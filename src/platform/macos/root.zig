@@ -1233,9 +1233,60 @@ pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void 
     services.decode_image_fn = decodeImage;
 }
 
+/// Text widths, like ink extents below, are a pure function of font,
+/// size, and text, and every frame asks for them again: each text
+/// command's bounds while diffing and planning. The host measurement
+/// builds an NSString per call, so a dense view (a table, a board's
+/// labels) spent most of its frame here. A direct-mapped cache answers
+/// the repeats; a busy lock (a concurrent measurer) measures directly.
+const WidthCacheEntry = struct {
+    hash: u64 = 0,
+    generation: u64 = 0,
+    font_id: u64 = 0,
+    size_bits: u32 = 0,
+    len: usize = 0,
+    stamp: u64 = 0,
+    valid: bool = false,
+    width: f32 = 0,
+};
+const cache_ways = 4;
+const width_cache_sets = 4096;
+var width_cache: [width_cache_sets][cache_ways]WidthCacheEntry = @splat(@splat(.{}));
+var width_cache_lock: std.atomic.Mutex = .unlocked;
+var width_cache_clock: u64 = 0;
+
 fn measureText(context: ?*anyopaque, font_id: u64, size: f32, text: []const u8) f32 {
     _ = context;
-    return @floatCast(native_sdk_appkit_measure_text(font_id, size, text.ptr, text.len));
+    if (text.len == 0) return 0;
+    const size_bits: u32 = @bitCast(size);
+    const generation: u64 = @intCast(canvas.textMeasureGeneration());
+    const hash = std.hash.Wyhash.hash(font_id ^ (@as(u64, size_bits) << 32) ^ (generation *% 0x9e3779b97f4a7c15) ^ 0x5bd1e995, text);
+    const set = &width_cache[hash % width_cache_sets];
+    if (width_cache_lock.tryLock()) {
+        defer width_cache_lock.unlock();
+        for (set) |*slot| {
+            if (slot.valid and slot.hash == hash and slot.generation == generation and slot.font_id == font_id and slot.size_bits == size_bits and slot.len == text.len) {
+                width_cache_clock += 1;
+                slot.stamp = width_cache_clock;
+                return slot.width;
+            }
+        }
+    }
+    const width: f32 = @floatCast(native_sdk_appkit_measure_text(font_id, size, text.ptr, text.len));
+    if (width_cache_lock.tryLock()) {
+        defer width_cache_lock.unlock();
+        var victim = &set[0];
+        for (set) |*slot| {
+            if (!slot.valid) {
+                victim = slot;
+                break;
+            }
+            if (slot.stamp < victim.stamp) victim = slot;
+        }
+        width_cache_clock += 1;
+        victim.* = .{ .hash = hash, .generation = generation, .font_id = font_id, .size_bits = size_bits, .len = text.len, .stamp = width_cache_clock, .valid = true, .width = width };
+    }
+    return width;
 }
 
 /// Batched CoreText measurement: per-cluster advances for the whole run
@@ -1249,9 +1300,63 @@ fn measureTextAdvances(context: ?*anyopaque, font_id: u64, size: f32, text: []co
     return native_sdk_appkit_measure_text_advances(font_id, size, text.ptr, text.len, advances.ptr) == 1;
 }
 
+/// CoreText ink extents are a pure function of font, size, and text, and
+/// frame planning asks for the same runs on every frame (each text
+/// command's bounds). A direct-mapped cache answers the repeats without a
+/// host call; a busy lock (a concurrent measurer) just measures directly.
+const InkCacheEntry = struct {
+    hash: u64 = 0,
+    generation: u64 = 0,
+    font_id: u64 = 0,
+    size_bits: u32 = 0,
+    len: usize = 0,
+    stamp: u64 = 0,
+    valid: bool = false,
+    ok: bool = false,
+    metrics: canvas.TextInkMetrics = .{ .min_x = 0, .max_x = 0, .min_y = 0, .max_y = 0 },
+};
+const ink_cache_sets = 4096;
+var ink_cache: [ink_cache_sets][cache_ways]InkCacheEntry = @splat(@splat(.{}));
+var ink_cache_lock: std.atomic.Mutex = .unlocked;
+var ink_cache_clock: u64 = 0;
+
 fn measureTextInk(context: ?*anyopaque, font_id: u64, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool {
     _ = context;
     if (text.len == 0) return false;
+    const size_bits: u32 = @bitCast(size);
+    // Font registration and appearance changes bump the generation.
+    const generation: u64 = @intCast(canvas.textMeasureGeneration());
+    const hash = std.hash.Wyhash.hash(font_id ^ (@as(u64, size_bits) << 32) ^ (generation *% 0x9e3779b97f4a7c15), text);
+    const set = &ink_cache[hash % ink_cache_sets];
+    if (ink_cache_lock.tryLock()) {
+        defer ink_cache_lock.unlock();
+        for (set) |*slot| {
+            if (slot.valid and slot.hash == hash and slot.generation == generation and slot.font_id == font_id and slot.size_bits == size_bits and slot.len == text.len) {
+                ink_cache_clock += 1;
+                slot.stamp = ink_cache_clock;
+                if (slot.ok) metrics.* = slot.metrics;
+                return slot.ok;
+            }
+        }
+    }
+    const ok = measureTextInkHost(font_id, size, text, metrics);
+    if (ink_cache_lock.tryLock()) {
+        defer ink_cache_lock.unlock();
+        var victim = &set[0];
+        for (set) |*slot| {
+            if (!slot.valid) {
+                victim = slot;
+                break;
+            }
+            if (slot.stamp < victim.stamp) victim = slot;
+        }
+        ink_cache_clock += 1;
+        victim.* = .{ .hash = hash, .generation = generation, .font_id = font_id, .size_bits = size_bits, .len = text.len, .stamp = ink_cache_clock, .valid = true, .ok = ok, .metrics = if (ok) metrics.* else victim.metrics };
+    }
+    return ok;
+}
+
+fn measureTextInkHost(font_id: u64, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool {
     var min_x: f64 = 0;
     var max_x: f64 = 0;
     var min_y: f64 = 0;

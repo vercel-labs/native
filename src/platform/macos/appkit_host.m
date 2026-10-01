@@ -125,6 +125,7 @@ static BOOL NativeSdkShortcutModifiersMatch(uint32_t shortcutModifiers, NSEventM
 static NSEventModifierFlags NativeSdkMenuModifierFlags(uint32_t modifiers);
 static uint32_t NativeSdkModifierFlagsForEvent(NSEvent *event);
 static uint64_t NativeSdkTimestampNanoseconds(void);
+static BOOL NativeSdkScrollTraceEnabled(void);
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForNativeViewKind(NSInteger kind);
 static NSAccessibilityRole NativeSdkAccessibilityRoleForWidgetRole(NSInteger role);
@@ -190,6 +191,19 @@ static uint64_t NativeSdkTimestampNanoseconds(void) {
      * math. CLOCK_MONOTONIC matches the runtime's monotonicNanoseconds seam
      * and cannot jump when the wall clock is adjusted. */
     return clock_gettime_nsec_np(CLOCK_MONOTONIC);
+}
+
+// Main-queue blocks cannot run inside a nested AppKit tracking loop when
+// that loop was entered from the main queue. Input and frame deadlines must
+// remain live there, so schedule one-shot timers in the common run-loop modes.
+// CoreFoundation registration is thread-safe, including GPU completions.
+static void NativeSdkScheduleMainRunLoopBlock(uint64_t delayNs, dispatch_block_t block) {
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault,
+        CFAbsoluteTimeGetCurrent() + (double)delayNs / 1e9, 0, 0, 0,
+        ^(CFRunLoopTimerRef fired) { block(); });
+    CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
+    CFRelease(timer);
+    CFRunLoopWakeUp(CFRunLoopGetMain());
 }
 
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
@@ -643,6 +657,13 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasCompositeBlendPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> canvasCompositeOpaquePipeline;
 @property(nonatomic, strong) id<MTLTexture> canvasCompositeFlatTexture;
+@property(nonatomic, strong) id<MTLSamplerState> canvasCompositeSampler;
+/* Registered images drawn as GPU-sampled quads (composite image path):
+ * filtered and nearest samplers, and the per-view texture for each image
+ * id, keyed by the store's NSImage so a re-registration re-uploads. */
+@property(nonatomic, strong) id<MTLSamplerState> canvasCompositeImageSampler;
+@property(nonatomic, strong) id<MTLSamplerState> canvasCompositeNearestImageSampler;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSArray *> *canvasCompositeImageTextures;
 @property(nonatomic, assign) BOOL canvasTextureRenderable;
 @property(nonatomic, assign) BOOL canvasCompositeContentValid;
 @property(nonatomic, strong) id<MTLCommandBuffer> canvasCompositeLastCommandBuffer;
@@ -708,7 +729,16 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 /* Occluder rects (view space): floating surfaces and modal catchers
  * that hit-block scroll regions beneath them. */
 @property(nonatomic, strong) NSArray *scrollOccluderRects;
-@property(nonatomic, assign) BOOL applyingScrollDriverOffset;
+/// The driver whose clip view the engine is writing right now, or 0.
+/// Per-driver rather than a plain flag: `setScrollDrivers:` walks every
+/// region in one pass, and a blanket "suppress bounds notifications"
+/// window swallowed a DIFFERENT driver's genuine user scroll if its
+/// clip view happened to settle inside that window. The runtime then
+/// never heard the offset, and because its belief about where the
+/// native scroller sits is what decides whether to push a correction,
+/// the two stayed silently out of step: the overlay scroller sat at the
+/// user's position while the content stayed at the engine's.
+@property(nonatomic, assign) uint64_t applyingScrollDriverOffsetId;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
 @property(nonatomic, assign) double pendingScrollDriverOffsetX;
@@ -3174,7 +3204,7 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
  * directly (a full-surface background fill is cheaper to paint than to
  * hold); the total cap evicts least-recently-used entries. */
 enum {
-    NativeSdkPacketRasterCacheMaxEntryBytes = 4 * 1024 * 1024,
+    NativeSdkPacketRasterCacheMaxEntryBytes = 16 * 1024 * 1024,
     NativeSdkPacketRasterCacheMaxBytes = 64 * 1024 * 1024,
 };
 
@@ -3208,13 +3238,131 @@ static BOOL NativeSdkGpuCompositeEnabled(void) {
  * caching the SCALED output turns the expensive per-present resample
  * (the dominant cost of image-heavy first frames) into a 1:1 blit. */
 static BOOL NativeSdkPacketCommandRasterCacheable(NSDictionary *command, NSString *kind) {
-    if (command[@"transform"]) return NO;
+    // Resolved transforms are immutable command content. A changed
+    // command invalidates the raster just like a changed color or path.
     if (command[@"clip"] && !NativeSdkPacketArray(command[@"clip"], 4)) return NO;
     if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"]) return YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"]) return YES;
     if ([kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"]) return YES;
     if ([kind isEqualToString:@"draw_image"]) return YES;
     return NO;
+}
+
+static BOOL NativeSdkPacketNumberTranslatedEqual(id oldValue, id newValue, CGFloat delta) {
+    if (![oldValue isKindOfClass:[NSNumber class]] || ![newValue isKindOfClass:[NSNumber class]]) return NO;
+    return fabs(NativeSdkPacketNumber(newValue, 0) - NativeSdkPacketNumber(oldValue, 0) - delta) < 1e-5;
+}
+
+/* Scroll layout changes only the absolute position of retained commands.
+ * Compare their complete payloads while accounting for one translation, so
+ * the already exact command raster can move as a texture instead of being
+ * rebuilt by CoreGraphics on every wheel tick. Fractional translations are
+ * sampled by the compositor, matching AppKit/SwiftUI retained-layer motion. */
+static BOOL NativeSdkPacketObjectsEqualUnderTranslation(id oldValue, id newValue, NSString *key, CGFloat dx, CGFloat dy) {
+    if (oldValue == newValue) return YES;
+    if (!oldValue || !newValue || ![oldValue isKindOfClass:[newValue class]]) return NO;
+    if ([oldValue isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *oldDictionary = oldValue;
+        NSDictionary *newDictionary = newValue;
+        if (oldDictionary.count != newDictionary.count) return NO;
+        for (id childKey in oldDictionary) {
+            if (![childKey isKindOfClass:[NSString class]] || !newDictionary[childKey]) return NO;
+            if (!NativeSdkPacketObjectsEqualUnderTranslation(oldDictionary[childKey], newDictionary[childKey], childKey, dx, dy)) return NO;
+        }
+        return YES;
+    }
+    if ([oldValue isKindOfClass:[NSArray class]]) {
+        // A viewport clip can stay fixed or translate with its content.
+        // The retarget guard below proves whether its baked mask is reusable.
+        if ([key isEqualToString:@"clip"] && [oldValue isEqual:newValue]) return YES;
+        NSArray *oldArray = oldValue;
+        NSArray *newArray = newValue;
+        if (oldArray.count != newArray.count) return NO;
+        const BOOL translatedRect = oldArray.count == 4 && ([key isEqualToString:@"bounds"] || [key isEqualToString:@"rect"] || [key isEqualToString:@"dst"] || [key isEqualToString:@"clip"]);
+        const BOOL translatedPoint = oldArray.count == 2 && ([key isEqualToString:@"origin"] || [key isEqualToString:@"start"] || [key isEqualToString:@"end"] || [key isEqualToString:@"from"] || [key isEqualToString:@"to"] || [key isEqualToString:@"points"]);
+        if (translatedRect || translatedPoint) {
+            if (!NativeSdkPacketNumberTranslatedEqual(oldArray[0], newArray[0], dx) || !NativeSdkPacketNumberTranslatedEqual(oldArray[1], newArray[1], dy)) return NO;
+            for (NSUInteger index = 2; index < oldArray.count; index += 1) if (![oldArray[index] isEqual:newArray[index]]) return NO;
+            return YES;
+        }
+        for (NSUInteger index = 0; index < oldArray.count; index += 1) {
+            if (!NativeSdkPacketObjectsEqualUnderTranslation(oldArray[index], newArray[index], key, dx, dy)) return NO;
+        }
+        return YES;
+    }
+    if ([key isEqualToString:@"x"]) return NativeSdkPacketNumberTranslatedEqual(oldValue, newValue, dx);
+    if ([key isEqualToString:@"y"] || [key isEqualToString:@"baseline"]) return NativeSdkPacketNumberTranslatedEqual(oldValue, newValue, dy);
+    return [oldValue isEqual:newValue];
+}
+
+static BOOL NativeSdkPacketRetargetRasterForTranslation(NativeSdkPacketCommandRaster *entry, NSDictionary *command, CGFloat scale, NSUInteger pixelWidth, NSUInteger pixelHeight) {
+    if (!entry || !entry.command || !command) return NO;
+    NSArray *oldBoundsArray = NativeSdkPacketArray(entry.command[@"bounds"], 4);
+    NSArray *newBoundsArray = NativeSdkPacketArray(command[@"bounds"], 4);
+    if (!oldBoundsArray || !newBoundsArray) return NO;
+    NSRect oldBounds = CGRectStandardize(NativeSdkPacketRect(oldBoundsArray));
+    NSRect newBounds = CGRectStandardize(NativeSdkPacketRect(newBoundsArray));
+    if (fabs(oldBounds.size.width - newBounds.size.width) >= 1e-5 || fabs(oldBounds.size.height - newBounds.size.height) >= 1e-5) return NO;
+    const CGFloat dx = newBounds.origin.x - oldBounds.origin.x;
+    const CGFloat dy = newBounds.origin.y - oldBounds.origin.y;
+    NSArray *oldTransform = NativeSdkPacketArray(entry.command[@"transform"], 6);
+    NSArray *newTransform = NativeSdkPacketArray(command[@"transform"], 6);
+    BOOL equivalent = NO;
+    if (oldTransform || newTransform) {
+        if (!oldTransform || !newTransform) return NO;
+        for (NSUInteger index = 0; index < 4; index += 1) {
+            if (![oldTransform[index] isEqual:newTransform[index]]) return NO;
+        }
+        const BOOL unchangedTransform = [oldTransform[4] isEqual:newTransform[4]] && [oldTransform[5] isEqual:newTransform[5]];
+        if (unchangedTransform) {
+            /* Text and other absolute-layout commands move their local
+             * geometry while keeping an identity transform. */
+            equivalent = NativeSdkPacketObjectsEqualUnderTranslation(entry.command, command, nil, dx, dy);
+        } else {
+            if (!NativeSdkPacketNumberTranslatedEqual(oldTransform[4], newTransform[4], dx) ||
+                !NativeSdkPacketNumberTranslatedEqual(oldTransform[5], newTransform[5], dy)) return NO;
+            /* Vector paths keep their local geometry and carry the scroll
+             * displacement in the transform itself. */
+            NSMutableDictionary *oldPayload = [entry.command mutableCopy];
+            NSMutableDictionary *newPayload = [command mutableCopy];
+            if (!NativeSdkPacketObjectsEqualUnderTranslation(oldPayload[@"clip"], newPayload[@"clip"], @"clip", dx, dy)) return NO;
+            [oldPayload removeObjectsForKeys:@[@"bounds", @"transform", @"clip"]];
+            [newPayload removeObjectsForKeys:@[@"bounds", @"transform", @"clip"]];
+            equivalent = [oldPayload isEqual:newPayload];
+        }
+    } else {
+        equivalent = NativeSdkPacketObjectsEqualUnderTranslation(entry.command, command, nil, dx, dy);
+    }
+    if (!equivalent) return NO;
+
+    const CGFloat guard = 1.0 / scale;
+    NSRect oldPadded = NSInsetRect(oldBounds, -guard, -guard);
+    NSRect newPadded = NSInsetRect(newBounds, -guard, -guard);
+    NSRect surface = NSMakeRect(0, 0, (CGFloat)pixelWidth / scale, (CGFloat)pixelHeight / scale);
+    if (!NSContainsRect(surface, oldPadded) || !NSContainsRect(surface, newPadded)) return NO;
+    NSArray *oldClipArray = NativeSdkPacketArray(entry.command[@"clip"], 4);
+    NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
+    if ((command[@"clip"] && !clipArray) || (entry.command[@"clip"] && !oldClipArray)) return NO;
+    if (clipArray) {
+        NSRect oldClip = CGRectStandardize(NativeSdkPacketRect(oldClipArray));
+        NSRect clip = CGRectStandardize(NativeSdkPacketRect(clipArray));
+        const BOOL translatedClip = fabs(clip.origin.x - oldClip.origin.x - dx) < 1e-5 &&
+            fabs(clip.origin.y - oldClip.origin.y - dy) < 1e-5 &&
+            NSEqualSizes(oldClip.size, clip.size);
+        if (!translatedClip) {
+            // A fixed mask is reusable only when neither position touches
+            // it. Insetting by the largest radius conservatively excludes
+            // every curved corner; moving through one must rasterize again.
+            CGFloat radius = 0;
+            for (NSNumber *value in NativeSdkPacketArray(command[@"clipRadius"], 4)) radius = MAX(radius, value.doubleValue);
+            NSRect interior = NSInsetRect(clip, radius, radius);
+            if (!NSContainsRect(interior, oldPadded) || !NSContainsRect(interior, newPadded)) return NO;
+        }
+    }
+
+    entry.command = command;
+    entry.destination = NSOffsetRect(entry.destination, dx, dy);
+    return YES;
 }
 
 /* Snap a point-space rect outward to the device-pixel grid and clamp it
@@ -3809,6 +3957,22 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
 
 @implementation NativeSdkScrollDriverView
 
+// Responsive (concurrent) scrolling must stay OFF. With it on, the first
+// gesture event the surface forwards makes AppKit latch the whole rest of
+// the gesture — every changed and momentum event — to this scroller and
+// drive its clip view from the concurrent scrolling path, so nothing
+// reaches the surface's router again until the gesture ends. That broke
+// the router's contract twice over: its per-gesture state (anchor point,
+// last native recipient, wire bindings) was never cleared, so a later
+// gesture could land on a region the pointer had left; and the clip view
+// moved on AppKit's schedule while frame emission stalled, so the overlay
+// scroller advanced over content frozen mid-scroll. Opted out, each event
+// comes back through the window and the router as designed, and the
+// scroller still supplies momentum, rubber-band, and the overlay knob.
++ (BOOL)isCompatibleWithResponsiveScrolling {
+    return NO;
+}
+
 - (NSView *)hitTest:(NSPoint)point {
     // Wheel events deliberately do NOT hit the driver: they fall
     // through to the surface, whose scrollWheel: resolves the gesture's
@@ -3911,8 +4075,9 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
     // Common modes: default-mode timers stall inside AppKit tracking
     // runloops (live window resize, menu tracking), freezing frames for
     // the whole gesture.
-    _displayTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0) target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
-    _displayTimer.tolerance = 1.0 / 240.0;
+    const NSTimeInterval displayInterval = (NSTimeInterval)NativeSdkRetainedFrameIntervalNanoseconds(NSScreen.mainScreen) / (NSTimeInterval)NativeSdkNanosecondsPerSecond;
+    _displayTimer = [NSTimer timerWithTimeInterval:displayInterval target:self selector:@selector(renderFrame) userInfo:nil repeats:YES];
+    _displayTimer.tolerance = displayInterval / 4.0;
     [[NSRunLoop mainRunLoop] addTimer:_displayTimer forMode:NSRunLoopCommonModes];
     [self renderFrame];
     return self;
@@ -4204,13 +4369,17 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 - (NSInteger)presentGpuPacketBinaryWithSurfaceWidth:(CGFloat)surfaceWidth height:(CGFloat)surfaceHeight scale:(CGFloat)scale clearR:(uint8_t)clearR clearG:(uint8_t)clearG clearB:(uint8_t)clearB clearA:(uint8_t)clearA requiresRender:(BOOL)requiresRender commandCount:(NSUInteger)commandCount unsupportedCommandCount:(NSUInteger)unsupportedCommandCount representable:(BOOL)representable packet:(const uint8_t *)packet byteLength:(NSUInteger)byteLength {
     if (![self isAvailable]) return -1;
     if (!requiresRender) return 1;
-    if (!representable || unsupportedCommandCount != 0 || !packet || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) return 0;
+    if (!representable || unsupportedCommandCount != 0 || !packet || byteLength == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) {
+        if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] refuse representable=%d unsupported=%lu commands=%lu bytes=%lu\n", representable, (unsigned long)unsupportedCommandCount, (unsigned long)commandCount, (unsigned long)byteLength);
+        return 0;
+    }
 
     const uint64_t decodeBeginNs = NativeSdkTimestampNanoseconds();
     NSDictionary *decoded = NativeSdkPacketDictionaryFromBinary(packet, byteLength);
-    if (!decoded) return 0;
+    if (!decoded) { if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] refuse decode bytes=%lu\n", (unsigned long)byteLength); return 0; }
     const uint64_t drawBeginNs = NativeSdkTimestampNanoseconds();
     const NSInteger result = [self presentGpuPacketObject:decoded surfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA commandCount:commandCount];
+    if (result != 1 && NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] refuse object result=%ld\n", (long)result);
     if (result == 1) {
         self.lastPacketDecodeNs = drawBeginNs - decodeBeginNs;
         self.lastPacketDrawNs = NativeSdkTimestampNanoseconds() - drawBeginNs;
@@ -4244,6 +4413,16 @@ static BOOL NativeSdkGpuFrameTraceEnabled(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const char *value = getenv("NATIVE_SDK_GPU_FRAME_TRACE");
+        enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
+    });
+    return enabled;
+}
+
+static BOOL NativeSdkScrollTraceEnabled(void) {
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_SCROLL_TRACE");
         enabled = value && value[0] != 0 && strcmp(value, "0") != 0;
     });
     return enabled;
@@ -4321,13 +4500,29 @@ static const char *NativeSdkGpuShotDir(void) {
  * pixel composites exactly once, like the CPU union clip). */
 
 typedef struct {
-    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich */
+    uint8_t type; /* 0 skip, 1 flat copy quad, 2 textured blend quad, 3 blur sandwich, 4 flat blend quad, 5 raster pending a layer group, 6 sampled image quad */
     BOOL hasCullBounds;
     NSRect cullBounds;      /* point space */
     float pxX, pxY, pxW, pxH; /* device-pixel quad */
     float colorR, colorG, colorB, colorA; /* premultiplied flat color */
     NSUInteger commandIndex;
     void *texture; /* unretained; kept alive by opTextures/raster cache */
+    void *poolKey; /* unretained NSNumber; scratch pooling for a lone raster */
+    /* Type 6 (sampled image quad): normalized source origin and extent
+     * the quad maps onto, and whether it samples nearest. The opacity
+     * rides colorA. */
+    float u0, v0, uSize, vSize;
+    BOOL nearest;
+    /* Type 7 (analytic shape quad): the shape's device-pixel box (x0, y0,
+     * x1, y1), corner radii (top-left, top-right, bottom-right,
+     * bottom-left), stroke width (0 fills), and optional device-pixel
+     * clip box. The premultiplied color rides colorR...colorA. */
+    float shape[4];
+    float radii[4];
+    float clip[4];
+    float clipRadii[4];
+    float strokeWidth;
+    BOOL hasClip;
 } NativeSdkCompositeOp;
 
 typedef struct {
@@ -4336,11 +4531,19 @@ typedef struct {
     float rectSize[2];
     float texOrigin[2];
     float color[4];
+    float uvSize[2];
     uint32_t textured;
-    uint32_t pad[3];
+    uint32_t pad;
+    float shape[4];
+    float radii[4];
+    float clip[4];
+    float stroke;
+    uint32_t hasClip;
+    float pad1[2];
+    float clipRadii[4];
 } NativeSdkCompositeUniforms;
 
-static void NativeSdkCompositeEncodeQuad(id<MTLRenderCommandEncoder> encoder, NSUInteger viewportWidth, NSUInteger viewportHeight, float pxX, float pxY, float pxW, float pxH, float texOriginX, float texOriginY, const float color[4], BOOL textured, id<MTLTexture> texture) {
+static void NativeSdkCompositeEncodeQuad(id<MTLRenderCommandEncoder> encoder, NSUInteger viewportWidth, NSUInteger viewportHeight, float pxX, float pxY, float pxW, float pxH, float texOriginX, float texOriginY, const float color[4], BOOL textured, id<MTLTexture> texture, id<MTLSamplerState> sampler) {
     NativeSdkCompositeUniforms uniforms;
     memset(&uniforms, 0, sizeof(uniforms));
     uniforms.viewport[0] = (float)viewportWidth;
@@ -4356,6 +4559,64 @@ static void NativeSdkCompositeEncodeQuad(id<MTLRenderCommandEncoder> encoder, NS
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder setFragmentTexture:texture atIndex:0];
+    [encoder setFragmentSamplerState:sampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
+/* A registered image as a GPU-sampled quad: the quad covers device
+ * pixels [px, px + size) and maps them linearly onto the normalized
+ * source rect, so scaling happens in the sampler rather than in a CPU
+ * re-raster. The texture holds straight alpha; the shader premultiplies. */
+static void NativeSdkCompositeEncodeImageQuad(id<MTLRenderCommandEncoder> encoder, NSUInteger viewportWidth, NSUInteger viewportHeight, const NativeSdkCompositeOp *op, id<MTLSamplerState> sampler) {
+    NativeSdkCompositeUniforms uniforms;
+    memset(&uniforms, 0, sizeof(uniforms));
+    uniforms.viewport[0] = (float)viewportWidth;
+    uniforms.viewport[1] = (float)viewportHeight;
+    uniforms.rectOrigin[0] = op->pxX;
+    uniforms.rectOrigin[1] = op->pxY;
+    uniforms.rectSize[0] = op->pxW;
+    uniforms.rectSize[1] = op->pxH;
+    uniforms.texOrigin[0] = op->u0;
+    uniforms.texOrigin[1] = op->v0;
+    uniforms.uvSize[0] = op->uSize;
+    uniforms.uvSize[1] = op->vSize;
+    uniforms.color[3] = op->colorA;
+    uniforms.textured = 2;
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentTexture:(__bridge id<MTLTexture>)op->texture atIndex:0];
+    [encoder setFragmentSamplerState:sampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
+/* An analytic shape (type 7) as a blended quad over its padded device
+ * bounds: the fragment shader evaluates exact box coverage for square
+ * corners and a signed distance for rounded ones, times the clip box's
+ * coverage. */
+static void NativeSdkCompositeEncodeShapeQuad(id<MTLRenderCommandEncoder> encoder, NSUInteger viewportWidth, NSUInteger viewportHeight, const NativeSdkCompositeOp *op, id<MTLTexture> texture, id<MTLSamplerState> sampler) {
+    NativeSdkCompositeUniforms uniforms;
+    memset(&uniforms, 0, sizeof(uniforms));
+    uniforms.viewport[0] = (float)viewportWidth;
+    uniforms.viewport[1] = (float)viewportHeight;
+    uniforms.rectOrigin[0] = op->pxX;
+    uniforms.rectOrigin[1] = op->pxY;
+    uniforms.rectSize[0] = op->pxW;
+    uniforms.rectSize[1] = op->pxH;
+    uniforms.color[0] = op->colorR;
+    uniforms.color[1] = op->colorG;
+    uniforms.color[2] = op->colorB;
+    uniforms.color[3] = op->colorA;
+    memcpy(uniforms.shape, op->shape, sizeof(uniforms.shape));
+    memcpy(uniforms.radii, op->radii, sizeof(uniforms.radii));
+    memcpy(uniforms.clip, op->clip, sizeof(uniforms.clip));
+    memcpy(uniforms.clipRadii, op->clipRadii, sizeof(uniforms.clipRadii));
+    uniforms.stroke = op->strokeWidth;
+    uniforms.hasClip = op->hasClip ? 1 : 0;
+    uniforms.textured = 3;
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentTexture:texture atIndex:0];
+    [encoder setFragmentSamplerState:sampler atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
@@ -4400,7 +4661,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (BOOL)ensureCanvasCompositor {
-    if (self.canvasCompositeBlendPipeline && self.canvasCompositeOpaquePipeline && self.canvasCompositeFlatTexture) return YES;
+    if (self.canvasCompositeBlendPipeline && self.canvasCompositeOpaquePipeline && self.canvasCompositeFlatTexture && self.canvasCompositeSampler) return YES;
     if (!self.device || !self.commandQueue) return NO;
     /* Shared-storage render targets (needed for cheap readback and the
      * blur sandwich) require unified memory. */
@@ -4411,8 +4672,22 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         @"using namespace metal;\n"
         @"struct NativeSdkCompositeUniforms {\n"
         @"  float2 viewport; float2 rect_origin; float2 rect_size; float2 tex_origin;\n"
-        @"  float4 color; uint textured; uint3 pad;\n"
+        @"  float4 color; float2 uv_size; uint textured; uint pad0;\n"
+        @"  float4 shape; float4 radii; float4 clip; float stroke; uint has_clip; float2 pad1; float4 clip_radii;\n"
         @"};\n"
+        @"static float native_sdk_box_coverage(float2 p, float4 box) {\n"
+        @"  float2 lo = max(p - 0.5, box.xy);\n"
+        @"  float2 hi = min(p + 0.5, box.zw);\n"
+        @"  float2 o = clamp(hi - lo, 0.0, 1.0);\n"
+        @"  return o.x * o.y;\n"
+        @"}\n"
+        @"static float native_sdk_round_distance(float2 p, float4 box, float4 radii) {\n"
+        @"  float2 half_size = (box.zw - box.xy) * 0.5;\n"
+        @"  float2 q = p - (box.xy + half_size);\n"
+        @"  float r = q.x < 0.0 ? (q.y < 0.0 ? radii.x : radii.w) : (q.y < 0.0 ? radii.y : radii.z);\n"
+        @"  float2 d = abs(q) - half_size + r;\n"
+        @"  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;\n"
+        @"}\n"
         @"struct NativeSdkCompositeVertexOut { float4 position [[position]]; };\n"
         @"vertex NativeSdkCompositeVertexOut native_sdk_composite_vertex(uint vertex_id [[vertex_id]], constant NativeSdkCompositeUniforms &u [[buffer(0)]]) {\n"
         @"  float2 corner = float2(float(vertex_id & 1u), float(vertex_id >> 1u));\n"
@@ -4421,12 +4696,43 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         @"  out.position = float4(px.x / u.viewport.x * 2.0 - 1.0, 1.0 - px.y / u.viewport.y * 2.0, 0.0, 1.0);\n"
         @"  return out;\n"
         @"}\n"
-        @"fragment float4 native_sdk_composite_fragment(NativeSdkCompositeVertexOut in [[stage_in]], constant NativeSdkCompositeUniforms &u [[buffer(0)]], texture2d<float, access::read> quad_texture [[texture(0)]]) {\n"
+        @"fragment float4 native_sdk_composite_fragment(NativeSdkCompositeVertexOut in [[stage_in]], constant NativeSdkCompositeUniforms &u [[buffer(0)]], texture2d<float> quad_texture [[texture(0)]], sampler quad_sampler [[sampler(0)]]) {\n"
         @"  if (u.textured == 0u) return u.color;\n"
-        @"  int2 pixel = int2(in.position.xy);\n"
-        @"  int2 texel = pixel - int2(u.rect_origin) + int2(u.tex_origin);\n"
-        @"  texel = clamp(texel, int2(0), int2(int(quad_texture.get_width()) - 1, int(quad_texture.get_height()) - 1));\n"
-        @"  return quad_texture.read(uint2(texel));\n"
+        @"  if (u.textured == 3u) {\n"
+        @"    float2 p = in.position.xy;\n"
+        @"    float coverage;\n"
+        @"    bool square = max(max(u.radii.x, u.radii.y), max(u.radii.z, u.radii.w)) <= 0.0;\n"
+        @"    if (u.stroke > 0.0) {\n"
+        @"      float h = u.stroke * 0.5;\n"
+        @"      if (square) {\n"
+        @"        float4 outer = u.shape + float4(-h, -h, h, h);\n"
+        @"        float4 inner = u.shape + float4(h, h, -h, -h);\n"
+        @"        float inside = (inner.z > inner.x && inner.w > inner.y) ? native_sdk_box_coverage(p, inner) : 0.0;\n"
+        @"        coverage = native_sdk_box_coverage(p, outer) - inside;\n"
+        @"      } else {\n"
+        @"        float d = native_sdk_round_distance(p, u.shape, u.radii);\n"
+        @"        coverage = min(clamp(0.5 + h - abs(d), 0.0, 1.0), u.stroke);\n"
+        @"      }\n"
+        @"    } else if (square) {\n"
+        @"      coverage = native_sdk_box_coverage(p, u.shape);\n"
+        @"    } else {\n"
+        @"      coverage = clamp(0.5 - native_sdk_round_distance(p, u.shape, u.radii), 0.0, 1.0);\n"
+        @"    }\n"
+        @"    if (u.has_clip != 0u) {\n"
+        @"      bool square_clip = max(max(u.clip_radii.x, u.clip_radii.y), max(u.clip_radii.z, u.clip_radii.w)) <= 0.0;\n"
+        @"      coverage *= square_clip ? native_sdk_box_coverage(p, u.clip) : clamp(0.5 - native_sdk_round_distance(p, u.clip, u.clip_radii), 0.0, 1.0);\n"
+        @"    }\n"
+        @"    return u.color * coverage;\n"
+        @"  }\n"
+        @"  if (u.textured == 2u) {\n"
+        @"    float2 t = (in.position.xy - u.rect_origin) / u.rect_size;\n"
+        @"    float4 c = quad_texture.sample(quad_sampler, u.tex_origin + t * u.uv_size);\n"
+        @"    c.rgb *= c.a;\n"
+        @"    return c * u.color.a;\n"
+        @"  }\n"
+        @"  float2 texel = in.position.xy - u.rect_origin + u.tex_origin;\n"
+        @"  float2 uv = texel / float2(quad_texture.get_width(), quad_texture.get_height());\n"
+        @"  return quad_texture.sample(quad_sampler, uv);\n"
         @"}\n";
 
     NSError *libraryError = nil;
@@ -4469,20 +4775,103 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const uint8_t flatPixel[4] = {0, 0, 0, 0};
     [flatTexture replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:flatPixel bytesPerRow:4];
 
+    /* Composite quads are rasterized at backing scale and drawn 1:1 into
+     * device pixels — the same contract the presenter states for the canvas
+     * texture, so they take the same sampler. A linear filter buys nothing
+     * on a 1:1 blit and costs sharpness the moment a quad's origin or the
+     * fragment's texel math drifts by a fraction of a pixel, which softens
+     * every composited command including glyph runs. */
+    MTLSamplerDescriptor *samplerDescriptor = [[MTLSamplerDescriptor alloc] init];
+    samplerDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
+    samplerDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
+    samplerDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    samplerDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> sampler = [self.device newSamplerStateWithDescriptor:samplerDescriptor];
+    if (!sampler) return NO;
+
+    /* Images scale in the sampler: trilinear across the mip chain for
+     * the filtered path, point sampling for `nearest`. */
+    MTLSamplerDescriptor *imageDescriptor = [[MTLSamplerDescriptor alloc] init];
+    imageDescriptor.minFilter = MTLSamplerMinMagFilterLinear;
+    imageDescriptor.magFilter = MTLSamplerMinMagFilterLinear;
+    imageDescriptor.mipFilter = MTLSamplerMipFilterLinear;
+    imageDescriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    imageDescriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> imageSampler = [self.device newSamplerStateWithDescriptor:imageDescriptor];
+    if (!imageSampler) return NO;
+    imageDescriptor.minFilter = MTLSamplerMinMagFilterNearest;
+    imageDescriptor.magFilter = MTLSamplerMinMagFilterNearest;
+    imageDescriptor.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    id<MTLSamplerState> nearestSampler = [self.device newSamplerStateWithDescriptor:imageDescriptor];
+    if (!nearestSampler) return NO;
+
     self.canvasCompositeBlendPipeline = blendPipeline;
     self.canvasCompositeOpaquePipeline = opaquePipeline;
     self.canvasCompositeFlatTexture = flatTexture;
+    self.canvasCompositeSampler = sampler;
+    self.canvasCompositeImageSampler = imageSampler;
+    self.canvasCompositeNearestImageSampler = nearestSampler;
     return YES;
+}
+
+/* The GPU texture for a registered image, uploaded once per NSImage the
+ * store holds for the id: a re-registration replaces the NSImage, which
+ * re-uploads here. Mipmapped, so heavily minified draws (navigator
+ * thumbnails, filmstrips) sample a prefiltered level instead of
+ * aliasing. */
+- (id<MTLTexture>)compositeTextureForImage:(NSImage *)image key:(NSString *)key {
+    if (!image || !key || !self.device) return nil;
+    if (!self.canvasCompositeImageTextures) self.canvasCompositeImageTextures = [NSMutableDictionary dictionary];
+    NSArray *cached = self.canvasCompositeImageTextures[key];
+    if (cached.count == 2 && cached[0] == image) return cached[1];
+    CGImageRef cgImage = [image CGImageForProposedRect:NULL context:nil hints:nil];
+    if (!cgImage) return nil;
+    const size_t width = CGImageGetWidth(cgImage);
+    const size_t height = CGImageGetHeight(cgImage);
+    if (width == 0 || height == 0 || CGImageGetBitsPerPixel(cgImage) != 32 || CGImageGetBitsPerComponent(cgImage) != 8) return nil;
+    CGImageAlphaInfo alpha = CGImageGetAlphaInfo(cgImage);
+    if (alpha != kCGImageAlphaLast && alpha != kCGImageAlphaNoneSkipLast) return nil;
+    CFDataRef data = CGDataProviderCopyData(CGImageGetDataProvider(cgImage));
+    if (!data) return nil;
+    const size_t bytesPerRow = CGImageGetBytesPerRow(cgImage);
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:YES];
+    descriptor.usage = MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [self.device newTextureWithDescriptor:descriptor];
+    if (!texture) {
+        CFRelease(data);
+        return nil;
+    }
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:CFDataGetBytePtr(data) bytesPerRow:bytesPerRow];
+    CFRelease(data);
+    if (texture.mipmapLevelCount > 1) {
+        id<MTLCommandBuffer> mipBuffer = [self.commandQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [mipBuffer blitCommandEncoder];
+        [blit generateMipmapsForTexture:texture];
+        [blit endEncoding];
+        [mipBuffer commit];
+    }
+    /* Drop textures for ids the view no longer holds. */
+    if (self.canvasCompositeImageTextures.count > self.canvasImageCache.count + 8) {
+        for (NSString *stale in [self.canvasCompositeImageTextures allKeys]) {
+            if (!self.canvasImageCache[stale]) [self.canvasCompositeImageTextures removeObjectForKey:stale];
+        }
+    }
+    self.canvasCompositeImageTextures[key] = @[ image, texture ];
+    return texture;
 }
 
 /* Rasterize one command per frame through the direct CG path (its own
  * clip + transform + opacity) into a transient texture over the padded,
  * pixel-aligned intersection of its bounds and the repaint region. Used
  * for transform-carrying and over-cache-budget commands. */
-- (id<MTLTexture>)compositeScratchTextureForCommand:(NSDictionary *)command poolKey:(NSNumber *)poolKey scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight repaintRect:(NSRect)repaintRect hasRepaintRect:(BOOL)hasRepaintRect outRegion:(MTLRegion *)outRegion {
-    NSArray *boundsArray = NativeSdkPacketArray(command[@"bounds"], 4);
-    if (!boundsArray || !self.canvasColorSpace) return nil;
-    NSRect bounds = CGRectStandardize(NativeSdkPacketRect(boundsArray));
+/* One layer for a run of commands: they are drawn in order into a single CG
+ * surface, exactly as the CPU path draws them into the shared backing, so
+ * their antialiased edges resolve against each other instead of each being
+ * resolved against transparent and composited separately. */
+- (id<MTLTexture>)compositeScratchTextureForCommands:(NSArray *)batch bounds:(NSRect)bounds poolKey:(NSNumber *)poolKey scale:(CGFloat)scale pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight repaintRect:(NSRect)repaintRect hasRepaintRect:(BOOL)hasRepaintRect outRegion:(MTLRegion *)outRegion {
+    if (batch.count == 0 || !self.canvasColorSpace) return nil;
     if (hasRepaintRect) bounds = NSIntersectionRect(bounds, repaintRect);
     if (NSIsEmptyRect(bounds)) return nil;
     CGFloat minX = floor(NSMinX(bounds) * scale) - 1;
@@ -4508,7 +4897,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NSGraphicsContext *graphics = [NSGraphicsContext graphicsContextWithCGContext:bitmap flipped:YES];
     [NSGraphicsContext saveGraphicsState];
     [NSGraphicsContext setCurrentContext:graphics];
-    BOOL ok = NativeSdkPacketDrawCommand(command, bitmap, scale, NO, NSZeroRect, self.canvasImageCache);
+    BOOL ok = YES;
+    for (NSDictionary *command in batch) {
+        if (!ok) break;
+        ok = NativeSdkPacketDrawCommand(command, bitmap, scale, NO, NSZeroRect, self.canvasImageCache);
+    }
     [NSGraphicsContext restoreGraphicsState];
     CGContextRelease(bitmap);
     if (!ok) return nil;
@@ -4519,8 +4912,6 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (pooled && pooled.width >= rasterWidth && pooled.height >= rasterHeight) texture = pooled;
     }
     if (!texture) {
-        /* Round capacity up so an animated command's wobbling padded
-         * extent keeps hitting the same pooled texture. */
         NSUInteger capacityWidth = MIN((NSUInteger)8192, (rasterWidth + 63) / 64 * 64);
         NSUInteger capacityHeight = MIN((NSUInteger)8192, (rasterHeight + 63) / 64 * 64);
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:capacityWidth height:capacityHeight mipmapped:NO];
@@ -4536,6 +4927,125 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     [texture replaceRegion:MTLRegionMake2D(0, 0, rasterWidth, rasterHeight) mipmapLevel:0 withBytes:data.bytes bytesPerRow:rasterWidth * 4];
     if (outRegion) *outRegion = MTLRegionMake2D((NSUInteger)minX, (NSUInteger)minY, rasterWidth, rasterHeight);
     return texture;
+}
+
+
+/* Whether a draw_image command can take the GPU-sampled quad path: a
+ * translation-only transform, square corners, and at most a rectangular
+ * clip. Everything else keeps the CG raster. */
+static BOOL NativeSdkCompositeImageQuadEligible(NSDictionary *command) {
+    /* Axis-aligned scale and translation only: the quad stays a rectangle
+     * and the sampler does the scaling. */
+    NSArray *transform = NativeSdkPacketArray(command[@"transform"], 6);
+    if (command[@"transform"] && !transform) return NO;
+    if (transform && (NativeSdkPacketNumber(transform[1], 0) != 0 || NativeSdkPacketNumber(transform[2], 0) != 0 ||
+                      NativeSdkPacketNumber(transform[0], 1) <= 0 || NativeSdkPacketNumber(transform[3], 1) <= 0)) return NO;
+    if (command[@"clip"] != nil && NativeSdkPacketArray(command[@"clip"], 4) == nil) return NO;
+    /* A clip with corner radii needs the CG mask; all-zero radii are a
+     * plain rectangle (scroll regions carry them). */
+    if (command[@"clipRadius"] != nil) {
+        NSArray *clipRadius = NativeSdkPacketArray(command[@"clipRadius"], 4);
+        if (!clipRadius) return NO;
+        for (NSUInteger corner = 0; corner < 4; corner += 1) {
+            if (NativeSdkPacketNumber(clipRadius[corner], 0) > 0) return NO;
+        }
+    }
+    NSDictionary *packetImage = NativeSdkPacketDictionary(command[@"image"]);
+    if (!packetImage || !NativeSdkPacketImageCacheKey(packetImage[@"image"])) return NO;
+    NSArray *radius = NativeSdkPacketArray(packetImage[@"radius"], 4);
+    for (NSUInteger corner = 0; radius && corner < 4; corner += 1) {
+        if (NativeSdkPacketNumber(radius[corner], 0) > 0) return NO;
+    }
+    return YES;
+}
+
+/* Solid rectangles, rounded rectangles, and rectangle strokes compose as
+ * analytic quads (op type 7): the fragment shader evaluates the exact
+ * shape per pixel, so fractional geometry, corner radii, and rectangular
+ * clips need neither a CG raster nor a raster-cache entry. Chrome fills
+ * are the bulk of a dense view's raster bytes; drawing them analytically
+ * keeps the cache for text and paths. Returns NO for anything the quad
+ * cannot reproduce exactly (gradients, rounded clips, non-translation
+ * transforms); YES with `op->type` 7, or 0 when the shape covers nothing. */
+static BOOL NativeSdkCompositeShapeQuad(NSDictionary *command, NSString *kind, CGFloat scale, NSUInteger pixelWidth, NSUInteger pixelHeight, NativeSdkCompositeOp *op) {
+    const BOOL stroke = [kind isEqualToString:@"stroke_rect_solid"];
+    if (!stroke && ![kind isEqualToString:@"fill_rect_solid"] && ![kind isEqualToString:@"fill_rounded_rect_solid"]) return NO;
+    NSArray *clipArray = nil;
+    if (command[@"clip"] != nil) {
+        clipArray = NativeSdkPacketArray(command[@"clip"], 4);
+        if (!clipArray) return NO;
+    }
+    /* A rounded clip (a clipped widget inside a rounded panel) masks with
+     * its own signed distance in the shader. */
+    NSArray *clipRadius = nil;
+    if (command[@"clipRadius"] != nil) {
+        clipRadius = NativeSdkPacketArray(command[@"clipRadius"], 4);
+        if (!clipRadius || !clipArray) return NO;
+    }
+    /* Axis-aligned scale and translation keep the shape a rectangle
+     * (layout emits near-identity scales, 0.9999986, that must not force
+     * the CG raster). */
+    CGFloat sx = 1, sy = 1, tx = 0, ty = 0;
+    if (command[@"transform"] != nil) {
+        NSArray *transform = NativeSdkPacketArray(command[@"transform"], 6);
+        if (!transform || NativeSdkPacketNumber(transform[1], 0) != 0 || NativeSdkPacketNumber(transform[2], 0) != 0) return NO;
+        sx = NativeSdkPacketNumber(transform[0], 1);
+        sy = NativeSdkPacketNumber(transform[3], 1);
+        if (sx <= 0 || sy <= 0) return NO;
+        tx = NativeSdkPacketNumber(transform[4], 0);
+        ty = NativeSdkPacketNumber(transform[5], 0);
+    }
+    NSDictionary *paint = NativeSdkPacketDictionary(command[@"paint"]);
+    NSDictionary *shape = NativeSdkPacketDictionary(command[@"shape"]);
+    NSArray *colorArray = paint ? NativeSdkPacketArray(paint[@"color"], 4) : nil;
+    if (!shape || !colorArray || ![[paint[@"kind"] description] isEqualToString:@"color"]) return NO;
+    const CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1)));
+    const CGFloat alpha = opacity * fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[3], 1)));
+    const NSRect local = CGRectStandardize(NativeSdkPacketRect(shape[@"rect"]));
+    const CGFloat maxRadius = fmax(0.0, fmin(local.size.width, local.size.height) * 0.5);
+    const NSRect rect = NSMakeRect(local.origin.x * sx + tx, local.origin.y * sy + ty, local.size.width * sx, local.size.height * sy);
+    const CGFloat shapeScale = fmin(sx, sy);
+    id radius = shape[@"radius"];
+    const CGFloat width = stroke ? fmax(0.0, NativeSdkPacketNumber(command[@"strokeWidth"], NativeSdkPacketNumber(shape[@"width"], 1))) : 0;
+    op->type = 0;
+    if (alpha <= 0 || (stroke && width <= 0) || NSIsEmptyRect(rect)) return YES;
+    op->shape[0] = (float)(NSMinX(rect) * scale);
+    op->shape[1] = (float)(NSMinY(rect) * scale);
+    op->shape[2] = (float)(NSMaxX(rect) * scale);
+    op->shape[3] = (float)(NSMaxY(rect) * scale);
+    for (NSUInteger corner = 0; corner < 4; corner += 1) op->radii[corner] = radius ? (float)(NativeSdkPacketRadiusAt(radius, corner, maxRadius) * shapeScale * scale) : 0;
+    op->strokeWidth = (float)(width * shapeScale * scale);
+    const CGFloat pad = op->strokeWidth * 0.5 + 1;
+    CGFloat minX = op->shape[0] - pad, minY = op->shape[1] - pad, maxX = op->shape[2] + pad, maxY = op->shape[3] + pad;
+    op->hasClip = clipArray != nil;
+    if (clipArray) {
+        NSRect clip = CGRectStandardize(NativeSdkPacketRect(clipArray));
+        op->clip[0] = (float)(NSMinX(clip) * scale);
+        op->clip[1] = (float)(NSMinY(clip) * scale);
+        op->clip[2] = (float)(NSMaxX(clip) * scale);
+        op->clip[3] = (float)(NSMaxY(clip) * scale);
+        const CGFloat clipMaxRadius = fmax(0.0, fmin(clip.size.width, clip.size.height) * 0.5);
+        for (NSUInteger corner = 0; corner < 4; corner += 1) op->clipRadii[corner] = clipRadius ? (float)(NativeSdkPacketRadiusAt(clipRadius, corner, clipMaxRadius) * scale) : 0;
+        minX = fmax(minX, op->clip[0] - 1);
+        minY = fmax(minY, op->clip[1] - 1);
+        maxX = fmin(maxX, op->clip[2] + 1);
+        maxY = fmin(maxY, op->clip[3] + 1);
+    }
+    minX = fmax(0.0, floor(minX));
+    minY = fmax(0.0, floor(minY));
+    maxX = fmin((CGFloat)pixelWidth, ceil(maxX));
+    maxY = fmin((CGFloat)pixelHeight, ceil(maxY));
+    if (maxX <= minX || maxY <= minY) return YES;
+    op->type = 7;
+    op->pxX = (float)minX;
+    op->pxY = (float)minY;
+    op->pxW = (float)(maxX - minX);
+    op->pxH = (float)(maxY - minY);
+    op->colorR = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[0], 0))) * alpha);
+    op->colorG = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[1], 0))) * alpha);
+    op->colorB = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[2], 0))) * alpha);
+    op->colorA = (float)alpha;
+    return YES;
 }
 
 - (NSInteger)compositePacketCommands:(NSArray *)commands keys:(NSArray *)keys target:(id<MTLTexture>)target pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale clearColor:(NSColor *)clearColor fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects waitUntilCompleted:(BOOL)waitUntilCompleted {
@@ -4622,16 +5132,62 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NativeSdkCompositeOp *ops = (NativeSdkCompositeOp *)opsData.mutableBytes;
     NSMutableArray *opTextures = [NSMutableArray array];
     [self rasterCacheEnsureScale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+    // Build independent command bitmaps concurrently, then publish in order.
+    // Cache mutation and draw order stay on the main thread.
+    if (keys && self.canvasCommandRasterCache) {
+        NSMutableArray *missCommands = [NSMutableArray array];
+        NSMutableArray *missKeys = [NSMutableArray array];
+        for (NSUInteger index = 0; index < commands.count && index < keys.count; index += 1) {
+            NSDictionary *command = NativeSdkPacketDictionary(commands[index]);
+            /* Cull first: a scissored patch touches a few regions, and
+             * everything outside them needs no classification at all. */
+            id boundsValue = command[@"bounds"];
+            if (!boundsValue) continue;
+            if (cullToRects && !NativeSdkPacketRectIntersects(NativeSdkPacketRect(boundsValue), repaintUnion)) continue;
+            NSNumber *key = [keys[index] isKindOfClass:[NSNumber class]] ? keys[index] : nil;
+            NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
+            if (!key || !NativeSdkPacketCommandRasterCacheable(command, kind)) continue;
+            if ([kind isEqualToString:@"draw_image"] && NativeSdkCompositeImageQuadEligible(command)) continue;
+            NativeSdkCompositeOp probe;
+            memset(&probe, 0, sizeof(probe));
+            if (NativeSdkCompositeShapeQuad(command, kind, scale, pixelWidth, pixelHeight, &probe)) continue;
+            NativeSdkPacketCommandRaster *entry = self.canvasCommandRasterCache[key];
+            if (entry && entry.texture && (entry.command == command || NativeSdkPacketRetargetRasterForTranslation(entry, command, scale, pixelWidth, pixelHeight))) continue;
+            [missCommands addObject:command];
+            [missKeys addObject:key];
+        }
+        const NSUInteger count = missCommands.count;
+        void **built = count >= 2 ? calloc(count, sizeof(void *)) : NULL;
+        if (built) {
+            uint64_t begin = NativeSdkTimestampNanoseconds();
+            dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^(size_t index) {
+                @autoreleasepool {
+                    NSDictionary *command = missCommands[index];
+                    NativeSdkPacketCommandRaster *entry = [self rasterCacheBuildEntryForCommand:command kind:command[@"kind"] scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight];
+                    if (entry) built[index] = (void *)CFBridgingRetain(entry);
+                }
+            });
+            for (NSUInteger index = 0; index < count; index += 1) {
+                if (!built[index]) continue;
+                NativeSdkPacketCommandRaster *entry = CFBridgingRelease(built[index]);
+                [self rasterCacheStoreEntry:entry forKey:missKeys[index]];
+                self.canvasTraceCacheFillCount += 1;
+            }
+            free(built);
+            self.canvasTraceCacheFillNs += NativeSdkTimestampNanoseconds() - begin;
+        }
+    }
     for (NSUInteger index = 0; index < commands.count; index += 1) {
         NativeSdkCompositeOp *op = &ops[index];
         op->type = 0;
         op->commandIndex = index;
         NSDictionary *command = NativeSdkPacketDictionary(commands[index]);
         if (!command) return 0;
-        NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
         NSArray *boundsArray = NativeSdkPacketArray(command[@"bounds"], 4);
         op->hasCullBounds = boundsArray != nil;
         op->cullBounds = boundsArray ? CGRectStandardize(NativeSdkPacketRect(boundsArray)) : NSZeroRect;
+        if (cullToRects && op->hasCullBounds && !NativeSdkPacketRectIntersects(op->cullBounds, repaintUnion)) continue;
+        NSString *kind = [command[@"kind"] isKindOfClass:[NSString class]] ? command[@"kind"] : @"";
         const BOOL knownKind = [kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"] ||
             [kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"] || [kind isEqualToString:@"draw_text"] ||
             [kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"] || [kind isEqualToString:@"draw_image"];
@@ -4658,15 +5214,80 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             self.canvasTraceDirectCount += 1;
             continue;
         }
-        /* Pixel-aligned fully-opaque solid rect: exact flat quad. */
-        if ([kind isEqualToString:@"fill_rect_solid"] && !command[@"transform"]) {
+        /* Translation-only transforms still permit an exact flat quad. */
+        NSArray *flatTransform = NativeSdkPacketArray(command[@"transform"], 6);
+        BOOL flatTranslation = !command[@"transform"] || (flatTransform &&
+            NativeSdkPacketNumber(flatTransform[0], 1) == 1 && NativeSdkPacketNumber(flatTransform[1], 0) == 0 &&
+            NativeSdkPacketNumber(flatTransform[2], 0) == 0 && NativeSdkPacketNumber(flatTransform[3], 1) == 1);
+        /* Registered images sample on the GPU: the texture uploads once
+         * per content change and every frame scales it in the sampler,
+         * instead of a CPU re-raster of the scaled image each time its
+         * pixels change (photographs being graded, video, rendered 3D
+         * frames). Rounded masks and non-translation transforms keep the
+         * CG raster below. */
+        if ([kind isEqualToString:@"draw_image"] && NativeSdkCompositeImageQuadEligible(command)) {
+            NSDictionary *packetImage = NativeSdkPacketDictionary(command[@"image"]);
+            NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
+            NSString *imageKey = NativeSdkPacketImageCacheKey(packetImage[@"image"]);
+            {
+                NSImage *image = self.canvasImageCache[imageKey];
+                if (!image) {
+                    /* Absent image: skip, exactly like the CG path. */
+                    self.canvasTraceDrawnCount -= 1;
+                    continue;
+                }
+                NSRect src = NativeSdkPacketImageSourceRect(packetImage, image);
+                NSString *fit = [packetImage[@"fit"] isKindOfClass:[NSString class]] ? packetImage[@"fit"] : @"stretch";
+                NSRect dst = NativeSdkPacketImageDestinationRect(NativeSdkPacketRect(packetImage[@"dst"]), src, fit);
+                if (flatTransform) {
+                    const CGFloat sx = NativeSdkPacketNumber(flatTransform[0], 1);
+                    const CGFloat sy = NativeSdkPacketNumber(flatTransform[3], 1);
+                    dst = NSMakeRect(NSMinX(dst) * sx + NativeSdkPacketNumber(flatTransform[4], 0), NSMinY(dst) * sy + NativeSdkPacketNumber(flatTransform[5], 0), NSWidth(dst) * sx, NSHeight(dst) * sy);
+                }
+                id<MTLTexture> texture = [self compositeTextureForImage:image key:imageKey];
+                if (texture) {
+                    /* The command clip is already in surface space. */
+                    NSRect visible = dst;
+                    if (clipArray) visible = NSIntersectionRect(visible, CGRectStandardize(NativeSdkPacketRect(clipArray)));
+                    const CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1))) *
+                        fmax(0.0, fmin(1.0, NativeSdkPacketNumber(packetImage[@"opacity"], 1)));
+                    if (NSIsEmptyRect(visible) || src.size.width <= 0 || src.size.height <= 0 || dst.size.width <= 0 || dst.size.height <= 0 || opacity <= 0) {
+                        self.canvasTraceDrawnCount -= 1;
+                        continue;
+                    }
+                    const CGFloat imageWidth = image.size.width;
+                    const CGFloat imageHeight = image.size.height;
+                    op->type = 6;
+                    op->pxX = (float)(NSMinX(visible) * scale);
+                    op->pxY = (float)(NSMinY(visible) * scale);
+                    op->pxW = (float)(NSWidth(visible) * scale);
+                    op->pxH = (float)(NSHeight(visible) * scale);
+                    op->u0 = (float)((NSMinX(src) + (NSMinX(visible) - NSMinX(dst)) / NSWidth(dst) * NSWidth(src)) / imageWidth);
+                    op->v0 = (float)((NSMinY(src) + (NSMinY(visible) - NSMinY(dst)) / NSHeight(dst) * NSHeight(src)) / imageHeight);
+                    op->uSize = (float)(NSWidth(visible) / NSWidth(dst) * NSWidth(src) / imageWidth);
+                    op->vSize = (float)(NSHeight(visible) / NSHeight(dst) * NSHeight(src) / imageHeight);
+                    op->colorA = (float)opacity;
+                    op->nearest = [[packetImage[@"sampling"] description] isEqualToString:@"nearest"];
+                    op->texture = (__bridge void *)texture;
+                    [opTextures addObject:texture];
+                    self.canvasTraceDirectCount += 1;
+                    continue;
+                }
+            }
+        }
+        NSDictionary *flatShape = NativeSdkPacketDictionary(command[@"shape"]);
+        NSArray *flatRadii = NativeSdkPacketArray(flatShape[@"radius"], 4);
+        BOOL squareCorners = flatRadii && NativeSdkPacketNumber(flatRadii[0], 0) == 0 &&
+            NativeSdkPacketNumber(flatRadii[1], 0) == 0 && NativeSdkPacketNumber(flatRadii[2], 0) == 0 && NativeSdkPacketNumber(flatRadii[3], 0) == 0;
+        if (([kind isEqualToString:@"fill_rect_solid"] || ([kind isEqualToString:@"fill_rounded_rect_solid"] && squareCorners)) && flatTranslation) {
             NSDictionary *paint = NativeSdkPacketDictionary(command[@"paint"]);
             NSDictionary *shape = NativeSdkPacketDictionary(command[@"shape"]);
             NSArray *colorArray = paint ? NativeSdkPacketArray(paint[@"color"], 4) : nil;
             CGFloat opacity = fmax(0.0, fmin(1.0, NativeSdkPacketNumber(command[@"opacity"], 1)));
-            if (colorArray && shape && [[paint[@"kind"] description] isEqualToString:@"color"] && opacity >= 1.0 &&
-                NativeSdkPacketNumber(colorArray[3], 1) >= 1.0) {
+            if (colorArray && shape && [[paint[@"kind"] description] isEqualToString:@"color"]) {
+                const CGFloat sourceAlpha = opacity * fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[3], 1)));
                 NSRect rect = CGRectStandardize(NativeSdkPacketRect(shape[@"rect"]));
+                if (flatTransform) rect = NSOffsetRect(rect, NativeSdkPacketNumber(flatTransform[4], 0), NativeSdkPacketNumber(flatTransform[5], 0));
                 NSArray *clipArray = NativeSdkPacketArray(command[@"clip"], 4);
                 BOOL clipUsable = command[@"clip"] == nil || clipArray != nil;
                 if (clipArray) rect = NSIntersectionRect(rect, CGRectStandardize(NativeSdkPacketRect(clipArray)));
@@ -4682,20 +5303,26 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                     pxMaxX = fmax(pxMinX, fmin((CGFloat)pixelWidth, round(pxMaxX)));
                     pxMaxY = fmax(pxMinY, fmin((CGFloat)pixelHeight, round(pxMaxY)));
                     if (pxMaxX > pxMinX && pxMaxY > pxMinY) {
-                        op->type = 1;
+                        if (sourceAlpha <= 0) continue;
+                        op->type = sourceAlpha >= 1.0 ? 1 : 4;
                         op->pxX = (float)pxMinX;
                         op->pxY = (float)pxMinY;
                         op->pxW = (float)(pxMaxX - pxMinX);
                         op->pxH = (float)(pxMaxY - pxMinY);
-                        op->colorR = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[0], 0)));
-                        op->colorG = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[1], 0)));
-                        op->colorB = (float)fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[2], 0)));
-                        op->colorA = 1;
+                        op->colorR = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[0], 0))) * sourceAlpha);
+                        op->colorG = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[1], 0))) * sourceAlpha);
+                        op->colorB = (float)(fmax(0.0, fmin(1.0, NativeSdkPacketNumber(colorArray[2], 0))) * sourceAlpha);
+                        op->colorA = (float)sourceAlpha;
                         self.canvasTraceDirectCount += 1;
                         continue;
                     }
                 }
             }
+        }
+        /* Analytic shapes: solid rects, rounded rects, rect strokes. */
+        if (NativeSdkCompositeShapeQuad(command, kind, scale, pixelWidth, pixelHeight, op)) {
+            if (op->type == 7) self.canvasTraceDirectCount += 1;
+            continue;
         }
         /* Cached raster as a textured quad. */
         NSNumber *key = nil;
@@ -4727,8 +5354,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 self.canvasCommandRasterCacheTick += 1;
                 entry.lastUseTick = self.canvasCommandRasterCacheTick;
                 op->type = 2;
-                op->pxX = (float)entry.pixelX;
-                op->pxY = (float)entry.pixelY;
+                op->pxX = (float)(entry.destination.origin.x * scale);
+                op->pxY = (float)(entry.destination.origin.y * scale);
                 op->pxW = (float)entry.pixelWidth;
                 op->pxH = (float)entry.pixelHeight;
                 op->texture = (__bridge void *)entry.texture;
@@ -4737,19 +5364,79 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             }
             /* Over budget or clamped empty: fall through to scratch. */
         }
+        /* Defer: the grouping pass below decides whether this command
+         * rasterizes alone or shares a layer with the commands it overlaps. */
+        op->type = 5;
+        op->poolKey = (__bridge void *)key;
+        continue;
+    }
+
+    /* Layer grouping.
+     *
+     * Rasterizing one command per layer means two overlapping antialiased
+     * edges each resolve against TRANSPARENT and are then composited as
+     * separate 8-bit quads, so the shared edge is quantized twice and reads
+     * softer than the same pair drawn one after the other into a single
+     * surface (what the CPU path does). Source-over is associative, so a run
+     * of consecutive commands can be drawn into one layer and composited
+     * once with an identical result — and inside that layer their edges
+     * resolve against each other at full precision.
+     *
+     * Only OVERLAPPING consecutive commands need to share: disjoint ones
+     * never blend with each other, so keeping them apart preserves the
+     * per-command raster cache for static chrome. A command that draws
+     * nothing (culled) is transparent to the run; anything that is not a
+     * deferred raster is an ordering barrier and ends it. */
+    for (NSUInteger start = 0; start < commands.count;) {
+        if (ops[start].type != 5) { start += 1; continue; }
+        NSRect unionBounds = ops[start].cullBounds;
+        NSUInteger end = start + 1;
+        NSUInteger members = 1;
+        while (end < commands.count) {
+            if (ops[end].type == 0) { end += 1; continue; }
+            if (ops[end].type != 5 || !ops[end].hasCullBounds) break;
+            if (!NativeSdkPacketRectIntersects(ops[end].cullBounds, unionBounds)) break;
+            unionBounds = NSUnionRect(unionBounds, ops[end].cullBounds);
+            members += 1;
+            end += 1;
+        }
+
+        NSMutableArray *batch = [NSMutableArray arrayWithCapacity:members];
+        for (NSUInteger member = start; member < end; member += 1) {
+            if (ops[member].type != 5) continue;
+            NSDictionary *memberCommand = NativeSdkPacketDictionary(commands[ops[member].commandIndex]);
+            if (!memberCommand) return 0;
+            [batch addObject:memberCommand];
+        }
+        if (batch.count == 0) { start = end; continue; }
+
         MTLRegion region = {0};
         const uint64_t scratchBegin = NativeSdkTimestampNanoseconds();
-        id<MTLTexture> scratch = [self compositeScratchTextureForCommand:command poolKey:key scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight repaintRect:repaintUnion hasRepaintRect:cullToRects outRegion:&region];
+        NSNumber *poolKey = batch.count == 1 ? (__bridge NSNumber *)ops[start].poolKey : nil;
+        id<MTLTexture> scratch = [self compositeScratchTextureForCommands:batch bounds:unionBounds poolKey:poolKey scale:scale pixelWidth:pixelWidth pixelHeight:pixelHeight repaintRect:repaintUnion hasRepaintRect:cullToRects outRegion:&region];
         self.canvasTraceDirectNs += NativeSdkTimestampNanoseconds() - scratchBegin;
-        if (!scratch) return 0;
+        if (!scratch) {
+            /* An empty layer (fully clipped away) draws nothing. */
+            for (NSUInteger member = start; member < end; member += 1) {
+                if (ops[member].type == 5) ops[member].type = 0;
+            }
+            start = end;
+            continue;
+        }
         self.canvasTraceDirectCount += 1;
+
+        NativeSdkCompositeOp *op = &ops[start];
+        for (NSUInteger member = start + 1; member < end; member += 1) {
+            if (ops[member].type == 5) ops[member].type = 0;
+        }
         op->type = 2;
+        op->texture = (__bridge void *)scratch;
+        [opTextures addObject:scratch];
         op->pxX = (float)region.origin.x;
         op->pxY = (float)region.origin.y;
         op->pxW = (float)region.size.width;
         op->pxH = (float)region.size.height;
-        op->texture = (__bridge void *)scratch;
-        [opTextures addObject:scratch];
+        start = end;
     }
 
     /* Encode. Everything is validated; failures past this point are
@@ -4787,7 +5474,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.canvasTraceBindCount += 1;
         for (NSUInteger rectIndex = 0; rectIndex < rectCount; rectIndex += 1) {
             [encoder setScissorRect:pxRects[rectIndex]];
-            NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, (float)pxRects[rectIndex].x, (float)pxRects[rectIndex].y, (float)pxRects[rectIndex].width, (float)pxRects[rectIndex].height, 0, 0, clearComponents, NO, self.canvasCompositeFlatTexture);
+            NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, (float)pxRects[rectIndex].x, (float)pxRects[rectIndex].y, (float)pxRects[rectIndex].width, (float)pxRects[rectIndex].height, 0, 0, clearComponents, NO, self.canvasCompositeFlatTexture, self.canvasCompositeSampler);
             self.canvasTraceQuadCount += 1;
         }
     }
@@ -4860,7 +5547,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             currentPipeline = self.canvasCompositeOpaquePipeline;
             self.canvasTraceBindCount += 1;
             [encoder setScissorRect:fullScissor];
-            NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, NULL, YES, blurTexture);
+            NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, NULL, YES, blurTexture, self.canvasCompositeSampler);
             self.canvasTraceQuadCount += 1;
             continue;
         }
@@ -4873,11 +5560,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 self.canvasTraceBindCount += 1;
             }
             [encoder setScissorRect:pxRects[rectIndex]];
-            if (op->type == 1) {
+            if (op->type == 1 || op->type == 4) {
                 const float color[4] = {op->colorR, op->colorG, op->colorB, op->colorA};
-                NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, color, NO, self.canvasCompositeFlatTexture);
+                NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, color, NO, self.canvasCompositeFlatTexture, self.canvasCompositeSampler);
+            } else if (op->type == 6) {
+                NativeSdkCompositeEncodeImageQuad(encoder, pixelWidth, pixelHeight, op, op->nearest ? self.canvasCompositeNearestImageSampler : self.canvasCompositeImageSampler);
+            } else if (op->type == 7) {
+                NativeSdkCompositeEncodeShapeQuad(encoder, pixelWidth, pixelHeight, op, self.canvasCompositeFlatTexture, self.canvasCompositeSampler);
             } else {
-                NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, NULL, YES, (__bridge id<MTLTexture>)op->texture);
+                NativeSdkCompositeEncodeQuad(encoder, pixelWidth, pixelHeight, op->pxX, op->pxY, op->pxW, op->pxH, 0, 0, NULL, YES, (__bridge id<MTLTexture>)op->texture, self.canvasCompositeSampler);
             }
             self.canvasTraceQuadCount += 1;
         }
@@ -4900,6 +5591,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
  * a missing/resized/invalid target refuses (0) so the engine resyncs
  * with a full present. */
 - (NSInteger)presentCompositePacketWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor loadAction:(NSString *)loadAction fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects directRetainedDirtyUpdate:(BOOL)directRetainedDirtyUpdate {
+    // Composite packets bypass presentPixels, which normally prepares
+    // the final texture-to-window pipeline and sampler.
+    if (![self ensureCanvasPresenter]) return -1;
     const BOOL needNewTexture = !self.canvasTexture || !self.canvasTextureRenderable ||
         self.canvasTextureWidth != pixelWidth || self.canvasTextureHeight != pixelHeight;
     if (!fullSurfacePass && (needNewTexture || !self.canvasCompositeContentValid)) return 0;
@@ -5103,21 +5797,64 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     self.canvasCommandRasterCachePixelHeight = pixelHeight;
 }
 
+typedef struct {
+    uint64_t tick;
+    void *key; /* unretained; the cache holds it until removal */
+} NativeSdkRasterCacheAge;
+
+static int NativeSdkRasterCacheAgeCompare(const void *a, const void *b) {
+    const uint64_t left = ((const NativeSdkRasterCacheAge *)a)->tick;
+    const uint64_t right = ((const NativeSdkRasterCacheAge *)b)->tick;
+    return left < right ? -1 : (left > right ? 1 : 0);
+}
+
+/* Evicts least-recently-used entries in one pass: one sort by last use,
+ * then the oldest go until `incoming` bytes fit with a quarter of the
+ * budget free. A working set larger than the budget then costs one sort
+ * per overflow, not a full scan per evicted entry. */
+- (void)rasterCacheEvictFor:(NSUInteger)incoming {
+    NSMutableDictionary *cache = self.canvasCommandRasterCache;
+    const NSUInteger count = cache.count;
+    if (count == 0) return;
+    NativeSdkRasterCacheAge *ages = malloc(count * sizeof(NativeSdkRasterCacheAge));
+    if (!ages) return;
+    __block NSUInteger filled = 0;
+    [cache enumerateKeysAndObjectsUsingBlock:^(NSNumber *candidate, NativeSdkPacketCommandRaster *candidateEntry, BOOL *stop) {
+        if (filled >= count) {
+            *stop = YES;
+            return;
+        }
+        ages[filled].tick = candidateEntry.lastUseTick;
+        ages[filled].key = (__bridge void *)candidate;
+        filled += 1;
+    }];
+    qsort(ages, filled, sizeof(NativeSdkRasterCacheAge), NativeSdkRasterCacheAgeCompare);
+    const NSUInteger budget = NativeSdkPacketRasterCacheMaxBytes / 4 * 3;
+    const NSUInteger target = incoming >= budget ? 0 : budget - incoming;
+    NSMutableArray<NSNumber *> *victims = [NSMutableArray array];
+    NSUInteger bytes = self.canvasCommandRasterCacheBytes;
+    for (NSUInteger index = 0; index < filled && bytes > target; index += 1) {
+        NSNumber *victim = (__bridge NSNumber *)ages[index].key;
+        NativeSdkPacketCommandRaster *victimEntry = cache[victim];
+        bytes -= MIN(victimEntry.byteCount, bytes);
+        [victims addObject:victim];
+    }
+    free(ages);
+    for (NSNumber *victim in victims) [self rasterCacheRemoveKey:victim];
+}
+
 - (void)rasterCacheStoreEntry:(NativeSdkPacketCommandRaster *)entry forKey:(NSNumber *)key {
     if (!entry || !key || !self.canvasCommandRasterCache) return;
     [self rasterCacheRemoveKey:key];
-    while (self.canvasCommandRasterCacheBytes + entry.byteCount > NativeSdkPacketRasterCacheMaxBytes && self.canvasCommandRasterCache.count > 0) {
-        NSNumber *lruKey = nil;
-        uint64_t lruTick = UINT64_MAX;
-        for (NSNumber *candidate in self.canvasCommandRasterCache) {
-            NativeSdkPacketCommandRaster *candidateEntry = self.canvasCommandRasterCache[candidate];
-            if (candidateEntry.lastUseTick <= lruTick) {
-                lruTick = candidateEntry.lastUseTick;
-                lruKey = candidate;
-            }
-        }
-        if (!lruKey) break;
-        [self rasterCacheRemoveKey:lruKey];
+    if (self.canvasCommandRasterCacheBytes + entry.byteCount > NativeSdkPacketRasterCacheMaxBytes) [self rasterCacheEvictFor:entry.byteCount];
+    /* NATIVE_SDK_RASTER_CACHE_TRACE=1: one stderr line per cache fill,
+     * naming the command kind, its destination, and the bytes it holds,
+     * so a view whose working set outgrows the budget shows what fills it. */
+    static int traceFills = -1;
+    if (traceFills < 0) traceFills = getenv("NATIVE_SDK_RASTER_CACHE_TRACE") != NULL;
+    if (traceFills) {
+        NSString *kind = [entry.command[@"kind"] isKindOfClass:[NSString class]] ? entry.command[@"kind"] : @"?";
+        fprintf(stderr, "native-sdk: raster-cache fill kind=%s rect=%.0f,%.0f %.0fx%.0f bytes=%lu total=%lu\n", kind.UTF8String, entry.destination.origin.x, entry.destination.origin.y, entry.destination.size.width, entry.destination.size.height, (unsigned long)entry.byteCount, (unsigned long)(self.canvasCommandRasterCacheBytes + entry.byteCount));
     }
     self.canvasCommandRasterCache[key] = entry;
     self.canvasCommandRasterCacheBytes += entry.byteCount;
@@ -5188,7 +5925,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (hasCommandClip) {
         [NSBezierPath clipRect:commandClip];
     }
-    BOOL ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, hasCommandClip, commandClip, self.canvasImageCache);
+    BOOL ok = NativeSdkPacketApplyTransform(command[@"transform"]);
+    if (ok) ok = NativeSdkPacketDrawCommandBody(command, kind, opacity, bitmap, scale, hasCommandClip, commandClip, self.canvasImageCache);
     [NSGraphicsContext restoreGraphicsState];
     CGImageRef cgImage = ok ? CGBitmapContextCreateImage(bitmap) : NULL;
     CGContextRelease(bitmap);
@@ -5533,7 +6271,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             NSDictionary *command = NativeSdkPacketDictionary(upsert[@"command"]);
             if (!key || !command) { self.hasCanvasRetainedState = NO; return 0; }
             self.canvasRetainedCommands[key] = command;
-            [self rasterCacheRemoveKey:key];
+            /* Keep the old raster until the draw pass compares the new
+             * command. Exact scroll translations retarget it; every other
+             * change removes it through the ordinary cache validation. */
         }
         if (self.canvasRetainedCommands.count > NativeSdkPacketRetainedCommandCap) { self.hasCanvasRetainedState = NO; return 0; }
         /* Draw order comes exclusively from the order vector, and it must
@@ -6086,8 +6826,8 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 /* Schedule the surface's next frame event on the display-interval grid.
  * At most one emission is ever in flight; producers arriving while it
  * is queued fold into it (see the property comment). Always fires
- * through the queue — a request lands mid engine dispatch and a
- * synchronous emission would re-enter the engine — and the pacing
+ * through a common-mode timer — a request lands mid engine dispatch and
+ * a synchronous emission would re-enter the engine — and the pacing
  * clock's grid stamping keeps the queue hop out of the period. */
 - (void)scheduleFrameEventEmission {
     [self scheduleFrameEventEmissionForPresentCompletion:NO];
@@ -6137,7 +6877,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     }
     const NSUInteger generation = self.frameEventEmissionGeneration;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+    NativeSdkScheduleMainRunLoopBlock(delayNs, ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
         // Superseded (de-occlusion rescheduled a fresher emission while
@@ -6312,7 +7052,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             sampleColor = ((uint32_t)bytes[3] << 24) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[1] << 8) | (uint32_t)bytes[0];
             nonblank = bytes[0] != 0 || bytes[1] != 0 || bytes[2] != 0;
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
+        NativeSdkScheduleMainRunLoopBlock(0, ^{
             NativeSdkMetalSurfaceView *strongSelf = weakSelf;
             if (!strongSelf) return;
             if (nonblank) {
@@ -6564,6 +7304,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     NativeSdkScrollDriverView *native = dominantVertical ? (ownerY ?: ownerX) : (ownerX ?: ownerY);
     const BOOL splitOwners = ownerX && ownerY && ownerX != ownerY;
     const BOOL nativeWireBound = native && [self.wireBoundDriverIds containsObject:@(native.driverId)];
+    if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu wheel dy=%.1f phase=%ld mom=%ld chain=%lu native=%llu split=%d wire=%d nativeY=%.1f doc=%.1f frame=%.1f\n", NativeSdkTimestampNanoseconds() / 1000000ull, canvasDy, (long)event.phase, (long)event.momentumPhase, (unsigned long)chain.count, native ? native.driverId : 0, splitOwners, nativeWireBound, native ? native.contentView.bounds.origin.y : -1, native ? native.documentView.frame.size.height : -1, native ? native.frame.size.height : -1);
     if (!native || splitOwners || nativeWireBound) {
         if (ownerX) [self.wireBoundDriverIds addObject:@(ownerX.driverId)];
         if (ownerY) [self.wireBoundDriverIds addObject:@(ownerY.driverId)];
@@ -6696,6 +7437,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     const uint64_t packetDrawNs = self.lastPacketDrawNs;
     self.lastPacketDecodeNs = 0;
     self.lastPacketDrawNs = 0;
+    const uint64_t traceFrameStart = NativeSdkTimestampNanoseconds();
     [self.host emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_FRAME,
         .window_id = self.windowId,
@@ -6713,6 +7455,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         .packet_draw_ns = packetDrawNs,
         .occluded = occluded ? 1 : 0,
     }];
+    if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu frame idx=%lu took=%.2fms decode=%.2fms draw=%.2fms\n", traceFrameStart / 1000000ull, (unsigned long)frameIndex, (NativeSdkTimestampNanoseconds() - traceFrameStart) / 1e6, self.lastPacketDecodeNs / 1e6, self.lastPacketDrawNs / 1e6);
     [self.host scheduleFrame];
 }
 
@@ -6766,7 +7509,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         delayNs = self.pointerMotionInputLastEmitNs + frameIntervalNs - now;
     }
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+    NativeSdkScheduleMainRunLoopBlock(delayNs, ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
         [strongSelf emitQueuedPointerMotionInputEvent];
@@ -6818,7 +7561,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         delayNs = self.scrollInputLastEmitNs + frameIntervalNs - now;
     }
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+    NativeSdkScheduleMainRunLoopBlock(delayNs, ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
         [strongSelf emitQueuedScrollInputEvent];
@@ -7006,6 +7749,24 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
                                      setX:(created || desired.set_offset_x)
                                   offsetY:desired.offset_y
                                      setY:(created || desired.set_offset_y)];
+        } else {
+            // Convergence check, run on every push. The runtime decides
+            // whether to correct a scroller from its BELIEF about where
+            // that scroller sits, and that belief only advances when a
+            // report lands — so a report lost anywhere (a coalesced
+            // notification, a view torn down mid-flight) would leave the
+            // scroller and the content permanently out of step, with
+            // neither side able to notice. Reporting the clip view's
+            // real origin whenever it has drifted from what the engine
+            // last published closes that loop: the user's position wins
+            // and the content catches up on the next frame.
+            const NSPoint origin = driver.contentView.bounds.origin;
+            const BOOL drifted_x = desired.scrolls_x && fabs(origin.x - desired.offset_x) > 0.5;
+            const BOOL drifted_y = desired.scrolls_y && fabs(origin.y - desired.offset_y) > 0.5;
+            if (drifted_x || drifted_y) {
+                if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu drift driver=%llu native=%.1f engine=%.1f\n", NativeSdkTimestampNanoseconds() / 1000000ull, driver.driverId, origin.y, desired.offset_y);
+                [self queueScrollDriverEventWithId:driver.driverId offsetX:origin.x offsetY:origin.y];
+            }
         }
         [ordered addObject:driver];
     }
@@ -7018,10 +7779,12 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 // coalesced report is still in flight (and vice versa).
 - (void)applyScrollDriverOffset:(NativeSdkScrollDriverView *)driver offsetX:(double)offsetX setX:(BOOL)setX offsetY:(double)offsetY setY:(BOOL)setY {
     const NSPoint current = driver.contentView.bounds.origin;
-    self.applyingScrollDriverOffset = YES;
+    const uint64_t previous = self.applyingScrollDriverOffsetId;
+    self.applyingScrollDriverOffsetId = driver.driverId;
+    if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu apply driver=%llu from=%.1f to=%.1f setY=%d\n", NativeSdkTimestampNanoseconds() / 1000000ull, driver.driverId, current.y, offsetY, setY);
     [driver.contentView setBoundsOrigin:NSMakePoint(setX ? offsetX : current.x, setY ? offsetY : current.y)];
     [driver reflectScrolledClipView:driver.contentView];
-    self.applyingScrollDriverOffset = NO;
+    self.applyingScrollDriverOffsetId = previous;
     // A queued (frame-coalesced) report for THIS driver predates the
     // programmatic write: rewrite it to the offsets the clip view
     // actually settled on, so the stale pair can never re-land and
@@ -7135,10 +7898,16 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 }
 
 - (void)scrollDriverBoundsDidChange:(NSNotification *)note {
-    if (self.applyingScrollDriverOffset) return;
     NSClipView *clipView = note.object;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (driver.contentView != clipView) continue;
+        // Only the driver the engine is writing right now is echoing
+        // back its own programmatic offset. Every other driver's change
+        // is the user, and dropping it desynchronizes that region for
+        // good — the runtime believes the scroller is where it last put
+        // it, so it never pushes a correction either.
+        if (self.applyingScrollDriverOffsetId == driver.driverId) return;
+        if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu bounds driver=%llu y=%.1f\n", NativeSdkTimestampNanoseconds() / 1000000ull, driver.driverId, clipView.bounds.origin.y);
         [self queueScrollDriverEventWithId:driver.driverId offsetX:clipView.bounds.origin.x offsetY:clipView.bounds.origin.y];
         return;
     }
@@ -7162,7 +7931,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
         delayNs = self.scrollDriverEventLastEmitNs + frameIntervalNs - now;
     }
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delayNs), dispatch_get_main_queue(), ^{
+    NativeSdkScheduleMainRunLoopBlock(delayNs, ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
         if (!strongSelf) return;
         [strongSelf emitQueuedScrollDriverEvent];
@@ -7178,6 +7947,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     if (!self.host || self.surfaceLabel.length == 0) return;
     self.scrollDriverEventLastEmitNs = NativeSdkTimestampNanoseconds();
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
+    const uint64_t traceStart = NativeSdkTimestampNanoseconds();
     [self.host emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER,
         .window_id = self.windowId,
@@ -7188,6 +7958,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
         .scroll_driver_offset_x = offsetX,
         .scroll_driver_offset_y = offsetY,
     }];
+    if (NativeSdkScrollTraceEnabled()) fprintf(stderr, "[scroll] %llu emit driver=%llu y=%.1f took=%.2fms\n", traceStart / 1000000ull, driverId, offsetY, (NativeSdkTimestampNanoseconds() - traceStart) / 1e6);
 }
 
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
@@ -10787,11 +11558,13 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
     if (self.timer) return;
     // Common modes so frames keep pumping during live resize and menu
     // tracking (default-mode timers do not fire in tracking runloops).
-    NSTimer *frame_timer = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+    const NSTimeInterval frameInterval = (NSTimeInterval)NativeSdkRetainedFrameIntervalNanoseconds(self.window.screen ?: NSScreen.mainScreen) / (NSTimeInterval)NativeSdkNanosecondsPerSecond;
+    NSTimer *frame_timer = [NSTimer timerWithTimeInterval:frameInterval
                                                    target:self
                                                  selector:@selector(emitFrame)
                                                  userInfo:nil
                                                   repeats:NO];
+    frame_timer.tolerance = frameInterval / 4.0;
     [[NSRunLoop mainRunLoop] addTimer:frame_timer forMode:NSRunLoopCommonModes];
     self.timer = frame_timer;
 }

@@ -597,6 +597,54 @@ test "a rebuild mid-overscroll keeps the driver's offset and pushes nothing" {
     try std.testing.expectEqual(pushes_before, harness.null_platform.scroll_driver_set_offset_count);
 }
 
+test "a driver report the engine could not apply still arms the next correction" {
+    // The desync this guards: the runtime decides whether to correct a
+    // native scroller by comparing its offset against what it BELIEVES
+    // that scroller shows. If a report could update the content but not
+    // the belief, a scroller the engine failed to follow would sit at
+    // the user's position forever while the content stayed put — the
+    // scrollbar moves, nothing scrolls, and neither side notices.
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try scrollFixtureLayout(&nodes, 0);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    // A report for a driver id the layout no longer carries: the engine
+    // cannot move anything, and the scroller keeps whatever the user
+    // left it showing.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_y = 36,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    const applied = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 36), applied.nodes[0].widget.value);
+
+    // Now the engine moves the region itself (a virtual list's measured
+    // correction does exactly this). The belief and the offset diverge,
+    // so the next sync must PUSH rather than assume the scroller agrees.
+    const pushes_before = harness.null_platform.scroll_driver_set_offset_count;
+    var moved_nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const moved = try scrollFixtureLayout(&moved_nodes, 12);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", moved);
+    try std.testing.expect(harness.null_platform.scroll_driver_set_offset_count > pushes_before);
+}
+
 test "a rebuild restores the retained scroll offset with translated descendants" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
