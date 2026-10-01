@@ -13533,6 +13533,15 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
+        /// Build a fake timer's platform event without firing it. Harnesses
+        /// that record sessions dispatch this event through Runtime so replay
+        /// can regenerate the timer Msg from the same journaled input.
+        pub fn fakeTimerEvent(self: *Self, key: u64, timestamp_ns: u64) error{EffectNotFound}!platform.TimerEvent {
+            const index = self.findActiveTimerIndex(key) orelse return error.EffectNotFound;
+            if (!self.timer_slots[index].fake) return error.EffectNotFound;
+            return .{ .id = effectTimerPlatformId(index), .timestamp_ns = timestamp_ns };
+        }
+
         /// Fire the fake fx timer with `key` by hand: its `on_fire` Msg
         /// (timestamp 0 — the fake executor has no clock) lands through
         /// the pending ring and drains on the next `.effects_wake`

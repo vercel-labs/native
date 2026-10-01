@@ -1,0 +1,30 @@
+<!-- The whole view: markup over the core's emitted model. Embedded at
+     build time and hot-reloaded while `native dev` runs. Fields bind
+     by the names core.ts wrote ({tickCount}); exported single-model
+     helpers bind too ({total}). Validate with: native check -->
+<column gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1">Counter</text>
+    <button size="sm" variant="ghost" on-press="reset">Reset</button>
+  </row>
+  <row gap="8" main="center" cross="center" grow="1">
+    <button variant="secondary" on-press="decrement">-</button>
+    <text>{count}</text>
+    <button variant="primary" on-press="increment">+</button>
+  </row>
+  <row gap="8" cross="center">
+    <switch checked="{ticking}" on-toggle="toggle_ticking">Tick every second</switch>
+    <text grow="1">ticks {tickCount}</text>
+    <button size="sm" on-press="stamp">Stamp</button>
+    <button size="sm" on-press="load">Load</button>
+  </row>
+  <!-- The empty state is markup, not model surgery: stampedMs starts
+       at -1 (never stamped), and the view says what Stamp will do
+       instead of printing "-1ms". -->
+  <if test="{stampedMs < 0}">
+    <status-bar>total: {total} | press Stamp for a timestamp</status-bar>
+  </if>
+  <else>
+    <status-bar>total: {total} | stamped: {stampedMs}ms</status-bar>
+  </else>
+</column>

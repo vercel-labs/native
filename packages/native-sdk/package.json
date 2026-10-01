@@ -23,6 +23,7 @@
     "app.zon",
     "packages/core/src",
     "packages/core/sdk",
+    "packages/core/testing",
     "packages/core/compile-surface",
     "packages/core/scripts",
     "packages/core/package.json",

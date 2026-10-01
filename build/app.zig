@@ -2001,6 +2001,30 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // Authored Node tests drive a separately linked native TestHarness host.
+    // Apps without tests pay no extra compile/link cost.
+    if (ts_stage != null and hasTypeScriptTests(b, app_options.app_root)) {
+        const host_root = b.addWriteFiles().add("native_test_main.zig",
+            \\pub const main = @import("app").testMain;
+            \\
+        );
+        const host_mod = b.createModule(.{ .root_source_file = host_root, .target = target, .optimize = optimize });
+        host_mod.addImport("app", test_app_mod);
+        const host = b.addExecutable(.{
+            .name = b.fmt("{s}-test-host", .{app_options.name}),
+            .root_module = host_mod,
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        const node_tests = b.addSystemCommand(&.{tsToolingPreflight(b, dep, .app_core)});
+        node_tests.addFileArg(dep.path("build/ts_run.mjs"));
+        node_tests.addFileArg(dep.path("packages/core/scripts/run_native_tests.mjs"));
+        node_tests.addArtifactArg(host);
+        node_tests.addDirectoryArg(b.path(appPath(b, app_options.app_root, "tests")));
+        node_tests.setCwd(b.path(app_options.app_root));
+        node_tests.has_side_effects = true;
+        test_step.dependOn(&node_tests.step);
+    }
+
     // `native test` must surface the app's compile-time teaching errors,
     // not just its test failures. Test builds never analyze `main` (the
     // test runner replaces the entry point), so rules that fire inside it
@@ -3047,4 +3071,18 @@ fn resolveWebLayer(config: AppManifestBuildConfig, web_engine: WebEngineOption, 
         .{ if (override != null) "-Dweb-layer=exclude" else "app.zon .webview_layer = \"exclude\"", declaration.?.text() },
     );
     return decision.enabled;
+}
+
+/// One explicit discovery convention, shared with run_native_tests.mjs.
+fn hasTypeScriptTests(b: *std.Build, app_root: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(b.graph.io, b.pathFromRoot(appPath(b, app_root, "tests")), .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => @panic("cannot read app tests directory"),
+    };
+    defer dir.close(b.graph.io);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch @panic("cannot enumerate app tests")) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".test.ts")) return true;
+    }
+    return false;
 }

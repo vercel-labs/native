@@ -108,12 +108,12 @@ const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
 const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
 
-pub fn main(init: std.process.Init) !void {
+fn appOptions(io: ?std.Io) Adapter.Options {
     var options: Adapter.Options = .{
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = if (dev) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = "src/app.native", .io = init.io } else null,
+        .markup = if (dev) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = if (io != null) "src/app.native" else null, .io = io } else null,
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no
@@ -126,13 +126,24 @@ pub fn main(init: std.process.Init) !void {
     if (comptime !dev) options.view = CompiledAppView.build;
     if (comptime @hasDecl(core.Model, "windows")) {
         options.window_view = window_views.build;
-        options.fragment_watch = .{ .fragments = &window_views.fragments, .io = init.io };
+        if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };
     }
     if (comptime @hasDecl(core, "commandMsg")) {
         // Menus, shortcuts, and chrome tabs dispatch through the core's
         // exported command mapper.
         options.on_command = core.commandMsg;
     }
+    return options;
+}
+
+/// A separate executable uses the same core, markup, theme and command routes.
+/// Test startup never enters production persistence, services or app directories.
+pub fn testMain(init: std.process.Init) !void {
+    try native_sdk.native_testing.run(Adapter, init, appOptions(null));
+}
+
+pub fn main(init: std.process.Init) !void {
+    const options = appOptions(init.io);
     // The platform caches directory for this app: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
     // the conventional content-addressed path under this directory —

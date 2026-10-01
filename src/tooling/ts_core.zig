@@ -815,10 +815,10 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
 pub const editor_package_dir = "node_modules/@native-sdk/core";
 
 /// The published artifact's files, relative to packages/core (and to the
-/// materialized copy): package.json plus its `files: ["sdk"]` allowlist.
+/// materialized copy): package.json, core editor sources, and the test driver.
 /// packages/core/test/package_manifest.test.ts pins the manifest to this
 /// shape, so copy and tarball cannot drift apart.
-const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/text.ts", "sdk/events.ts", "sdk/bytes_text_methods.d.ts" };
+const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/text.ts", "sdk/events.ts", "testing/index.ts", "sdk/bytes_text_methods.d.ts" };
 const sqlite_editor_overlay_marker = ".native/cache/sqlite/editor-overlay";
 
 /// Extract the top-level "version" of a package.json. A targeted scan, not
@@ -1079,12 +1079,16 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     defer allocator.free(bundled);
     try std.testing.expectEqualStrings("0.0.9", bundled);
 
+    try cwd.createDirPath(io, sdk ++ "/packages/core/testing");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/testing/index.ts", .data = "// native test driver" });
+
     // Missing copy: materialized, and the full artifact lands.
     try std.testing.expectEqual(EnsureOutcome.materialized, try ensureEditorPackage(allocator, io, sdk, app));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/package.json"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
+    try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/testing/index.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/bytes_text_methods.d.ts"));
 
     // A generated relational surface overlays the editor-resolved core and

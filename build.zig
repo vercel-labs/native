@@ -746,6 +746,24 @@ pub fn build(b: *std.Build) void {
     const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
+        const native_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        native_driver_run.setCwd(b.path("tests/native-driver"));
+        native_driver_run.has_side_effects = true;
+        _ = native_driver_run.captureStdOut(.{});
+        _ = native_driver_run.captureStdErr(.{});
+        native_driver_run.setName("TypeScript native test driver");
+        const native_driver_step = b.step("test-ts-native-driver", "Drive a compiled app from authored TypeScript tests");
+        native_driver_step.dependOn(&native_driver_run.step);
+        const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
+        native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
+        native_api_tests.has_side_effects = true;
+        _ = native_api_tests.captureStdOut(.{});
+        _ = native_api_tests.captureStdErr(.{});
+        native_driver_step.dependOn(&native_api_tests.step);
+        ts_core_e2e_step.dependOn(&native_api_tests.step);
+        test_step.dependOn(&native_api_tests.step);
+        ts_core_e2e_step.dependOn(&native_driver_run.step);
+        test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
@@ -793,9 +811,14 @@ pub fn build(b: *std.Build) void {
         // ABI-law suites over real compiled cores: the broad markup fixture
         // plus the focused mixed bare-Model/[Model, Cmd] return regression.
         const abi_laws_run = b.addRunArtifact(ts_core_artifacts.external_core_abi_laws);
+        const trap_run = b.addRunArtifact(ts_core_artifacts.external_core_trap);
+        trap_run.expectExitCode(73);
+        _ = trap_run.captureStdErr(.{});
         const mixed_return_abi_run = b.addRunArtifact(ts_core_artifacts.mixed_return_abi_laws);
         const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suites, including mixed update returns (requires node and `npm ci` in packages/core)");
         abi_laws_step.dependOn(&abi_laws_run.step);
+        abi_laws_step.dependOn(&trap_run.step);
+        test_step.dependOn(&trap_run.step);
         abi_laws_step.dependOn(&mixed_return_abi_run.step);
         test_step.dependOn(&abi_laws_run.step);
         test_step.dependOn(&mixed_return_abi_run.step);
@@ -3382,6 +3405,7 @@ const TsCoreE2eArtifacts = struct {
     /// (boot fence, collect invariant, deterministic re-init, channel
     /// envelopes, integer classes).
     external_core_abi_laws: *std.Build.Step.Compile,
+    external_core_trap: *std.Build.Step.Compile,
     /// The mixed-return ABI regression: a real compiled core whose update
     /// returns both bare Model and [Model, Cmd] through the generated facade.
     mixed_return_abi_laws: *std.Build.Step.Compile,
@@ -3835,6 +3859,13 @@ fn tsCoreE2eArtifact(
     abi_laws_mod.addObjectFile(markup_fixture.archive);
     addScriptcArchiveSystemLibs(abi_laws_mod, target);
 
+    const trap_mod = module(b, target, optimize, "tests/sidecar/external_core_trap.zig");
+    trap_mod.link_libc = true;
+    trap_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
+    trap_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, markup_fixture.sidecar));
+    trap_mod.addObjectFile(markup_fixture.archive);
+    addScriptcArchiveSystemLibs(trap_mod, target);
+
     const mixed_return_abi_mod = module(b, target, optimize, "tests/sidecar/mixed_return_abi_tests.zig");
     mixed_return_abi_mod.addImport("mixed_return_core", mixed_return_fixture.module);
 
@@ -3853,6 +3884,7 @@ fn tsCoreE2eArtifact(
         .mobile_battery = mobile_battery,
         .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
+        .external_core_trap = b.addExecutable(.{ .name = "external-core-trap", .root_module = trap_mod, .use_llvm = @import("build/app.zig").useLlvmWorkaround(target) }),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
         .mixed_return_abi_laws = filteredTestArtifact(b, mixed_return_abi_mod, "mixed-return-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),

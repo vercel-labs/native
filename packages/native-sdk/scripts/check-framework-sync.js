@@ -33,6 +33,7 @@ const mirrors = [
   // whole-directory comparison stays off.
   { source: 'packages/core/src', target: 'packages/core/src' },
   { source: 'packages/core/sdk', target: 'packages/core/sdk' },
+  { source: 'packages/core/testing', target: 'packages/core/testing' },
   { source: 'packages/core/compile-surface', target: 'packages/core/compile-surface' },
   { source: 'packages/core/scripts', target: 'packages/core/scripts' },
   { source: 'packages/core/package.json', target: 'packages/core/package.json' },

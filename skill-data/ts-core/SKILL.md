@@ -46,6 +46,10 @@ export function update(model: Model, msg: Msg): Model {
 - Update-only state (fields, helpers, or Msg kinds nothing in markup binds or dispatches — host-fired timer arms, persistence bookkeeping) is declared once: `export const viewUnbound = ["nextId", "tick"] as const;`. It emits as the `view_unbound` opt-out `native check`'s unbound-state lint reads; a name outside the model surface is a taught NS1032. Entries are the TypeScript names exactly as declared (`"nextId"`) and Msg kinds as their `kind` tags — the same names markup binds, because there are no other names.
 - Names: your names are your names — fields, helpers, and locals emit into Zig with their TS spellings (`doneToday` stays `doneToday`), and markup binds them verbatim. String-literal unions emit as native enums.
 
+## Tests against the compiled app
+
+Put Node test files directly in `tests/*.test.ts` and run `native test`. Import `NativeApp` and `findWidget` from `@native-sdk/core/testing` **only in tests**, never in `src/core.ts`. Each `NativeApp.start()` launches a separate headless native process with the real scriptc-compiled core and markup. Drive `click`/`action`/`menu`, assert returned model and accessibility snapshots, inspect and answer fake requests with `respond`, and fire declared timers with `fireTimer`. Always `close()` in `finally` or use `await using`. `verifyReplay()` verifies checkpoints and the final model in a fresh runtime; afterward only snapshot/close are allowed. Model bytes are JSON number arrays; native identities are decimal strings. The host uses a fixed clock and fake effects, without production persistence/services/app-data startup. See https://native-sdk.dev/docs/testing for the complete API and limits.
+
 ## The arena mental model
 
 Everything `update` builds lives in a per-dispatch bump arena that is freed wholesale after the returned model is committed, so spreads, `map`, and `filter` are cheap by construction. At commit, only nodes your update actually created are copied into the persistent model heap — everything you spread through unchanged is shared with the previous model for free.

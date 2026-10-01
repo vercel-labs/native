@@ -334,3 +334,32 @@ test "channel entries hold the bytes-envelope laws" {
         try testing.expectEqualStrings("/tmp/first.txt", shim_model.banner);
     }
 }
+
+test "borrowed byte inputs survive caller reuse, frame resets, and collection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    shim_core.rt.resetAll();
+    var model = shim_core.commitModelRoot(shim_core.initialModel());
+    defer shim_core.rt.resetAll();
+    shim_core.rt.frameReset();
+
+    // Real dispatch_bytes through the library-compiled, byte-bearing sidecar.
+    // The caller owns this storage and may reuse it as soon as dispatch returns.
+    var input = [_]u8{ 'a', 0, 255, 128, 'z' };
+    const expected = input;
+    const out = shim_core.update(model, .{ .banner_set = &input });
+    model = shim_core.commitModelRoot(out.model);
+    @memset(&input, 42);
+    shim_core.rt.frameReset();
+    abi.collect();
+    try testing.expectEqualSlices(u8, &expected, model.banner);
+    try expectSnapshotFidelity(model, arena);
+
+    // An unrelated update must retain the owned bytes too. This catches a
+    // borrowed dispatch buffer being retained in the compiler's model heap.
+    model = try singleCycle(arena, model, .add);
+    abi.collect();
+    try testing.expectEqualSlices(u8, &expected, model.banner);
+    try expectSnapshotFidelity(model, arena);
+}

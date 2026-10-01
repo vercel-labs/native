@@ -45,6 +45,7 @@ pub const Command = runtime.Command;
 pub const CommandEvent = runtime.CommandEvent;
 pub const CommandSource = runtime.CommandSource;
 pub const TestHarness = runtime.TestHarness;
+pub const native_testing = @import("runtime/ts_test_host.zig");
 pub const UiApp = runtime.UiApp;
 pub const UiAppWithFeatures = runtime.UiAppWithFeatures;
 pub const UiAppFeatures = runtime.UiAppFeatures;

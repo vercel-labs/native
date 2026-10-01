@@ -2,9 +2,55 @@
 
 Native SDK apps test headlessly by default: the view is a function of the model, dispatch is typed, and the layout engine runs without a window server. Unit tests drive the real loop, `TestHarness` covers runtime integration, and the [automation](/docs/automation) harness drives the live app. For running these tiers on GitHub Actions — including the workflow `native init --full` scaffolds — see [Testing in CI](/docs/testing/ci).
 
-## Full-loop UI tests
+## TypeScript tests against compiled apps
 
-The generated `src/tests.zig` shows the core pattern: build the real view from the markup, find a widget, dispatch its press exactly like the runtime would, and assert on the model and the rebuilt view:
+For an app with `src/core.ts`, add `tests/*.test.ts` and run `native test`. The build compiles the app with scriptc and links a headless host around the existing `TestHarness`. Node.js 24 runs the test code; the app's model, updates, markup, layout, effects, and automation execute in the native process.
+
+```ts
+// tests/counter.test.ts
+import assert from "node:assert/strict";
+import test from "node:test";
+import { NativeApp, findWidget } from "@native-sdk/core/testing";
+
+test("increment and replay", async () => {
+  const app = await NativeApp.start({ wallMs: 77000 });
+  try {
+    let snapshot = await app.snapshot();
+    snapshot = await app.click(findWidget(snapshot, {
+      role: "button", name: "+",
+    }));
+    assert.equal(snapshot.model.count, 1);
+    assert.ok(snapshot.widgets.some(widget => widget.name.includes("total: 1")));
+
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, snapshot.model);
+  } finally {
+    await app.close();
+  }
+});
+```
+
+`findWidget` requires exactly one matching accessibility role and name. Add `view` to distinguish identical controls in different views. Use a fresh snapshot after an interaction. Widget identities and effect keys are decimal strings so JavaScript preserves all 64 bits.
+
+Each `NativeApp.start()` creates an independent native process. `click`, `action`, `menu`, and `frame` return the resulting snapshot. Actions support `focus`, `press`, `toggle`, `increment`, `decrement`, and `dismiss`. Requests are serialized, time out after 10 seconds by default (`timeoutMs` overrides this), and reject on native errors or process exits. Always close the app in `finally`, or use `await using`.
+
+### Models, effects, and replay
+
+`snapshot.model` is the committed native model's JSON projection: byte values become number arrays, enums become strings, and tagged unions use the generated mirror's `{arm: payload}` shape. Its TypeScript type is a JSON record. `snapshot.widgets` contains accessibility state, bounds, and available actions. The `fingerprint` covers the native accessibility tree.
+
+This initial host drives the primary canvas on the current desktop build target. It uses fake effects and a fixed clock (`wallMs`, default zero). It does not start production services, load persistence, read launch environment values, or open app-data directories.
+
+Inspect `snapshot.effects.requests`, then answer a request with `app.respond(key, bytes, ok)`. Inspect `snapshot.effects.timers`, then call `app.fireTimer(key)` to send a journaled platform timer event. `snapshot.effects.recorded` counts journaled effect results, including clock reads.
+
+Rendering uses `NullPlatform`; OS windows, GPU presentation, and platform integrations still need live [automation tests](/docs/automation).
+
+`verifyReplay()` finishes the in-memory recording, creates a fresh native runtime, and verifies recorded checkpoints, the final accessibility fingerprint, and the final model. Its report includes event, effect, and checkpoint counts plus the replayed snapshot. It is terminal: afterward, use only `snapshot()` and `close()`. The journal and each response are capped at 8 MiB; each request is capped at 64 KiB. Exceeding a bound fails the test.
+
+Tests are discovered directly under `tests/` (no recursive discovery), run in a shared Node process, and resolve the SDK selected by the build. The core remains compiled even when an app has no local `node_modules`. For editor checking of Node test files, install `@types/node` and use a separate test tsconfig with `types: ["node"]` and `include: ["tests/**/*.ts"]`; keep the deterministic core's tsconfig separate.
+
+## Zig full-loop UI tests
+
+For apps created with `--template zig-core`, the generated `src/tests.zig` shows the core pattern: build the real view from the markup, find a widget, dispatch its press exactly like the runtime would, and assert on the model and the rebuilt view:
 
 ```zig
 var view = try canvas.MarkupView(Model, Msg).init(arena, main.app_markup);

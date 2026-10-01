@@ -76,7 +76,7 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
 // The @native-sdk/core closure a TS app build needs (see the header note).
 {
   rmSync(join(projectRoot, 'packages'), { recursive: true, force: true });
-  for (const dir of ['src', 'sdk', 'compile-surface', 'scripts']) {
+  for (const dir of ['src', 'sdk', 'testing', 'compile-surface', 'scripts']) {
     const source = join(repoRoot, 'packages', 'core', dir);
     const target = join(projectRoot, 'packages', 'core', dir);
     cpSync(source, target, { recursive: true });
