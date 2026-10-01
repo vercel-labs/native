@@ -62,7 +62,7 @@ test("literal Unicode, entities, keyed nodes and conditional splicing survive vi
 
 test("unsupported or malformed markup fails with source location before compilation", () => {
   const cases = [
-    ['<input/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
+    ['<textarea/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
     ['<constructor/>', /unsupported element/],
     ['<text>{missing}</text>', /unknown binding/], ['<text>{count.constructor}</text>', /unsupported field/], ['<text>{count; process.exit()}</text>', /unsupported expression/],
     ['<switch checked="{count}"/>', /expected boolean/], ['<button on-press="loaded"/>', /scalar Msg payload/],
@@ -162,4 +162,38 @@ test("scalar and byte event payloads bind the authored Msg member", () => {
   assert.equal(messages[1].kind, "choose");
   assert.equal(messages[1].id, 7);
   assert.throws(() => compileView('<button on-press="choose:{ticking}"/>', payloadContract), /matching scalar Msg payload/);
+});
+
+const feedContract: ViewContract = JSON.parse(checkFile(new URL("../../../examples/service-feed-reader/src/core.ts", import.meta.url).pathname, { contractEntry: "core_facade.ts" }).contract!);
+const feedMarkup = readFileSync(new URL("../../../examples/service-feed-reader/src/app.native", import.meta.url), "utf8");
+
+test("the complete feed view uses native input constructors and committed service records", () => {
+  const generated = compileView(feedMarkup, feedContract);
+  const js = ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS });
+  const bytes = (text: string) => new TextEncoder().encode(text);
+  const model = { url: bytes("https://example.com/café"), items: [{ title: bytes("日本語"), link: bytes("https://example.com/1") }], feedTitle: bytes("Feed"), reason: bytes("failure"), phase: "ready" };
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, loading: () => model.phase === "loading", ready: () => model.phase === "ready", failed: () => model.phase === "failed", itemSummary: () => bytes("1 of 1 items"), nscfPackMsg: () => Uint8Array.of(1, 0) });
+  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const input = view().find((node: any) => node.kind === "input");
+  assert.equal(input.text, "https://example.com/café");
+  assert.equal(input.input, feedContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
+  assert.deepEqual(input.submit, [1, 0]);
+  assert.ok(view().some((node: any) => node.text === "日本語" && node.wrap));
+  assert.ok(view().some((node: any) => node.key === "https://example.com/1"));
+  model.phase = "loading";
+  assert.ok(view().some((node: any) => node.kind === "badge"));
+  model.phase = "failed";
+  assert.ok(view().some((node: any) => node.foreground === "destructive"));
+});
+
+test("text event bindings reject malformed unions and mismatched widgets at build time", () => {
+  for (const markup of ['<input on-input="refresh"/>', '<input on-input="url_edit:{url}"/>', '<text on-input="url_edit"/>', '<panel wrap="true"/>', '<text placeholder="hint"/>', '<input size="heading"/>', '<input text="{url}">duplicate</input>']) {
+    assert.throws(() => compileView(markup, feedContract), /app.native:\d+:\d+/);
+  }
+  const inputUnion = feedContract.types.unions!.find(item => item.name === "TextInputEvent")!;
+  for (const arms of [inputUnion.arms!.slice(1), inputUnion.arms!.map(arm => arm.name === "insert_text" ? { ...arm, payload: { kind: "bool" } } : arm)]) {
+    const broken = { ...feedContract, types: { ...feedContract.types, unions: [{ ...inputUnion, arms }] } };
+    assert.throws(() => compileView('<input on-input="url_edit"/>', broken), /TextInputEvent/);
+  }
 });

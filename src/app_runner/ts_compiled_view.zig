@@ -10,8 +10,10 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, text, button, switch_control, status_bar, spacer, scroll, avatar },
+    kind: enum { column, row, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar },
     text: []const u8,
+    placeholder: []const u8 = "",
+    wrap: ?bool = null,
     key: ?[]const u8 = null,
     keyInt: ?i64 = null,
     keySlot: usize = 0,
@@ -41,6 +43,8 @@ const Record = struct {
     toggle: ?[]const u8 = null,
     drag: ?[]const u8 = null,
     scroll: ?u8 = null,
+    input: ?u8 = null,
+    submit: ?[]const u8 = null,
 };
 const Tree = struct { format: u32, nodes: []const Record };
 
@@ -69,11 +73,14 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .scroll;
+    const container = value.kind == .column or value.kind == .row or value.kind == .scroll or value.kind == .panel;
     if (!container and value.end != index + 1) return error.InvalidView;
     if (value.press != null and value.kind != .button) return error.InvalidView;
     if (value.toggle != null and value.kind != .switch_control) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
+    const text_entry = value.kind == .input or value.kind == .search_field;
+    if ((value.input != null or value.submit != null or value.placeholder.len != 0) and !text_entry) return error.InvalidView;
+    if (value.wrap != null and value.kind != .text) return error.InvalidView;
     var children: std.ArrayList(Ui.Node) = .empty;
     var child_index = index + 1;
     while (child_index < value.end) {
@@ -89,6 +96,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
         .text = value.text,
+        .placeholder = value.placeholder,
+        .wrap = value.wrap,
         .gap = value.gap,
         .padding = value.padding,
         .grow = value.grow,
@@ -110,6 +119,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_toggle = if (value.toggle) |bytes| try event(ui, bytes) else null,
         .on_drag = if (value.drag) |bytes| try dragEvent(ui, bytes) else null,
         .on_scroll = if (value.scroll) |tag| try scrollEvent(tag) else null,
+        .on_input = if (value.input) |tag| try inputEvent(tag) else null,
+        .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
     }, children.items);
 }
 
@@ -132,6 +143,15 @@ fn scrollEvent(tag: u8) !Ui.ScrollMsgFn {
     inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
         if (comptime sdk.canvas.ui_markup_reflect.declaredScrollStateRecord(field.type)) {
             if (tag == index) return Ui.translatedScrollMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
+        }
+    }
+    return error.InvalidView;
+}
+
+fn inputEvent(tag: u8) !Ui.InputMsgFn {
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
+        if (comptime sdk.canvas.ui_markup_reflect.declaredTextInputUnion(field.type)) {
+            if (tag == index) return Ui.translatedInputMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
         }
     }
     return error.InvalidView;
@@ -193,6 +213,10 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"gap\":-1}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"grow\":1e300}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"input\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"input\":255}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"submit\":[0,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"panel\",\"text\":\"\",\"wrap\":true}]}",
         };
         for (cases) |source| {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

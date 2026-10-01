@@ -6,8 +6,7 @@
   <panel padding="18" background="surface" radius="lg" grow="1">
     <column gap="10">
       <row gap="8" cross="center">
-        <text size="sm" foreground="text_muted" wrap="false">{url}</text>
-        <spacer grow="1" />
+        <input text="{url}" placeholder="Feed URL" label="Feed URL" grow="1" on-input="url_edit" on-submit="refresh" />
         <if test="{loading}">
           <badge variant="secondary">Working</badge>
         </if>
@@ -23,7 +22,7 @@
           <text size="lg">{feedTitle}</text>
           <scroll grow="1" label="Feed items">
             <column gap="8">
-              <for each="items" as="item">
+              <for each="items" as="item" key="link">
                 <column gap="2">
                   <text wrap="true">{item.title}</text>
                   <text size="sm" foreground="text_muted" wrap="false">{item.link}</text>

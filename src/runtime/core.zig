@@ -1029,7 +1029,7 @@ pub const Runtime = struct {
     const dispatchGpuSurfaceInput = GpuSurfaceEventMethods.dispatchGpuSurfaceInput;
 
     const AutomationWidgetMethods = runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
-    const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
+    pub const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
     const dispatchAutomationWidgetClick = AutomationWidgetMethods.dispatchAutomationWidgetClick;
     const dispatchAutomationWidgetHold = AutomationWidgetMethods.dispatchAutomationWidgetHold;
     const dispatchAutomationWidgetContextPress = AutomationWidgetMethods.dispatchAutomationWidgetContextPress;

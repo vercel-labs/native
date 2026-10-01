@@ -785,6 +785,25 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&kanban_driver_run.step);
         ts_core_e2e_step.dependOn(&kanban_driver_run.step);
         test_step.dependOn(&kanban_driver_run.step);
+        const feed_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        feed_reference_run.setCwd(b.path("examples/service-feed-reader"));
+        feed_reference_run.has_side_effects = true;
+        feed_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        feed_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/feed-view-reference"));
+        _ = feed_reference_run.captureStdOut(.{});
+        _ = feed_reference_run.captureStdErr(.{});
+        const feed_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        feed_driver_run.setCwd(b.path("examples/service-feed-reader"));
+        feed_driver_run.has_side_effects = true;
+        feed_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        feed_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/feed-view-reference"));
+        _ = feed_driver_run.captureStdOut(.{});
+        _ = feed_driver_run.captureStdErr(.{});
+        feed_driver_run.step.dependOn(&feed_reference_run.step);
+        native_driver_step.dependOn(&feed_driver_run.step);
+        ts_core_e2e_step.dependOn(&feed_driver_run.step);
+        ts_services_e2e_step.dependOn(&feed_driver_run.step);
+        test_step.dependOn(&feed_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -3681,6 +3700,7 @@ fn tsCoreE2eArtifact(
         .src_dir = b.path("examples/service-feed-reader/src"),
         .name = "feed_reader_core",
         .emit_services = true,
+        .typescript_view = true,
     });
     const feed_reader_service = externalServiceFixture(
         b,
@@ -3696,6 +3716,14 @@ fn tsCoreE2eArtifact(
     const feed_reader_root = feed_reader_stage.addCopyFile(b.path("tests/ts-services/feed_reader_e2e_tests.zig"), "feed_reader_e2e_tests.zig");
     _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/app.native"), "app.native");
     _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/fixtures/feed.xml"), "fixture_feed.xml");
+    _ = feed_reader_stage.addCopyFile(b.path("src/app_runner/ts_compiled_view.zig"), "ts_compiled_view.zig");
+    _ = feed_reader_stage.add("core.zig",
+        \\const core = @import("ts_feed_reader_core");
+        \\pub const Model = core.Model;
+        \\pub const Msg = core.Msg;
+        \\pub const nativeView = core.nativeView;
+        \\pub const nativeViewEvent = core.nativeViewEvent;
+    );
     const feed_reader_mod = b.createModule(.{
         .root_source_file = feed_reader_root,
         .target = target,
@@ -4185,6 +4213,7 @@ const ExternalCoreFixtureSpec = struct {
     f64_slots: []const []const u8 = &.{},
     emit_services: bool = false,
     service_packages: []const []const u8 = &.{},
+    typescript_view: bool = false,
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -4281,6 +4310,12 @@ fn externalCoreFixtureModule(
     if (services_client) |client| {
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
+    }
+    if (spec.typescript_view) {
+        stage_run.addArg("--view-markup");
+        stage_run.addFileArg(b.path(b.fmt("{s}/app.native", .{std.fs.path.dirname(spec.entry).?})));
+        stage_run.addArg("--view-contract");
+        stage_run.addFileArg(contract);
     }
     tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".");
     app_build.addStagedCoreSdkInputs(b, b, stage_run);

@@ -1767,7 +1767,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         detectCoreTree(b, app_options.app_root)
     else
         .zig;
-    const typescript_view = b.option(bool, "typescript-view", "Compile the counter markup surface beside the TypeScript model (no runtime markup hot reload)") orelse false;
+    const typescript_view = b.option(bool, "typescript-view", "Compile supported Native markup beside the TypeScript model (rebuild after markup edits)") orelse false;
     if (typescript_view and core_tree != .ts) @panic("-Dtypescript-view requires src/core.ts");
     if (core_tree == .both) {
         @panic("\nthis app declares two cores: src/core.ts (TypeScript) and src/main.zig (Zig)." ++

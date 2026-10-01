@@ -34,6 +34,8 @@ test("increment and replay", async () => {
 
 Each `NativeApp.start()` creates an independent native process. `click`, `action`, `menu`, and `frame` return the resulting snapshot. Actions support `focus`, `press`, `toggle`, `increment`, `decrement`, and `dismiss`. Requests are serialized, time out after 10 seconds by default (`timeoutMs` overrides this), and reject on native errors or process exits. Always close the app in `finally`, or use `await using`.
 
+For text-entry widgets, `setText(widget, text)` replaces the content through native select-all and text input, preserving leading and trailing whitespace. `selectText(widget, anchor, focus)` uses UTF-8 byte offsets. `composeText`, `commitComposition`, and `cancelComposition` drive native IME events. Each method returns a snapshot and records the interaction for replay. `key(view, "cmd+a")`, `key(view, "backspace")`, and `key(view, "enter")` use the native keyboard path.
+
 For drag and scroll tests, `drag(widget, { x, y })` sends a physical pointer gesture through native hit testing. Coordinates are in the receiving canvas. `beginDrag` leaves the gesture active so you can inspect its preview; finish it with `pointer(widget, "up", point)` or cancel with `key(widget.view, "escape")`. `pointer` also accepts `"down"`, `"drag"`, and `"cancel"`, with an optional `{ x, y }` movement delta. `wheel(widget, deltaY, deltaX)` scrolls at the widget's center. `dropFiles(view, paths, window)` sends a platform file-drop event; an empty view addresses the window, and the default window is `1`. These inputs use the normal runtime and replay journal.
 
 ### Models, effects, and replay
@@ -42,7 +44,7 @@ For drag and scroll tests, `drag(widget, { x, y })` sends a physical pointer ges
 
 This initial host drives the primary canvas on the current desktop build target. It uses fake effects and a fixed clock (`wallMs`, default zero). It does not start production services, load persistence, read launch environment values, or open app-data directories.
 
-Inspect `snapshot.effects.requests`, then answer a request with `app.respond(key, bytes, ok)`. Inspect `snapshot.effects.timers`, then call `app.fireTimer(key)` to send a journaled platform timer event. `snapshot.effects.recorded` counts journaled effect results, including clock reads.
+Inspect `snapshot.effects.requests`, then answer a request with `app.respond(key, bytes, ok)`. For typed services, successful responses use the service contract's canonical binary encoding; the generated result decoder routes them to the typed Msg arm. Failed responses carry error bytes. See `examples/service-feed-reader/tests/view.test.ts` for a record response fixture. Inspect `snapshot.effects.timers`, then call `app.fireTimer(key)` to send a journaled platform timer event. `snapshot.effects.recorded` counts journaled effect results, including clock reads.
 
 Rendering uses `NullPlatform`; OS windows, GPU presentation, and platform integrations still need live [automation tests](/docs/automation).
 

@@ -7,7 +7,7 @@
 //!
 //!   - boot parses the built-in sample through the real service child and
 //!     the markup lists the typed records;
-//!   - a menu-driven refresh performs a REAL buffered `Cmd.fetch` against a
+//!   - editing and submitting the URL performs a REAL buffered `Cmd.fetch` against a
 //!     loopback HTTP fixture, the delivered bytes cross to `feeds.parse`
 //!     through the generated typed client, and the parsed feed replaces the
 //!     sample in the rendered view;
@@ -17,7 +17,8 @@
 //!   - the whole loop RECORDS and REPLAYS byte-identically with the service
 //!     executable absent and the launch variable unset: the journaled env
 //!     delivery, fetch response, and service results feed the replay, and
-//!     no child process starts.
+//!     no child process starts. Replay uses the reference view to verify
+//!     the compiled TypeScript view's native checkpoints.
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
@@ -36,6 +37,7 @@ const ServiceTransport = native_sdk.ServiceHost(registry);
 
 const app_markup = @embedFile("app.native");
 const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_markup);
+const TsView = @import("ts_compiled_view.zig");
 
 const fixture_feed = @embedFile("fixture_feed.xml");
 
@@ -50,22 +52,12 @@ const app_windows = [_]native_sdk.ShellWindow{.{
 }};
 const app_scene: native_sdk.ShellConfig = .{ .windows = &app_windows };
 
-/// TEST-ONLY command mapper: the journaled menu-command path for the void
-/// arms (record/replay needs every input in the journal; the app itself
-/// dispatches these from markup presses).
-fn testCommand(name: []const u8) ?core.Msg {
-    if (std.mem.eql(u8, name, "feed.refresh")) return .refresh;
-    if (std.mem.eql(u8, name, "feed.sample")) return .load_sample;
-    return null;
-}
-
-fn appOptions() App.Options {
+fn appOptions(reference: bool) App.Options {
     return .{
         .name = "feed-reader-e2e",
         .scene = app_scene,
         .canvas_label = canvas_label,
-        .view = CompiledAppView.build,
-        .on_command = testCommand,
+        .view = if (reference) CompiledAppView.build else TsView.build,
     };
 }
 
@@ -203,7 +195,7 @@ const Harness = struct {
             .env_values = &self.env_values,
             .host_calls = self.transport.binding(),
             .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
-        }, appOptions());
+        }, appOptions(false));
         errdefer self.app_state.deinit();
         self.app = self.app_state.app();
         try self.harness.start(self.app);
@@ -228,8 +220,17 @@ const Harness = struct {
         std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_root) catch {};
     }
 
-    fn menu(self: *Harness, name: []const u8) !void {
-        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .menu_command = .{ .name = name, .window_id = 1 } });
+    fn refreshFromInput(self: *Harness) !void {
+        const url = self.env_values[0].value;
+        const id = self.findLabel("Feed URL").?;
+        try self.harness.runtime.dispatchAutomationWidgetAction(self.app, .{
+            .view_label = canvas_label,
+            .id = id,
+            .action = .set_text,
+            .value = url,
+        });
+        try std.testing.expectEqualStrings(url, Bridge.model().url);
+        try self.harness.runtime.dispatchAutomationCommand(self.app, "widget-key feed-canvas enter");
     }
 
     fn wake(self: *Harness) !void {
@@ -309,7 +310,7 @@ fn expectFeedViewportAboveActions(h: *Harness) !void {
 
 test "the service facade preserves the core's unbound view declarations" {
     try std.testing.expectEqualDeep(
-        .{ "phase", "totalItems" },
+        .{ "phase", "totalItems", "urlAnchor", "urlFocus", "urlCompStart", "urlCompEnd" },
         core.Model.view_unbound,
     );
     try std.testing.expectEqualDeep(
@@ -340,7 +341,7 @@ test "refresh fetches the fixture feed and the service returns typed records" {
     defer h.destroy();
     try h.settleBoot();
 
-    try h.menu("feed.refresh");
+    try h.refreshFromInput();
     try h.settle();
 
     const model = Bridge.model();
@@ -376,7 +377,7 @@ test "a non-200 response lands in the failed state with its status" {
     defer h.destroy();
     try h.settleBoot();
 
-    try h.menu("feed.refresh");
+    try h.refreshFromInput();
     try h.settle();
 
     try std.testing.expect(Bridge.model().phase == .failed);
@@ -389,7 +390,7 @@ test "bytes that are not a feed surface the service's kind-tagged error on the e
     defer h.destroy();
     try h.settleBoot();
 
-    try h.menu("feed.refresh");
+    try h.refreshFromInput();
     try h.settle();
 
     try std.testing.expect(Bridge.model().phase == .failed);
@@ -467,7 +468,7 @@ test "the recorded loop replays byte-identically without the service or the netw
         defer h.destroy();
         try h.settleBoot();
         try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
-        try h.menu("feed.refresh");
+        try h.refreshFromInput();
         try h.settle();
         try std.testing.expectEqualStrings("Native SDK Engineering", Bridge.model().feedTitle);
         try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
@@ -500,7 +501,7 @@ test "the recorded loop replays byte-identically without the service or the netw
     app_state.* = Adapter.init(std.heap.page_allocator, .{
         .host_calls = absent_transport.binding(),
         .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
-    }, appOptions());
+    }, appOptions(true));
     defer app_state.deinit();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{

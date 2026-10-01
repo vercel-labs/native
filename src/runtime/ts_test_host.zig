@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, input, drop, menu, frame, host_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, host_result, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -19,6 +19,9 @@ const Request = struct {
     bytes: []const u8 = "",
     view: []const u8 = "",
     window: u64 = 1,
+    widget: []const u8 = "0",
+    text_action: enum { set_text, set_selection, set_composition, commit_composition, cancel_composition } = .set_text,
+    text: []const u8 = "",
     input: enum { pointer_down, pointer_drag, pointer_up, pointer_cancel, scroll } = .pointer_down,
     x: f32 = 0,
     y: f32 = 0,
@@ -38,6 +41,12 @@ const Journal = struct {
 };
 
 pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Options) !void {
+    try runWithCoreOptions(Adapter, init, options, .{});
+}
+
+/// Generated service result codecs remain active under the fake executor.
+/// Tests feed serialized results without launching production transports.
+pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, options: Adapter.Options, core_options: Adapter.CoreOptions) !void {
     const gpa = std.heap.page_allocator;
     const Host = struct {
         harness: *sdk.TestHarness(),
@@ -46,7 +55,7 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
         size: sdk.geometry.SizeF,
         frame_index: u64 = 0,
 
-        fn create(config: Request, app_options: Adapter.Options) !*@This() {
+        fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions) !*@This() {
             if (config.width == 0 or config.width > 8192 or config.height == 0 or config.height > 8192) return error.InvalidSurfaceSize;
             // Times cross JavaScript exactly; reject out-of-range input.
             if (config.wall_ms < -9007199254740991 or config.wall_ms > 9007199254740991) return error.InvalidClock;
@@ -61,7 +70,7 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
             errdefer self.harness.destroy(gpa);
             self.harness.null_platform.gpu_surfaces = true;
             self.harness.null_platform.image_decode = true;
-            self.state = try Adapter.create(gpa, .{}, app_options);
+            self.state = try Adapter.create(gpa, wiring, app_options);
             self.state.effects.executor = .fake;
             self.clock.setWallMs(config.wall_ms);
             self.state.effects.clock = self.clock.clock();
@@ -193,7 +202,7 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
         if (request.op == .start) {
             if (host != null) return error.AlreadyStarted;
             config = request;
-            host = try Host.create(config, options);
+            host = try Host.create(config, options, core_options);
             recorder.begin(.{ .platform_name = "test", .app_name = options.name, .window_width = @floatFromInt(config.width), .window_height = @floatFromInt(config.height) });
             host.?.harness.runtime.options.session_recorder = recorder;
             try host.?.harness.start(host.?.state.app());
@@ -203,6 +212,14 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
             if (replayed and request.op != .snapshot) return error.SessionAlreadyReplayed;
             switch (request.op) {
                 .automation => try value.harness.runtime.dispatchAutomationCommand(value.state.app(), request.command),
+                .text_action => try value.harness.runtime.dispatchAutomationWidgetAction(value.state.app(), .{
+                    .view_label = request.view,
+                    .id = try std.fmt.parseInt(u64, request.widget, 10),
+                    .action = switch (request.text_action) {
+                        inline else => |action| @field(@import("automation_commands.zig").AutomationWidgetActionKind, @tagName(action)),
+                    },
+                    .value = request.text,
+                }),
                 .input => {
                     for ([_]f32{ request.x, request.y, request.delta_x, request.delta_y }) |number| if (!std.math.isFinite(number)) return error.InvalidInput;
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .gpu_surface_input = .{
@@ -240,7 +257,7 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
                     defer gpa.free(model_before);
                     value.destroy();
                     host = null;
-                    host = try Host.create(config, options);
+                    host = try Host.create(config, options, core_options);
                     const report = try sdk.runtime.replaySession(&host.?.harness.runtime, host.?.state.app(), journal.bytes.items, .{
                         .verify = true,
                         .require_same_platform = false,

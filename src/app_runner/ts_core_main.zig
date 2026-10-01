@@ -140,7 +140,9 @@ fn appOptions(io: ?std.Io) Adapter.Options {
 /// A separate executable uses the same core, markup, theme and command routes.
 /// Test startup never enters production persistence, services or app directories.
 pub fn testMain(init: std.process.Init) !void {
-    try native_sdk.native_testing.run(Adapter, init, appOptions(null));
+    try native_sdk.native_testing.runWithCoreOptions(Adapter, init, appOptions(null), .{
+        .service_results = if (comptime services.enabled) .{ .index_fn = services.indexOf, .streaming_fn = services.isStreaming, .decode_fn = services.resultDecoder(core) } else null,
+    });
 }
 
 pub fn main(init: std.process.Init) !void {

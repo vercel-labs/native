@@ -1,12 +1,13 @@
 /** Native markup compiled beside the committed TypeScript core. Unsupported
  * constructs fail at build time; no bindings are evaluated by the native host.
  */
-interface Ref { kind: string; name?: string; elem?: Ref; class?: string; type?: Ref }
+interface Ref { kind: string; name?: string; elem?: Ref; inner?: Ref; class?: string; type?: Ref }
+interface Arm { name: string; member?: string; payload: Ref }
 export interface ViewContract {
   model: string;
-  types: { structs: { name: string; fields: { name: string; type: Ref }[] }[]; enums?: { name: string; members: string[] }[]; unions?: { name: string }[] };
+  types: { structs: { name: string; fields: { name: string; type: Ref }[] }[]; enums?: { name: string; members: string[] }[]; unions?: { name: string; arms?: Arm[] }[] };
   model_helpers: { name: string; params: Ref[]; returns: Ref }[];
-  msg: { name?: string; arms: { name: string; member?: string; payload: Ref }[] };
+  msg: { name?: string; arms: Arm[] };
 }
 interface Element { name: string; attrs: Map<string, string>; children: Element[]; text: string; at: number; file: string }
 interface Expr { code: string; type: Ref }
@@ -213,6 +214,27 @@ export function compileView(source: string, contract: ViewContract, options: Vie
     return expr.type.kind === "i64" ? { code: `nscvInteger(${expr.code})`, type: expr.type } : { code: textValue(expr, node), type: { kind: "string" } };
   };
   const output: string[] = []; let next = 0;
+  const textInputUnion = (ref: Ref): boolean => {
+    const arms = ref.kind === "union" ? contract.types.unions?.find(item => item.name === ref.name)?.arms : undefined;
+    const verbs = ["delete_backward", "delete_forward", "delete_word_backward", "delete_word_forward", "delete_to_start", "delete_to_line_start", "clear", "commit_composition", "cancel_composition"];
+    if (!arms || arms.length !== 13 || !verbs.every(name => arms.some(arm => arm.name === name && arm.payload.kind === "void"))) return false;
+    const payload = (name: string) => arms.find(arm => arm.name === name)?.payload;
+    const record = (name: string) => {
+      const type = payload(name);
+      return type && ["value", "record"].includes(type.kind) ? contract.types.structs.find(item => item.name === type.name)?.fields : undefined;
+    };
+    const move = record("move_caret"), selection = record("set_selection"), composition = record("set_composition");
+    const direction = move?.find(field => field.name === "direction")?.type;
+    const members = direction?.kind === "enum" ? contract.types.enums?.find(item => item.name === direction.name)?.members : undefined;
+    const directions = ["previous", "next", "previous_word", "next_word", "start", "end"];
+    const cursor = composition?.find(field => field.name === "cursor")?.type;
+    return payload("insert_text")?.kind === "bytes" && move?.length === 2 &&
+      !!members && members.length === 6 && directions.every(name => members.includes(name)) &&
+      move.some(field => field.name === "extend" && field.type.kind === "bool") &&
+      selection?.length === 2 && ["anchor", "focus"].every(name => selection.some(field => field.name === name && category(field.type) === "number")) &&
+      composition?.length === 2 && composition.some(field => field.name === "text" && field.type.kind === "bytes") &&
+      cursor?.kind === "optional" && !!cursor.inner && category(cursor.inner) === "number";
+  };
   const emitChildren = (nodes: Element[], scope: Scope, slot: Slot | undefined, stack: string[], depth: number) => {
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]!;
@@ -233,6 +255,10 @@ export function compileView(source: string, contract: ViewContract, options: Vie
     const arm = contract.msg.arms.find(item => item.name === match?.[1]);
     if (!arm || !match) fail(node, `unknown or unsupported event ${raw}`);
     const payload = match[2] ? path(match[2], node, scope) : null;
+    if (channel === "input") {
+      if (payload || !textInputUnion(arm.payload)) fail(node, "on-input requires a bare TextInputEvent Msg arm");
+      return String(contract.msg.arms.indexOf(arm));
+    }
     if (channel === "scroll") {
       const record = arm.payload.kind === "record" ? contract.types.structs.find(item => item.name === arm.payload.name) : null;
       const names = ["offsetX", "offsetY", "velocityX", "velocityY", "viewportExtentX", "viewportExtentY", "contentExtentX", "contentExtentY"];
@@ -286,32 +312,38 @@ export function compileView(source: string, contract: ViewContract, options: Vie
       emitChildren(node.children, inner, slot, stack, depth + 1);
       output.push(`nscvLoopKeys(nscvNodes, nscvFirst${id}, ${base.code});`, "}"); return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", text: "text", button: "button", switch: "switch_control", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar" };
+    const kinds: Record<string, string> = { column: "column", row: "row", panel: "panel", badge: "badge", input: "input", "search-field": "search_field", text: "text", button: "button", switch: "switch_control", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
-    const container = ["column", "row", "scroll"].includes(node.name);
+    const container = ["column", "row", "scroll", "panel"].includes(node.name);
     if (container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
     for (const [name, value] of node.attrs) {
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
-      else if (["checked", "disabled", "window-drag"].includes(name)) {
+      else if (["checked", "disabled", "window-drag", "wrap"].includes(name)) {
         if (name === "checked" && node.name !== "switch") fail(node, "checked requires switch");
+        if (name === "wrap" && node.name !== "text") fail(node, "wrap requires text");
         props.push(`${name === "window-drag" ? "windowDrag" : name}: ${bound(value, "boolean", node, scope)}`);
       } else if (name === "key" || name === "global-key") {
         const expr = key(value, node, scope), prop = name === "key" ? "key" : "globalKey";
         props.push(`${prop}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
-      } else if (name === "label") {
+      } else if (["label", "text", "placeholder"].includes(name)) {
+        if (name !== "label" && !["input", "search-field"].includes(node.name)) fail(node, `${name} requires a text-entry widget`);
+        if (name === "text" && node.text.trim()) fail(node, "text attribute cannot be combined with element text");
         const expr = value.startsWith("{") ? binding(value, node, scope) : { code: JSON.stringify(value), type: { kind: "string" } };
-        if (!["bytes", "string", "enum"].includes(expr.type.kind)) fail(node, "label requires text");
-        props.push(`label: ${textValue(expr, node)}`);
+        if (!["bytes", "string", "enum"].includes(expr.type.kind)) fail(node, `${name} requires text`);
+        if (name === "text") props[1] = `text: ${textValue(expr, node)}`;
+        else props.push(`${name}: ${textValue(expr, node)}`);
       }
       else if (name === "icon") { if (/[{}]/.test(value)) fail(node, "icon requires a literal name"); props.push(`icon: ${JSON.stringify(value)}`); }
       else if (["main", "cross", "size", "variant", "role", "background", "foreground", "radius"].includes(name)) {
-        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon"], variant: ["default", "primary", "secondary", "ghost", "destructive"], role: ["listitem"], background: ["background", "surface"], foreground: ["text", "text_muted"], radius: ["sm", "md", "lg"] };
+        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], radius: ["sm", "md", "lg"] };
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
+        if (name === "size" && value === "heading" && node.name !== "text") fail(node, "heading size requires text");
         props.push(`${name}: ${JSON.stringify(value)}`);
-      } else if (["on-press", "on-toggle", "on-drag", "on-scroll"].includes(name)) {
+      } else if (["on-press", "on-toggle", "on-drag", "on-scroll", "on-input", "on-submit"].includes(name)) {
         const channel = name.slice(3);
         if (channel === "press" && node.name !== "button" || channel === "toggle" && node.name !== "switch" || channel === "scroll" && node.name !== "scroll") fail(node, `${name} is unsupported on ${node.name}`);
+        if (["input", "submit"].includes(channel) && !["input", "search-field"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         props.push(`${channel}: ${event(value, channel, node, scope)}`);
       } else fail(node, `unsupported attribute ${name}`);
     }
@@ -321,7 +353,7 @@ export function compileView(source: string, contract: ViewContract, options: Vie
   };
   emit(roots[0]!, new Map(), undefined, [], 0);
   return `\n// Generated Native markup; reads the actual committed TypeScript model.\n` +
-    `type NscViewNode = { end: number; kind: string; text: string; key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number; gap?: number; padding?: number; grow?: number; width?: number; height?: number; value?: number; image?: number; icon?: string; label?: string; role?: string; background?: string; foreground?: string; radius?: string; windowDrag?: boolean; main?: string; cross?: string; size?: string; variant?: string; checked?: boolean; disabled?: boolean; press?: number[]; toggle?: number[]; drag?: number[]; scroll?: number };\n` +
+    `type NscViewNode = { end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number; gap?: number; padding?: number; grow?: number; width?: number; height?: number; value?: number; image?: number; icon?: string; label?: string; role?: string; background?: string; foreground?: string; radius?: string; windowDrag?: boolean; main?: string; cross?: string; size?: string; variant?: string; checked?: boolean; disabled?: boolean; press?: number[]; toggle?: number[]; drag?: number[]; scroll?: number; input?: number; submit?: number[] };\n` +
     `function nscvInteger(value: number): number { if (!Number.isSafeInteger(value)) throw new Error("compiled view key is not an exact integer"); return value; }\n` +
     `function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number): void { let slot = 0; for (let i = first; i < nodes.length; i = nodes[i]!.end) { const node = nodes[i]!; if (node.key === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyInt === undefined) { if (typeof base === "number") node.keyInt = base; else node.key = base; node.keySlot = slot; } slot++; } }\n` +
     `export function native_view(): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;

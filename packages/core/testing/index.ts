@@ -192,6 +192,27 @@ export class NativeApp implements AsyncDisposable {
   key(view: string, key: string): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-key ${token(view)} ${token(key)}` });
   }
+  /** Replace through native select-all and text input, preserving whitespace. */
+  setText(widget: NativeWidget, text: string): Promise<NativeSnapshot> {
+    return this.#textAction(widget, "set_text", text);
+  }
+  /** UTF-8 byte offsets; native editing snaps offsets to valid boundaries. */
+  selectText(widget: NativeWidget, anchor: number, focus: number): Promise<NativeSnapshot> {
+    for (const offset of [anchor, focus]) if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Expected a nonnegative exact byte offset");
+    return this.#textAction(widget, "set_selection", `${anchor} ${focus}`);
+  }
+  composeText(widget: NativeWidget, text: string): Promise<NativeSnapshot> {
+    return this.#textAction(widget, "set_composition", text);
+  }
+  commitComposition(widget: NativeWidget): Promise<NativeSnapshot> {
+    return this.#textAction(widget, "commit_composition", "");
+  }
+  cancelComposition(widget: NativeWidget): Promise<NativeSnapshot> {
+    return this.#textAction(widget, "cancel_composition", "");
+  }
+  #textAction(widget: NativeWidget, action: string, text: string): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "text_action", view: token(widget.view), widget: identity(widget.id), text_action: action, text });
+  }
   dropFiles(view: string, paths: readonly string[], window = 1): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "drop", view, paths, window });
   }
