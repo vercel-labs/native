@@ -477,9 +477,12 @@ fn textBoundsForLines(value: DrawText, lines: []const TextLine) ?geometry.RectF 
 fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
     var bounds = line.bounds;
     if (value.glyphs.len > 0) return bounds;
+    const start = @min(line.text_start, value.text.len);
+    const end = @min(value.text.len, start + line.paintedTextLen());
+    // Line layout measures untracked advances; the host draws the kern, so
+    // a tracked line inks past them and would lose its tail to the clip.
+    bounds.width += trackingExtent(value.tracking, value.text[start..end]);
     if (drawTextMeasure(value)) |provider| {
-        const start = @min(line.text_start, value.text.len);
-        const end = @min(value.text.len, start + line.paintedTextLen());
         if (end > start) {
             if (provider.measureInk(value.font_id, value.size, value.text[start..end])) |line_metrics| {
                 bounds = bounds.unionWith(geometry.RectF.init(
@@ -504,6 +507,21 @@ fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
     return bounds;
 }
 
+/// The extra advance positive letter spacing adds after every cluster but
+/// the last. The width measure answers the untracked run, so without this a
+/// tracked single-line run inks past its bounds and hosts clip its tail.
+/// Negative tracking only tightens the run, which the untracked box covers.
+fn positiveTrackingExtent(value: DrawText) f32 {
+    return trackingExtent(value.tracking, value.text);
+}
+
+fn trackingExtent(tracking: f32, text: []const u8) f32 {
+    if (!(tracking > 0)) return 0;
+    const count = std.unicode.utf8CountCodepoints(text) catch text.len;
+    if (count < 2) return 0;
+    return tracking * @as(f32, @floatFromInt(count - 1));
+}
+
 fn metricTextBounds(value: DrawText) ?geometry.RectF {
     if (value.glyphs.len == 0 and value.text.len == 0) return null;
 
@@ -525,7 +543,7 @@ fn metricTextBounds(value: DrawText) ?geometry.RectF {
             max_y = @max(max_y, glyph_y + value.size * 0.25);
         }
     } else {
-        max_x = value.origin.x + measureTextWidthForFont(drawTextMeasure(value), value.font_id, value.text, value.size);
+        max_x = value.origin.x + measureTextWidthForFont(drawTextMeasure(value), value.font_id, value.text, value.size) + positiveTrackingExtent(value);
     }
 
     return geometry.RectF.init(

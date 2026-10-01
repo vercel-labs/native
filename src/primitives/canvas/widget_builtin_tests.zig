@@ -2932,6 +2932,50 @@ test "built-in accordion disclosure state controls child layout and semantics" {
     try std.testing.expect(expanded_builder.displayList().findCommandById(widgetPartId(46, 1)) != null);
 }
 
+test "cover images and revealing accordions clip at their authored radius" {
+    var image = Widget{
+        .id = 60,
+        .kind = .image,
+        .frame = geometry.RectF.init(0, 0, 80, 60),
+        .image_id = 7,
+        .image_fit = .cover,
+    };
+    image.layout.clip_content = true;
+    image.style.radius = 10;
+    var commands: [4]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, image, .{});
+    switch (builder.displayList().findCommandById(widgetPartId(60, 2)).?.command) {
+        .push_clip => |clip| try std.testing.expectEqualDeep(Radius.all(10), clip.radius),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Open, but the frame still trails the content: mid-reveal, so the
+    // content paints inside the accordion's clip.
+    var tall = Widget{ .id = 62, .kind = .stack };
+    tall.layout.min_size = geometry.SizeF.init(0, 200);
+    const content = [_]Widget{tall};
+    var accordion = builtinComponentWidget(.accordion, .{
+        .id = 61,
+        .frame = geometry.RectF.init(0, 0, 240, 80),
+        .text = "Section",
+        .children = &content,
+    });
+    accordion.state.selected = true;
+    accordion.value = 1;
+    accordion.layout.clip_content = true;
+    accordion.style.radius = 8;
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(accordion, accordion.frame, &nodes);
+    var layout_commands: [24]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, .{});
+    switch (layout_builder.displayList().findCommandById(widgetPartId(61, 9)).?.command) {
+        .push_clip => |clip| try std.testing.expectEqualDeep(Radius.all(8), clip.radius),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "built-in alert renders house surface chrome and text" {
     const alert = builtinComponentWidget(.alert, .{
         .id = 40,

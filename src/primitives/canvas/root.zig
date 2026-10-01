@@ -219,6 +219,8 @@ pub const max_display_list_text_bytes = command_model.max_display_list_text_byte
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
 pub const RenderState = render_model.RenderState;
+pub const RenderClip = render_model.RenderClip;
+pub const composeClips = render_model.composeClips;
 pub const RenderCommand = render_model.RenderCommand;
 pub const CanvasRenderOverride = render_model.CanvasRenderOverride;
 pub const CanvasRenderAnimation = render_model.CanvasRenderAnimation;

@@ -28,6 +28,7 @@ const Blur = drawing_model.Blur;
 const DrawText = text_model.DrawText;
 const TextLayoutOptions = text_model.TextLayoutOptions;
 const TextLine = text_model.TextLine;
+const RenderClip = render_model.RenderClip;
 const RenderCommand = render_model.RenderCommand;
 const CanvasRenderPass = frame_model.CanvasRenderPass;
 
@@ -121,6 +122,10 @@ pub const ReferenceRenderSurface = struct {
     scratch: ?[]u8 = null,
     images: []const ReferenceImage = &.{},
     fonts: []const ReferenceFont = &.{},
+    /// The rounded clip the command being rendered draws under, in
+    /// device space. Set per command by `renderPass`; null when the
+    /// clip is a plain rectangle (already folded into the draw bounds).
+    clip_shape: ?RenderClip = null,
     /// Optional memo for large per-pixel commands (see
     /// `ReferenceRenderMemo`): when present, a heavyweight command
     /// (backdrop blur, drop shadow, big fills) whose inputs are
@@ -167,6 +172,18 @@ pub const ReferenceRenderSurface = struct {
         var next = self;
         next.render_memo = memo;
         return next;
+    }
+
+    /// Fractional coverage of the ACTIVE ROUNDED CLIP at a pixel, which
+    /// every blend multiplies into its own coverage. Null everywhere a
+    /// command's clip is a plain rectangle — the overwhelming majority
+    /// — so the rounded path costs nothing where it cannot apply: the
+    /// planner already intersected the rect into the draw bounds, and
+    /// only a command whose geometry reaches a corner arc carries radii
+    /// at all.
+    fn clipCoverage(self: ReferenceRenderSurface, x: usize, y: usize) f32 {
+        const clip = self.clip_shape orelse return 1;
+        return referenceRoundedRectCoverage(referencePixelCenter(@intCast(x), @intCast(y)), clip.rect, clip.radius);
     }
 
     /// A memo lookup in flight for one command: the memo to store into
@@ -280,7 +297,17 @@ pub const ReferenceRenderSurface = struct {
             .clear => self.clear(clear_color),
             .load => if (scissor) |bounds| self.clearRect(bounds, clear_color),
         }
-        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        for (pass.commands) |command| {
+            const scaled = referenceScaleCommand(command, scale);
+            var surface = self;
+            // Only a command the planner marked as reaching a corner
+            // pays the per-pixel mask.
+            surface.clip_shape = if (scaled.clipIsRounded())
+                RenderClip{ .rect = scaled.clip orelse scaled.bounds, .radius = scaled.clip_radius }
+            else
+                null;
+            try surface.renderCommand(scaled, scissor);
+        }
     }
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {
@@ -791,7 +818,8 @@ pub const ReferenceRenderSurface = struct {
         var x = line.bounds.x;
         while (text_offset < end) {
             const next_offset = nextTextOffset(value.text, text_offset);
-            const advance = measureTextAdvance(measure, value.font_id, value.size, value.text, line.text_start, text_offset, next_offset);
+            const advance = measureTextAdvance(measure, value.font_id, value.size, value.text, line.text_start, text_offset, next_offset) +
+                value.tracking;
             defer {
                 text_offset = next_offset;
                 x += advance;
@@ -918,6 +946,11 @@ pub const ReferenceRenderSurface = struct {
     }
 
     fn blendPixel(self: ReferenceRenderSurface, x: usize, y: usize, color: Color, opacity: f32) void {
+        // Full coverage of its own: `blendPixelCoverage` is the one
+        // place the clip mask multiplies in, so routing through it here
+        // applies the mask exactly once. A pixel the clip covers whole
+        // lands back on `blendRgba8` byte for byte.
+        if (self.clip_shape != null) return self.blendPixelCoverage(x, y, color, 1, opacity, .linear_light);
         const index = (y * self.width + x) * 4;
         const dst = [4]u8{
             self.pixels[index + 0],
@@ -937,6 +970,8 @@ pub const ReferenceRenderSurface = struct {
     /// can tell an AA fringe from a translucent wash — see
     /// `CoverageBlend`).
     fn blendPixelCoverage(self: ReferenceRenderSurface, x: usize, y: usize, color: Color, coverage: f32, opacity: f32, blend: CoverageBlend) void {
+        const clipped = coverage * self.clipCoverage(x, y);
+        if (clipped <= 0) return;
         const index = (y * self.width + x) * 4;
         const dst = [4]u8{
             self.pixels[index + 0],
@@ -944,7 +979,7 @@ pub const ReferenceRenderSurface = struct {
             self.pixels[index + 2],
             self.pixels[index + 3],
         };
-        const out = blendRgba8Coverage(dst, color, coverage, opacity, blend);
+        const out = blendRgba8Coverage(dst, color, clipped, opacity, blend);
         self.pixels[index + 0] = out[0];
         self.pixels[index + 1] = out[1];
         self.pixels[index + 2] = out[2];
@@ -1121,6 +1156,12 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
     scaled.local_bounds = referenceScaleRect(command.local_bounds, scale);
     scaled.bounds = referenceScaleRect(command.bounds, scale);
     if (command.clip) |clip| scaled.clip = referenceScaleRect(clip, scale);
+    scaled.clip_radius = .{
+        .top_left = command.clip_radius.top_left * scale,
+        .top_right = command.clip_radius.top_right * scale,
+        .bottom_right = command.clip_radius.bottom_right * scale,
+        .bottom_left = command.clip_radius.bottom_left * scale,
+    };
     return scaled;
 }
 

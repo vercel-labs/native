@@ -16,13 +16,13 @@
 
 namespace {
 
-/* Compact binary gpu-surface packet decoding (wire format v5).
+/* Compact binary gpu-surface packet decoding (wire format v6).
  *
  * This independent decoder deliberately repeats the encoder's tags and
  * bounds rather than sharing packed structs across the Zig/C++ ABI. A
  * version or layout disagreement is a refused present, which makes the
  * runtime resynchronize/fall back instead of drawing corrupt content. */
-constexpr uint8_t kPacketVersion = 5;
+constexpr uint8_t kPacketVersion = 6;
 constexpr size_t kRetainedCommandCap = 2048;
 constexpr size_t kDirtyRectCap = kWindowsGpuDirtyRectCap;
 constexpr uint32_t kMaxSurfacePixels = 8192;
@@ -368,6 +368,9 @@ struct TextCommand {
     Point origin = {};
     Color color = {};
     std::string text;
+    /* Letter spacing the engine measured, broke, and positioned this run
+     * with. Ignoring it draws glyphs at advances layout never budgeted. */
+    float tracking = 0;
     bool has_positioned_glyphs = false;
     std::vector<PositionedGlyph> positioned_glyphs;
     std::vector<PositionedTextFragment> positioned_fragments;
@@ -401,6 +404,10 @@ struct Command {
     uint64_t id = 0;
     bool has_clip = false;
     Rect clip = {};
+    /* v6: a clip may carry corner radii, which the engine attaches only
+     * where the command's own geometry reaches one of them. */
+    bool has_clip_radius = false;
+    Radius clip_radius = {};
     bool has_transform = false;
     Affine transform = {};
     Shape shape;
@@ -534,6 +541,7 @@ static bool readText(Reader &reader, TextCommand *text) {
     text->origin = readPoint(reader);
     text->color = readColor(reader);
     text->text = reader.string();
+    text->tracking = reader.f32();
     text->has_positioned_glyphs = reader.u8() != 0;
     if (text->has_positioned_glyphs) {
         const uint32_t glyph_count = reader.u32();
@@ -633,6 +641,10 @@ static bool readCommand(Reader &reader, Command *command) {
     if (flags & kCommandFlagClip) {
         command->has_clip = true;
         command->clip = readRect(reader);
+        if (reader.u8()) {
+            command->has_clip_radius = true;
+            command->clip_radius = readRadius(reader);
+        }
     }
     if (flags & kCommandFlagTransform) {
         command->has_transform = true;
@@ -1572,6 +1584,18 @@ private:
             IDWriteTextLayout *layout = nullptr;
             HRESULT result = createTextLayout(
                 value, format, 100000.0f, std::max(4.0f, text.size * 4.0f), &layout) ? S_OK : E_FAIL;
+            /* Trailing-only spacing matches the engine's convention: one
+             * tracking quantum after every cluster, the last one included,
+             * so the painted extent equals the measured width. */
+            if (SUCCEEDED(result) && text.tracking != 0.0f) {
+                IDWriteTextLayout1 *spacing_layout = nullptr;
+                if (SUCCEEDED(layout->QueryInterface(__uuidof(IDWriteTextLayout1),
+                        reinterpret_cast<void **>(&spacing_layout)))) {
+                    DWRITE_TEXT_RANGE range = {0, static_cast<UINT32>(value.size())};
+                    spacing_layout->SetCharacterSpacing(0.0f, text.tracking, 0.0f, range);
+                    releaseCom(spacing_layout);
+                }
+            }
             DWRITE_LINE_METRICS metrics = {};
             UINT32 actual = 0;
             if (SUCCEEDED(result)) result = layout->GetLineMetrics(&metrics, 1, &actual);
@@ -1849,7 +1873,32 @@ private:
         if (outer_clip && !intersects(command.bounds, *outer_clip)) return true;
         backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
         if (outer_clip) backing_target_->PushAxisAlignedClip(d2dRect(*outer_clip), D2D1_ANTIALIAS_MODE_ALIASED);
-        if (command.has_clip) backing_target_->PushAxisAlignedClip(d2dRect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
+        /* A rounded clip needs a geometric mask; an axis-aligned clip
+         * can only square the corners off. The mask layer costs more
+         * than the clip, which is why the engine only attaches radii to
+         * commands whose geometry actually reaches a corner. */
+        ID2D1PathGeometry *clip_mask = nullptr;
+        ID2D1Layer *clip_layer = nullptr;
+        bool clip_pushed = false;
+        if (command.has_clip && command.has_clip_radius) {
+            if (makeRoundedGeometry(renderer_->d2dFactory(), command.clip, command.clip_radius, &clip_mask) &&
+                SUCCEEDED(backing_target_->CreateLayer(nullptr, &clip_layer))) {
+                D2D1_LAYER_PARAMETERS parameters = D2D1::LayerParameters();
+                parameters.contentBounds = D2D1::InfiniteRect();
+                parameters.geometricMask = clip_mask;
+                parameters.maskAntialiasMode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
+                parameters.opacity = 1.0f;
+                backing_target_->PushLayer(parameters, clip_layer);
+            } else {
+                releaseCom(clip_mask);
+                releaseCom(clip_layer);
+                if (outer_clip) backing_target_->PopAxisAlignedClip();
+                return false;
+            }
+        } else if (command.has_clip) {
+            backing_target_->PushAxisAlignedClip(d2dRect(command.clip), D2D1_ANTIALIAS_MODE_ALIASED);
+            clip_pushed = true;
+        }
         if (command.has_transform) {
             const Affine &value = command.transform;
             backing_target_->SetTransform(D2D1::Matrix3x2F(value.a, value.b, value.c, value.d, value.tx, value.ty));
@@ -1876,7 +1925,13 @@ private:
                 break;
         }
         backing_target_->SetTransform(D2D1::Matrix3x2F::Identity());
-        if (command.has_clip) backing_target_->PopAxisAlignedClip();
+        if (clip_layer) {
+            backing_target_->PopLayer();
+            releaseCom(clip_layer);
+            releaseCom(clip_mask);
+        } else if (clip_pushed) {
+            backing_target_->PopAxisAlignedClip();
+        }
         if (outer_clip) backing_target_->PopAxisAlignedClip();
         return ok;
     }

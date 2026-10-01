@@ -366,6 +366,100 @@ const expectRouteEntry = support.expectRouteEntry;
 const expectFillColor = support.expectFillColor;
 const expectGpuPaintColor = support.expectGpuPaintColor;
 
+test "a rounded content clip rounds what it clips" {
+    // The planner used to keep only the clip's RECT, so `clip_content`
+    // with a radius was a rectangle at raster time and a square child
+    // fill painted straight through the corner it was supposed to be
+    // cut by.
+    const commands = [_]CanvasCommand{
+        .{ .push_clip = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 20, 20), .radius = Radius.all(8) } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(0, 0, 20, 20), .fill = .{ .color = Color.rgb8(255, 255, 255) } } },
+        .{ .pop_clip = {} },
+    };
+    var render_commands: [4]RenderCommand = undefined;
+    var render_batches: [4]RenderBatch = undefined;
+    var resources: [4]RenderResource = undefined;
+    var resource_cache_entries: [4]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [4]RenderResourceCacheAction = undefined;
+    var glyphs: [4]GlyphAtlasEntry = undefined;
+    var changes: [8]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(20, 20),
+        .full_repaint = true,
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+    // The fill reaches every corner arc, so it carries the radii.
+    try std.testing.expect(frame.render_plan.commands[0].clipIsRounded());
+
+    var pixels: [20 * 20 * 4]u8 = undefined;
+    const surface = try ReferenceRenderSurface.init(20, 20, &pixels);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+    // The corner is cut away; the middle is not.
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 0, 0);
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, surface, 19, 0);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 10, 10);
+    try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 10, 0);
+}
+
+test "a rounded clip only costs the commands that reach a corner" {
+    // Content that clears every arc is clipped identically by the
+    // rectangle, so it keeps the plain rect backends already handle.
+    const commands = [_]CanvasCommand{
+        .{ .push_clip = .{ .id = 1, .rect = geometry.RectF.init(0, 0, 100, 100), .radius = Radius.all(10) } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(20, 20, 60, 60), .fill = .{ .color = Color.rgb8(255, 0, 0) } } },
+        .{ .fill_rect = .{ .id = 3, .rect = geometry.RectF.init(0, 0, 100, 100), .fill = .{ .color = Color.rgb8(0, 255, 0) } } },
+        .{ .pop_clip = {} },
+    };
+    var render_commands: [4]RenderCommand = undefined;
+    var render_batches: [4]RenderBatch = undefined;
+    var resources: [4]RenderResource = undefined;
+    var resource_cache_entries: [4]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [4]RenderResourceCacheAction = undefined;
+    var glyphs: [4]GlyphAtlasEntry = undefined;
+    var changes: [8]DiffChange = undefined;
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(100, 100),
+        .full_repaint = true,
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+    try std.testing.expect(!frame.render_plan.commands[0].clipIsRounded());
+    try std.testing.expect(frame.render_plan.commands[1].clipIsRounded());
+}
+
+test "nested clips keep each corner's own radius" {
+    // The outer clip owns the corners it reaches; a corner formed by
+    // one clip's edge crossing the other's is square, because neither
+    // one's arc passes through it.
+    const outer = canvas.RenderClip{ .rect = geometry.RectF.init(0, 0, 100, 100), .radius = Radius.all(12) };
+    const inner = canvas.RenderClip{ .rect = geometry.RectF.init(0, 0, 60, 100), .radius = .{} };
+    const composed = canvas.composeClips(outer, inner);
+    try expectRect(geometry.RectF.init(0, 0, 60, 100), composed.rect);
+    // Left corners still belong to the outer clip; the right pair is
+    // now the inner clip's straight edge cutting across.
+    try std.testing.expectEqual(@as(f32, 12), composed.radius.top_left);
+    try std.testing.expectEqual(@as(f32, 12), composed.radius.bottom_left);
+    try std.testing.expectEqual(@as(f32, 0), composed.radius.top_right);
+    try std.testing.expectEqual(@as(f32, 0), composed.radius.bottom_right);
+
+    // A clip fully inside another keeps its own corners.
+    const contained = canvas.composeClips(outer, .{ .rect = geometry.RectF.init(10, 10, 40, 40), .radius = Radius.all(4) });
+    try std.testing.expectEqual(@as(f32, 4), contained.radius.top_left);
+}
+
 test "builder records replayable commands" {
     var commands: [8]CanvasCommand = undefined;
     var builder = Builder.init(&commands);

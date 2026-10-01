@@ -112,6 +112,21 @@ pub fn measureTextAdvance(
     return estimateTextAdvanceForBytes(font_id, text[cluster_start..cluster_end], size);
 }
 
+/// Total advance `tracking` adds to `text`: one quantum per cluster, the
+/// same convention CSS `letter-spacing` and SwiftUI `.tracking(_:)` use
+/// (the trailing cluster is spaced too, so a tracked run's measured width
+/// and its painted width agree without a special last-glyph case).
+/// Clusters are counted as UTF-8 lead bytes, matching every other
+/// cluster walk in the text stack.
+pub fn trackingWidth(text: []const u8, tracking: f32) f32 {
+    if (tracking == 0 or text.len == 0) return 0;
+    var clusters: usize = 0;
+    for (text) |byte| {
+        if (byte & 0xc0 != 0x80) clusters += 1;
+    }
+    return tracking * @as(f32, @floatFromInt(clusters));
+}
+
 fn isFiniteF32(value: f32) bool {
     return value - value == 0;
 }

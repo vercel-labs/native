@@ -847,6 +847,7 @@ fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
 fn widgetStylesEqual(a: WidgetStyle, b: WidgetStyle) bool {
     return optionalColorsEqual(a.background, b.background) and
         optionalColorsEqual(a.foreground, b.foreground) and
+        optionalF32Equal(a.text_size, b.text_size) and
         optionalColorsEqual(a.accent, b.accent) and
         optionalColorsEqual(a.accent_foreground, b.accent_foreground) and
         optionalColorsEqual(a.border, b.border) and

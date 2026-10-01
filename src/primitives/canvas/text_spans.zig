@@ -100,6 +100,12 @@ pub const TextSpanLayoutOptions = struct {
     line_height: f32 = 0,
     /// 0 (or non-finite) disables wrapping.
     max_width: f32 = 0,
+    /// Extra advance inserted after every cluster, in points (CSS
+    /// `letter-spacing`, SwiftUI `.tracking(_:)`). Negative tightens.
+    /// Applied by the measurement seam so line breaking, intrinsic
+    /// sizing, and the painted run all agree, and carried on the emitted
+    /// `DrawText` so hosts kern identically.
+    tracking: f32 = 0,
     wrap: TextWrap = .word,
     alignment: TextAlign = .start,
     typography: token_model.TypographyTokens = .{},
@@ -243,9 +249,10 @@ fn measureSpanSliceExact(span: TextSpan, slice: []const u8, options: TextSpanLay
     if (spanSliceAdvances(span, slice, options, font_id, size)) |advances| {
         var width: f32 = 0;
         for (advances) |advance| width += advance;
-        return width;
+        return width + text_metrics.trackingWidth(slice, options.tracking);
     }
-    return text_metrics.measureTextWidthForFont(options.measure, font_id, slice, size);
+    return text_metrics.measureTextWidthForFont(options.measure, font_id, slice, size) +
+        text_metrics.trackingWidth(slice, options.tracking);
 }
 
 /// The batched advances of `slice` within its span, or null when the
@@ -733,6 +740,7 @@ const SpanWrapKey = struct {
     span_count: usize = 0,
     size_bits: u32 = 0,
     line_height_bits: u32 = 0,
+    tracking_bits: u32 = 0,
     max_width_bits: u32 = 0,
     wrap: TextWrap = .word,
     alignment: TextAlign = .start,
@@ -815,6 +823,7 @@ fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrap
         .span_count = spans.len,
         .size_bits = @bitCast(options.size),
         .line_height_bits = @bitCast(options.line_height),
+        .tracking_bits = @bitCast(options.tracking),
         .max_width_bits = @bitCast(options.max_width),
         .wrap = options.wrap,
         .alignment = options.alignment,
@@ -833,6 +842,7 @@ fn spanWrapKeysEqual(a: SpanWrapKey, b: SpanWrapKey) bool {
         a.span_count == b.span_count and
         a.size_bits == b.size_bits and
         a.line_height_bits == b.line_height_bits and
+        a.tracking_bits == b.tracking_bits and
         a.max_width_bits == b.max_width_bits and
         a.wrap == b.wrap and
         a.alignment == b.alignment and

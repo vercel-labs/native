@@ -11,6 +11,7 @@ const CanvasCommand = canvas.CanvasCommand;
 const DisplayList = canvas.DisplayList;
 const ReferenceImage = canvas.ReferenceImage;
 const Affine = drawing_model.Affine;
+const Radius = drawing_model.Radius;
 const Fill = drawing_model.Fill;
 const Stroke = drawing_model.Stroke;
 const Easing = token_model.Easing;
@@ -80,9 +81,118 @@ pub const RenderPathGeometryCachePlanner = render_paths.RenderPathGeometryCacheP
 
 pub const max_render_state_stack: usize = 32;
 
+/// The flattened clip a command draws under: the intersected rect plus
+/// the corner radii that survive that intersection.
+///
+/// Composing two rounded clips is exact here, not approximate. The
+/// intersection's corner is a corner of whichever inputs reach it: an
+/// input whose own corner sits at the same place contributes its radius
+/// (the larger wins when both do — the more deeply cut corner is the
+/// intersection), and a corner formed by crossing two different inputs'
+/// EDGES is square, because neither input's arc passes through it.
+pub const RenderClip = struct {
+    rect: geometry.RectF,
+    radius: Radius = .{},
+
+    pub fn rounded(self: RenderClip) bool {
+        return self.radius.top_left > 0 or self.radius.top_right > 0 or
+            self.radius.bottom_right > 0 or self.radius.bottom_left > 0;
+    }
+
+    /// Whether the radii can change what `bounds` draws.
+    ///
+    /// The region a rounded clip removes that the rectangle does not is
+    /// exactly the four corner NOTCHES — the part of each radius-square
+    /// outside its arc. Content that reaches no notch is clipped
+    /// identically by the rectangle alone, and saying so lets the
+    /// planner hand the cheaper rectangular clip to backends with no
+    /// rounded-clip support. The test is exact, not conservative: the
+    /// point of `bounds ∩ clip ∩ notch` farthest from the arc's centre
+    /// is that intersection's outer corner, so comparing just that one
+    /// point against the radius settles the whole notch.
+    pub fn bindsBounds(self: RenderClip, bounds: geometry.RectF) bool {
+        if (!self.rounded()) return false;
+        const clip = self.rect.normalized();
+        const region = geometry.RectF.intersection(clip, bounds.normalized());
+        if (region.isEmpty()) return false;
+        if (cornerBinds(region, clip.x, clip.y, self.radius.top_left, .{ .right = true, .down = true })) return true;
+        if (cornerBinds(region, clip.maxX(), clip.y, self.radius.top_right, .{ .right = false, .down = true })) return true;
+        if (cornerBinds(region, clip.maxX(), clip.maxY(), self.radius.bottom_right, .{ .right = false, .down = false })) return true;
+        if (cornerBinds(region, clip.x, clip.maxY(), self.radius.bottom_left, .{ .right = true, .down = false })) return true;
+        return false;
+    }
+};
+
+const CornerDirection = struct { right: bool, down: bool };
+
+fn cornerBinds(region: geometry.RectF, x: f32, y: f32, radius: f32, direction: CornerDirection) bool {
+    if (radius <= 0) return false;
+    const notch = geometry.RectF.init(
+        if (direction.right) x else x - radius,
+        if (direction.down) y else y - radius,
+        radius,
+        radius,
+    );
+    const reached = geometry.RectF.intersection(notch, region);
+    if (reached.isEmpty()) return false;
+    // The arc's centre, and the reached corner farthest from it.
+    const center_x = if (direction.right) x + radius else x - radius;
+    const center_y = if (direction.down) y + radius else y - radius;
+    const far_x = if (direction.right) reached.x else reached.maxX();
+    const far_y = if (direction.down) reached.y else reached.maxY();
+    const dx = far_x - center_x;
+    const dy = far_y - center_y;
+    return dx * dx + dy * dy > radius * radius;
+}
+
+/// Scale corner radii alongside a transformed clip rect. A rounded
+/// rectangle only survives a uniform scale; under a non-uniform one the
+/// tighter axis is used, which keeps the arc inside the clip rather
+/// than letting it bulge past an edge.
+fn scaledRadius(radius: Radius, transform: Affine) Radius {
+    const scale_x = @sqrt(transform.a * transform.a + transform.b * transform.b);
+    const scale_y = @sqrt(transform.c * transform.c + transform.d * transform.d);
+    const scale = @min(scale_x, scale_y);
+    if (scale == 1) return radius;
+    return .{
+        .top_left = radius.top_left * scale,
+        .top_right = radius.top_right * scale,
+        .bottom_right = radius.bottom_right * scale,
+        .bottom_left = radius.bottom_left * scale,
+    };
+}
+
+const clip_corner_epsilon: f32 = 0.01;
+
+/// The radius the intersection keeps at one corner: the largest radius
+/// among the inputs whose own corner sits there, and zero when the
+/// corner is formed by two different inputs' edges crossing.
+fn cornerRadius(intersection: f32, a_edge: f32, a_radius: f32, b_edge: f32, b_radius: f32, other_intersection: f32, a_other: f32, b_other: f32) f32 {
+    var value: f32 = 0;
+    if (@abs(intersection - a_edge) <= clip_corner_epsilon and @abs(other_intersection - a_other) <= clip_corner_epsilon) value = @max(value, a_radius);
+    if (@abs(intersection - b_edge) <= clip_corner_epsilon and @abs(other_intersection - b_other) <= clip_corner_epsilon) value = @max(value, b_radius);
+    return value;
+}
+
+pub fn composeClips(a: RenderClip, b: RenderClip) RenderClip {
+    const rect = geometry.RectF.intersection(a.rect, b.rect);
+    if (rect.isEmpty()) return .{ .rect = rect };
+    const an = a.rect.normalized();
+    const bn = b.rect.normalized();
+    return .{
+        .rect = rect,
+        .radius = .{
+            .top_left = cornerRadius(rect.x, an.x, a.radius.top_left, bn.x, b.radius.top_left, rect.y, an.y, bn.y),
+            .top_right = cornerRadius(rect.maxX(), an.maxX(), a.radius.top_right, bn.maxX(), b.radius.top_right, rect.y, an.y, bn.y),
+            .bottom_right = cornerRadius(rect.maxX(), an.maxX(), a.radius.bottom_right, bn.maxX(), b.radius.bottom_right, rect.maxY(), an.maxY(), bn.maxY()),
+            .bottom_left = cornerRadius(rect.x, an.x, a.radius.bottom_left, bn.x, b.radius.bottom_left, rect.maxY(), an.maxY(), bn.maxY()),
+        },
+    };
+}
+
 pub const RenderState = struct {
     opacity: f32 = 1,
-    clip: ?geometry.RectF = null,
+    clip: ?RenderClip = null,
     transform: Affine = .{},
 };
 
@@ -91,9 +201,20 @@ pub const RenderCommand = struct {
     id: ?ObjectId = null,
     opacity: f32 = 1,
     clip: ?geometry.RectF = null,
+    /// Corner radii of `clip`, in the same space. Zero unless a rounded
+    /// clip is active AND this command's geometry actually reaches one
+    /// of its corners — content that clears every arc carries the plain
+    /// rectangle, so backends without rounded-clip support keep their
+    /// fast path for everything that cannot tell the difference.
+    clip_radius: Radius = .{},
     transform: Affine = .{},
     local_bounds: geometry.RectF,
     bounds: geometry.RectF,
+
+    pub fn clipIsRounded(self: RenderCommand) bool {
+        return self.clip_radius.top_left > 0 or self.clip_radius.top_right > 0 or
+            self.clip_radius.bottom_right > 0 or self.clip_radius.bottom_left > 0;
+    }
 };
 
 pub const CanvasRenderOverride = struct {
@@ -409,7 +530,7 @@ pub const RenderPlanner = struct {
     len: usize = 0,
     state: RenderState = .{},
     bounds_value: ?geometry.RectF = null,
-    clip_stack: [max_render_state_stack]?geometry.RectF = undefined,
+    clip_stack: [max_render_state_stack]?RenderClip = undefined,
     clip_stack_len: usize = 0,
     opacity_stack: [max_render_state_stack]f32 = undefined,
     opacity_stack_len: usize = 0,
@@ -453,11 +574,11 @@ pub const RenderPlanner = struct {
         self.clip_stack[self.clip_stack_len] = self.state.clip;
         self.clip_stack_len += 1;
 
-        const transformed_clip = self.state.transform.transformRect(clip.rect);
-        self.state.clip = if (self.state.clip) |existing|
-            geometry.RectF.intersection(existing, transformed_clip)
-        else
-            transformed_clip;
+        const pushed = RenderClip{
+            .rect = self.state.transform.transformRect(clip.rect),
+            .radius = scaledRadius(clip.radius, self.state.transform),
+        };
+        self.state.clip = if (self.state.clip) |existing| composeClips(existing, pushed) else pushed;
     }
 
     fn popClip(self: *RenderPlanner) Error!void {
@@ -484,17 +605,26 @@ pub const RenderPlanner = struct {
         const command_bounds = command.bounds() orelse return;
         const transformed_bounds = self.state.transform.transformRect(command_bounds);
         const clipped_bounds = if (self.state.clip) |clip|
-            geometry.RectF.intersection(clip, transformed_bounds)
+            geometry.RectF.intersection(clip.rect, transformed_bounds)
         else
             transformed_bounds;
         if (clipped_bounds.isEmpty()) return;
         if (self.len >= self.commands.len) return error.RenderListFull;
+        // The radius rides along only when this command's own geometry
+        // reaches a corner arc. Everything that clears the arcs is
+        // clipped identically by the rectangle, so it keeps the plain
+        // rect every backend already understands.
+        const clip_radius: Radius = if (self.state.clip) |clip|
+            (if (clip.bindsBounds(transformed_bounds)) clip.radius else .{})
+        else
+            .{};
 
         self.commands[self.len] = .{
             .command = command,
             .id = command.objectId(),
+            .clip_radius = clip_radius,
             .opacity = self.state.opacity,
-            .clip = self.state.clip,
+            .clip = if (self.state.clip) |clip| clip.rect else null,
             .transform = self.state.transform,
             .local_bounds = command_bounds,
             .bounds = clipped_bounds,

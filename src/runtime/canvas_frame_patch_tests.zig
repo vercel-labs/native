@@ -228,6 +228,7 @@ const BinaryCursor = struct {
             try self.skip(8 + 4 + 8 + 16); // font + size + origin + color
             const text_len = try self.readU32();
             try self.skip(text_len);
+            try self.skip(4); // tracking
             const has_positioned_glyphs = try self.readU8();
             if (has_positioned_glyphs != 0) {
                 const glyph_count = try self.readU32();

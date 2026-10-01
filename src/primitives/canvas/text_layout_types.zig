@@ -16,6 +16,11 @@ pub const DrawText = struct {
     origin: geometry.PointF,
     color: Color,
     text: []const u8 = "",
+    /// Extra advance after every cluster, in points (CSS `letter-spacing`,
+    /// SwiftUI `.tracking(_:)`). Layout measured the run with it, so hosts
+    /// MUST kern by the same amount or the painted run drifts from the
+    /// geometry selection and hit testing were computed against.
+    tracking: f32 = 0,
     glyphs: []const Glyph = &.{},
     /// Process-local measurement context used for host-aware ink bounds.
     /// Excluded from equality, hashing, and serialization.
