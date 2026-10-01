@@ -48,6 +48,14 @@ snap="$app_dir/.zig-cache/native-sdk-automation/snapshot.txt"
 cli="$repo_root/zig-out/bin/native"
 app_log="${TMPDIR:-/tmp}/linux-canvas-smoke-app.log"
 
+# xvfb-run waits for Xvfb's ready signal instead of imposing a short
+# displayfd deadline. Shared runners can take more than ten seconds to
+# initialize XKEYBOARD. The app and xdotool inherit one private display,
+# and the wrapper owns server cleanup on success and failure.
+if [ -z "${DISPLAY:-}" ]; then
+  exec xvfb-run -a --server-args="-screen 0 1280x800x24" "$0" "$@"
+fi
+
 # Readiness budget. Even with GTK_A11Y=none, shared ubuntu-24.04 runners
 # show a consistent ~27 s stall between EGL init and the app's first
 # runtime event (measured in runs 28690855597 pass / 28691951139 fail —
@@ -58,13 +66,11 @@ app_log="${TMPDIR:-/tmp}/linux-canvas-smoke-app.log"
 ready_timeout_ms=90000
 
 app_pid=""
-xvfb_pid=""
 cleanup() {
   [ -n "$app_pid" ] && kill "$app_pid" >/dev/null 2>&1
-  # Reap the app and our Xvfb directly so local runs exit clean (CI would
+  # Reap the app directly so local runs exit clean (CI would
   # otherwise rely on the runner's orphan sweep).
   pkill -f "$app_dir/zig-out/bin/ui-inbox" >/dev/null 2>&1
-  [ -n "$xvfb_pid" ] && kill "$xvfb_pid" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -128,19 +134,7 @@ assert_no_webkit() {
 echo "== native-only ELF audit ok"
 
 # ---- launch ---------------------------------------------------------------
-# The script owns its Xvfb (instead of wrapping the app in xvfb-run) so
-# the xdotool step below shares the app's display. -displayfd picks a
-# free display number, the modern equivalent of xvfb-run -a's probing.
-display_file="$(mktemp)"
-Xvfb -displayfd 4 -screen 0 1280x800x24 4>"$display_file" &
-xvfb_pid=$!
-for _ in $(seq 1 100); do
-  [ -s "$display_file" ] && break
-  sleep 0.1
-done
-[ -s "$display_file" ] || fail "Xvfb never reported a display number"
-export DISPLAY=":$(cat "$display_file")"
-echo "== Xvfb on $DISPLAY"
+echo "== X display $DISPLAY"
 
 cd "$app_dir" || fail "missing $app_dir"
 rm -rf .zig-cache/native-sdk-automation

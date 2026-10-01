@@ -287,8 +287,8 @@ jobs:
       # x11-utils provides xwininfo, which the smoke script uses to find
       # the context-menu popover's override-redirect X window (and to
       # dump the X window list in failure diagnostics).
-      - name: Install GTK, Xvfb, xdotool, and x11-utils
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool x11-utils
+      - name: Install GTK, Xvfb, xauth, xdotool, and x11-utils
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xauth xdotool x11-utils
       # The stub is the expected, configured state of every native-only
       # Linux app, so compiling the GTK host with the stub define must be
       # diagnostic-FREE, not merely successful: zig renders every clang
