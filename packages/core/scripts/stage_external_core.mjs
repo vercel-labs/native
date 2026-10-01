@@ -173,6 +173,7 @@ if (args["view-markup"]) {
   const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
   profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
   if (windows.length) profile.exports.push({ export: "native_window_view", symbol: `${profile.abi.prefix}native_window_view`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_radio_policy", symbol: `${profile.abi.prefix}native_radio_policy`, params: ["bytes"], returns: "bytes" });
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
 if (args["services-client"]) {

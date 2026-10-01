@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, switch_control, status_bar, spacer, scroll, avatar, radio, radio_group },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -48,6 +48,7 @@ const Record = struct {
     spanScale: ?f32 = null,
     press: ?[]const u8 = null,
     toggle: ?[]const u8 = null,
+    change: ?[]const u8 = null,
     drag: ?[]const u8 = null,
     scroll: ?u8 = null,
     input: ?u8 = null,
@@ -85,10 +86,11 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group;
     if (!container and value.end != index + 1) return error.InvalidView;
-    if (value.press != null and value.kind != .button and value.kind != .stack) return error.InvalidView;
-    if (value.toggle != null and value.kind != .switch_control) return error.InvalidView;
+    if (value.press != null and value.kind != .button and value.kind != .stack and value.kind != .radio) return error.InvalidView;
+    if (value.toggle != null and value.kind != .switch_control and value.kind != .radio) return error.InvalidView;
+    if (value.change != null and value.kind != .radio) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
     const text_entry = value.kind == .input or value.kind == .search_field;
     if ((value.input != null or value.submit != null or value.placeholder.len != 0) and !text_entry) return error.InvalidView;
@@ -133,12 +135,16 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .disabled = value.disabled,
         .selected = value.selected,
         .on_press = if (value.press) |bytes| try event(ui, bytes) else null,
+        .on_change = if (value.change) |bytes| try event(ui, bytes) else null,
         .on_toggle = if (value.toggle) |bytes| try event(ui, bytes) else null,
         .on_drag = if (value.drag) |bytes| try dragEvent(ui, bytes) else null,
         .on_scroll = if (value.scroll) |tag| try scrollEvent(tag) else null,
         .on_input = if (value.input) |tag| try inputEvent(tag) else null,
         .on_submit = if (value.submit) |bytes| try event(ui, bytes) else null,
     }, children.items);
+    if (comptime @hasDecl(core, "nativeRadioPolicy")) {
+        if (value.kind == .radio or value.kind == .radio_group) result.widget.radio_policy = core.nativeRadioPolicy;
+    }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
         spans[0] = .{ .text = result.widget.text, .weight = value.spanWeight orelse .regular, .color = value.spanColor, .scale = value.spanScale orelse 0 };

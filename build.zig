@@ -822,6 +822,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&pipeline_driver_run.step);
         ts_core_e2e_step.dependOn(&pipeline_driver_run.step);
         test_step.dependOn(&pipeline_driver_run.step);
+        const radio_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        radio_policy_reference_run.setCwd(b.path("examples/radio-policy"));
+        radio_policy_reference_run.has_side_effects = true;
+        radio_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        radio_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/radio-policy-view-reference"));
+        _ = radio_policy_reference_run.captureStdOut(.{});
+        _ = radio_policy_reference_run.captureStdErr(.{});
+        const radio_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        radio_policy_driver_run.setCwd(b.path("examples/radio-policy"));
+        radio_policy_driver_run.has_side_effects = true;
+        radio_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        radio_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/radio-policy-view-reference"));
+        _ = radio_policy_driver_run.captureStdOut(.{});
+        _ = radio_policy_driver_run.captureStdErr(.{});
+        radio_policy_driver_run.step.dependOn(&radio_policy_reference_run.step);
+        native_driver_step.dependOn(&radio_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&radio_policy_driver_run.step);
+        test_step.dependOn(&radio_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -1983,6 +2001,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-pipeline", "Run portable pipeline component example tests", "examples/pipeline", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-radio-policy", "Run portable radio policy example tests", "examples/radio-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

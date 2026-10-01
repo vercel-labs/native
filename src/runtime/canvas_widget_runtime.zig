@@ -1639,10 +1639,51 @@ pub fn canvasWidgetGroupDirectionForFocus(parent_kind: canvas.WidgetKind, child_
 // logical targets intentionally omit only scroll clipping so keyboard
 // focus can reveal an offscreen radio before committing to it.
 
+/// Retained geometry is native; selection scope and traversal are portable.
+/// Wire v1 uses preorder indices rather than ids (ids can exceed JS integers).
+pub fn canvasWidgetRadioPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.radio_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("radio policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .radio => 1,
+            .radio_group => 2,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if (operation != 0 and operation != 8 and node.widget.kind == .radio and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if ((operation == 2 or operation == 3) and node.widget.kind == .radio and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+fn compiledRadioIndex(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?usize {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetRadioPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid radio policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("radio policy target outside tree");
+    return index;
+}
+
+fn compiledRadioFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    const index = compiledRadioIndex(layout, subject, operation) orelse return null;
+    return if (operation == 2 or operation == 3) layout.focusTargetById(layout.nodes[index].widget.id) else layout.logicalFocusTargetAtIndex(index);
+}
+
 /// Index of the nearest `.radio_group` ancestor, or null for a bare
 /// radio (and for any other node outside a radio group).
 pub fn canvasWidgetRadioGroupScopeIndex(layout: canvas.WidgetLayoutTree, node_index: usize) ?usize {
     if (node_index >= layout.nodes.len) return null;
+    if (layout.nodes[node_index].widget.radio_policy != null) return compiledRadioIndex(layout, node_index, 0);
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
@@ -1679,6 +1720,7 @@ fn canvasWidgetRadioGroupFocusTarget(
 /// focusable radio. Selection may be represented by state or value.
 pub fn canvasWidgetRovingTabEntryTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
     if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.radio_policy != null) return compiledRadioFocus(layout, scope.index, 1);
     const scope_depth = layout.nodes[scope.index].depth;
     var first: ?canvas.WidgetFocusTarget = null;
     var index = scope.index + 1;
@@ -1697,6 +1739,7 @@ pub fn canvasWidgetRovingTabEntryTarget(layout: canvas.WidgetLayoutTree, scope: 
 /// composite's position around those intervening Tab stops.
 pub fn canvasWidgetRovingTabStopTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
     if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.radio_policy != null) return compiledRadioFocus(layout, scope.index, 2);
     const scope_depth = layout.nodes[scope.index].depth;
     var index = scope.index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
@@ -1715,6 +1758,7 @@ pub fn canvasWidgetRovingTabStopTarget(layout: canvas.WidgetLayoutTree, scope: C
 /// an invisible focus id.
 pub fn canvasWidgetRovingTabVisibleEntryTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
     if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.radio_policy != null) return compiledRadioFocus(layout, scope.index, 3);
     const scope_depth = layout.nodes[scope.index].depth;
     var first: ?canvas.WidgetFocusTarget = null;
     var index = scope.index + 1;
@@ -1734,8 +1778,9 @@ pub fn canvasWidgetRadioGroupDirectionalFocusTarget(
     direction: canvas.WidgetFocusDirection,
 ) ?canvas.WidgetFocusTarget {
     if (focused.kind != .radio or focused.index >= layout.nodes.len) return null;
-    const scope_index = canvasWidgetRadioGroupScopeIndex(layout, focused.index) orelse return null;
     const group_direction = canvasWidgetAnyAxisGroupDirection(direction) orelse return null;
+    if (layout.nodes[focused.index].widget.radio_policy != null) return compiledRadioFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    const scope_index = canvasWidgetRadioGroupScopeIndex(layout, focused.index) orelse return null;
     return canvasWidgetRadioGroupAdjacentRadio(layout, scope_index, focused.index, group_direction) orelse focused;
 }
 
@@ -1745,6 +1790,7 @@ pub fn canvasWidgetRadioGroupFocusEdgeTarget(
     edge: CanvasWidgetGroupFocusEdge,
 ) ?canvas.WidgetFocusTarget {
     if (focused.kind != .radio or focused.index >= layout.nodes.len) return null;
+    if (layout.nodes[focused.index].widget.radio_policy != null) return compiledRadioFocus(layout, focused.index, if (edge == .first) 6 else 7);
     const scope_index = canvasWidgetRadioGroupScopeIndex(layout, focused.index) orelse return null;
     if (scope_index >= layout.nodes.len) return null;
     const scope_depth = layout.nodes[scope_index].depth;

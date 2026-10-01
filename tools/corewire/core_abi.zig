@@ -114,6 +114,10 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const native_view = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_view");
         pub const native_window_view = Symbol(fn (label: [*]const u8, label_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_view");
 
+        /// Pure retained radio policy over native tree/eligibility bytes.
+        /// The result is borrowed until frame_reset; the host copies it first.
+        pub const native_radio_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_radio_policy");
+
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");
         pub const dispatch_bytes = Symbol(fn (tag: u8, ptr: [*]const u8, len: usize, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_bytes");

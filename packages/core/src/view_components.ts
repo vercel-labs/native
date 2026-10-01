@@ -12,7 +12,7 @@ type NscViewNode = {
   disabled?: boolean; selected?: boolean; focusable?: boolean;
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
-  press?: number[]; toggle?: number[]; drag?: number[]; scroll?: number;
+  press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; submit?: number[];
 };
 
@@ -100,4 +100,69 @@ function nscvTimelineItem(nodes: NscViewNode[], options: NscTimelineItem): void 
   if (root.press !== undefined) nscvPush(nodes, { end: 0, kind: "text", text: "›", foreground: "text_muted" });
   row.end = nodes.length;
   root.end = nodes.length;
+}
+
+/** Retained radio policy wire v1: operation, subject u16, count u16,
+ * followed by parent u16, kind (0 other/1 radio/2 group), flags
+ * (1 logical focus/2 visible focus/4 selected). Index 65535 means absent.
+ * Operations: 0 scope, 1 logical entry, 2 visible stop, 3 visible entry,
+ * 4 previous, 5 next, 6 first, 7 last, 8 selection clear mask.
+ * Target responses are u16 indices; selection responds with one byte per node.
+ * Native supplies geometry eligibility; this pure function chooses scopes,
+ * selection clearing, and authored-order roving focus without reading Model.
+ */
+export function native_radio_policy(request: Uint8Array): Uint8Array {
+  const read = (at: number): number => request[at]! + request[at + 1]! * 256;
+  if (request.length < 5) throw new Error("invalid radio policy request");
+  const operation = request[0]!, subject = read(1), count = read(3);
+  if (count > 1024 || subject >= count || request.length !== 5 + count * 4 || operation > 8) throw new Error("invalid radio policy request");
+  const kind = (i: number): number => request[7 + i * 4]!;
+  const flags = (i: number): number => request[8 + i * 4]!;
+  const parent = (i: number): number => read(5 + i * 4);
+  const scope = (i: number): number => {
+    let ancestor = parent(i);
+    for (let depth = 0; ancestor !== 65535 && depth < count; depth++) {
+      if (ancestor >= i) throw new Error("invalid radio policy parent");
+      if (kind(ancestor) === 2) return ancestor;
+      ancestor = parent(ancestor);
+    }
+    return 65535;
+  };
+  const group = kind(subject) === 2 ? subject : scope(subject);
+  if (operation === 8) {
+    const result = new Uint8Array(count);
+    for (let i = 0; i < count; i++) {
+      if (i !== subject && kind(i) === 1 && (flags(i) & 4) !== 0 && scope(i) === group &&
+          (group !== 65535 || parent(i) === parent(subject))) result[i] = 1;
+    }
+    return result;
+  }
+  let target = 65535;
+  if (operation === 0) target = scope(subject);
+  else if (group !== 65535) {
+    const eligible: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const mask = operation === 2 || operation === 3 ? 2 : 1;
+      if (kind(i) === 1 && scope(i) === group && (flags(i) & mask) !== 0) eligible.push(i);
+    }
+    if (eligible.length > 0) {
+      target = eligible[0]!;
+      if (operation === 1 || operation === 3) {
+        for (const i of eligible) if ((flags(i) & 4) !== 0) { target = i; break; }
+      } else if (operation === 7) target = eligible[eligible.length - 1]!;
+      else if (operation === 4 || operation === 5) {
+        target = subject;
+        if (operation === 4) {
+          target = eligible[eligible.length - 1]!;
+          for (const i of eligible) if (i < subject) target = i;
+        } else {
+          target = eligible[0]!;
+          for (const i of eligible) if (i > subject) { target = i; break; }
+        }
+      }
+    } else if (operation === 4 || operation === 5) target = subject;
+  }
+  const result = new Uint8Array(2);
+  result[0] = target % 256; result[1] = Math.floor(target / 256);
+  return result;
 }

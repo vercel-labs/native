@@ -297,6 +297,9 @@ const Emitter = struct {
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_window_view")) {
             try reserved.appendSlice(self.arena, &.{ "nativeWindowView", "label", "ptr", "len", "arena" });
         }
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_radio_policy")) {
+            try reserved.appendSlice(self.arena, &.{ "nativeRadioPolicy", "request", "output", "ptr", "len" });
+        }
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
         if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg or sidecar_mod.abiHasExport(self.sidecar.abi, "native_view")) {
@@ -1180,6 +1183,23 @@ const Emitter = struct {
                 \\    defer abi.frame_reset();
                 \\    if (len > 1024 * 1024) @panic("compiled window view exceeds 1 MiB");
                 \\    return arena.dupe(u8, ptr[0..len]) catch @panic("compiled window view allocation failed");
+                \\}
+                \\
+            );
+        }
+
+        if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_radio_policy")) {
+            try self.raw(
+                \\
+                \\/// Pure retained policy: copy the result before resetting the arena.
+                \\pub fn nativeRadioPolicy(request: []const u8, output: []u8) usize {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_radio_policy(request.ptr, request.len, &ptr, &len);
+                \\    defer abi.frame_reset();
+                \\    if (len > output.len) @panic("invalid compiled radio policy result");
+                \\    @memcpy(output[0..len], ptr[0..len]);
+                \\    return len;
                 \\}
                 \\
             );

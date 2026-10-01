@@ -259,6 +259,7 @@ pub const conditional_exports = [_][]const u8{
     // Native SDK's opt-in compiled-view extension, after function channels.
     "native_view",
     "native_window_view",
+    "native_radio_policy",
 };
 
 // ------------------------------------------------------------ reading
@@ -2412,6 +2413,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const windows = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_window_view\"]");
     const window_valid = try readValid(arena, windows);
     try testing.expect(abiHasExport(window_valid.abi, "native_window_view"));
+    const policy = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_radio_policy\"]");
+    const policy_valid = try readValid(arena, policy);
+    try testing.expect(abiHasExport(policy_valid.abi, "native_radio_policy"));
+    const policy_duplicate = try replaced(arena, policy, "\"native_radio_policy\"]", "\"native_radio_policy\", \"native_radio_policy\"]");
+    try expectRefusal(policy_duplicate, "abi.exports[25]", "out of canonical order");
     const window_duplicate = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_window_view\"]");
     try expectRefusal(window_duplicate, "abi.exports[24]", "out of canonical order");
     const duplicate = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_view\"]");

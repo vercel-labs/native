@@ -384,11 +384,18 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                 // layout containers wrap its radios. Nearest-ancestor
                 // resolution also isolates nested radio groups. A bare
                 // radio deliberately falls back to its direct parent.
-                const scope = canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), index);
+                var clear: [1024]u8 = undefined;
+                const policy_len = canvas_widget_runtime.canvasWidgetRadioPolicy(self.widgetLayoutTree(), index, 8, &clear);
+                if (policy_len) |len| {
+                    if (len != self.widget_layout_node_count) @panic("invalid radio selection policy result");
+                }
+                const scope = if (policy_len == null) canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), index) else null;
                 const parent_index = self.widget_layout_nodes[index].parent_index;
                 for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, radio_index| {
                     if (radio_index == index or node.widget.kind != .radio) continue;
-                    if (scope) |radio_group_index| {
+                    if (policy_len != null) {
+                        if (clear[radio_index] == 0) continue;
+                    } else if (scope) |radio_group_index| {
                         if (canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != radio_group_index) continue;
                     } else if (node.parent_index != parent_index or canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != null) continue;
                     if (!canvasWidgetSelectableSelected(node.widget)) continue;

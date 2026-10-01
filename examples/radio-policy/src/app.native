@@ -1,0 +1,18 @@
+<column padding="16" gap="8">
+  <text size="heading">Radio policy</text>
+  <text>Changes: {changes}</text>
+  <button on-press="reset">Reset</button>
+  <radio-group label="Delivery" gap="4">
+    <column gap="4">
+      <for each="choices" as="choice" key="id">
+        <row><radio checked="{choice.chosen}" disabled="{choice.disabled}" on-change="choose:{choice.id}">{choice.title}</radio></row>
+      </for>
+    </column>
+    <radio-group label="Packaging" gap="4">
+      <radio width="100" checked="{nested == 11}" on-change="paper">Paper</radio>
+      <radio width="120" checked="{nested == 12}" on-change="reusable">Reusable</radio>
+    </radio-group>
+  </radio-group>
+  <button on-press="reverse">Reverse</button>
+  <button on-press="hide">Hide priority</button>
+</column>

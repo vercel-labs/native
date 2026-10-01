@@ -279,3 +279,14 @@ test("portable component expansion enforces the shared native node budget", () =
   runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
   assert.throws(() => exports.native_view!(), /1024 nodes/);
 });
+
+test("radio markup preserves native checked state and canonical change handlers", () => {
+  const { view } = evaluate('<column><radio-group label="Delivery"><radio checked="true" on-change="reset">Standard</radio><radio disabled="true">Unavailable</radio></radio-group></column>');
+  assert.equal(view().nodes[1].kind, "radio_group");
+  assert.equal(view().nodes[1].label, "Delivery");
+  assert.equal(view().nodes[2].kind, "radio");
+  assert.equal(view().nodes[2].checked, true);
+  assert.deepEqual(view().nodes[2].change, [1, 5]);
+  assert.throws(() => compileView('<radio-group><radio>Missing label</radio></radio-group>', contract), /requires a label/);
+  assert.throws(() => compileView('<button on-change="reset">Invalid</button>', contract), /unsupported on button/);
+});

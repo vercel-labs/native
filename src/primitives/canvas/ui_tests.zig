@@ -427,6 +427,7 @@ test "radio selection dispatches change then toggle then press on every input pa
     const toggle_radio = tree.root.children[1];
     const press_radio = tree.root.children[2];
     const selected_radio = tree.root.children[3];
+    try testing.expectEqual(@as(f32, 1), selected_radio.value);
 
     try testing.expectEqual(Msg.add, tree.msgForPointer(change_radio.id, .up).?);
     try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "space" }).?);

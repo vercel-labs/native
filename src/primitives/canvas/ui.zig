@@ -3820,6 +3820,9 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_origin = options.resize_origin,
                 .tooltip_delay_ms = options.tooltip_delay,
             };
+            // A checked radio starts with the same canonical value as a
+            // retained selection, so activating it is not a change edge.
+            if (kind == .radio and widget.state.selected) widget.value = 1;
             applyKindDefaultLayout(kind, options, &widget.layout);
             return widget;
         }

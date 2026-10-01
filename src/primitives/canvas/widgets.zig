@@ -901,6 +901,8 @@ pub const WidgetGroupSegment = enum {
 };
 
 pub const Widget = struct {
+    /// Optional portable retained radio policy, installed by compiled views.
+    radio_policy: ?*const fn ([]const u8, []u8) usize = null,
     id: ObjectId = 0,
     kind: WidgetKind,
     frame: geometry.RectF = .{},
@@ -1647,11 +1649,12 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
     return merged;
 }
 
-test "Widget keeps the retained hot-path footprint after textarea policy flags" {
+test "Widget keeps the reviewed retained footprint with portable radio policy" {
     // One layout tree holds thousands of Widgets by value. On the 64-bit
-    // targets that run the renderer, 776 bytes is the reviewed footprint;
-    // packing engine-only markers keeps the new textarea policy within it.
+    // targets that run the renderer, 784 bytes is the reviewed footprint:
+    // the 776-byte native widget plus one optional 8-byte policy callback.
+    // The callback borrows compiled code, with no per-widget allocation.
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 776), @sizeOf(Widget));
+        try std.testing.expectEqual(@as(usize, 784), @sizeOf(Widget));
     }
 }

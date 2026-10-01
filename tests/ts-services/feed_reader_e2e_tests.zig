@@ -593,10 +593,228 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const allocator = arena.allocator();
     const primary = core.nativeView(allocator);
     const secondary = core.nativeWindowView("feed", allocator);
+    const policy_request = [_]u8{ 1, 0, 0, 2, 0, 255, 255, 2, 0, 0, 0, 1, 7 };
+    var policy_output: [2]u8 = undefined;
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(usize, 2), core.nativeRadioPolicy(&policy_request, &policy_output));
+        try std.testing.expectEqualSlices(u8, &.{ 1, 0 }, &policy_output);
         try std.testing.expectEqualStrings(primary, core.nativeView(allocator));
         try std.testing.expectEqualStrings(secondary, core.nativeWindowView("feed", allocator));
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
+}
+
+test "compiled radio group Tab entry falls back when its selection is fixed-clipped" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "gpu-widget-radio-fixed-clip-tab", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var app_state: TestApp = .{};
+        const app = app_state.app();
+        try harness.start(app);
+
+        _ = try harness.runtime.createView(.{
+            .window_id = 1,
+            .label = "canvas",
+            .kind = .gpu_surface,
+            .frame = geometry.RectF.init(0, 0, 220, 80),
+        });
+
+        const radios = [_]canvas.Widget{
+            .{ .id = 3, .kind = .radio, .frame = geometry.RectF.init(0, 0, 48, 32), .text = "Visible" },
+            .{ .id = 4, .kind = .radio, .frame = geometry.RectF.init(0, 0, 48, 32), .text = "Clipped", .state = .{ .selected = true } },
+        };
+        const children = [_]canvas.Widget{
+            .{ .id = 2, .kind = .button, .frame = geometry.RectF.init(0, 0, 40, 32), .text = "Before" },
+            .{ .id = 10, .kind = .radio_group, .frame = geometry.RectF.init(52, 0, 48, 32), .layout = .{ .clip_content = true }, .semantics = .{ .label = "View" }, .children = &radios },
+            .{ .id = 5, .kind = .button, .frame = geometry.RectF.init(112, 0, 40, 32), .text = "After" },
+        };
+        var nodes: [6]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 220, 80), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            node.widget.radio_policy = core.nativeRadioPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+        // The selected radio is the logical entry, but the fixed clip cannot
+        // scroll it into view. Tab therefore uses the visible group member
+        // and the next Tab still leaves the composite in one step.
+        harness.runtime.views[0].canvas_widget_focused_id = 2;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 3), harness.runtime.views[0].canvas_widget_focused_id);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 5), harness.runtime.views[0].canvas_widget_focused_id);
+    }
+}
+
+test "compiled radio navigation skips fixed-clipped candidates" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "gpu-widget-radio-fixed-clip-navigation", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var app_state: TestApp = .{};
+        const app = app_state.app();
+        try harness.start(app);
+
+        _ = try harness.runtime.createView(.{
+            .window_id = 1,
+            .label = "canvas",
+            .kind = .gpu_surface,
+            .frame = geometry.RectF.init(0, 0, 280, 80),
+        });
+
+        const radios = [_]canvas.Widget{
+            .{ .id = 3, .kind = .radio, .frame = geometry.RectF.init(0, 0, 28, 32), .text = "Hidden first" },
+            .{ .id = 4, .kind = .radio, .frame = geometry.RectF.init(0, 0, 28, 32), .text = "Visible one", .state = .{ .selected = true } },
+            .{ .id = 5, .kind = .radio, .frame = geometry.RectF.init(0, 0, 28, 32), .text = "Hidden middle" },
+            .{ .id = 6, .kind = .radio, .frame = geometry.RectF.init(0, 0, 28, 32), .text = "Visible two" },
+            .{ .id = 7, .kind = .radio, .frame = geometry.RectF.init(0, 0, 28, 32), .text = "Hidden last" },
+        };
+        const children = [_]canvas.Widget{
+            .{ .id = 10, .kind = .radio_group, .frame = geometry.RectF.init(20, 0, 160, 32), .layout = .{ .clip_content = true, .gap = 4 }, .semantics = .{ .label = "View" }, .children = &radios },
+        };
+        var nodes: [7]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 280, 80), &nodes);
+        for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.id == 3 or node.widget.id == 5 or node.widget.id == 7) {
+                node.frame.x = 220;
+            }
+        }
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            node.widget.radio_policy = core.nativeRadioPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+        // Logical order remains 3,4,5,6,7 so scroll viewports can reveal
+        // candidates. Fixed clipping cannot reveal 3/5/7; traversal must
+        // continue until the next visible member accepts focus.
+        harness.runtime.views[0].canvas_widget_focused_id = 4;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 6), harness.runtime.views[0].canvas_widget_focused_id);
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(4).?.widget.state.selected);
+        try std.testing.expect(retained.findById(6).?.widget.state.selected);
+
+        harness.runtime.views[0].canvas_widget_focused_id = 4;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "end" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 6), harness.runtime.views[0].canvas_widget_focused_id);
+
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "home" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
+
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowleft" } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 6), harness.runtime.views[0].canvas_widget_focused_id);
+    }
+}
+
+test "compiled radio-group arrow navigation reveals selects and focuses an offscreen nested radio" {
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const TestApp = struct {
+            fn app(self: *@This()) native_sdk.App {
+                return .{ .context = self, .name = "compiled-radio-reveal", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+            }
+        };
+        var app_state: TestApp = .{};
+        const app = app_state.app();
+        try harness.start(app);
+
+        _ = try harness.runtime.createView(.{
+            .window_id = 1,
+            .label = "canvas",
+            .kind = .gpu_surface,
+            .frame = geometry.RectF.init(0, 0, 240, 64),
+        });
+
+        const radios = [_]canvas.Widget{
+            .{ .id = 31, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One", .state = .{ .selected = true } },
+            .{ .id = 32, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Two" },
+            .{ .id = 33, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Three" },
+            .{ .id = 34, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Four" },
+        };
+        const nested = [_]canvas.Widget{.{
+            .kind = .column,
+            .layout = .{ .gap = 2 },
+            .children = &radios,
+        }};
+        const group = canvas.Widget{
+            .id = 30,
+            .kind = .radio_group,
+            .frame = geometry.RectF.init(0, 0, 0, 118),
+            .children = &nested,
+        };
+        const root = canvas.Widget{ .id = 20, .kind = .scroll_view, .children = &.{group} };
+        var nodes: [10]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            node.widget.radio_policy = core.nativeRadioPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        view.canvas_widget_focused_id = 31;
+
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+
+        try std.testing.expectEqual(@as(canvas.ObjectId, 34), view.canvas_widget_focused_id);
+        const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const viewport = scrolled.findById(20).?.frame.normalized();
+        const focused = scrolled.findById(34).?.frame.normalized();
+        try std.testing.expect(focused.y >= viewport.y);
+        try std.testing.expect(focused.maxY() <= viewport.maxY());
+        try std.testing.expect(!scrolled.findById(31).?.widget.state.selected);
+        try std.testing.expect(scrolled.findById(34).?.widget.state.selected);
+    }
+}
+
+test "compiled bare radio selection clears only direct siblings" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-bare-radios", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 400, 200) });
+        const children = [_]canvas.Widget{
+            .{ .id = 2, .kind = .radio, .text = "One", .state = .{ .selected = true } },
+            .{ .id = 3, .kind = .radio, .text = "Two" },
+            .{ .id = 4, .kind = .radio_group, .children = &.{.{ .id = 5, .kind = .radio, .text = "Nested", .state = .{ .selected = true } }} },
+            .{ .id = 6, .kind = .row, .children = &.{.{ .id = 7, .kind = .radio, .text = "Other parent", .state = .{ .selected = true } }} },
+        };
+        var nodes: [7]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .column, .children = &children }, geometry.RectF.init(0, 0, 400, 200), &nodes);
+        if (compiled) for (nodes[0..layout.nodes.len]) |*node| {
+            node.widget.radio_policy = core.nativeRadioPolicy;
+        };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        _ = try harness.runtime.views[0].setCanvasWidgetSelected(3, true);
+        const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expect(!retained.findById(2).?.widget.state.selected);
+        try std.testing.expect(retained.findById(3).?.widget.state.selected);
+        try std.testing.expect(retained.findById(5).?.widget.state.selected);
+        try std.testing.expect(retained.findById(7).?.widget.state.selected);
+        try std.testing.expectEqual(@as(?geometry.RectF, null), try harness.runtime.views[0].setCanvasWidgetSelected(3, true));
+    }
 }

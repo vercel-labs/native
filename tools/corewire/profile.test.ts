@@ -134,15 +134,17 @@ test("policy text obeys compiler limits and conditional channel signatures are c
 
 test("compiled profiles preserve the optional Native primary and window view signatures", () => withWork(dir => {
   const input = currentContract("wide_msg");
-  input.abi.exports.push("native_view", "native_window_view");
+  input.abi.exports.push("native_view", "native_window_view", "native_radio_policy");
   const result = invoke(dir, input, ["--profile", "profile.json", "--out", "mirror.zig"]);
   assert.equal(result.status, 0, result.stderr);
   const output = fs.readFileSync(path.join(dir, "profile.json"), "utf8");
   assert.equal(output, emitProfile(input, "core_facade.ts", "").output);
   const profile = JSON.parse(output);
-  assert.deepEqual(profile.exports.at(-2), { export: "native_view", symbol: input.abi.prefix + "native_view", params: [], returns: "bytes" });
-  assert.deepEqual(profile.exports.at(-1), { export: "native_window_view", symbol: input.abi.prefix + "native_window_view", params: ["bytes"], returns: "bytes" });
+  assert.deepEqual(profile.exports.at(-3), { export: "native_view", symbol: input.abi.prefix + "native_view", params: [], returns: "bytes" });
+  assert.deepEqual(profile.exports.at(-2), { export: "native_window_view", symbol: input.abi.prefix + "native_window_view", params: ["bytes"], returns: "bytes" });
+  assert.deepEqual(profile.exports.at(-1), { export: "native_radio_policy", symbol: input.abi.prefix + "native_radio_policy", params: ["bytes"], returns: "bytes" });
   const mirror = fs.readFileSync(path.join(dir, "mirror.zig"), "utf8");
+  assert.match(mirror, /pub fn nativeRadioPolicy\(request:/);
   assert.match(mirror, /pub fn nativeView\(arena:/);
   assert.match(mirror, /pub fn nativeViewEvent\(envelope: \[\]const u8, arena: std.mem.Allocator\)/);
   assert.match(mirror, /pub fn nativeWindowView\(label: \[\]const u8, arena: std.mem.Allocator\)/);
