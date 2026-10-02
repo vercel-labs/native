@@ -905,3 +905,32 @@ test("shared semantic controls preserve grants and selectable press precedence",
       assert.throws(() => policy(new Uint8Array(request)), /semantic control request/);
   }
 });
+
+test("semantic action derivation keeps defaults, authored actions and focusability distinct", () => {
+  const exports: Record<string, (request: Uint8Array) => Uint8Array> = {};
+  runInNewContext(ts.transpile(compileView('<button on-press="increment">Go</button>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  for (const name of ["text", "radio", "tabs", "tree", "list", "menu", "toggle", "accordion", "slider", "split", "resizable", "scroll"]) {
+    const policy = exports[`native_${name}_policy`]!;
+    const actions = (kind: number, flags = 0, authored = 0) => {
+      const result = policy(new Uint8Array([17, kind, 0, flags, authored & 255, authored >>> 8]));
+      return [result[0]! | result[1]! << 8, result[2]! | result[3]! << 8, result[4]];
+    };
+    assert.deepEqual(actions(0), [0, 0, 0]);
+    assert.deepEqual(actions(0, 8, 2), [3, 1, 0]); // authored focusable, default not focusable
+    assert.deepEqual(actions(0, 4 | 16), [131, 131, 1]); // any tree row
+    assert.deepEqual(actions(31), [3, 3, 1]);
+    assert.deepEqual(actions(48), [129, 129, 1]);
+    assert.deepEqual(actions(48, 16), [131, 131, 1]);
+    assert.deepEqual(actions(38, 2), [67, 99, 1]); // read-only retains selection and press
+    assert.deepEqual(actions(16), [256, 256, 0]);
+    assert.deepEqual(actions(58), [281, 281, 1]);
+    assert.deepEqual(actions(62), [1, 1, 1]); // terminal is focusable without text actions
+    assert.deepEqual(actions(40), [1024, 1024, 0]);
+    assert.deepEqual(actions(0, 0, 2047), [2047, 0, 0]);
+    assert.deepEqual(actions(0, 2, 2047), [2015, 0, 0]);
+    assert.deepEqual(actions(38, 31, 2047), [0, 0, 0]);
+    for (const request of [[17], [17, 0, 0, 0, 0], [17, 0, 0, 0, 0, 0, 0],
+      [17, 63, 0, 0, 0, 0], [17, 0, 1, 0, 0, 0], [17, 0, 0, 32, 0, 0], [17, 0, 0, 0, 0, 8]])
+      assert.throws(() => policy(new Uint8Array(request)), /semantic actions request/);
+  }
+});

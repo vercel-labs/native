@@ -1991,6 +1991,7 @@ fn widgetChildrenScrollHorizontalOnly(widget: Widget, viewport: geometry.RectF) 
 
 pub fn semanticActions(widget: Widget) WidgetActions {
     if (widget.state.disabled) return .{};
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).actions;
     var actions = defaultSemanticActions(widget);
     actions.focus = actions.focus or widget.semantics.actions.focus;
     actions.press = actions.press or widget.semantics.actions.press;
@@ -2011,6 +2012,7 @@ pub fn semanticActions(widget: Widget) WidgetActions {
 
 pub fn defaultSemanticActions(widget: Widget) WidgetActions {
     if (widget.state.disabled) return .{};
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).defaults;
 
     var actions = WidgetActions{
         .focus = widget.semantics.focusable or defaultFocusable(widget),
@@ -2058,12 +2060,63 @@ pub fn defaultSemanticActions(widget: Widget) WidgetActions {
 }
 
 pub fn defaultFocusable(widget: Widget) bool {
+    if (widget.state.disabled) return false;
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).focusable;
     // Tree rows are role-driven: `role = .treeitem` on any row makes it
     // part of the tree's roving keyboard focus set.
     if (widget.semantics.role == .treeitem) return !widget.state.disabled;
     return switch (widget.kind) {
         .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider, .terminal => !widget.state.disabled,
         else => false,
+    };
+}
+
+// Explicit wire bits, independent of WidgetActions' native bool layout.
+const semantic_action_fields = [_][]const u8{
+    "focus",         "press",  "toggle", "increment",  "decrement", "set_text",
+    "set_selection", "select", "drag",   "drop_files", "dismiss",
+};
+comptime {
+    if (@typeInfo(WidgetActions).@"struct".fields.len != semantic_action_fields.len)
+        @compileError("update the compiled semantic action protocol for new actions");
+}
+
+fn semanticActionBits(actions: WidgetActions) u16 {
+    var bits: u16 = 0;
+    inline for (semantic_action_fields, 0..) |field, bit| {
+        if (@field(actions, field)) bits |= @as(u16, 1) << bit;
+    }
+    return bits;
+}
+
+fn semanticActionsFromBits(bits: u16) WidgetActions {
+    var actions = WidgetActions{};
+    inline for (semantic_action_fields, 0..) |field, bit| {
+        @field(actions, field) = bits & (@as(u16, 1) << bit) != 0;
+    }
+    return actions;
+}
+
+fn compiledSemanticActions(widget: Widget) struct { actions: WidgetActions, defaults: WidgetActions, focusable: bool } {
+    const kind = widget_model.widgetKindCode(widget.kind);
+    const authored = semanticActionBits(widget.semantics.actions);
+    const request = [_]u8{
+        17,                  @truncate(kind),          @truncate(kind >> 8),
+        @as(u8, if (widget.state.disabled) 1 else 0) | @as(u8, if (widget.state.read_only) 2 else 0) |
+            @as(u8, if (widget.semantics.role == .treeitem) 4 else 0) | @as(u8, if (widget.semantics.focusable) 8 else 0) |
+            @as(u8, if (widget.command.len > 0) 16 else 0),
+        @truncate(authored), @truncate(authored >> 8),
+    };
+    // Each callback copies out of scriptc's arena before another policy/view
+    // call can reset it. These decoded records contain native-owned values.
+    var output: [5]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != output.len or
+        output[1] > 7 or output[3] > 7 or output[4] > 1)
+        @panic("invalid compiled semantic actions result");
+    return .{
+        .actions = semanticActionsFromBits(std.mem.readInt(u16, output[0..2], .little)),
+        .defaults = semanticActionsFromBits(std.mem.readInt(u16, output[2..4], .little)),
+        .focusable = output[4] == 1,
     };
 }
 

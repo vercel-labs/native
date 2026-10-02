@@ -212,8 +212,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor_offset = value.anchorOffset,
     }, children.items);
     if (comptime @hasDecl(core, "nativeTextPolicy")) {
-        // Every primitive can carry composed press semantics. Specialized
-        // callbacks below also accept the shared keyboard-control tag.
+        // Every primitive can carry composed semantics. Specialized callbacks
+        // below also accept shared keyboard, semantic-control and action tags.
         result.widget.interaction_policy = core.nativeTextPolicy;
     }
     if (comptime @hasDecl(core, "nativeRadioPolicy")) {

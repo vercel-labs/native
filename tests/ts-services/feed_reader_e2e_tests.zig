@@ -3933,3 +3933,136 @@ test "compiled semantic policy owns pointer handler choice and preserves radio c
     try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(999999, .up));
     try std.testing.expectEqual(before, Spy.calls);
 }
+
+test "compiled semantic derivation matches every kind flag and authored action mask" {
+    const policies = [_]*const fn ([]const u8, []u8) usize{
+        core.nativeTextPolicy,   core.nativeRadioPolicy,     core.nativeTabsPolicy,
+        core.nativeTreePolicy,   core.nativeListPolicy,      core.nativeMenuPolicy,
+        core.nativeTogglePolicy, core.nativeAccordionPolicy, core.nativeSliderPolicy,
+        core.nativeSplitPolicy,  core.nativeResizablePolicy, core.nativeScrollPolicy,
+    };
+    for (std.enums.values(canvas.WidgetKind)) |kind| {
+        for (0..32) |flags| {
+            var reference = canvas.Widget{
+                .id = 1,
+                .kind = kind,
+                .state = .{ .disabled = flags & 1 != 0, .read_only = flags & 2 != 0 },
+                .semantics = .{ .role = if (flags & 4 != 0) .treeitem else .none, .focusable = flags & 8 != 0 },
+                .command = if (flags & 16 != 0) "activate" else "",
+            };
+            var compiled = reference;
+            compiled.interaction_policy = policies[(flags + canvas.widgetKindCode(kind)) % policies.len];
+            // With authored actions empty and read-only off, the reference's
+            // merged actions expose its defaults. Inspect the copied wire
+            // defaults separately because read-only only masks the merged set.
+            var default_reference = reference;
+            default_reference.state.read_only = false;
+            const defaults = canvas.semanticActions(default_reference);
+            var expected_bits: u16 = 0;
+            inline for (@typeInfo(canvas.WidgetActions).@"struct".fields, 0..) |field, bit| {
+                if (@field(defaults, field.name)) expected_bits |= @as(u16, 1) << bit;
+            }
+            var output: [5]u8 = undefined;
+            _ = compiled.interaction_policy.?(&.{ 17, @intCast(canvas.widgetKindCode(kind)), 0, @intCast(flags), 0, 0 }, &output);
+            try std.testing.expectEqual(expected_bits, std.mem.readInt(u16, output[2..4], .little));
+            default_reference.semantics.focusable = false;
+            try std.testing.expectEqual(canvas.widgetIsFocusable(default_reference), output[4] == 1);
+            try std.testing.expectEqual(canvas.widgetIsFocusable(reference), canvas.widgetIsFocusable(compiled));
+            for (0..2048) |mask| {
+                const actions = canvas.WidgetActions{
+                    .focus = mask & 1 != 0,
+                    .press = mask & 2 != 0,
+                    .toggle = mask & 4 != 0,
+                    .increment = mask & 8 != 0,
+                    .decrement = mask & 16 != 0,
+                    .set_text = mask & 32 != 0,
+                    .set_selection = mask & 64 != 0,
+                    .select = mask & 128 != 0,
+                    .drag = mask & 256 != 0,
+                    .drop_files = mask & 512 != 0,
+                    .dismiss = mask & 1024 != 0,
+                };
+                reference.semantics.actions = actions;
+                compiled.semantics.actions = actions;
+                compiled.interaction_policy = policies[(mask + flags + canvas.widgetKindCode(kind)) % policies.len];
+                try std.testing.expectEqualDeep(canvas.semanticActions(reference), canvas.semanticActions(compiled));
+            }
+        }
+        // Other roles carry no tree-specific defaults, even on composed rows.
+        for (std.enums.values(canvas.WidgetRole)) |role| {
+            const reference = canvas.Widget{ .kind = kind, .semantics = .{ .role = role } };
+            var compiled = reference;
+            compiled.interaction_policy = core.nativeTextPolicy;
+            try std.testing.expectEqualDeep(canvas.semanticActions(reference), canvas.semanticActions(compiled));
+        }
+    }
+    const Never = struct {
+        fn policy(_: []const u8, _: []u8) usize {
+            @panic("disabled semantic derivation called compiled policy");
+        }
+    };
+    const disabled = canvas.Widget{ .kind = .button, .state = .{ .disabled = true }, .interaction_policy = Never.policy };
+    try std.testing.expect(canvas.semanticActions(disabled).isEmpty());
+    try std.testing.expect(!canvas.widgetIsFocusable(disabled));
+
+    const retained = canvas.semanticActions(.{ .kind = .combobox, .state = .{ .read_only = true }, .interaction_policy = core.nativeTextPolicy });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = core.initialModel();
+    _ = core.nativeView(arena.allocator());
+    var output: [5]u8 = undefined;
+    _ = core.nativeScrollPolicy(&.{ 17, 58, 0, 0, 0, 0 }, &output);
+    try std.testing.expectEqualDeep(canvas.WidgetActions{ .focus = true, .press = true, .set_selection = true }, retained);
+}
+
+test "compiled semantic derivation drives accessibility focus drag and pointer consumers" {
+    const Msg = union(enum) { press, toggle };
+    const Ui = canvas.Ui(Msg);
+    const Spy = struct {
+        var calls: usize = 0;
+        var suppress = false;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 17) {
+                calls += 1;
+                if (suppress) {
+                    @memset(output[0..5], 0);
+                    return 5;
+                }
+            }
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    var button = ui.button(.{ .on_press = .press }, "Run");
+    button.widget.interaction_policy = Spy.policy;
+    const tree = try ui.finalize(ui.column(.{}, .{button}));
+    const id = tree.root.children[0].id;
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 300, 200), &nodes);
+    var records: [2]canvas.WidgetSemanticsNode = undefined;
+    Spy.calls = 0;
+    Spy.suppress = true;
+    const suppressed = try layout.collectSemantics(&records);
+    const button_index = for (suppressed, 0..) |record, index| {
+        if (record.id == id) break index;
+    } else return error.ExpectedButtonSemantics;
+    try std.testing.expect(suppressed[button_index].actions.isEmpty());
+    try std.testing.expect(!suppressed[button_index].focusable);
+    try std.testing.expect(!canvas.widgetIsFocusable(layout.findById(id).?.widget));
+    try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(id, .up));
+    var drag_nodes: [1]canvas.WidgetLayoutNode = undefined;
+    const drag_layout = try canvas.layoutWidgetTree(.{ .id = 3, .kind = .resizable, .interaction_policy = Spy.policy }, geometry.RectF.init(0, 0, 200, 100), &drag_nodes);
+    var route_entries: [3]canvas.WidgetEventRouteEntry = undefined;
+    try std.testing.expect((try drag_layout.routeDragEvent(.{ .source_id = 3, .point = .{} }, &route_entries)).target == null);
+    try std.testing.expect(Spy.calls > 0);
+    Spy.suppress = false;
+    const enabled = try layout.collectSemantics(&records);
+    try std.testing.expectEqual(id, enabled[button_index].id);
+    try std.testing.expect(enabled[button_index].actions.press);
+    try std.testing.expect(enabled[button_index].focusable);
+    try std.testing.expect(canvas.widgetIsFocusable(layout.findById(id).?.widget));
+    try std.testing.expectEqualDeep(@as(?Msg, .press), tree.msgForPointer(id, .up));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), (try drag_layout.routeDragEvent(.{ .source_id = 3, .point = .{} }, &route_entries)).target.?.id);
+}
