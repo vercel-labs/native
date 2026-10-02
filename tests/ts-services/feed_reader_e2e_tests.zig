@@ -3739,13 +3739,9 @@ test "compiled keyboard controls match native kind role and stamped focus preced
                     widget.state.expanded = expanded;
                     const event = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = key, .focus_moved = flags & 2 != 0, .radio_group_selection = flags & 4 != 0, .modifiers = .{ .shift = true } };
                     const expected = canvas.widgetKeyboardControlIntent(widget, event);
-                    // Use the genuine callback for numeric/scroll planning;
-                    // shared activation requests exercise every export in turn.
-                    widget.interaction_policy = switch (kind) {
-                        .slider => core.nativeSliderPolicy,
-                        .split_divider => core.nativeSplitPolicy,
-                        else => policies[(flags + @intFromEnum(kind)) % policies.len],
-                    };
+                    // Shared activation and complete step planning both work
+                    // through every specialized callback.
+                    widget.interaction_policy = policies[(flags + @intFromEnum(kind)) % policies.len];
                     try std.testing.expectEqualDeep(expected, canvas.widgetKeyboardControlIntent(widget, event));
                 }
             }
@@ -3850,7 +3846,7 @@ test "compiled semantic controls match native grants kind and tree role preceden
                         var widget = canvas.Widget{ .kind = kind, .value = 0.5, .frame = geometry.RectF.init(0, 0, 160, 100), .command = if (command) "activate" else "", .semantics = .{ .role = if (tree_row) .treeitem else .none } };
                         const expected = canvas.widgetSemanticControlIntentWithActions(widget, action, actions);
                         const defaults = canvas.widgetSemanticControlIntent(widget, action);
-                        widget.interaction_policy = if (kind == .slider) core.nativeSliderPolicy else policies[(bits + @intFromEnum(kind)) % policies.len];
+                        widget.interaction_policy = policies[(bits + @intFromEnum(kind)) % policies.len];
                         try std.testing.expectEqualDeep(expected, canvas.widgetSemanticControlIntentWithActions(widget, action, actions));
                         try std.testing.expectEqualDeep(defaults, canvas.widgetSemanticControlIntent(widget, action));
                     }
@@ -4065,4 +4061,89 @@ test "compiled semantic derivation drives accessibility focus drag and pointer c
     try std.testing.expect(canvas.widgetIsFocusable(layout.findById(id).?.widget));
     try std.testing.expectEqualDeep(@as(?Msg, .press), tree.msgForPointer(id, .up));
     try std.testing.expectEqual(@as(canvas.ObjectId, 3), (try drag_layout.routeDragEvent(.{ .source_id = 3, .point = .{} }, &route_entries)).target.?.id);
+}
+
+test "shared step planning preserves complete f32 intents and public scroll helper behavior" {
+    const policies = [_]*const fn ([]const u8, []u8) usize{
+        core.nativeTextPolicy,   core.nativeRadioPolicy, core.nativeTabsPolicy,      core.nativeTreePolicy,
+        core.nativeListPolicy,   core.nativeMenuPolicy,  core.nativeTogglePolicy,    core.nativeAccordionPolicy,
+        core.nativeSliderPolicy, core.nativeSplitPolicy, core.nativeResizablePolicy, core.nativeScrollPolicy,
+    };
+    for ([_]canvas.WidgetKind{ .slider, .split_divider, .grid, .scroll_view, .list, .data_grid, .table, .stack }) |kind| {
+        for ([_]f32{ -0.1, 0, 0.00001, 0.3, 0.4999, 0.95, 1, 1.2 }) |value| {
+            for ([_]canvas.ScrollAxes{ .vertical, .horizontal, .both }) |axes| for ([_]bool{ false, true }) |virtualized| {
+                for ([_]geometry.SizeF{ .{}, .{ .width = 333.3, .height = 155.5 }, .{ .width = 1, .height = 1 } }) |size| {
+                    const children = [_]canvas.Widget{.{ .kind = .stack, .frame = geometry.RectF.init(0, 0, 900, 0.1) }};
+                    const reference = canvas.Widget{ .kind = kind, .value = value, .scroll_axes = axes, .layout = .{ .virtualized = virtualized, .padding = geometry.InsetsF.all(0.25) }, .frame = geometry.RectF.init(0, 0, size.width, size.height), .children = &children };
+                    var compiled = reference;
+                    for ([_][]const u8{ "ArrowLeft", "ARROWRIGHT", "arrowup", "arrowdown", "Home", "end", "pageup", "PageDown", "space", "return", "" }, 0..) |key, key_index| {
+                        for ([_]bool{ false, true }) |shift| {
+                            compiled.interaction_policy = policies[(key_index + @intFromEnum(kind)) % policies.len];
+                            const event = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = key, .modifiers = .{ .shift = shift } };
+                            try std.testing.expectEqualDeep(canvas.widgetKeyboardControlIntent(reference, event), canvas.widgetKeyboardControlIntent(compiled, event));
+                            try std.testing.expectEqualDeep(canvas.widgetScrollKeyboardIntent(reference, event), canvas.widgetScrollKeyboardIntent(compiled, event));
+                            try std.testing.expectEqualDeep(canvas.widgetScrollKeyboardDelta(reference, event), canvas.widgetScrollKeyboardDelta(compiled, event));
+                        }
+                    }
+                    for ([_]canvas.WidgetSemanticAction{ .increment, .decrement }) |action| {
+                        for (policies) |policy| {
+                            compiled.interaction_policy = policy;
+                            try std.testing.expectEqualDeep(canvas.widgetSemanticControlIntentWithActions(reference, action, .{ .increment = true, .decrement = true }), canvas.widgetSemanticControlIntentWithActions(compiled, action, .{ .increment = true, .decrement = true }));
+                        }
+                    }
+                }
+            };
+        }
+    }
+    // Public delta helpers historically ignore disabled state; intent helpers
+    // suppress it. Arena resets must not change a previously returned intent.
+    const disabled = canvas.Widget{ .kind = .scroll_view, .state = .{ .disabled = true }, .interaction_policy = core.nativeTextPolicy };
+    const event = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowdown" };
+    try std.testing.expectEqualDeep(@as(?geometry.OffsetF, geometry.OffsetF.init(0, 24)), canvas.widgetScrollKeyboardDelta(disabled, event));
+    try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetScrollKeyboardIntent(disabled, event));
+    // Numeric helpers and scroll Home/End need no normalized geometry.
+    const invalid_frame = geometry.RectF.init(0, 0, -2, 1);
+    for ([_]canvas.WidgetKind{ .slider, .split_divider, .scroll_view }) |kind| {
+        const reference = canvas.Widget{ .kind = kind, .value = 0.3, .frame = invalid_frame };
+        var compiled = reference;
+        compiled.interaction_policy = core.nativeTextPolicy;
+        try std.testing.expectEqualDeep(canvas.widgetKeyboardControlIntent(reference, .{ .phase = .key_down, .key = "end" }), canvas.widgetKeyboardControlIntent(compiled, .{ .phase = .key_down, .key = "end" }));
+    }
+    const retained = canvas.widgetKeyboardControlIntent(.{ .kind = .slider, .value = 0.3, .interaction_policy = core.nativeMenuPolicy }, .{ .phase = .key_down, .key = "arrowright" }).?;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = core.initialModel();
+    _ = core.nativeView(arena.allocator());
+    _ = canvas.widgetScrollKeyboardIntent(.{ .kind = .scroll_view, .interaction_policy = core.nativeTreePolicy }, event);
+    try std.testing.expectEqualDeep(canvas.WidgetControlIntent{ .kind = .set_value, .actions = .{ .increment = true }, .value = @as(f32, 0.3) + @as(f32, 0.05) }, retained);
+}
+
+test "complete step consumers honor the compiled result instead of falling back to native planning" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var suppress = true;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 18) {
+                calls += 1;
+                if (suppress) {
+                    @memset(output[0..16], 0);
+                    return 16;
+                }
+            }
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    Spy.calls = 0;
+    Spy.suppress = true;
+    const slider = canvas.Widget{ .kind = .slider, .value = 0.3, .interaction_policy = Spy.policy };
+    const scroll = canvas.Widget{ .kind = .scroll_view, .interaction_policy = Spy.policy };
+    const right = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowright" };
+    try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetKeyboardControlIntent(slider, right));
+    try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetScrollKeyboardIntent(scroll, right));
+    try std.testing.expectEqual(@as(?geometry.OffsetF, null), canvas.widgetScrollKeyboardDelta(scroll, right));
+    try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetSemanticControlIntentWithActions(slider, .increment, .{ .increment = true }));
+    try std.testing.expectEqual(@as(usize, 4), Spy.calls);
+    Spy.suppress = false;
+    try std.testing.expectEqual(@as(f32, 0.3) + @as(f32, 0.05), canvas.widgetKeyboardControlIntent(slider, right).?.value.?);
+    try std.testing.expectEqualDeep(geometry.OffsetF.init(0, 24), canvas.widgetScrollKeyboardDelta(scroll, right).?);
 }

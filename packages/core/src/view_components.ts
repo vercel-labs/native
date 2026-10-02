@@ -43,6 +43,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request[0] === 4) return nscvTextEdit(request);
   if (request[0] === 5) return nscvTextReconcile(request);
@@ -136,8 +137,8 @@ function nscvKeyboardControl(request: Uint8Array): Uint8Array {
  * Native checks disabled/hidden state and supplies advertised actions.
  * Press on selectable rows selects and presses; an explicit select
  * carries press only when granted. Result uses tag 15's intent/action
- * vocabulary, with 4 delegating eligible steps to native geometry/value
- * planners. The same resolution serves public semantic APIs and pointer handlers.
+ * vocabulary, with 4 delegating eligible steps to shared operation 18.
+ * The same resolution serves public semantic APIs and pointer handlers.
  */
 function nscvSemanticControl(request: Uint8Array): Uint8Array {
   if (request.length !== 5 || request[1]! > 21 || request[2]! > 4 ||
@@ -187,6 +188,67 @@ function nscvSemanticActions(request: Uint8Array): Uint8Array {
   result[0] = actions & 255; result[1] = actions >>> 8;
   result[2] = defaults & 255; result[3] = defaults >>> 8;
   result[4] = focusable ? 1 : 0;
+  return result;
+}
+
+/** Shared step intents: tag 18, kind from tag 15, mode (0 keyboard control,
+ * 1 semantic increment, 2 semantic decrement, 3 scroll keyboard), key from
+ * tag 15 plus 9 PageUp/10 PageDown, flags (shift/virtualized/horizontal axes/
+ * both axes/sideways-only overflow), then current value and measured viewport
+ * width/height f32LE. Native grants eligibility and measures overflow facts.
+ * Existing numeric
+ * policies retain each f32 arithmetic stage. The 16-byte copied result is
+ * kind (0 none, 1 value, 2 scroll by, 3 start, 4 end), increment/decrement
+ * bits, two zero bytes, then value/dx/dy f32LE. Keyboard value action bits
+ * compare the unclamped step; semantic bits retain the requested direction.
+ */
+function nscvStepControl(request: Uint8Array): Uint8Array {
+  if (request.length !== 17 || request[1]! > 21 || request[2]! > 3 ||
+      request[3]! > 10 || request[4]! > 31 || (request[4]! & 12) === 12) throw new Error("invalid step control request");
+  const kind = request[1]!, mode = request[2]!, key = request[3]!, flags = request[4]!;
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const current = wire.getFloat32(5, true), width = wire.getFloat32(9, true), height = wire.getFloat32(13, true);
+  const result = new Uint8Array(16), out = new DataView(result.buffer);
+  const semantic = mode === 1 || mode === 2;
+  if (mode === 0 && (kind === 15 || kind === 16) || semantic && kind === 15) {
+    let operation = 0;
+    if (semantic) operation = mode === 1 ? 3 : 2;
+    else if (key === 5 || kind === 15 && key === 4) operation = (flags & 1) !== 0 ? 4 : 2;
+    else if (key === 6 || kind === 15 && key === 3) operation = (flags & 1) !== 0 ? 5 : 3;
+    else if (key === 7) operation = 6;
+    else if (key === 8) operation = 7;
+    else return result;
+    const input = new Uint8Array(kind === 15 ? 14 : 26);
+    input[0] = operation + (kind === 16 ? 1 : 0);
+    new DataView(input.buffer).setFloat32(2, current, true);
+    const valueBytes = kind === 15 ? nscvSliderPolicy(input) : nscvSplitPolicy(input);
+    const value = new DataView(valueBytes.buffer, valueBytes.byteOffset, valueBytes.byteLength).getFloat32(0, true);
+    result[0] = 1;
+    result[1] = semantic ? (mode === 1 ? 1 : 2) : (value > current ? 1 : value < current ? 2 : 0);
+    out.setFloat32(4, Math.max(0, Math.min(1, value)), true);
+    return result;
+  }
+  if (mode !== 3 && !(kind >= 17 && kind <= 21)) return result;
+  if (!semantic && (key === 7 || key === 8)) {
+    result[0] = key === 7 ? 3 : 4; result[1] = key === 7 ? 2 : 1;
+    return result;
+  }
+  const operation = semantic ? (mode === 1 ? 11 : 10) :
+    key === 5 ? 4 : key === 6 ? 5 : key === 3 ? 6 : key === 4 ? 7 : key === 9 ? 8 : key === 10 ? 9 : 0;
+  if (operation === 0) return result;
+  const input = new Uint8Array(26), args = new DataView(input.buffer);
+  input[0] = 128 + operation;
+  const horizontal = kind === 18 && (flags & 2) === 0 && (flags & 4) !== 0;
+  const dual = kind === 18 && (flags & 2) === 0 && (flags & 8) !== 0;
+  const primary = horizontal || dual && (flags & 16) !== 0;
+  input[1] = 1 | (semantic ? (primary ? 8 : 0) : (horizontal ? 8 : 0) | (dual ? 16 : 0));
+  args.setFloat32(6, width, true); args.setFloat32(10, height, true);
+  const deltaBytes = nscvScrollPolicy(input);
+  const delta = new DataView(deltaBytes.buffer, deltaBytes.byteOffset, deltaBytes.byteLength);
+  const x = delta.getFloat32(0, true), y = delta.getFloat32(4, true), step = y !== 0 ? y : x;
+  result[0] = 2;
+  result[1] = semantic ? (mode === 1 ? 1 : 2) : (step > 0 ? 1 : step < 0 ? 2 : 0);
+  out.setFloat32(8, x, true); out.setFloat32(12, y, true);
   return result;
 }
 
@@ -711,6 +773,7 @@ export function native_radio_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid radio policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -776,6 +839,7 @@ export function native_tabs_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tabs policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -848,6 +912,7 @@ export function native_list_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid list policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -901,6 +966,7 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid menu policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -969,6 +1035,7 @@ export function native_toggle_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   if (request.length === 0) throw new Error("invalid toggle policy request");
   const operation = request[0]!;
   if (operation === 8 || operation === 9 || operation === 10) {
@@ -1015,6 +1082,7 @@ export function native_accordion_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   if (request.length !== 2 || (request[0] !== 8 && request[0] !== 9) || request[1]! > 15) {
     throw new Error("invalid accordion state request");
   }
@@ -1038,6 +1106,11 @@ export function native_slider_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
+  return nscvSliderPolicy(request);
+}
+
+function nscvSliderPolicy(request: Uint8Array): Uint8Array {
   if (request.length !== 14 || request[0]! > 7 || request[1]! > 3) {
     throw new Error("invalid slider policy request");
   }
@@ -1072,6 +1145,11 @@ export function native_split_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
+  return nscvSplitPolicy(request);
+}
+
+function nscvSplitPolicy(request: Uint8Array): Uint8Array {
   if (request.length !== 26 || request[0]! > 8 || request[1]! > 7) throw new Error("invalid split policy request");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const operation = request[0]!, flags = request[1]!;
@@ -1118,6 +1196,7 @@ export function native_resizable_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   if (request.length !== 13 || request[0]! > 1) throw new Error("invalid resizable policy request");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const height = wire.getFloat32(1, true), current = wire.getFloat32(5, true), delta = wire.getFloat32(9, true);
@@ -1143,6 +1222,11 @@ export function native_scroll_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
+  return nscvScrollPolicy(request);
+}
+
+function nscvScrollPolicy(request: Uint8Array): Uint8Array {
   if (request.length !== 26 || request[0]! < 128 || request[0]! > 142 || request[1]! > 31) {
     throw new Error("invalid scroll policy request");
   }
@@ -1196,6 +1280,7 @@ export function native_tree_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
+  if (request[0] === 18) return nscvStepControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tree policy request");
   const operation = request[0]!, subject = read(1), count = read(3);

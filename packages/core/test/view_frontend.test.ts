@@ -934,3 +934,46 @@ test("semantic action derivation keeps defaults, authored actions and focusabili
       assert.throws(() => policy(new Uint8Array(request)), /semantic actions request/);
   }
 });
+
+test("shared step intents preserve raw boundary actions, axis facts and callback ownership", () => {
+  const exports: Record<string, (request: Uint8Array) => Uint8Array> = {};
+  runInNewContext(ts.transpile(compileView('<button on-press="increment">Go</button>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const line = (extent: number) => Math.max(24, Math.fround(Math.fround(extent) * Math.fround(0.35)));
+  const page = (extent: number) => Math.max(line(extent), Math.fround(Math.fround(extent) * Math.fround(0.85)));
+  for (const name of ["text", "radio", "tabs", "tree", "list", "menu", "toggle", "accordion", "slider", "split", "resizable", "scroll"]) {
+    const policy = exports[`native_${name}_policy`]!;
+    const intent = (kind: number, mode: number, key: number, flags = 0, value = 0.95) => {
+      const request = new Uint8Array(17), args = new DataView(request.buffer);
+      request.set([18, kind, mode, key, flags]);
+      args.setFloat32(5, value, true); args.setFloat32(9, 333.3, true); args.setFloat32(13, 155.5, true);
+      const before = request.slice(), result = policy(request), out = new DataView(result.buffer, result.byteOffset, result.byteLength);
+      assert.deepEqual(request, before);
+      assert.equal(result.length, 16); assert.equal(result[2], 0); assert.equal(result[3], 0);
+      return [result[0], result[1], out.getFloat32(4, true), out.getFloat32(8, true), out.getFloat32(12, true)];
+    };
+    assert.deepEqual(intent(15, 0, 6, 1, 1), [1, 1, 1, 0, 0]); // raw step advertises increment at the clamp
+    assert.deepEqual(intent(15, 0, 7, 0, 0), [1, 0, 0, 0, 0]);
+    assert.deepEqual(intent(15, 1, 0, 0, 1), [1, 1, 1, 0, 0]);
+    assert.deepEqual(intent(15, 2, 0, 0, 0), [1, 2, 0, 0, 0]);
+    assert.deepEqual(intent(16, 0, 3), [0, 0, 0, 0, 0]); // split leaves vertical arrows to focus routing
+    assert.deepEqual(intent(16, 1, 0), [0, 0, 0, 0, 0]);
+    assert.deepEqual(intent(18, 0, 6, 4), [2, 1, 0, line(333.3), 0]);
+    assert.deepEqual(intent(18, 0, 6, 6), [2, 1, 0, 0, line(155.5)]); // virtualized regions stay vertical
+    assert.deepEqual(intent(18, 0, 5, 8), [2, 2, 0, -line(333.3), 0]);
+    assert.deepEqual(intent(18, 0, 10, 8), [2, 1, 0, 0, page(155.5)]);
+    assert.deepEqual(intent(18, 1, 0, 24), [2, 1, 0, page(333.3), 0]);
+    assert.deepEqual(intent(18, 1, 0, 26), [2, 1, 0, 0, page(155.5)]);
+    assert.deepEqual(intent(19, 1, 0, 24), [2, 1, 0, 0, page(155.5)]);
+    assert.deepEqual(intent(0, 3, 9, 4), [2, 2, 0, 0, -page(155.5)]); // public scroll helper on any widget
+    assert.deepEqual(intent(18, 0, 7), [3, 2, 0, 0, 0]);
+    assert.deepEqual(intent(18, 0, 8), [4, 1, 0, 0, 0]);
+    assert.deepEqual(intent(18, 0, 1), [0, 0, 0, 0, 0]);
+    const retained = policy(new Uint8Array([18, 18, 0, 7, 0, ...new Uint8Array(12)]));
+    intent(15, 0, 6); assert.deepEqual([...retained], [3, 2, ...new Uint8Array(14)]);
+    for (const request of [new Uint8Array([18]), new Uint8Array(16).fill(18), new Uint8Array(18).fill(18),
+      new Uint8Array([18, 22, 0, 0, 0, ...new Uint8Array(12)]), new Uint8Array([18, 0, 4, 0, 0, ...new Uint8Array(12)]),
+      new Uint8Array([18, 0, 0, 11, 0, ...new Uint8Array(12)]), new Uint8Array([18, 0, 0, 0, 32, ...new Uint8Array(12)]),
+      new Uint8Array([18, 0, 0, 0, 12, ...new Uint8Array(12)])])
+      assert.throws(() => policy(request), /step control request/);
+  }
+});

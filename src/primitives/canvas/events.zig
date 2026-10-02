@@ -1307,6 +1307,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             },
             else => unreachable,
         };
+        return compiledStepControlIntent(widget, 0, keyboard);
     }
     // Tree rows are ROLE-driven (any pressable row becomes one by
     // carrying `role = .treeitem`), so their keymap resolves before the
@@ -1348,7 +1349,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        .slider => if (widgetSliderControlKeyboardValue(widget, keyboard)) |next_value|
+        .slider => if (widgetSliderKeyboardValue(widget.value, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -1363,7 +1364,7 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
         // adjust the parent split's fraction, Home/End jump to the
         // clamp edges (the runtime clamps against the panes' min
         // widths when it applies the value).
-        .split_divider => if (widgetSplitControlKeyboardValue(widget, keyboard)) |next_value|
+        .split_divider => if (widgetSplitDividerKeyboardValue(widget.value, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -1388,8 +1389,8 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
 
 /// Stable kind/key projections for shared operation 15. The compiled policy
 /// chooses activation and tree/radio precedence; native retains eligibility
-/// and the existing numeric/scroll planners. Copy both result bytes before
-/// another compiler call resets its arena.
+/// and geometry measurement. Numeric/scroll intents use operation 18 below.
+/// Copy both result bytes before another compiler call resets its arena.
 fn compiledKeyboardControlResult(widget: Widget, keyboard: WidgetKeyboardEvent, policy: *const fn ([]const u8, []u8) usize) [2]u8 {
     const kind = compiledControlKind(widget.kind);
     const keys = [_][]const u8{ "enter", "space", "arrowup", "arrowdown", "arrowleft", "arrowright", "home", "end" };
@@ -1450,6 +1451,61 @@ fn compiledControlKind(kind: WidgetKind) u8 {
         .data_grid => 20,
         .table => 21,
         else => 0,
+    };
+}
+
+/// Shared operation 18 owns key-to-operation mapping and complete numeric /
+/// scroll intent assembly. Native supplies canonical keys, measured viewport
+/// and overflow witnesses; results contain only copied native-owned values.
+fn compiledStepControlIntent(widget: Widget, mode: u8, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    const keys = [_][]const u8{ "enter", "space", "arrowup", "arrowdown", "arrowleft", "arrowright", "home", "end", "pageup", "pagedown" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, code| {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, name)) {
+            key = @intCast(code);
+            break;
+        }
+    }
+    const kind = compiledControlKind(widget.kind);
+    // Numeric steps and boundary jumps do not depend on geometry. Keep the
+    // same measurement preconditions as the native reference helpers.
+    const measure_scroll = (mode == 3 or (kind >= 17 and kind <= 21)) and
+        !((mode == 0 or mode == 3) and (key == 7 or key == 8));
+    const viewport = if (measure_scroll) widget.frame.inset(widget.layout.padding).normalized() else geometry.RectF{};
+    const sideways_overflow = measure_scroll and (mode == 1 or mode == 2) and widgetChildrenScrollHorizontalOnly(widget, viewport);
+    var request: [17]u8 = undefined;
+    request[0..5].* = .{
+        18, kind, mode, key,
+        @as(u8, if (keyboard.modifiers.shift) 1 else 0) | @as(u8, if (widget.layout.virtualized) 2 else 0) |
+            @as(u8, if (widget.scroll_axes == .horizontal) 4 else if (widget.scroll_axes == .both) 8 else 0) |
+            @as(u8, if (sideways_overflow) 16 else 0),
+    };
+    const value: f32 = if (widget.kind == .slider or widget.kind == .split_divider) widget.value else 0;
+    for ([_]f32{ value, viewport.width, viewport.height }, 0..) |number, index|
+        std.mem.writeInt(u32, request[5 + index * 4 ..][0..4], @bitCast(number), .little);
+    var output: [16]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != output.len or output[0] > 4 or
+        output[1] > 2 or !std.mem.allEqual(u8, output[2..4], 0))
+        @panic("invalid compiled step control result");
+    const next: f32 = @bitCast(std.mem.readInt(u32, output[4..8], .little));
+    const dx: f32 = @bitCast(std.mem.readInt(u32, output[8..12], .little));
+    const dy: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
+    if (!std.math.isFinite(next) or !std.math.isFinite(dx) or !std.math.isFinite(dy) or
+        (output[0] != 1 and next != 0) or (output[0] != 2 and (dx != 0 or dy != 0)) or
+        (output[0] == 0 and output[1] != 0) or (output[0] == 1 and (next < 0 or next > 1)) or
+        (output[0] == 3 and output[1] != 2) or (output[0] == 4 and output[1] != 1))
+        @panic("invalid compiled step control arguments");
+    if (output[0] == 0) return null;
+    return .{
+        .kind = switch (output[0]) {
+            1 => .set_value,
+            2 => .scroll_by,
+            3 => .scroll_to_start,
+            else => .scroll_to_end,
+        },
+        .actions = .{ .increment = output[1] & 1 != 0, .decrement = output[1] & 2 != 0 },
+        .value = if (output[0] == 1) next else null,
+        .delta = geometry.OffsetF.init(dx, dy),
     };
 }
 
@@ -1644,22 +1700,6 @@ pub fn widgetCompiledSliderValue(widget: Widget, operation: u8, previous_source:
     return value;
 }
 
-fn widgetSliderControlKeyboardValue(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
-    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier() or widget.state.disabled) return null;
-    if (widget.interaction_policy == null) return widgetSliderKeyboardValue(widget.value, keyboard);
-    const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown"))
-        (if (keyboard.modifiers.shift) @as(u8, 4) else 2)
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or std.ascii.eqlIgnoreCase(keyboard.key, "arrowup"))
-        (if (keyboard.modifiers.shift) @as(u8, 5) else 3)
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "home"))
-        6
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "end"))
-        7
-    else
-        return null;
-    return widgetCompiledSliderValue(widget, operation, null, 0, false);
-}
-
 /// Fraction steps for the split divider: the slider's step sizes, on the
 /// horizontal axis only (the vertical arrows stay free for tree/list
 /// focus travel around the divider).
@@ -1717,22 +1757,6 @@ pub fn widgetCompiledSplitValue(widget: Widget, input: SplitPolicyRequest) ?f32 
     const value: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
     if (!std.math.isFinite(value) or (input.operation < 2 and (value < 0 or value > 1))) @panic("invalid compiled split policy value");
     return value;
-}
-
-fn widgetSplitControlKeyboardValue(widget: Widget, keyboard: WidgetKeyboardEvent) ?f32 {
-    if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier() or widget.state.disabled) return null;
-    if (widget.interaction_policy == null) return widgetSplitDividerKeyboardValue(widget.value, keyboard);
-    const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft"))
-        (if (keyboard.modifiers.shift) @as(u8, 5) else 3)
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright"))
-        (if (keyboard.modifiers.shift) @as(u8, 6) else 4)
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "home"))
-        7
-    else if (std.ascii.eqlIgnoreCase(keyboard.key, "end"))
-        8
-    else
-        return null;
-    return widgetCompiledSplitValue(widget, .{ .operation = operation, .value = widget.value });
 }
 
 /// The ARIA tree-row keymap, resolved on the routed keyboard target:
@@ -1841,6 +1865,7 @@ pub fn widgetCompiledScrollResult(widget: Widget, value: ScrollPolicyRequest) ?g
 pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
+    if (widget.interaction_policy != null) return compiledStepControlIntent(widget, 3, keyboard);
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .{ .kind = .scroll_to_start, .actions = .{ .decrement = true } };
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .{ .kind = .scroll_to_end, .actions = .{ .increment = true } };
     const delta = widgetScrollKeyboardDelta(widget, keyboard) orelse return null;
@@ -1873,17 +1898,11 @@ fn widgetScrollKeymapHorizontalOnly(widget: Widget) bool {
 ///   horizontal axis — the two-axis convention native scroll views use.
 pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?geometry.OffsetF {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
-    const viewport = widget.frame.inset(widget.layout.padding).normalized();
-    if (widget.kind == .scroll_view and widget.runtime_flags.compiled_scroll_policy and widget.interaction_policy != null) {
-        const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) 4 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) 5 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) 6 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) 7 else if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) 8 else if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) 9 else return null;
-        return widgetCompiledScrollResult(widget, .{
-            .operation = operation,
-            .viewport = viewport.width,
-            .content = viewport.height,
-            .horizontal_keymap = widgetScrollKeymapHorizontalOnly(widget),
-            .dual_keymap = !widget.layout.virtualized and widget.scroll_axes == .both,
-        });
+    if (widget.interaction_policy != null) {
+        const intent = compiledStepControlIntent(widget, 3, keyboard) orelse return null;
+        return if (intent.kind == .scroll_by) intent.delta else null;
     }
+    const viewport = widget.frame.inset(widget.layout.padding).normalized();
     if (widgetScrollKeymapHorizontalOnly(widget)) {
         const line_step = @max(24, viewport.width * 0.35);
         const page_step = @max(line_step, viewport.width * 0.85);
@@ -1928,6 +1947,7 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     const increment = direction == .increment;
     if (increment and !actions.increment) return null;
     if (!increment and !actions.decrement) return null;
+    if (widget.interaction_policy != null) return compiledStepControlIntent(widget, if (increment) 1 else 2, .{ .phase = .key_down });
 
     const intent_actions = WidgetActions{
         .increment = increment,
@@ -1937,8 +1957,7 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
         .slider => .{
             .kind = .set_value,
             .actions = intent_actions,
-            .value = std.math.clamp(widgetCompiledSliderValue(widget, if (increment) 3 else 2, null, 0, false) orelse
-                (widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05)), 0, 1),
+            .value = std.math.clamp(widget.value + if (increment) @as(f32, 0.05) else @as(f32, -0.05), 0, 1),
         },
         .grid, .scroll_view, .list, .data_grid, .table => .{
             .kind = .scroll_by,
@@ -1965,7 +1984,6 @@ fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirect
     const horizontal_primary = widgetScrollKeymapHorizontalOnly(widget) or
         (widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both and
             widgetChildrenScrollHorizontalOnly(widget, viewport));
-    if (widgetCompiledScrollResult(widget, .{ .operation = if (direction == .increment) 11 else 10, .viewport = viewport.width, .content = viewport.height, .horizontal_keymap = horizontal_primary })) |delta| return delta;
     if (horizontal_primary) {
         const page_step_x = @max(@max(24, viewport.width * 0.35), viewport.width * 0.85);
         return geometry.OffsetF.init(sign * page_step_x, 0);
