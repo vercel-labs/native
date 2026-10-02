@@ -2276,8 +2276,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target.id) orelse return null;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
-            const range = canvas.widgetTextSelectionRange(widget) orelse return null;
-            if (range.isCollapsed(widget.text.len)) return null;
+            const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
         }
 

@@ -425,11 +425,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       const canonical = aliases[language] ?? language;
       if (language === "c_like" || !["plain", "zig", "javascript", "typescript", "json", "yaml", "shell", "python", "rust", "c_like", "go", "html", "css", "sql", "jsx", "tsx", "markdown"].includes(canonical)) fail(node, "code language requires a supported literal name");
       props.push(`codeLanguage: ${JSON.stringify(canonical)}`);
-      const attrs = ["source", "language", "editable", "line-numbers", "wrap", "width", "height", "min-width", "grow", "label", "key", "global-key", "on-input"];
+      const attrs = ["source", "language", "editable", "line-numbers", "added-lines", "removed-lines", "wrap", "width", "height", "min-width", "grow", "label", "key", "global-key", "on-input"];
       for (const name of node.attrs.keys()) if (!attrs.includes(name)) fail(node, `unsupported compiled code attribute ${name}`);
     }
     for (const [name, value] of node.attrs) {
-      if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers"].includes(name)) continue;
+      if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers", "added-lines", "removed-lines"].includes(name)) continue;
       if (name === "gap" && node.name === "resizable") fail(node, "resizable is a stacking surface; put gap on a row or column inside");
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
       else if (name === "value-x") {
@@ -516,7 +516,17 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (node.name === "tabs" || node.name === "split") output.push(`const nscvStart${id} = nscvNodes.length;`);
     output.push(`const nscvNode${id}: NscViewNode = { end: 0, ${props.join(", ")} };`, `nscvNodes.push(nscvNode${id});`, 'if (nscvNodes.length > 1024) throw new Error("compiled view exceeds 1024 nodes");');
     emitChildren(node.children, scope, slot, stack, depth + 1); output.push(`nscvNode${id}.end = nscvNodes.length;`);
-    if (node.name === "code") output.push(`nscvCodeEditor(nscvNode${id}, ${node.attrs.has("line-numbers") ? bound(node.attrs.get("line-numbers")!, "boolean", node, scope) : "false"});`);
+    if (node.name === "code") {
+      const spec = (name: string): string => {
+        const raw = node.attrs.get(name);
+        if (raw === undefined) return 'new Uint8Array(0)';
+        if (!raw.startsWith("{")) return `new TextEncoder().encode(${JSON.stringify(raw)})`;
+        const value = binding(raw, node, scope);
+        if (value.type.kind !== "bytes") fail(node, `${name} requires one text binding or a literal line list`);
+        return value.code;
+      };
+      output.push(`nscvCodeEditor(nscvNode${id}, ${node.attrs.has("line-numbers") ? bound(node.attrs.get("line-numbers")!, "boolean", node, scope) : "false"}, ${spec("added-lines")}, ${spec("removed-lines")});`);
+    }
     if (node.name === "tabs") output.push(`nscvTabs(nscvNodes, nscvStart${id});`);
     if (node.name === "split") output.push(`nscvSplit(nscvNodes, nscvStart${id});`);
   };

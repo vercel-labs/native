@@ -760,6 +760,40 @@ const text_policy_scratch = canvas.lazy_tls.LazyTls(struct {
     result: [24 + text_model.max_widget_text_bytes_per_view]u8,
 });
 
+pub const TextClipboardPolicyResult = struct {
+    selection: ?TextRange,
+    select_all: bool,
+};
+
+/// Source-only clipboard range and default edit-menu availability. Native
+/// callers retain eligibility, clipboard ownership and write-before-cut.
+pub fn widgetTextClipboardState(widget: Widget) TextClipboardPolicyResult {
+    if ((widget.kind == .textarea or widgetKindSingleLineTextEntry(widget.kind)) and widget.interaction_policy != null) {
+        if (widget.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled clipboard request exceeds text budget");
+        const request = text_policy_scratch.get().request[0 .. 24 + widget.text.len];
+        @memset(request[0..24], 0);
+        request[0] = 12;
+        std.mem.writeInt(u32, request[4..8], @intCast(widget.text.len), .little);
+        if (widget.text_selection) |selection| {
+            request[1] = 1;
+            std.mem.writeInt(u64, request[8..16], @intCast(selection.anchor), .little);
+            std.mem.writeInt(u64, request[16..24], @intCast(selection.focus), .little);
+        }
+        @memcpy(request[24..], widget.text);
+        var output: [12]u8 = undefined;
+        if (widget.interaction_policy.?(request, &output) != output.len) @panic("invalid compiled clipboard result");
+        const flags = std.mem.readInt(u32, output[0..4], .little);
+        const start = std.mem.readInt(u32, output[4..8], .little);
+        const end = std.mem.readInt(u32, output[8..12], .little);
+        if (flags > 3 or (flags & 1 != 0 and (widget.text_selection == null or start >= end or end > widget.text.len)) or
+            (flags & 1 == 0 and (start != 0 or end != 0)) or (flags & 2 != 0 and widget.text.len == 0))
+            @panic("invalid compiled clipboard range");
+        return .{ .selection = if (flags & 1 != 0) .{ .start = start, .end = end } else null, .select_all = flags & 2 != 0 };
+    }
+    const range = canvas.widgetTextSelectionRange(widget);
+    return .{ .selection = if (range) |selected| if (selected.isCollapsed(widget.text.len)) null else selected else null, .select_all = widget.text.len > 0 };
+}
+
 /// Native resolves the pointer into a byte offset. Compiled policy selects
 /// the run and orients its union with the gesture anchor; copy before reset.
 pub fn widgetCompiledTextPointerSelection(widget: Widget, offset: usize, click_count: u8, mode: u8, anchor: TextRange) ?TextPointerPolicyResult {

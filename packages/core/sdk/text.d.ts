@@ -54,7 +54,20 @@ export interface TextEditState {
  * current line. Unindented and ambiguous files use two spaces.
  */
 export declare function codeIndentationInsertion(text: Uint8Array, caret: number): Uint8Array;
+/** Parse one-based code diff lines, such as `2-4, 7`. Lines are unique,
+ * retain author order, and range from 1 through 128. Empty ASCII-whitespace
+ * text produces no lines; malformed pieces or descending ranges return null.
+ * Decimal names accept a leading + and interior underscores, matching the
+ * native markup parser. Returns a fresh array; source bytes are never changed.
+ */
+export declare function parseCodeLineNumberSpec(spec: Uint8Array): number[] | null;
 export declare function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextInputEvent | null;
+/** Source-byte range for Copy/Cut. Clamp and order the selection, then snap
+ * its endpoints to UTF-8 boundaries. Missing or collapsed selections return
+ * null. The current selection supplies the range; line numbers and diff
+ * markers never enter the source bytes.
+ */
+export declare function textClipboardRange(text: Uint8Array, selection: TextSelection | null): TextRange | null;
 /** Select the word, whitespace run or punctuation cluster at a UTF-8 byte
  * offset. An offset at or beyond the end selects the trailing run.
  */

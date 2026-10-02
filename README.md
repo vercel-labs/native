@@ -7,39 +7,13 @@
   <a href="https://www.npmjs.com/package/@native-sdk/cli"><img alt="npm downloads per month: @native-sdk/cli" src="https://img.shields.io/npm/dm/%40native-sdk%2Fcli.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
 </p>
 
-**Native SDK is the complete toolkit for building native desktop applications.**
+Native SDK is a toolkit for building native desktop applications with TypeScript and Native markup. The toolkit compiles app logic and views into a native executable and renders the interface in OS windows. Zig cores and optional embedded web content are also supported.
 
-Native SDK exists because expressive UI and native performance should not be competing goals. Developers often choose web-based runtimes because they offer freedom, speed and control over the product experience. But that freedom often comes with a heavy runtime. Native SDK keeps the expressive authoring model and replaces the runtime with native rendering.
-
-Views are declarative markup in `.native` files, logic is plain TypeScript compiled to native code at build time — or Zig, first-class by choice — and Native SDK's own engine draws every pixel into real OS windows. No browser, no WebView, no JS runtime in the binary: Zig is how everything works, TypeScript and Native markup are how apps are authored.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/soundboard-dark.webp">
-  <img src=".github/assets/soundboard-light.webp" alt="The Soundboard example app rendered by the Native SDK engine: a music library with album cover art, search, and a playback bar" width="100%">
-</picture>
-
-<table>
-  <tr>
-    <td width="70%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/notes-dark.webp">
-        <img src=".github/assets/notes-light.webp" alt="The Notes example app rendered by the Native SDK engine: a three-pane notes manager with folders, a note list, and an open note" width="640">
-      </picture>
-    </td>
-    <td width="30%">
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/calculator-dark.webp">
-        <img src=".github/assets/calculator-light.webp" alt="The Calculator example app rendered by the Native SDK engine: a finished calculation above a full keypad" width="270">
-      </picture>
-    </td>
-  </tr>
-</table>
-
-<sub>Soundboard, Notes, and Calculator from <a href="./examples">examples/</a> — every pixel drawn by the Native SDK engine, captured through its deterministic reference renderer. The images follow your color scheme.</sub>
+Native SDK is experimental. Platform capabilities vary, and mobile support is still evolving. See the [platform support matrix](https://native-sdk.dev/docs/platform-support) for current support.
 
 ## Quick start
 
-Install the CLI:
+Install the CLI with Node.js 24 or later:
 
 ```bash
 npm install -g @native-sdk/cli
@@ -53,92 +27,51 @@ cd my_app
 native dev
 ```
 
-A native window opens with a working counter. The whole app is three files of truth — view, logic, manifest — and no build config. The view is `src/app.native`, a markup file that binds values and dispatches messages (the counter row at its heart):
+The generated project opens a counter app and includes:
 
-```html
-<row gap="8" main="center" cross="center" grow="1">
-  <button variant="secondary" on-press="decrement">-</button>
-  <text>{count}</text>
-  <button variant="primary" on-press="increment">+</button>
-</row>
-```
+- `src/core.ts`: the app's model, messages, and update function.
+- `src/app.native`: the view, with layout, bindings, and message dispatch.
+- `app.json`: app identity, windows, permissions, and security settings.
 
-All logic lives in `src/core.ts`: a `Model` interface, a `Msg` union, and one pure `update` function — the only place state changes, plain TypeScript compiled to native code at build time:
+`native dev` watches markup changes and updates the view while preserving app state. TypeScript core changes rebuild and restart the app. Use `native dev --core` to exercise core logic under Node.js without opening a window, `native check` to validate the project, and `native build` to create a release binary.
 
-```ts
-export function update(model: Model, msg: Msg): Model {
-  switch (msg.kind) {
-    case "increment":
-      return { ...model, count: model.count + 1 };
-    case "decrement":
-      return { ...model, count: model.count - 1 };
-    case "reset":
-      return { ...model, count: 0 };
-  }
-}
-```
+The CLI uses a compatible Zig toolchain from your `PATH` or offers to download the pinned version. See [Quick Start](https://native-sdk.dev/docs/quick-start) for platform prerequisites and the complete workflow.
 
-Prefer Zig for the core? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` — same loop, same runtime, first-class by choice.
+## App model
 
-Edit `src/app.native` while `native dev` runs and the window updates in place, keeping your state. `native dev --core` runs the TypeScript core under node for instant logic checks, `native check` validates the core and every view in milliseconds without building, and `native build` produces an optimized release binary.
+Events dispatch typed messages to `update`, which returns the next model and any effects. The view derives its content from the model. Filesystem access, network requests, and other external work run through effects and TypeScript services.
 
-Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick-start).
-
-## What you get
-
-**Beautiful by default** — Great software should not start from a blank slate. The built-in component catalog — buttons, tabs, text fields, dialogs, charts, virtual lists, and more — ships with considered typography, spacing, and color, so the app `native init` scaffolds already looks intentional the first time its window opens.
-
-**Customizable by design** — Your app should have its own identity, not ours. Styling is design tokens end to end: color, radius, and typography resolve by name, re-resolve live when the theme changes, and can be replaced wholesale — `examples/soundboard` and `examples/deck` are the same music player separated only by tokens and a chrome pass.
-
-**Native from the start** — Every interface is rendered without a browser or WebView. The engine draws into real OS windows while scroll physics, menus, dialogs, the tray, and text input stay with the operating system, and markup compiles into the executable at build time, so a release build carries no parser or interpreter — the scaffolded counter app builds to a single binary a few megabytes small.
-
-**Predictable state** — State changes should be explicit, inspectable and easy to reason about. Events produce messages, messages update state, and state renders the interface; markup can bind and dispatch but never mutate. The loop is so deterministic that `native automate record` journals a session and `replay` reproduces it headlessly, verified frame by frame against state fingerprints.
-
-**Simple authoring** — Interfaces should be easy to read, easy to write and easy to generate. Views are elements, flex layout, `{bindings}`, and expressions like `selected="{f == filter}"`, and `native check` validates every view against your app's actual `Model` and `Msg` — bindings, iterables, message tags — in milliseconds, with `file:line:column` errors that teach.
-
-**AI is part of the workflow** — Native SDK is designed for a world where humans and AI agents build software together. Every app embeds an automation server, so any agent can read accessibility snapshots, drive widgets, assert on live state, and take deterministic screenshots of the running window; accessibility findings are machine-checked in `native check`; and the CLI ships the agent skills that teach all of it (`native skills list`).
+App cores use a checked TypeScript subset and compile to native code. To write a Zig core instead, create the project with `native init my_app --template zig-core`. See [App Model](https://native-sdk.dev/docs/app-model) and [TypeScript Cores](https://native-sdk.dev/docs/typescript).
 
 ## Examples
 
-The apps pictured above live in [examples/](./examples), most as zero-config projects with a manifest plus `src/` and no build files, run straight from their directory with `native dev`. Many examples predate the current `app.json` default and retain `app.zon`; both formats have the same capabilities. Start with the TypeScript examples when learning the primary authoring path. The `-ts` suffix on `soundboard-ts` and `system-monitor-ts` is historical because those apps are ports kept beside older Zig originals. Chatbot is TypeScript-only and follows the unsuffixed naming used by new apps created with `native init`.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/soundboard-dark.webp">
+  <img src=".github/assets/soundboard-light.webp" alt="The Soundboard example app rendered by the Native SDK engine: a music library with album cover art, search, and a playback bar" width="100%">
+</picture>
 
-| Example | What it shows |
-| --- | --- |
-| [`chatbot`](./examples/chatbot) | TypeScript + Native markup end to end: modules, a text editor, streaming fetch effects, and replay-safe configuration. |
-| [`soundboard-ts`](./examples/soundboard-ts) | The full music-player showcase in TypeScript + Native markup: audio, search, assets, timers, and context menus. |
-| [`system-monitor-ts`](./examples/system-monitor-ts) | A live process monitor in TypeScript + Native markup: subprocess effects, tables, charts, and timers. |
-| [`calculator`](./examples/calculator) | A complete small app: markup keypad, keyboard input, chrome shortcuts, theming. |
-| [`notes`](./examples/notes) | Persistence through the effects channel: debounced writes, restore on boot, dialogs, search. |
-| [`soundboard`](./examples/soundboard) | Album grid with decoded cover art, context menus, timers, and a custom theme. |
-| [`deck`](./examples/deck) | The soundboard player rebuilt as a dense hardware chassis: two windows, same widgets, different tokens. |
-| [`feed`](./examples/feed) | A 100,000-row list, virtualized with runtime-owned scrolling. |
+The Soundboard example rendered by the Native SDK engine. More apps are in [examples/](./examples):
 
-The unsuffixed showcase apps above predate the TypeScript default and retain their Zig cores as first-class alternative implementations. The full catalog in [examples/README.md](./examples/README.md) also covers guarded OS capabilities, GPU surfaces, WebView composition, web-frontend shells, and the iOS/Android embed hosts.
+- [Chatbot](./examples/chatbot): streaming responses, text editing, and TypeScript effects.
+- [Soundboard](./examples/soundboard-ts): audio playback, search, assets, and context menus.
+- [System monitor](./examples/system-monitor-ts): subprocess effects, tables, charts, and timers.
+- [Calculator](./examples/calculator): markup, keyboard input, and theming.
 
-## Platforms
-
-macOS is the primary development platform and carries the deepest support: Metal presentation, OS scroll physics, native context menus, app menus, tray, and dialogs. Linux runs the full showcase through the deterministic software renderer in real windows, with pointer, keyboard, scroll, native context menus, IME composition, and HiDPI; Windows runs on a Win32 host with native context menus and IME composition and is exercised in CI, including real input injection. Mobile support is experimental: iOS is simulator-proven through the embed library and Android cross-compiles with the full embed ABI, but APIs and tooling on both are still evolving — desktop is the mature surface. WebView surfaces coexist on every desktop platform. The [platform support matrix](https://native-sdk.dev/platform-support) documents exactly what each host supports today.
+See the [example catalog](./examples/README.md) for additional apps and their authoring languages.
 
 ## Documentation
 
-The full documentation is at [native-sdk.dev](https://native-sdk.dev).
-
-- [Quick Start](https://native-sdk.dev/quick-start) — install to a running, tested app
-- [Philosophy](https://native-sdk.dev/philosophy) — the six principles behind the toolkit
-- [App Model](https://native-sdk.dev/app-model) — the model/message/update loop, wiring, and hot reload
-- [TypeScript Cores](https://native-sdk.dev/typescript) — the app-core subset, effects, subscriptions, and the node dev loop
-- [Native UI](https://native-sdk.dev/native-ui) — every element, attribute, and pattern in the markup
-- [Components](https://native-sdk.dev/components) — the component catalog
-- [State & Data Flow](https://native-sdk.dev/state) — derive-don't-store, bindings, and text editing
-- [Testing](https://native-sdk.dev/testing) — full-loop UI tests, headless on any machine
-- [Automation](https://native-sdk.dev/automation) — snapshots, widget driving, record/replay, screenshots
-- [Capabilities](https://native-sdk.dev/capabilities) — guarded OS services: notifications, clipboard, dialogs, credentials
-- [Packaging](https://native-sdk.dev/packaging) — from binary to distributable app
-- [Platform Support](https://native-sdk.dev/platform-support) — what each host supports today
+- [Quick Start](https://native-sdk.dev/docs/quick-start): installation and your first app.
+- [Native UI](https://native-sdk.dev/docs/native-ui): markup, layout, and bindings.
+- [Components](https://native-sdk.dev/docs/components): the built-in component catalog.
+- [TypeScript Services](https://native-sdk.dev/docs/typescript/services): external work outside the core.
+- [Testing](https://native-sdk.dev/docs/testing): headless app tests and runtime integration.
+- [Automation](https://native-sdk.dev/docs/automation): inspect and drive a running app.
+- [Packaging](https://native-sdk.dev/docs/packaging): create distributable packages.
 
 ## Contributing
 
-Native SDK is pre-1.0: APIs still move, and the toolkit is evolving quickly. Bug reports and focused pull requests are welcome — for larger changes, open an issue first so the design can be discussed. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development setup and local checks.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for repository setup and local checks. For larger changes, open an issue to discuss the design first.
 
 ## License
 

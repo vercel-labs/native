@@ -58,6 +58,8 @@ const Record = struct {
     spanScale: ?f32 = null,
     codeLanguage: ?sdk.canvas.code.Language = null,
     codeLineDigits: ?u8 = null,
+    codeAddedLines: ?[]const u8 = null,
+    codeRemovedLines: ?[]const u8 = null,
     press: ?[]const u8 = null,
     toggle: ?[]const u8 = null,
     change: ?[]const u8 = null,
@@ -139,6 +141,14 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         if (value.codeLanguage == null or value.codeLineDigits == null or value.kind != .textarea or
             value.codeLineDigits.? > 5 or value.placeholder.len != 0 or value.submitOnEnter or paragraph)
             return error.InvalidView;
+    }
+    var code_diff: ?sdk.canvas.CodeDiffLines = null;
+    if (value.codeAddedLines != null or value.codeRemovedLines != null) {
+        if (value.codeLanguage == null or value.codeAddedLines == null or value.codeRemovedLines == null) return error.InvalidView;
+        const added = try codeLineMask(value.codeAddedLines.?);
+        const removed = try codeLineMask(value.codeRemovedLines.?);
+        if (added & removed != 0) return error.InvalidView;
+        if (added != 0 or removed != 0) code_diff = .{ .added = added, .removed = removed };
     }
     if (value.listItemIndex) |item| if (value.listItemCount == null or item >= value.listItemCount.?) return error.InvalidView;
     var children: std.ArrayList(Ui.Node) = .empty;
@@ -252,10 +262,25 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         result.widget.runtime_flags.code_editor = true;
         result.widget.code_language = language;
         result.widget.code_line_number_digits = value.codeLineDigits.?;
+        if (code_diff) |lines| result.widget.setCodeDiffLines(lines);
         result.widget.text_no_wrap = true;
         result.widget.layout.clip_content = true;
     }
     return result;
+}
+
+/// Pack already parsed, unique line ordinals into the renderer's exact masks.
+/// The compiled component owns text parsing; this checks untrusted tree data.
+fn codeLineMask(lines: []const u8) !u128 {
+    if (lines.len > sdk.canvas.code.max_diff_lines) return error.InvalidView;
+    var mask: u128 = 0;
+    for (lines) |line| {
+        if (line == 0 or line > sdk.canvas.code.max_diff_lines) return error.InvalidView;
+        const bit = @as(u128, 1) << @as(u7, @intCast(line - 1));
+        if (mask & bit != 0) return error.InvalidView;
+        mask |= bit;
+    }
+    return mask;
 }
 
 /// A scroll container can also own logical tree navigation. The explicit
@@ -534,5 +559,36 @@ test "compiled code records preserve owned monospace source and reject misplaced
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":6}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":1,\"submitOnEnter\":true}]}",
         }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+    }
+}
+
+test "compiled code diff ordinals preserve every mask word and reject invalid tree metadata" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.testing.allocator.dupe(u8, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"café\\n日本\\n\",\"codeLanguage\":\"typescript\",\"codeLineDigits\":1,\"codeAddedLines\":[1,32,33,64,65,96,97,128],\"codeRemovedLines\":[2,31,34,63,66,95,98,127]}]}");
+        defer std.testing.allocator.free(bytes);
+        const result = try decode(&ui, bytes);
+        @memset(bytes, 'x');
+        var added: u128 = 0;
+        var removed: u128 = 0;
+        for ([_]u7{ 0, 31, 32, 63, 64, 95, 96, 127 }) |bit| added |= @as(u128, 1) << bit;
+        for ([_]u7{ 1, 30, 33, 62, 65, 94, 97, 126 }) |bit| removed |= @as(u128, 1) << bit;
+        try std.testing.expectEqualDeep(sdk.canvas.CodeDiffLines{ .added = added, .removed = removed }, result.widget.codeDiffLines().?);
+        try std.testing.expectEqual(@as(u8, 1), result.widget.codeLineNumberDigits());
+        try std.testing.expectEqualStrings("café\n日本\n", result.widget.text);
+        const next = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"other\",\"codeLanguage\":\"python\",\"codeLineDigits\":0,\"codeAddedLines\":[],\"codeRemovedLines\":[]}]}");
+        try std.testing.expect(next.widget.codeDiffLines() == null);
+        try std.testing.expectEqualDeep(sdk.canvas.CodeDiffLines{ .added = added, .removed = removed }, result.widget.codeDiffLines().?);
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeAddedLines\":[1],\"codeRemovedLines\":[]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0,\"codeAddedLines\":[1]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0,\"codeAddedLines\":[0],\"codeRemovedLines\":[]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0,\"codeAddedLines\":[129],\"codeRemovedLines\":[]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0,\"codeAddedLines\":[1,1],\"codeRemovedLines\":[]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0,\"codeAddedLines\":[128],\"codeRemovedLines\":[128]}]}",
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+        try std.testing.expectError(error.InvalidView, codeLineMask(&([_]u8{1} ** 129)));
     }
 }

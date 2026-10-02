@@ -3344,3 +3344,118 @@ test "compiled code indentation matches native votes caret ties eligibility and 
     // Returned edits borrow static native bytes, never a reset compiler arena.
     try std.testing.expectEqualStrings("        ", insertion);
 }
+
+test "compiled clipboard ranges match native UTF-8 selection and exact huge offsets" {
+    const sources = [_][]const u8{ "", "plain", "aé🙂\r\nz", "a\x80\xffb", "\r\n", "日本\nlast" };
+    const kinds = [_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea };
+    for (kinds) |kind| {
+        for (sources) |source| {
+            for (0..source.len + 2) |anchor| {
+                for (0..source.len + 2) |focus| {
+                    const reference = canvas.Widget{ .kind = kind, .text = source, .text_selection = .{ .anchor = anchor, .focus = focus } };
+                    var compiled = reference;
+                    compiled.interaction_policy = core.nativeTextPolicy;
+                    try std.testing.expectEqualDeep(canvas.widgetTextClipboardState(reference), canvas.widgetTextClipboardState(compiled));
+                }
+            }
+            const offsets = [_]usize{ 0, source.len, 4294967295, 4294967296, 9007199254740991, 9007199254740992, std.math.maxInt(usize) };
+            for (offsets) |anchor| {
+                for (offsets) |focus| {
+                    const reference = canvas.Widget{ .kind = kind, .text = source, .text_selection = .{ .anchor = anchor, .focus = focus } };
+                    var compiled = reference;
+                    compiled.interaction_policy = core.nativeTextPolicy;
+                    try std.testing.expectEqualDeep(canvas.widgetTextClipboardState(reference), canvas.widgetTextClipboardState(compiled));
+                }
+            }
+            const reference = canvas.Widget{ .kind = kind, .text = source };
+            var compiled = reference;
+            compiled.interaction_policy = core.nativeTextPolicy;
+            try std.testing.expectEqualDeep(canvas.widgetTextClipboardState(reference), canvas.widgetTextClipboardState(compiled));
+        }
+    }
+    const large = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    @memcpy(large[0..7], "café\r\n");
+    const widget = canvas.Widget{ .kind = .textarea, .text = large, .text_selection = .{ .anchor = std.math.maxInt(usize), .focus = 0 }, .interaction_policy = core.nativeTextPolicy };
+    const result = canvas.widgetTextClipboardState(widget);
+    try std.testing.expectEqualDeep(canvas.TextRange{ .start = 0, .end = large.len }, result.selection.?);
+    try std.testing.expect(result.select_all);
+    const view = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(view);
+    var output: [2]u8 = undefined;
+    _ = core.nativeTextPolicy(&.{ 1, 1, 0, 0, 1, 0, 5, 0 }, &output);
+    try std.testing.expectEqualDeep(canvas.TextRange{ .start = 0, .end = large.len }, result.selection.?);
+    // Unsupported kinds never call a text callback; static text keeps its reference path.
+    const button = canvas.Widget{ .kind = .button, .text = "x", .text_selection = .{ .anchor = 0, .focus = 1 }, .interaction_policy = core.nativeTextPolicy };
+    try std.testing.expect(canvas.widgetTextClipboardState(button).selection == null);
+    try std.testing.expectEqualDeep(canvas.TextRange{ .start = 0, .end = 1 }, canvas.widgetTextClipboardState(.{ .kind = .text, .text = "x", .text_selection = .{ .anchor = 1, .focus = 0 } }).selection.?);
+}
+
+test "compiled clipboard keyboard and edit menus preserve source bytes eligibility and failed cuts" {
+    const source = "aé🙂\r\nz";
+    const kinds = [_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea };
+    const cases = [_]struct { text: []const u8, selection: ?canvas.TextSelection, expected: ?[]const u8 }{
+        .{ .text = source, .selection = .{ .anchor = 7, .focus = 1 }, .expected = "é🙂" },
+        .{ .text = source, .selection = .{ .anchor = std.math.maxInt(usize), .focus = 0 }, .expected = source },
+        .{ .text = source, .selection = .{ .anchor = 2, .focus = 1 }, .expected = null },
+        .{ .text = source, .selection = null, .expected = null },
+        .{ .text = "", .selection = .{ .anchor = 0, .focus = 0 }, .expected = null },
+    };
+    for (kinds) |kind| {
+        for ([_]bool{ false, true }) |compiled| {
+            for (cases) |case| {
+                const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+                defer harness.destroy(std.testing.allocator);
+                harness.null_platform.gpu_surfaces = true;
+                var context: u8 = 0;
+                const app = native_sdk.App{ .context = &context, .name = "compiled-clipboard-menu", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+                try harness.start(app);
+                _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+                const field = canvas.Widget{ .id = 2, .kind = kind, .frame = geometry.RectF.init(12, 16, 180, 84), .text = case.text, .interaction_policy = if (compiled) core.nativeTextPolicy else null };
+                var nodes: [2]canvas.WidgetLayoutNode = undefined;
+                const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{field} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 30 } });
+                harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = case.selection;
+                try harness.runtime.writeClipboard("sentinel");
+                const before_writes = harness.null_platform.clipboardWriteCount();
+                try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "c", .modifiers = .{ .primary = true } } });
+                var clipboard: [64]u8 = undefined;
+                try std.testing.expectEqualStrings(case.expected orelse "sentinel", try harness.runtime.readClipboard(&clipboard));
+                try std.testing.expectEqual(before_writes + @intFromBool(case.expected != null), harness.null_platform.clipboardWriteCount());
+                try std.testing.expectEqualStrings(case.text, (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+                const right_click = native_sdk.platform.Event{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .button = 1, .x = 50, .y = 30 } };
+                try harness.runtime.dispatchPlatformEvent(app, right_click);
+                const menu = harness.null_platform.contextMenuItems();
+                try std.testing.expectEqual(@as(usize, 5), menu.len);
+                try std.testing.expectEqual(case.expected != null, menu[0].enabled);
+                try std.testing.expectEqual(case.expected != null, menu[1].enabled);
+                try std.testing.expect(menu[2].enabled and menu[3].separator);
+                try std.testing.expectEqual(case.text.len > 0, menu[4].enabled);
+                if (case.expected) |wanted| {
+                    // Menu Copy shares the compiled selection planner.
+                    try harness.runtime.writeClipboard("menu sentinel");
+                    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{ .window_id = 1, .view_label = "canvas", .token = harness.null_platform.context_menu_token, .item_id = 2 } });
+                    try std.testing.expectEqualStrings(wanted, try harness.runtime.readClipboard(&clipboard));
+                    // Both menu and keyboard Cut must refuse a failed platform write.
+                    harness.runtime.options.platform.services.write_clipboard_data_fn = null;
+                    harness.runtime.options.platform.services.write_clipboard_fn = null;
+                    try harness.runtime.dispatchPlatformEvent(app, right_click);
+                    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{ .window_id = 1, .view_label = "canvas", .token = harness.null_platform.context_menu_token, .item_id = 1 } });
+                    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "x", .modifiers = .{ .primary = true } } });
+                    try std.testing.expectEqualStrings(case.text, (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+                    try std.testing.expectEqualStrings(wanted, try harness.runtime.readClipboard(&clipboard));
+                    try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_text_history_entry_count);
+                }
+                harness.runtime.views[0].widget_layout_nodes[1].widget.state.disabled = true;
+                const requests = harness.null_platform.context_menu_request_count;
+                try harness.runtime.dispatchPlatformEvent(app, right_click);
+                try std.testing.expectEqual(requests, harness.null_platform.context_menu_request_count);
+                try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "x", .modifiers = .{ .primary = true } } });
+                try std.testing.expectEqualStrings(case.text, (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+                try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+            }
+        }
+    }
+}

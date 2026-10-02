@@ -1465,8 +1465,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const widget = self.widget_layout_nodes[index].widget;
             if (widget.state.disabled) return null;
             if (editable_only and !canvasWidgetEditableTextKind(widget.kind)) return null;
-            const range = canvas.widgetTextSelectionRange(widget) orelse return null;
-            if (range.isCollapsed(widget.text.len)) return null;
+            const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
         }
 

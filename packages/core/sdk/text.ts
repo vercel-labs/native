@@ -129,6 +129,66 @@ export function codeIndentationInsertion(text: Uint8Array, caret: number): Uint8
   return result;
 }
 
+/** Parse one-based code diff lines, such as `2-4, 7`. Lines are unique,
+ * retain author order, and range from 1 through 128. Empty ASCII-whitespace
+ * text produces no lines; malformed pieces or descending ranges return null.
+ * Decimal names accept a leading + and interior underscores, matching the
+ * native markup parser. Returns a fresh array; source bytes are never changed.
+ */
+export function parseCodeLineNumberSpec(spec: Uint8Array): number[] | null {
+  let start = 0, end = spec.length;
+  while (start < end && codeSpecWhitespace(spec[start], true)) start += 1;
+  while (end > start && codeSpecWhitespace(spec[end - 1], true)) end -= 1;
+  const result: number[] = [];
+  const seen = new Uint8Array(129);
+  while (start < end) {
+    let after = start;
+    while (after < end && spec[after] !== 44) after += 1;
+    let firstByte = start, lastByte = after;
+    while (firstByte < lastByte && codeSpecWhitespace(spec[firstByte], true)) firstByte += 1;
+    while (lastByte > firstByte && codeSpecWhitespace(spec[lastByte - 1], true)) lastByte -= 1;
+    if (firstByte === lastByte) return null;
+    let dash = -1;
+    for (let i = firstByte; i < lastByte; i += 1) {
+      if (spec[i] === 45) {
+        if (dash !== -1) return null;
+        dash = i;
+      }
+    }
+    const first = codeSpecNumber(spec, firstByte, dash === -1 ? lastByte : dash);
+    const last = dash === -1 ? first : codeSpecNumber(spec, dash + 1, lastByte);
+    if (first === 0 || last < first) return null;
+    for (let line = first; line <= last; line += 1) {
+      if (seen[line] === 0) { seen[line] = 1; result.push(line); }
+    }
+    if (after === end) break;
+    start = after + 1;
+    if (start === end) return null;
+  }
+  return result;
+}
+
+function codeSpecWhitespace(byte: number, breaks: boolean): boolean {
+  return byte === 32 || byte === 9 || breaks && (byte === 10 || byte === 13);
+}
+
+function codeSpecNumber(spec: Uint8Array, from: number, to: number): number {
+  let start = from, end = to;
+  while (start < end && codeSpecWhitespace(spec[start], false)) start += 1;
+  while (end > start && codeSpecWhitespace(spec[end - 1], false)) end -= 1;
+  if (start < end && spec[start] === 43) start += 1;
+  if (start === end || spec[start] === 95 || spec[end - 1] === 95) return 0;
+  let value = 0;
+  for (let i = start; i < end; i += 1) {
+    const byte = spec[i];
+    if (byte === 95) continue;
+    if (byte < 48 || byte > 57) return 0;
+    value = value * 10 + byte - 48;
+    if (value > 128) return 0;
+  }
+  return value;
+}
+
 /// Prepare new single-line input by removing CR/LF bytes. An insertion
 /// containing only line breaks is suppressed; an empty composition stays
 /// meaningful and its explicit cursor moves past the removed bytes.
@@ -179,6 +239,17 @@ function rangeIsCollapsed(r: TextRange, textLen: number): boolean {
 
 function selectionRange(s: TextSelection, textLen: number): TextRange {
   return rangeNormalized({ start: s.anchor, end: s.focus }, textLen);
+}
+
+/** Source-byte range for Copy/Cut. Clamp and order the selection, then snap
+ * its endpoints to UTF-8 boundaries. Missing or collapsed selections return
+ * null. The current selection supplies the range; line numbers and diff
+ * markers never enter the source bytes.
+ */
+export function textClipboardRange(text: Uint8Array, selection: TextSelection | null): TextRange | null {
+  if (selection === null) return null;
+  const range = snapTextRange(text, selectionRange(selection, text.length));
+  return range.start === range.end ? null : range;
 }
 
 function isUtf8ContinuationByte(byte: number): boolean {

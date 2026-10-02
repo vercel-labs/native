@@ -6,12 +6,42 @@ import {
   textLineSelectionAtOffset,
   sanitizedSingleLineTextInputEvent,
   codeIndentationInsertion,
+  parseCodeLineNumberSpec,
+  textClipboardRange,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("clipboard ranges use source UTF-8 bytes and ignore selection direction", () => {
+  const text = encoder.encode("aé🙂\r\nz"), before = text.slice();
+  assert.equal(textClipboardRange(text, null), null);
+  assert.equal(textClipboardRange(text, { anchor: 2, focus: 1 }), null);
+  assert.deepEqual(textClipboardRange(text, { anchor: 6, focus: 2 }), { start: 1, end: 3 });
+  assert.deepEqual(textClipboardRange(text, { anchor: 999, focus: 3 }), { start: 3, end: text.length });
+  assert.deepEqual(textClipboardRange(text, { anchor: 7, focus: 9 }), { start: 7, end: 9 });
+  assert.equal(textClipboardRange(text, { anchor: 999, focus: 998 }), null);
+  assert.equal(textClipboardRange(new Uint8Array(), { anchor: 0, focus: 4 }), null);
+  assert.deepEqual(text, before);
+});
+
+test("code diff line specs retain author order, deduplicate ranges and preserve bytes", () => {
+  for (const [spec, expected] of [
+    ["", []], [" \r\n\t", []], ["2-4, 7, 3", [2, 3, 4, 7]],
+    ["128, 1-3, 2, 127-128", [128, 1, 2, 3, 127]],
+    [" +01, 1__2, +1_2_8 ", [1, 12, 128]], ["1-128", Array.from({ length: 128 }, (_, i) => i + 1)],
+  ] as [string, number[]][]) {
+    const input = encoder.encode(spec), before = input.slice();
+    assert.deepEqual(parseCodeLineNumberSpec(input), expected); assert.deepEqual(input, before);
+  }
+  for (const spec of ["0", "4-2", "1-129", "1,,2", "2-", "2-3-4", "nope", ",1", "1,", "+", "_1", "1_", "1.0", "0x1", "1\n-2", "1-\n2", "١", "1\0", "18446744073709551616"]) {
+    assert.equal(parseCodeLineNumberSpec(encoder.encode(spec)), null, spec);
+  }
+  assert.equal(parseCodeLineNumberSpec(new Uint8Array([0xff, 49])), null);
+  assert.deepEqual(parseCodeLineNumberSpec(encoder.encode("0".repeat(65535) + "1")), [1]);
+});
 
 test("code Tab follows file indentation and caret-local ties without changing source", () => {
   const cases: [string, number, string][] = [

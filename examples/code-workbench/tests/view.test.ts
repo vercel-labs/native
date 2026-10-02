@@ -34,6 +34,32 @@ test("code drafts preserve file indentation, selection, independent history, sou
     assert.equal(field().focused, true);
     await key("cmd+z"); text("typescript", "function greet() {\n    return 'café';\n}\n");
     await key("cmd+shift+z");
+    // Diff annotations change presentation while keeping source/history intact.
+    const annotatedDraft = value("typescript");
+    await click("Apply diff"); assert.deepEqual(s.model.added, [2, 3]); assert.deepEqual(s.model.removed, [1]);
+    assert.deepEqual(value("typescript"), annotatedDraft); assert.equal(field().id, firstId);
+    await set("Added lines", "128, 32-33, 64-65, 96-97, 32");
+    await set("Removed lines", "1, 31, 63, 95, 127"); await click("Apply diff");
+    assert.deepEqual(s.model.added, [128, 32, 33, 64, 65, 96, 97]);
+    assert.equal(s.model.diffError, false); assert.deepEqual(value("typescript"), annotatedDraft);
+    const lastAdded = s.model.addedLines;
+    for (const invalid of ["0", "129", "1-129", "1,,2", "2-", "4-2", "1", "127-128"]) {
+      await set("Added lines", invalid); await click("Apply diff");
+      assert.equal(s.model.diffError, true, invalid); assert.deepEqual(s.model.addedLines, lastAdded);
+    }
+    await set("Added lines", " +1__2, 00128 "); await set("Removed lines", "\t\r\n"); await click("Apply diff");
+    assert.deepEqual(s.model.added, [12, 128]); assert.deepEqual(s.model.removed, []); assert.equal(s.model.diffError, false);
+    await set("Added lines", "1-128"); await set("Removed lines", ""); await click("Apply diff");
+    assert.deepEqual(s.model.added, Array.from({ length: 128 }, (_, i) => i + 1));
+    assert.deepEqual(value("typescript"), annotatedDraft);
+    // The author order remains observable through the actual compiled model.
+    for (const [spec, expected] of [["2-4, 7, 3", [2, 3, 4, 7]], ["128, 1-3, 2, 127-128", [128, 1, 2, 3, 127]], ["0".repeat(4096) + "1", [1]]] as [string, number[]][]) {
+      await set("Added lines", spec); await click("Apply diff"); assert.deepEqual(s.model.added, expected);
+    }
+    await click("Toggle line numbers"); await click("Refresh"); assert.equal(field().id, firstId);
+    await click("Toggle line numbers"); await click("Clear diff"); assert.deepEqual(s.model.added, []);
+    await focus(); await key("cmd+z"); text("typescript", "function greet() {\n    return 'café';\n}\n");
+    await key("cmd+shift+z"); assert.deepEqual(value("typescript"), annotatedDraft);
     await focus("Python draft"); await key("end"); await key("tab");
     text("python", "def greet():\n\treturn '日本'\n\t");
     await key("enter"); text("python", "def greet():\n\treturn '日本'\n\t\n");
@@ -78,6 +104,21 @@ test("code drafts preserve file indentation, selection, independent history, sou
     await click("Refresh"); text("typescript", long + "    ");
     await click("New workbench"); assert.notEqual(field().id, firstId); assert.notEqual(field("Python draft").id, secondId);
     text("python", "def greet():\n\treturn '日本'\n");
+    // Native clipboard shortcuts transfer source bytes, never gutter or diff markers.
+    await click("Apply diff");
+    const source = bytes(value("typescript").text);
+    await select("TypeScript draft", Buffer.byteLength(source), 0); await focus(); await key("cmd+c");
+    await select("Python draft", 0, Buffer.byteLength(bytes(value("python").text))); await focus("Python draft"); await key("cmd+v");
+    text("python", source); assert.deepEqual(s.model.added, [2, 3]);
+    const cafeStart = Buffer.byteLength(source.slice(0, source.indexOf("café")));
+    await select("TypeScript draft", cafeStart + Buffer.byteLength("café"), cafeStart); await focus(); await key("cmd+x");
+    text("typescript", source.replace("café", ""));
+    await key("cmd+z"); text("typescript", source);
+    await focus("Python draft"); await key("end"); await key("cmd+v");
+    text("python", source + "café");
+    await select("TypeScript draft", 0, 0); await focus(); await key("cmd+x"); text("typescript", source);
+    await focus("Python draft"); await key("end"); await key("cmd+v"); text("python", source + "cafécafé");
+    await click("Refresh"); text("typescript", source); text("python", source + "cafécafé");
     const replay = await app.verifyReplay();
     assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);

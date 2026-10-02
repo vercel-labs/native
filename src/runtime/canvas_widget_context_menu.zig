@@ -200,12 +200,13 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled) {
                     if (!has_presenter) return;
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
-                    const has_selection = if (canvas.widgetTextSelectionRange(widget)) |range| !range.isCollapsed(widget.text.len) else false;
+                    const clipboard = canvas.widgetTextClipboardState(widget);
+                    const has_selection = clipboard.selection != null;
                     items[0] = .{ .id = default_item_cut, .label = "Cut", .enabled = has_selection };
                     items[1] = .{ .id = default_item_copy, .label = "Copy", .enabled = has_selection };
                     items[2] = .{ .id = default_item_paste, .label = "Paste" };
                     items[3] = .{ .separator = true };
-                    items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = widget.text.len > 0 };
+                    items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = clipboard.select_all };
                     _ = try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
                         .target_id = target.id,
@@ -535,8 +536,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return null;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
-            const range = canvas.widgetTextSelectionRange(widget) orelse return null;
-            if (range.isCollapsed(widget.text.len)) return null;
+            const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
         }
 
