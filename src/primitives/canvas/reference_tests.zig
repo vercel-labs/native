@@ -1415,6 +1415,164 @@ test "reference renderer blurs transparent colors without dark fringes" {
     try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 2, 0);
 }
 
+const glyph0_test_width: usize = 128;
+const glyph0_test_height: usize = 64;
+const glyph0_test_size: f32 = 32;
+const glyph0_test_baseline: f32 = 48;
+
+const Glyph0CoverageSink = struct {
+    coverage: []bool,
+    width: usize,
+    height: usize,
+
+    pub fn pixel(self: *@This(), x: i32, y: i32, amount: f32) void {
+        if (amount <= 0 or x < 0 or y < 0) return;
+        const px: usize = @intCast(x);
+        const py: usize = @intCast(y);
+        if (px >= self.width or py >= self.height) return;
+        self.coverage[py * self.width + px] = true;
+    }
+};
+
+fn renderGlyph0TextForTest(font_id: FontId, text: []const u8, glyphs: []const Glyph, origin: geometry.PointF, pixels: []u8) !void {
+    const bounds = geometry.RectF.init(0, 0, @floatFromInt(glyph0_test_width), @floatFromInt(glyph0_test_height));
+    const commands = [_]RenderCommand{.{
+        .command = .{ .draw_text = .{
+            .id = 1,
+            .font_id = font_id,
+            .size = glyph0_test_size,
+            .origin = origin,
+            .color = Color.rgba8(255, 255, 255, 255),
+            .text = text,
+            .glyphs = glyphs,
+        } },
+        .local_bounds = bounds,
+        .bounds = bounds,
+    }};
+    const surface = try ReferenceRenderSurface.init(glyph0_test_width, glyph0_test_height, pixels);
+    try surface.renderPass(.{
+        .surface_size = geometry.SizeF.init(@floatFromInt(glyph0_test_width), @floatFromInt(glyph0_test_height)),
+        .full_repaint = true,
+        .commands = &commands,
+    }, Color.rgba8(0, 0, 0, 0));
+}
+
+fn directGlyph0CoverageForTest(face: *const canvas.font_ttf.Face, pen_x: f32, cell_advance: f32, coverage: []bool) !void {
+    @memset(coverage, false);
+    const natural_advance = glyph0_test_size * (face.advance(0) / face.units_per_em);
+    const inset = @max(0, (cell_advance - natural_advance) * 0.5);
+    const scale = glyph0_test_size / face.units_per_em;
+    const transform = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + inset, .ty = glyph0_test_baseline };
+    var builder = canvas.vector.PathBuilder(2048){};
+    try face.glyphOutline(0, transform, &builder);
+    const raster = try std.testing.allocator.create(canvas.vector.GlyphRasterizer);
+    defer std.testing.allocator.destroy(raster);
+    var sink = Glyph0CoverageSink{ .coverage = coverage, .width = glyph0_test_width, .height = glyph0_test_height };
+    try canvas.vector.fillGlyphPath(
+        raster,
+        builder.slice(),
+        Affine.identity(),
+        .nonzero,
+        canvas.vector.default_tolerance,
+        .{ .x0 = 0, .y0 = 0, .x1 = @intCast(glyph0_test_width), .y1 = @intCast(glyph0_test_height) },
+        &sink,
+    );
+}
+
+fn expectGlyph0CoverageForTest(pixels: []const u8, coverage: []const bool, cell_advance: f32) !void {
+    var inked: usize = 0;
+    var background_in_cell: usize = 0;
+    for (coverage, 0..) |expected, index| {
+        const actual = pixels[index * 4 + 3] > 0;
+        try std.testing.expectEqual(expected, actual);
+        if (expected) inked += 1;
+        const x = index % glyph0_test_width;
+        const y = index / glyph0_test_width;
+        if (!expected and actual == false and
+            @as(f32, @floatFromInt(x)) < cell_advance and
+            @as(f32, @floatFromInt(y)) >= glyph0_test_baseline - glyph0_test_size and
+            @as(f32, @floatFromInt(y)) < glyph0_test_baseline)
+        {
+            background_in_cell += 1;
+        }
+    }
+    try std.testing.expect(inked > 0);
+    try std.testing.expect(background_in_cell > 0);
+}
+
+test "reference renderer draws face-owned glyph zero for decoded uncovered scalars" {
+    const Missing = struct {
+        codepoint: u21,
+        text: []const u8,
+        mixed: []const u8,
+    };
+    const missing = [_]Missing{
+        .{ .codepoint = 0x65E5, .text = "\xE6\x97\xA5", .mixed = "A\xE6\x97\xA5B" }, // 日
+        .{ .codepoint = 0x2705, .text = "\xE2\x9C\x85", .mixed = "A\xE2\x9C\x85B" }, // ✅
+        .{ .codepoint = 0x1F600, .text = "\xF0\x9F\x98\x80", .mixed = "A\xF0\x9F\x98\x80B" }, // 😀
+    };
+    const faces = [_]struct { face: *const canvas.font_ttf.Face, id: FontId }{
+        .{ .face = &canvas.font_ttf.geist_regular, .id = default_sans_font_id },
+        .{ .face = &canvas.font_ttf.geist_mono, .id = default_mono_font_id },
+    };
+
+    for (faces) |font| {
+        for (missing) |case| {
+            // The format-4 parser intentionally maps each of these to
+            // glyph 0: an uncovered BMP ideograph, a symbol, and an
+            // astral pictograph all take the same face-owned fallback.
+            try std.testing.expectEqual(@as(u16, 0), font.face.glyphIndex(case.codepoint));
+
+            const cell_advance = canvas.estimateTextWidthForFont(font.id, case.text, glyph0_test_size);
+            var coverage: [glyph0_test_width * glyph0_test_height]bool = [_]bool{false} ** (glyph0_test_width * glyph0_test_height);
+            try directGlyph0CoverageForTest(font.face, 0, cell_advance, &coverage);
+
+            var plain_pixels: [glyph0_test_width * glyph0_test_height * 4]u8 = undefined;
+            try renderGlyph0TextForTest(font.id, case.text, &.{}, geometry.PointF.init(0, glyph0_test_baseline), &plain_pixels);
+            try expectGlyph0CoverageForTest(&plain_pixels, &coverage, cell_advance);
+
+            const one_shaped_glyph = [_]Glyph{.{
+                .id = 1,
+                .x = 0,
+                .y = 0,
+                .advance = cell_advance,
+                .text_start = 0,
+                .text_len = case.text.len,
+            }};
+            var shaped_pixels: [glyph0_test_width * glyph0_test_height * 4]u8 = undefined;
+            try renderGlyph0TextForTest(font.id, case.text, &one_shaped_glyph, geometry.PointF.init(0, glyph0_test_baseline), &shaped_pixels);
+            try expectGlyph0CoverageForTest(&shaped_pixels, &coverage, cell_advance);
+            try std.testing.expectEqualSlices(u8, &plain_pixels, &shaped_pixels);
+
+            // Preserve the measured pen after a decoded miss. The direct
+            // `B` render establishes its expected position independently
+            // of the preceding glyph-0 outline.
+            const a_advance = canvas.estimateTextWidthForFont(font.id, "A", glyph0_test_size);
+            const b_pen_x = canvas.estimateTextWidthForFont(font.id, case.mixed[0 .. 1 + case.text.len], glyph0_test_size);
+            const b_advance = canvas.estimateTextWidthForFont(font.id, case.mixed, glyph0_test_size) - b_pen_x;
+            const mixed_shaped = [_]Glyph{
+                .{ .id = 1, .x = 0, .y = 0, .advance = a_advance, .text_start = 0, .text_len = 1 },
+                .{ .id = 0, .x = a_advance, .y = 0, .advance = cell_advance, .text_start = 1, .text_len = case.text.len },
+                .{ .id = 2, .x = b_pen_x, .y = 0, .advance = b_advance, .text_start = 1 + case.text.len, .text_len = 1 },
+            };
+            var mixed_plain_pixels: [glyph0_test_width * glyph0_test_height * 4]u8 = undefined;
+            var mixed_shaped_pixels: [glyph0_test_width * glyph0_test_height * 4]u8 = undefined;
+            var expected_b_pixels: [glyph0_test_width * glyph0_test_height * 4]u8 = undefined;
+            try renderGlyph0TextForTest(font.id, case.mixed, &.{}, geometry.PointF.init(0, glyph0_test_baseline), &mixed_plain_pixels);
+            try renderGlyph0TextForTest(font.id, case.mixed, &mixed_shaped, geometry.PointF.init(0, glyph0_test_baseline), &mixed_shaped_pixels);
+            try renderGlyph0TextForTest(font.id, "B", &.{}, geometry.PointF.init(b_pen_x, glyph0_test_baseline), &expected_b_pixels);
+            try std.testing.expectEqualSlices(u8, &mixed_plain_pixels, &mixed_shaped_pixels);
+            var b_inked: usize = 0;
+            for (expected_b_pixels, 0..) |_, index| {
+                if (index % 4 != 3 or expected_b_pixels[index] == 0) continue;
+                b_inked += 1;
+                try std.testing.expect(mixed_plain_pixels[index] > 0);
+            }
+            try std.testing.expect(b_inked > 0);
+        }
+    }
+}
+
 test "reference renderer draws proxy text runs" {
     const commands = [_]CanvasCommand{.{ .draw_text = .{
         .id = 1,

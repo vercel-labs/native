@@ -13,8 +13,9 @@
 //! are sized from real CJK faces, so this refuses only outliers) — or
 //! registration fails with a recoverable error. A registered id
 //! therefore ALWAYS resolves at render time, and the only per-glyph
-//! fallback is the same notdef block built-in faces use for codepoints a
-//! face does not cover. `canvas.font_ttf.parseFailureReason` turns a
+//! fallback is that selected face's glyph-0 `.notdef` outline (or no ink
+//! when glyph 0 is empty) for codepoints the face does not cover.
+//! `canvas.font_ttf.parseFailureReason` turns a
 //! rejected file into a teaching sentence, and
 //! `canvas.font_ttf.declaredGlyphMaxima` names a budget-refused face's
 //! declared numbers, for callers that know the file's name (UiApp's
@@ -311,19 +312,22 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
                     text[offset] == '\n' or text[offset] == '\r';
 
                 if (!is_break) {
-                    var glyph: u16 = 0;
-                    if (cluster.len == canvas.utf8SequenceLength(cluster[0]) and cluster.len > 1) {
+                    var glyph: ?u16 = null;
+                    // Keep this decode gate aligned with
+                    // `referenceGlyphCodepoint`: every valid scalar,
+                    // including one-byte controls, can use the selected
+                    // face's glyph-0 fallback. Invalid or truncated bytes
+                    // remain on the filled-cell fallback below.
+                    if (cluster.len == canvas.utf8SequenceLength(cluster[0])) {
                         if (std.unicode.utf8Decode(cluster)) |codepoint| {
                             glyph = face.glyphIndex(codepoint);
                         } else |_| {}
-                    } else if (cluster.len == 1 and cluster[0] >= 0x20 and cluster[0] < 0x7F) {
-                        glyph = face.glyphIndex(cluster[0]);
                     }
 
-                    if (glyph != 0) {
-                        const natural_advance = face.advance(glyph) * scale;
+                    if (glyph) |resolved_glyph| {
+                        const natural_advance = face.advance(resolved_glyph) * scale;
                         const inset = @max(0, (cell_advance - natural_advance) * 0.5);
-                        const outline = face.glyphBounds(glyph) catch return false;
+                        const outline = face.glyphBounds(resolved_glyph) catch return false;
                         if (outline) |glyph_bounds| {
                             const outline_min_x = pen_x + inset + glyph_bounds.x * scale;
                             const outline_max_x = pen_x + inset + (glyph_bounds.x + glyph_bounds.width) * scale;
@@ -343,9 +347,10 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
                             }
                         }
                     } else {
-                        // The reference renderer paints a solid fallback
-                        // cell for an uncovered cluster. Keep this provider
-                        // in lockstep with that block's actual cell bounds.
+                        // Undecodable source bytes retain the renderer's
+                        // historical filled-cell fallback. Valid decoded
+                        // misses use glyph 0 above, including its empty
+                        // no-ink case.
                         const block_min_x = pen_x;
                         const block_max_x = pen_x + cell_advance;
                         const block_min_y = -size;

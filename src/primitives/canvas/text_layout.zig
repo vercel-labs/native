@@ -56,7 +56,8 @@ pub const textLayoutKeysEqual = text_layout_hash.textLayoutKeysEqual;
 /// The elision marker: U+2026 HORIZONTAL ELLIPSIS, taken from the run's
 /// own face. Both bundled faces cover it; a registered face that lacks
 /// it takes the same documented fallback every uncovered codepoint does
-/// (the face's `.notdef` advance in layout, the block glyph in paint),
+/// (the face's `.notdef` advance in layout and its glyph-0 outline — or
+/// intentional no-ink — in paint),
 /// so the painted extent and the measured extent still agree.
 pub const text_ellipsis = "\u{2026}";
 pub const text_ellipsis_codepoint: u21 = 0x2026;

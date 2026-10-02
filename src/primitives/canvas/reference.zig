@@ -64,7 +64,7 @@ const reference_glyph_path_capacity: usize = @max(
 
 /// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
 /// derived budgets guarantee every outline the font registration gate
-/// admits rasterizes (never a block fallback), which sizes it at
+/// admits rasterizes without the mapped-glyph fallback, which sizes it at
 /// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
 /// lazy_tls pattern), not a stack temporary and not static TLS. Only
 /// threads that ink a glyph through the reference renderer allocate it.
@@ -807,7 +807,8 @@ pub const ReferenceRenderSurface = struct {
     /// The trailing ellipsis of an elided line, drawn at the painted
     /// right edge with the advance layout reserved for it — the same
     /// codepoint-to-outline path every glyph takes, so a face lacking
-    /// U+2026 falls back to the documented block treatment.
+    /// U+2026 draws that face's glyph-0 `.notdef` outline (or no ink
+    /// when its glyph 0 is intentionally empty).
     fn drawTextLineEllipsis(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF, line: TextLine) void {
         if (!line.hasEllipsis()) return;
         const pen_x = line.bounds.maxX() - line.ellipsis_advance;
@@ -815,14 +816,13 @@ pub const ReferenceRenderSurface = struct {
         self.drawGlyphBox(command, value, draw_bounds, text_ellipsis_codepoint, pen_x, line.baseline, glyph_rect);
     }
 
-    /// Paint one glyph: the real Geist outline through the vector core
-    /// when the codepoint resolves, the historical block rect otherwise
-    /// (unmapped codepoints, glyphs of hostile faces whose `maxp`
-    /// under-declares — the per-glyph parse backstops — or draws
-    /// carrying no text bytes; never a gate-admitted glyph, whose raster
-    /// budgets are derived from the registration gate). Layout is
-    /// untouched — the pen position and advance still come from the
-    /// deterministic estimator.
+    /// Paint one glyph through the selected face's vector outline. A
+    /// decoded codepoint that the face does not map draws glyph 0 — its
+    /// `.notdef` outline — or intentionally leaves no ink when glyph 0
+    /// is empty or unusable. The historical filled-cell fallback remains
+    /// for draws carrying no decodable text bytes and mapped glyphs that
+    /// fail a per-glyph parse backstop. Layout is untouched: the pen
+    /// position and advance still come from the deterministic estimator.
     fn drawGlyphBox(
         self: ReferenceRenderSurface,
         command: RenderCommand,
@@ -834,27 +834,31 @@ pub const ReferenceRenderSurface = struct {
         block_rect: geometry.RectF,
     ) void {
         if (codepoint) |cp| {
-            if (self.drawGlyphOutline(command, value, draw_bounds, cp, pen_x, baseline, block_rect.width)) return;
+            const face = referenceFaceForFontId(self.fonts, value.font_id);
+            const glyph = face.glyphIndex(cp);
+            if (self.drawGlyphOutline(command, value, draw_bounds, face, glyph, pen_x, baseline, block_rect.width)) return;
+            // A decoded but unmapped scalar owns glyph 0's fallback. An
+            // empty or unusable `.notdef` is deliberate no-ink, never a
+            // solid text-colored cell.
+            if (glyph == 0) return;
         }
         self.fillTextRect(command.transform.transformRect(block_rect).normalized(), draw_bounds, value.color, command.opacity);
     }
 
-    /// True when the glyph was handled (drawn, or intentionally empty
-    /// like a space); false requests the block fallback.
+    /// True when the selected glyph was handled (drawn, or intentionally
+    /// empty like a space or glyph-0 `.notdef`); false requests the
+    /// caller's mapped-glyph fallback.
     fn drawGlyphOutline(
         self: ReferenceRenderSurface,
         command: RenderCommand,
         value: DrawText,
         draw_bounds: geometry.RectF,
-        codepoint: u21,
+        face: *const font_ttf.Face,
+        glyph: u16,
         pen_x: f32,
         baseline: f32,
         cell_advance: f32,
     ) bool {
-        const face = referenceFaceForFontId(self.fonts, value.font_id);
-        const glyph = face.glyphIndex(codepoint);
-        if (glyph == 0) return false;
-
         // Center the outline's natural advance inside its layout cell when
         // the cell is wider. With the bundled mono face this is the
         // identity for every covered glyph (natural advance == the 0.6 em
@@ -1128,7 +1132,6 @@ fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
 
-
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
 }
@@ -1150,9 +1153,9 @@ fn isReferenceTextSpace(byte: u8) bool {
 /// bundled mapping — the mono face for the reserved mono id, the sans
 /// face for everything else (the weight and italic span variants keep
 /// the regular outlines at their estimator advances, exactly as before).
-/// Glyphs missing from whichever face wins keep the per-glyph notdef
-/// block fallback in `drawGlyphBox`; a registered face never cascades
-/// into the bundled faces mid-run.
+/// Glyphs missing from whichever face wins draw that face's own glyph-0
+/// `.notdef` outline (or intentionally no ink); a registered face never
+/// cascades into the bundled faces mid-run.
 fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) *const font_ttf.Face {
     for (fonts) |font| {
         if (font.id == font_id) return font.face;
