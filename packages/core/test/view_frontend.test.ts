@@ -101,6 +101,30 @@ test("clipboard requests preserve source ranges, exact huge offsets and validati
   assert.throws(() => exports.native_text_policy!(new Uint8Array([12])), /clipboard request/);
 });
 
+test("editor boundary requests preserve Escape precedence and closed picker routing", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const intent = (kind: number, phase: number, bits: number, key: number, text = 0, composition = 0, expanded = 0) =>
+    [...exports.native_text_policy!(new Uint8Array([14, kind, phase, bits, key, text, composition, expanded]))];
+  assert.deepEqual(intent(0, 0, 0, 1, 1, 1), [2, 0]);
+  assert.deepEqual(intent(2, 0, 0, 1, 1, 1), [2, 0]);
+  assert.deepEqual(intent(2, 0, 0, 1, 1), [3, 0]);
+  assert.deepEqual(intent(1, 0, 0, 1, 1), [1, 0]);
+  assert.deepEqual(intent(0, 0, 0, 2), [0, 0]);
+  assert.deepEqual(intent(1, 0, 1, 2), [4, 1]);
+  assert.deepEqual(intent(2, 0, 0, 3), [5, 0]);
+  assert.deepEqual(intent(3, 0, 1, 3), [0, 1]);
+  assert.deepEqual(intent(3, 0, 1, 3, 0, 0, 1), [5, 1]);
+  for (const bits of [1, 2, 4, 8, 15]) assert.equal(intent(2, 0, bits, 1)[0], 0);
+  for (const phase of [1, 2]) assert.equal(intent(2, phase, 0, 1, 0, 1)[0], 0);
+  assert.equal(intent(1, 0, 0, 2, 1)[0], 0);
+  for (const request of [[14], [14, 4, 0, 0, 0, 0, 0, 0], [14, 0, 3, 0, 0, 0, 0, 0],
+    [14, 0, 0, 16, 0, 0, 0, 0], [14, 0, 0, 0, 4, 0, 0, 0], [14, 0, 0, 0, 0, 2, 0, 0],
+    [14, 0, 0, 0, 0, 0, 2, 0], [14, 0, 0, 0, 0, 0, 0, 2]]) {
+    assert.throws(() => exports.native_text_policy!(new Uint8Array(request)), /editor boundary request/);
+  }
+});
+
 test("editor shortcut requests preserve primary modifiers and refuse malformed input", () => {
   const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
   runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });

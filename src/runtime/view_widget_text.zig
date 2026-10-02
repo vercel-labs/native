@@ -7,7 +7,6 @@ const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 
 const unionRects = canvas_frame_helpers.unionRects;
-const canvasWidgetEscapeKey = canvas_frame_helpers.canvasWidgetEscapeKey;
 const max_canvas_widget_nodes_per_view = canvas_limits.max_canvas_widget_nodes_per_view;
 const max_canvas_widget_text_bytes_per_view = canvas_limits.max_canvas_widget_text_bytes_per_view;
 const WidgetTextStorageRange = canvas_widget_runtime.WidgetTextStorageRange;
@@ -174,10 +173,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             // form the same vertical-navigation run as auto-repeat keydowns.
             if (!plain_vertical_navigation_key) clearCanvasWidgetTextVerticalGoal(self);
 
-            if (keyboard.phase == .key_down and !keyboard.modifiers.shift and !keyboard.modifiers.hasNavigationModifier() and canvasWidgetEscapeKey(keyboard.key)) {
-                if (widget.text_composition != null) return .cancel_composition;
-                if (widget.kind == .search_field or widget.kind == .combobox) return .clear;
-                return null;
+            switch (canvas.widgetKeyboardTextBoundaryIntent(widget, keyboard)) {
+                .fallback => {},
+                .no_edit => return null,
+                .edit => |edit| return edit,
             }
 
             // Multi-line editing contract: Enter normally inserts a
@@ -389,28 +388,6 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                     else
                         canvas.TextSelection.collapsedAt(target_position) };
                 }
-            }
-
-            // On a CLOSED combobox these same arrows are the trigger's
-            // OPEN keys (`widgetKeyboardControlIntent`'s menu-open
-            // mapping, which the app dispatch resolves BEFORE any
-            // stamped edit): platform convention is that opening wins
-            // and the caret does not move, so the derivation yields no
-            // edit and the retained editor agrees with the model's "no
-            // edit" verdict. The app-side fallback derivation for
-            // events that never crossed the runtime
-            // (`textEditEvent()`'s generic keymap) has no ArrowUp/Down
-            // arm at all, so both derivations stay in agreement. Once
-            // the picker is OPEN the focus step walks the arrows into
-            // the mounted menu before routing reaches the trigger; an
-            // arrow that still lands on an EXPANDED trigger (no
-            // focusable menu entry mounted) keeps the caret jump — the
-            // control resolver ignores it there, so both sides hear
-            // the same move.
-            const arrow_opens_combobox = widget.kind == .combobox and !(widget.state.expanded orelse false);
-            if (!arrow_opens_combobox and canvasWidgetSingleLineTextKind(widget.kind) and keyboard.phase == .key_down and keyboard.text.len == 0 and !keyboard.modifiers.hasNavigationModifier()) {
-                if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return .{ .move_caret = .{ .direction = .start, .extend = keyboard.modifiers.shift } };
-                if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return .{ .move_caret = .{ .direction = .end, .extend = keyboard.modifiers.shift } };
             }
 
             return canvas.widgetKeyboardTextEditEventForWidget(widget, keyboard);

@@ -46,3 +46,7 @@ removing CR/LF; Note, Message, and Scratchpad keep them. Single-line IME
 previews use the same rule, including empty previews. Paste fits the view's
 remaining text budget at a UTF-8 boundary after removing line breaks; undo
 and redo restore retained bytes exactly.
+
+Up/Down in Subject moves to the beginning/end; Shift extends the selection.
+Escape cancels an active composition in any editor and keeps the surrounding
+text. With no composition, Escape preserves Subject, Note, and Message.

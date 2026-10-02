@@ -7,7 +7,7 @@
   </row>
   <text foreground="text_muted">Write a note, or send a quick message.</text>
   <input width="420" label="Subject" text="{subject.text}" disabled="{locked}" on-input="subject_edit" on-submit="publish"/>
-  <text foreground="text_muted">Pasted lines join in Subject; notes keep their newlines.</text>
+  <text foreground="text_muted">Subject: Up/Down reaches either end; Shift selects. Escape cancels composition.</text>
   <row gap="16" cross="start">
     <column gap="8" width="420">
       <text size="heading">Note</text>

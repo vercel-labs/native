@@ -2348,6 +2348,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 try self.views[index].applyCanvasWidgetTextEditWithoutHistory(target.id, edit) orelse return
             else
                 try self.views[index].applyCanvasWidgetTextEdit(target.id, edit) orelse return;
+            // Keyboard Escape closes this editor's composition directly. It
+            // must release the native IME owner too, or later text intended
+            // for a newly focused editor still routes to the canceled one.
+            // Host IME cancel events keep their separate converted-commit
+            // grace (cancel followed by text_input), handled by GPU routing.
+            if (edit == .cancel_composition and keyboard_event.keyboard.phase == .key_down and
+                self.views[index].canvas_widget_ime_owner_id == target.id)
+            {
+                self.views[index].canvas_widget_ime_owner_id = 0;
+                self.views[index].canvas_widget_ime_commit_grace = .none;
+            }
             if (keyboard_event.history_replay) {
                 self.views[index].commitCanvasWidgetTextHistoryReplayIfComplete(
                     target,

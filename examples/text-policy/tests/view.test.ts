@@ -319,6 +319,29 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await history("Note", true); expectText("draft", "Restored café\nA fresh draft from the app.!");
     await history("Subject", false); expectText("subject", "Sé");
     await history("Message", false); expectText("chat", "M");
+    await click("New desk");
+    // Single-line arrows reach boundaries, preserving the anchor with Shift.
+    await set("Subject", "aé🙂z"); await focus("Subject"); await select("Subject", 7, 3);
+    await key("shift+arrowup"); assert.equal(value("subject").anchor, 7); assert.equal(value("subject").focus, 0);
+    await key("shift+arrowdown"); assert.equal(value("subject").anchor, 7); assert.equal(value("subject").focus, 8);
+    await key("arrowup"); assert.equal(value("subject").anchor, 0); assert.equal(value("subject").focus, 0);
+    await key("arrowdown"); assert.equal(value("subject").anchor, 8); assert.equal(value("subject").focus, 8);
+    await select("Subject", 3, 3); const stationary = value("subject");
+    for (const chord of ["alt+arrowup", "ctrl+arrowdown", "super+arrowup", "shift+escape", "escape"]) {
+      await key(chord); assert.deepEqual(value("subject"), stationary);
+    }
+    // Escape cancels even an empty preview; it never clears ordinary entries.
+    s = await app.composeText(field("Subject"), "日本"); save(); expectText("subject", "aé日本🙂z");
+    await key("shift+escape"); assert.ok(value("subject").compStart >= 0);
+    await key("escape"); expectText("subject", "aé🙂z"); assert.equal(value("subject").compStart, -1);
+    s = await app.composeText(field("Subject"), ""); save(); assert.ok(value("subject").compStart >= 0);
+    await key("escape"); expectText("subject", "aé🙂z"); assert.equal(value("subject").compStart, -1);
+    const noteBefore = bytes(value("draft").text);
+    await set("Note", "Before\nAfter"); expectText("draft", "Before\nAfter"); assert.equal(value("draft").compStart, -1); await focus("Note"); await select("Note", 7, 7);
+    assert.equal(value("draft").anchor, 7); assert.equal(value("draft").focus, 7);
+    s = await app.composeText(field("Note"), "🙂"); save(); expectText("draft", "Before\n🙂After"); assert.equal(value("draft").compStart, 7);
+    await key("escape"); expectText("draft", "Before\nAfter"); assert.equal(value("draft").compStart, -1);
+    await key("cmd+z"); expectText("draft", noteBefore);
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

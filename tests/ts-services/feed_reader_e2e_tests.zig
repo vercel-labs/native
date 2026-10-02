@@ -3550,3 +3550,169 @@ test "runtime clipboard and history routing consult the focused compiled editor 
     try std.testing.expectEqualStrings("🙂", (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
 }
+
+test "compiled editor boundary policy matches native runtime phases and state" {
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-editor-boundaries", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{.{ .id = 2, .kind = .input, .frame = geometry.RectF.init(12, 16, 180, 84), .text = "aé🙂z" }} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    const keys = [_][]const u8{ "", "escape", "ESC", "Escape", "ArrowUp", "arrowdown", "enter" };
+    const compositions = [_]?canvas.TextRange{ null, .{ .start = 3, .end = 3 }, .{ .start = 1, .end = 3 } };
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up, .text_input }) |phase| {
+            for (0..16) |bits| {
+                for (keys) |key| {
+                    for ([_][]const u8{ "", "日本" }) |payload| {
+                        for (compositions) |composition| {
+                            for ([_]?bool{ null, false, true }) |expanded| {
+                                const event = canvas.WidgetKeyboardEvent{ .phase = phase, .key = key, .text = payload, .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
+                                var widget = view.widget_layout_nodes[1].widget;
+                                widget.kind = kind;
+                                widget.text_selection = .{ .anchor = 7, .focus = 3 };
+                                widget.text_composition = composition;
+                                widget.state.expanded = expanded;
+                                widget.interaction_policy = null;
+                                view.widget_layout_nodes[1].widget = widget;
+                                const target = canvas.WidgetFocusTarget{ .id = 2, .kind = kind, .bounds = widget.frame, .index = 1, .state = widget.state };
+                                const expected_intent = canvas.widgetKeyboardTextBoundaryIntent(widget, event);
+                                const expected_edit = view.canvasWidgetKeyboardTextEdit(target, event);
+                                widget.interaction_policy = core.nativeTextPolicy;
+                                view.widget_layout_nodes[1].widget = widget;
+                                try std.testing.expectEqualDeep(expected_intent, canvas.widgetKeyboardTextBoundaryIntent(widget, event));
+                                try std.testing.expectEqualDeep(expected_edit, view.canvasWidgetKeyboardTextEdit(target, event));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const Never = struct {
+        fn policy(_: []const u8, _: []u8) usize {
+            @panic("ineligible editor called boundary policy");
+        }
+    };
+    const escape = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "escape" };
+    for ([_]canvas.WidgetKind{ .text, .button, .terminal }) |kind| {
+        try std.testing.expectEqualDeep(canvas.WidgetTextBoundaryIntent.fallback, canvas.widgetKeyboardTextBoundaryIntent(.{ .kind = kind, .interaction_policy = Never.policy }, escape));
+    }
+    view.widget_layout_nodes[1].widget.kind = .search_field;
+    view.widget_layout_nodes[1].widget.state.disabled = true;
+    view.widget_layout_nodes[1].widget.interaction_policy = Never.policy;
+    try std.testing.expectEqual(@as(?canvas.TextInputEvent, null), view.canvasWidgetKeyboardTextEdit(.{ .id = 2, .kind = .search_field, .bounds = .{}, .index = 1, .state = .{} }, escape));
+    try std.testing.expectEqual(@as(?canvas.TextInputEvent, null), view.canvasWidgetKeyboardTextEdit(.{ .id = 999, .kind = .input, .bounds = .{}, .index = 1, .state = .{} }, escape));
+}
+
+test "runtime stamps compiled Escape and single line navigation before retained edits" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var suppress = true;
+        var last_edit: ?canvas.TextInputEvent = null;
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, value: native_sdk.Event) anyerror!void {
+            if (value == .canvas_widget_keyboard) last_edit = value.canvas_widget_keyboard.keyboard.edit;
+        }
+        fn key(harness: anytype, app: native_sdk.App, name: []const u8, text: []const u8, shift: bool) !void {
+            last_edit = null;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = name, .text = text, .modifiers = .{ .shift = shift } } });
+        }
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 14) {
+                calls += 1;
+                if (suppress) {
+                    output[0] = 1;
+                    output[1] = 0;
+                    return 2;
+                }
+            }
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    Spy.calls = 0;
+    Spy.suppress = true;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-boundary-routing", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>"), .event_fn = Spy.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{ .{ .id = 2, .kind = .search_field, .frame = geometry.RectF.init(12, 16, 180, 36), .text = "aé🙂z", .interaction_policy = Spy.policy }, .{ .id = 3, .kind = .input, .frame = geometry.RectF.init(12, 60, 180, 36), .text = "Neighbor", .interaction_policy = Spy.policy } } }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_focused_id = 2;
+    try Spy.key(harness, app, "escape", "", false);
+    try std.testing.expectEqual(@as(usize, 1), Spy.calls);
+    try std.testing.expect(Spy.last_edit == null);
+    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
+    Spy.suppress = false;
+    _ = try view.applyCanvasWidgetTextEdit(2, .{ .set_selection = .{ .anchor = 7, .focus = 3 } });
+    try Spy.key(harness, app, "arrowup", "", true);
+    try std.testing.expectEqualDeep(canvas.TextInputEvent{ .move_caret = .{ .direction = .start, .extend = true } }, Spy.last_edit.?);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 7, .focus = 0 }, view.widget_layout_nodes[1].widget.text_selection.?);
+    _ = try view.applyCanvasWidgetTextEdit(2, .{ .set_selection = .{ .anchor = 3, .focus = 3 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .ime_set_composition, .text = "日本" } });
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), view.canvas_widget_ime_owner_id);
+    try Spy.key(harness, app, "ESC", "", false);
+    try std.testing.expectEqualDeep(canvas.TextInputEvent.cancel_composition, Spy.last_edit.?);
+    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
+    try std.testing.expect(view.widget_layout_nodes[1].widget.text_composition == null);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_ime_owner_id);
+    try std.testing.expect(view.canvas_widget_ime_commit_grace == .none);
+    view.canvas_widget_focused_id = 3;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .text_input, .text = "!" } });
+    try std.testing.expectEqualStrings("Neighbor!", view.widget_layout_nodes[2].widget.text);
+    try std.testing.expectEqualStrings("aé🙂z", view.widget_layout_nodes[1].widget.text);
+    view.canvas_widget_focused_id = 2;
+    try Spy.key(harness, app, "ESC", "", false);
+    try std.testing.expectEqualDeep(canvas.TextInputEvent.clear, Spy.last_edit.?);
+    try std.testing.expectEqualStrings("", view.widget_layout_nodes[1].widget.text);
+    try Spy.key(harness, app, "ESC", "", false);
+    try std.testing.expectEqualDeep(canvas.TextInputEvent.clear, Spy.last_edit.?);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+}
+
+test "compiled combobox boundaries preserve opening and mounted menu focus precedence" {
+    const Fixture = struct {
+        var calls: usize = 0;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 14) calls += 1;
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var context: u8 = 0;
+        const app = native_sdk.App{ .context = &context, .name = "compiled-combo-boundaries", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 200) });
+        const view = &harness.runtime.views[0];
+        for (0..3) |mode| {
+            const fields = [_]canvas.Widget{
+                .{ .id = 2, .kind = .combobox, .frame = geometry.RectF.init(0, 0, 180, 36), .text = "aé🙂z", .text_selection = canvas.TextSelection.collapsed(3), .state = .{ .expanded = mode != 0 }, .command = "choose", .interaction_policy = if (compiled) Fixture.policy else null },
+                .{ .id = 3, .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 180, 50), .layout = .{ .anchor = .{ .placement = .below } }, .children = if (mode == 2) &.{.{ .id = 4, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 160, 30), .text = "Choice", .command = "choose" }} else &.{} },
+            };
+            var nodes: [4]canvas.WidgetLayoutNode = undefined;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .frame = geometry.RectF.init(12, 16, 180, 36), .children = fields[0..if (mode == 0) @as(usize, 1) else 2] }, geometry.RectF.init(0, 0, 300, 200), &nodes));
+            view.canvas_widget_focused_id = 2;
+            _ = try view.applyCanvasWidgetTextEdit(2, .{ .set_selection = canvas.TextSelection.collapsed(3) });
+            Fixture.calls = 0;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(if (mode == 1) 8 else 3), retained.findById(2).?.widget.text_selection.?);
+            try std.testing.expectEqual(@as(canvas.ObjectId, if (mode == 2) 4 else 2), view.canvas_widget_focused_id);
+            if (compiled) try std.testing.expectEqual(@as(usize, if (mode == 2) 0 else 1), Fixture.calls);
+            if (mode == 0) try std.testing.expectEqual(canvas.WidgetControlIntentKind.press, canvas.widgetKeyboardControlIntent(retained.findById(2).?.widget, .{ .phase = .key_down, .key = "arrowdown" }).?.kind);
+        }
+        try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+    }
+}
