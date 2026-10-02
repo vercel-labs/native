@@ -3265,3 +3265,82 @@ test "compiled history replay borrows full-budget payloads and copies exact sele
     try std.testing.expect(canvas.widgetCompiledTextHistoryReplay(widget, state).? == .none);
     try std.testing.expect(canvas.widgetCompiledTextHistoryReplay(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, state) == null);
 }
+
+test "compiled code indentation matches native votes caret ties eligibility and full source budget" {
+    const sources = [_][]const u8{
+        "",                             "plain\n  \n\t\n",
+        "    café\r\n",
+        "   a\n",
+        "\t日本\n\tx\n  y",
+        "    a\n        b\n    c",      "  a\n    b\n      c",
+        "     a\n       b\n         c", "\tx\n  y",
+        " \t mixed\n    spaces",        "\r\n  \r\n\t\r\n",
+        "  \x80\xff\n",                 "         nine",
+    };
+    const event = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "TAB" };
+    for (sources) |source| {
+        for (0..source.len + 2) |caret| {
+            const reference = canvas.Widget{ .kind = .textarea, .runtime_flags = .{ .code_editor = true }, .text = source, .text_selection = .{ .anchor = 0, .focus = caret } };
+            var compiled = reference;
+            compiled.interaction_policy = core.nativeTextPolicy;
+            try std.testing.expectEqualDeep(canvas.widgetCodeTabTextEditEvent(reference, event), canvas.widgetCodeTabTextEditEvent(compiled, event));
+        }
+    }
+    // Exhaust every indent width and mixed voting tie at both local line kinds.
+    for (1..13) |a| {
+        for (1..13) |b| {
+            var source: [64]u8 = undefined;
+            @memset(source[0..a], ' ');
+            source[a] = 'x';
+            source[a + 1] = '\n';
+            @memset(source[a + 2 .. a + 2 + b], ' ');
+            source[a + 2 + b] = 'y';
+            source[a + 3 + b] = '\n';
+            source[a + 4 + b] = '\t';
+            source[a + 5 + b] = 'z';
+            for ([_]usize{ 0, a + 2, a + 4 + b, std.math.maxInt(usize) }) |caret| {
+                const reference = canvas.Widget{ .kind = .textarea, .runtime_flags = .{ .code_editor = true }, .text = source[0 .. a + b + 6], .text_selection = .{ .focus = caret } };
+                var compiled = reference;
+                compiled.interaction_policy = core.nativeTextPolicy;
+                try std.testing.expectEqualDeep(canvas.widgetCodeTabTextEditEvent(reference, event), canvas.widgetCodeTabTextEditEvent(compiled, event));
+            }
+        }
+    }
+    const compiled = canvas.Widget{ .kind = .textarea, .runtime_flags = .{ .code_editor = true }, .text = "    x", .interaction_policy = core.nativeTextPolicy };
+    for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up, .text_input }) |phase| {
+        for (0..16) |bits| {
+            for ([_]bool{ false, true }) |moved| {
+                for ([_][]const u8{ "", "\t" }) |text| {
+                    const keyboard = canvas.WidgetKeyboardEvent{ .phase = phase, .key = "tab", .text = text, .focus_moved = moved, .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
+                    var reference = compiled;
+                    reference.interaction_policy = null;
+                    try std.testing.expectEqualDeep(canvas.widgetCodeTabTextEditEvent(reference, keyboard), canvas.widgetCodeTabTextEditEvent(compiled, keyboard));
+                }
+            }
+        }
+    }
+    var disabled = compiled;
+    disabled.state.disabled = true;
+    try std.testing.expect(canvas.widgetCodeTabTextEditEvent(disabled, event) == null);
+    var ordinary = compiled;
+    ordinary.runtime_flags.code_editor = false;
+    try std.testing.expect(canvas.widgetCodeTabTextEditEvent(ordinary, event) == null);
+    ordinary = compiled;
+    ordinary.kind = .input;
+    try std.testing.expect(canvas.widgetCodeTabTextEditEvent(ordinary, event) == null);
+    const large = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'a');
+    @memset(large[0..8], ' ');
+    var full = compiled;
+    full.text = large;
+    full.text_selection = .{ .focus = std.math.maxInt(usize) };
+    const insertion = canvas.widgetCodeTabTextEditEvent(full, event).?.insert_text;
+    try std.testing.expectEqualStrings("        ", insertion);
+    const view = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(view);
+    var output: [2]u8 = undefined;
+    _ = core.nativeTextPolicy(&.{ 1, 1, 0, 0, 1, 0, 5, 0 }, &output);
+    // Returned edits borrow static native bytes, never a reset compiler arena.
+    try std.testing.expectEqualStrings("        ", insertion);
+}

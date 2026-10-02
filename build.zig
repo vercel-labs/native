@@ -1079,6 +1079,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&text_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&text_policy_driver_run.step);
         test_step.dependOn(&text_policy_driver_run.step);
+        const code_workbench_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        code_workbench_reference_run.setCwd(b.path("examples/code-workbench"));
+        code_workbench_reference_run.has_side_effects = true;
+        code_workbench_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        code_workbench_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/code-workbench-view-reference"));
+        _ = code_workbench_reference_run.captureStdOut(.{});
+        _ = code_workbench_reference_run.captureStdErr(.{});
+        const code_workbench_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        code_workbench_driver_run.setCwd(b.path("examples/code-workbench"));
+        code_workbench_driver_run.has_side_effects = true;
+        code_workbench_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        code_workbench_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/code-workbench-view-reference"));
+        _ = code_workbench_driver_run.captureStdOut(.{});
+        _ = code_workbench_driver_run.captureStdErr(.{});
+        code_workbench_driver_run.step.dependOn(&code_workbench_reference_run.step);
+        native_driver_step.dependOn(&code_workbench_driver_run.step);
+        ts_core_e2e_step.dependOn(&code_workbench_driver_run.step);
+        test_step.dependOn(&code_workbench_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2253,6 +2271,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

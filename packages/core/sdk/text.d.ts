@@ -48,6 +48,12 @@ export interface TextEditState {
     readonly selection: TextSelection;
     readonly composition: TextRange | null;
 }
+/** Indentation inserted by a code editor's plain Tab. Nonempty indented
+ * lines vote for tabs or spaces; space widths 2–8 compete by divisibility,
+ * with wider widths winning ties. A tied tab vote follows the caret's
+ * current line. Unindented and ambiguous files use two spaces.
+ */
+export declare function codeIndentationInsertion(text: Uint8Array, caret: number): Uint8Array;
 export declare function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextInputEvent | null;
 /** Select the word, whitespace run or punctuation cluster at a UTF-8 byte
  * offset. An offset at or beyond the end selects the trailing run.

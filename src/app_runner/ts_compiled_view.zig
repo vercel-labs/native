@@ -56,6 +56,8 @@ const Record = struct {
     spanWeight: ?sdk.canvas.TextSpanWeight = null,
     spanColor: ?sdk.canvas.TextSpanColor = null,
     spanScale: ?f32 = null,
+    codeLanguage: ?sdk.canvas.code.Language = null,
+    codeLineDigits: ?u8 = null,
     press: ?[]const u8 = null,
     toggle: ?[]const u8 = null,
     change: ?[]const u8 = null,
@@ -133,6 +135,11 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     const paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
     if (paragraph and value.kind != .text) return error.InvalidView;
     if (value.spanScale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
+    if (value.codeLanguage != null or value.codeLineDigits != null) {
+        if (value.codeLanguage == null or value.codeLineDigits == null or value.kind != .textarea or
+            value.codeLineDigits.? > 5 or value.placeholder.len != 0 or value.submitOnEnter or paragraph)
+            return error.InvalidView;
+    }
     if (value.listItemIndex) |item| if (value.listItemCount == null or item >= value.listItemCount.?) return error.InvalidView;
     var children: std.ArrayList(Ui.Node) = .empty;
     var child_index = index + 1;
@@ -237,6 +244,16 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
         spans[0] = .{ .text = result.widget.text, .weight = value.spanWeight orelse .regular, .color = value.spanColor, .scale = value.spanScale orelse 0 };
         result.widget.spans = spans;
+    }
+    if (value.codeLanguage) |language| {
+        const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
+        spans[0] = .{ .text = result.widget.text, .monospace = true, .color = .syntax_plain };
+        result.widget.spans = spans;
+        result.widget.runtime_flags.code_editor = true;
+        result.widget.code_language = language;
+        result.widget.code_line_number_digits = value.codeLineDigits.?;
+        result.widget.text_no_wrap = true;
+        result.widget.layout.clip_content = true;
     }
     return result;
 }
@@ -493,6 +510,29 @@ test "compiled textareas preserve multiline Enter policy and text keyboard callb
         for ([_][]const u8{
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"submitOnEnter\":true}]}",
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"textarea\",\"text\":\"\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+    }
+}
+
+test "compiled code records preserve owned monospace source and reject misplaced metadata" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const result = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"const café = 1;\\n\",\"codeLanguage\":\"typescript\",\"codeLineDigits\":1}]}");
+        try std.testing.expect(result.widget.runtime_flags.code_editor);
+        try std.testing.expect(result.widget.text_no_wrap and result.widget.layout.clip_content);
+        try std.testing.expectEqual(sdk.canvas.code.Language.typescript, result.widget.code_language);
+        try std.testing.expectEqual(@as(u8, 1), result.widget.code_line_number_digits);
+        try std.testing.expect(result.widget.spans[0].monospace);
+        try std.testing.expect(result.widget.spans[0].text.ptr == result.widget.text.ptr);
+        try std.testing.expectEqualStrings("const café = 1;\n", result.widget.text);
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLineDigits\":1}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":6}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",\"codeLanguage\":\"plain\",\"codeLineDigits\":1,\"submitOnEnter\":true}]}",
         }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
     }
 }

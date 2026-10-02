@@ -405,7 +405,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", panel: "panel", badge: "badge", input: "input", textarea: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
+    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", panel: "panel", badge: "badge", input: "input", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
     const container = ["column", "row", "stack", "scroll", "panel", "radio-group", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
@@ -413,7 +413,23 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
     if (node.name === "list-item" ? node.text.trim() !== "" && node.children.length !== 0 : container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
+    if (node.name === "code") {
+      if (node.attrs.get("editable") !== "true" || node.attrs.get("wrap") !== "false")
+        fail(node, 'compiled code requires editable="true" and wrap="false"');
+      if (!node.attrs.has("source") || node.text.trim()) fail(node, "code requires a source binding and no element text");
+      const expr = binding(node.attrs.get("source")!, node, scope);
+      if (expr.type.kind !== "bytes") fail(node, "code source requires UTF-8 bytes");
+      props[1] = `text: ${textValue(expr, node)}`;
+      const language = (node.attrs.get("language") ?? "plain").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").toLowerCase();
+      const aliases: Record<string, string> = { text: "plain", js: "javascript", mjs: "javascript", ts: "typescript", jsonc: "json", yml: "yaml", sh: "shell", bash: "shell", zsh: "shell", py: "python", rs: "rust", c: "c_like", h: "c_like", cc: "c_like", cpp: "c_like", "c++": "c_like", cs: "c_like", csharp: "c_like", java: "c_like", kotlin: "c_like", swift: "c_like", golang: "go", xml: "html", svg: "html", scss: "css", less: "css", md: "markdown" };
+      const canonical = aliases[language] ?? language;
+      if (language === "c_like" || !["plain", "zig", "javascript", "typescript", "json", "yaml", "shell", "python", "rust", "c_like", "go", "html", "css", "sql", "jsx", "tsx", "markdown"].includes(canonical)) fail(node, "code language requires a supported literal name");
+      props.push(`codeLanguage: ${JSON.stringify(canonical)}`);
+      const attrs = ["source", "language", "editable", "line-numbers", "wrap", "width", "height", "min-width", "grow", "label", "key", "global-key", "on-input"];
+      for (const name of node.attrs.keys()) if (!attrs.includes(name)) fail(node, `unsupported compiled code attribute ${name}`);
+    }
     for (const [name, value] of node.attrs) {
+      if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers"].includes(name)) continue;
       if (name === "gap" && node.name === "resizable") fail(node, "resizable is a stacking surface; put gap on a row or column inside");
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
       else if (name === "value-x") {
@@ -489,7 +505,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
         if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && node.name !== "dropdown-menu") fail(node, `${name} is unsupported on ${node.name}`);
-        if (["input", "submit"].includes(channel) && !["input", "search-field", "textarea"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
+        if (["input", "submit"].includes(channel) && !["input", "search-field", "textarea", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");
         if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {
           props.push(`valueChange: ${event(value, "value", node, scope)}`);
@@ -500,6 +516,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (node.name === "tabs" || node.name === "split") output.push(`const nscvStart${id} = nscvNodes.length;`);
     output.push(`const nscvNode${id}: NscViewNode = { end: 0, ${props.join(", ")} };`, `nscvNodes.push(nscvNode${id});`, 'if (nscvNodes.length > 1024) throw new Error("compiled view exceeds 1024 nodes");');
     emitChildren(node.children, scope, slot, stack, depth + 1); output.push(`nscvNode${id}.end = nscvNodes.length;`);
+    if (node.name === "code") output.push(`nscvCodeEditor(nscvNode${id}, ${node.attrs.has("line-numbers") ? bound(node.attrs.get("line-numbers")!, "boolean", node, scope) : "false"});`);
     if (node.name === "tabs") output.push(`nscvTabs(nscvNodes, nscvStart${id});`);
     if (node.name === "split") output.push(`nscvSplit(nscvNodes, nscvStart${id});`);
   };

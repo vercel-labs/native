@@ -5,12 +5,31 @@ import {
   textWordSelectionAtOffset,
   textLineSelectionAtOffset,
   sanitizedSingleLineTextInputEvent,
+  codeIndentationInsertion,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("code Tab follows file indentation and caret-local ties without changing source", () => {
+  const cases: [string, number, string][] = [
+    ["", 0, "  "], ["plain\n  \n\t\n", 0, "  "],
+    ["    café\r\n", 0, "    "], ["   x\n", 0, "   "],
+    ["\t日本\n\tx\n  y", 0, "\t"],
+    ["    a\n        b\n    c", 0, "    "],
+    ["  a\n    b\n      c", 0, "  "],
+    ["     a\n       b\n         c", 0, "  "],
+    ["\tx\n  y", 1, "\t"], ["\tx\n  y", 4, "  "],
+    ["\tx\n  y", 999, "  "], ["\tx\n  y", 3, "  "],
+  ];
+  for (const [source, caret, expected] of cases) {
+    const text = encoder.encode(source), before = text.slice();
+    assert.equal(decoder.decode(codeIndentationInsertion(text, caret)), expected);
+    assert.deepEqual(text, before);
+  }
+});
 
 test("single-line new input strips breaks, preserves empty previews and adjusts only rewritten cursors", () => {
   const insert = (text: string): TextInputEvent => ({ kind: "insert_text", text: encoder.encode(text) });

@@ -180,6 +180,22 @@ pub fn widgetCodeTabTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?T
 const CodeIndentKind = enum { none, spaces, tabs };
 
 fn codeIndentationInsertion(widget: Widget) []const u8 {
+    if (widget.interaction_policy) |callback| {
+        std.debug.assert(widget.text.len <= canvas.max_widget_text_bytes_per_view);
+        const request = text_policy_scratch.get().request[0 .. 8 + widget.text.len];
+        @memset(request[0..8], 0);
+        request[0] = 11;
+        const selection = widget.text_selection orelse text_model.TextSelection.collapsed(widget.text.len);
+        std.mem.writeInt(u32, request[4..8], @intCast(@min(selection.focus, widget.text.len)), .little);
+        @memcpy(request[8..], widget.text);
+        var output: [1]u8 = undefined;
+        if (callback(request, &output) != 1) @panic("invalid compiled code indentation result");
+        return switch (output[0]) {
+            0 => "\t",
+            2...8 => "        "[0..output[0]],
+            else => @panic("invalid compiled code indentation width"),
+        };
+    }
     var tab_lines: usize = 0;
     var space_lines: usize = 0;
     var space_width_scores: [9]usize = @splat(0);

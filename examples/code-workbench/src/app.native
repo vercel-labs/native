@@ -1,0 +1,27 @@
+<column key="{workbench}" gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1" size="heading">Code Workbench</text>
+    <button size="sm" on-press="refresh">Refresh</button>
+    <button size="sm" on-press="new_workbench">New workbench</button>
+  </row>
+  <text foreground="text_muted">Tab follows each draft's indentation. Shift+Tab moves focus.</text>
+  <row gap="16" grow="1">
+    <column gap="8" width="420">
+      <text size="heading">TypeScript</text>
+      <if test="{typescriptVisible}">
+        <code key="typescript" source="{typescript.text}" language="typescript" editable="true" wrap="false" line-numbers="{numbered}" width="420" height="260" label="TypeScript draft" on-input="edit_typescript"/>
+      </if>
+      <row gap="8">
+        <button size="sm" on-press="spaces">Use spaces</button>
+        <button size="sm" on-press="tabs">Use tabs</button>
+        <button size="sm" on-press="hide">Hide TypeScript</button>
+      </row>
+    </column>
+    <column gap="8" width="420">
+      <text size="heading">Python</text>
+      <code key="python" source="{python.text}" language="python" editable="true" wrap="false" line-numbers="{numbered}" width="420" height="260" label="Python draft" on-input="edit_python"/>
+      <button size="sm" on-press="numbers">Toggle line numbers</button>
+    </column>
+  </row>
+  <status-bar>Workbench {workbench} · {refreshes} refreshes</status-bar>
+</column>

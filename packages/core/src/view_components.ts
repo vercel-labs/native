@@ -2,7 +2,7 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
-import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -17,6 +17,7 @@ type NscViewNode = {
   expanded?: boolean; treeLevel?: number;
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
+  codeLanguage?: string; codeLineDigits?: number;
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number;
@@ -46,6 +47,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 8) return nscvTextHistoryDelta(request);
   if (request[0] === 9) return nscvTextCompositionHistory(request);
   if (request[0] === 10) return nscvTextHistoryTimeline(request);
+  if (request[0] === 11) return nscvCodeIndentation(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -83,6 +85,38 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
   return result;
+}
+
+/** Code Tab: tag 11, three reserved zero bytes, LE u32 caret, UTF-8 source.
+ * Result is one byte: 0 for a tab, or a space width from 2 through 8.
+ * Native keeps eligibility, key delivery and static insertion bytes.
+ */
+function nscvCodeIndentation(request: Uint8Array): Uint8Array {
+  if (request.length < 8 || request.length > 8 + 512 * 1024 ||
+      request[1] !== 0 || request[2] !== 0 || request[3] !== 0)
+    throw new Error("invalid code indentation request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const insertion = nscvIndentation(request.subarray(8), data.getUint32(4, true));
+  const result = new Uint8Array(1);
+  result[0] = insertion[0] === 9 ? 0 : insertion.length;
+  return result;
+}
+
+/** Editable no-wrap code lowers to a textarea plus renderer metadata.
+ * Count its terminal caret line and omit the gutter beyond 10,000 source
+ * lines, matching the retained native code component's line budget.
+ */
+function nscvCodeEditor(node: NscViewNode, numbered: boolean): void {
+  let lines = 1;
+  for (let i = 0; i < node.text.length; i += 1) if (node.text.charCodeAt(i) === 10) lines += 1;
+  const terminal = node.text.length > 0 && node.text.charCodeAt(node.text.length - 1) === 10;
+  let digits = 0;
+  if (numbered && lines - (terminal ? 1 : 0) <= 10000) {
+    digits = 1;
+    let remaining = lines;
+    while (remaining >= 10) { remaining = Math.floor(remaining / 10); digits += 1; }
+  }
+  node.codeLineDigits = digits;
 }
 
 /** Tagged pointer request: 3, multiline, click count (2/3), mode

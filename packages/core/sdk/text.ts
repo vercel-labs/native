@@ -73,6 +73,62 @@ export interface TextEditState {
   readonly composition: TextRange | null;
 }
 
+/** Indentation inserted by a code editor's plain Tab. Nonempty indented
+ * lines vote for tabs or spaces; space widths 2–8 compete by divisibility,
+ * with wider widths winning ties. A tied tab vote follows the caret's
+ * current line. Unindented and ambiguous files use two spaces.
+ */
+export function codeIndentationInsertion(text: Uint8Array, caret: number): Uint8Array {
+  let tabLines = 0, spaceLines = 0, onlySpaceIndent = 0;
+  const scores = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  let lineStart = 0;
+  while (lineStart <= text.length) {
+    let end = lineStart;
+    while (end < text.length && text[end] !== 10) end += 1;
+    let cursor = lineStart, spaces = 0, tabs = 0;
+    while (cursor < end) {
+      if (text[cursor] === 32) spaces += 1;
+      else if (text[cursor] === 9) tabs += 1;
+      else break;
+      cursor += 1;
+    }
+    if (cursor < end && cursor > lineStart) {
+      if (tabs > 0) tabLines += 1;
+      else {
+        spaceLines += 1;
+        onlySpaceIndent = spaceLines === 1 ? spaces : 0;
+        for (let width = 2; width <= 8; width += 1) {
+          if (spaces % width === 0) scores[width] = scores[width]! + 1;
+        }
+      }
+    }
+    if (end === text.length) break;
+    lineStart = end + 1;
+  }
+  const offset = Math.min(Math.max(caret, 0), text.length);
+  let localStart = 0;
+  for (let i = 0; i < offset; i += 1) if (text[i] === 10) localStart = i + 1;
+  if (tabLines > spaceLines || tabLines === spaceLines && tabLines > 0 && localStart < text.length && text[localStart] === 9) {
+    const result = new Uint8Array(1); result[0] = 9; return result;
+  }
+  let inferred = 2;
+  if (spaceLines === 1) {
+    if (onlySpaceIndent >= 2 && onlySpaceIndent <= 8) inferred = onlySpaceIndent;
+  } else if (spaceLines > 1) {
+    let bestWidth = 2, bestScore = 0;
+    for (let width = 2; width <= 8; width += 1) {
+      const score = scores[width]!;
+      if (score > bestScore || score === bestScore && score > 0 && width > bestWidth) {
+        bestWidth = width; bestScore = score;
+      }
+    }
+    if (bestScore * 2 >= spaceLines) inferred = bestWidth;
+  }
+  const result = new Uint8Array(inferred);
+  for (let i = 0; i < inferred; i += 1) result[i] = 32;
+  return result;
+}
+
 /// Prepare new single-line input by removing CR/LF bytes. An insertion
 /// containing only line breaks is suppressed; an empty composition stays
 /// meaningful and its explicit cursor moves past the removed bytes.

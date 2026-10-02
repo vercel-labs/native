@@ -43,6 +43,43 @@ test("the view frontend and portable components typecheck", () => {
   assert.deepEqual(ts.getPreEmitDiagnostics(program).map(d => ts.flattenDiagnosticMessageText(d.messageText, "\n")), []);
 });
 
+test("editable no-wrap code lowers to owned textarea metadata and bounded line numbers", () => {
+  const { model, view } = evaluate('<code source="{status}" language=" TS " editable="true" wrap="false" line-numbers="{ticking}" label="Draft"/>');
+  let node = view().nodes[0];
+  assert.equal(node.kind, "textarea"); assert.equal(node.codeLanguage, "typescript");
+  assert.equal(node.codeLineDigits, 1); assert.equal(node.text, "Café\nnotes");
+  model.status = new TextEncoder().encode("x\n".repeat(9));
+  assert.equal(view().nodes[0].codeLineDigits, 2);
+  model.status = new TextEncoder().encode("x\n".repeat(10000));
+  assert.equal(view().nodes[0].codeLineDigits, 5);
+  model.status = new TextEncoder().encode("x\n".repeat(10001));
+  assert.equal(view().nodes[0].codeLineDigits, 0);
+  model.ticking = false; model.status = new TextEncoder().encode("x");
+  assert.equal(view().nodes[0].codeLineDigits, 0);
+  for (const markup of [
+    '<code source="{status}"/>',
+    '<code source="{status}" editable="{ticking}" wrap="false"/>',
+    '<code source="{status}" editable="true" wrap="true"/>',
+    '<code source="{count}" editable="true" wrap="false"/>',
+    '<code source="{status}" language="unknown" editable="true" wrap="false"/>',
+    '<code source="{status}" editable="true" wrap="false" disabled="true"/>',
+    '<code source="{status}" editable="true" wrap="false"><text>child</text></code>',
+  ]) assert.throws(() => compileView(markup, contract), /compiled TypeScript view/);
+});
+
+test("compiled indentation requests preserve the shared text library's file convention", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const source = new TextEncoder().encode("\tcafé\n    日本");
+  const request = new Uint8Array(8 + source.length), data = new DataView(request.buffer);
+  request[0] = 11; request.set(source, 8);
+  data.setUint32(4, 1, true); assert.equal(exports.native_text_policy!(request)[0], 0);
+  data.setUint32(4, source.length, true); assert.equal(exports.native_text_policy!(request)[0], 4);
+  data.setUint32(4, 0xffffffff, true); assert.equal(exports.native_text_policy!(request)[0], 4);
+  request[2] = 1; assert.throws(() => exports.native_text_policy!(request), /indentation request/);
+  assert.throws(() => exports.native_text_policy!(new Uint8Array([11])), /indentation request/);
+});
+
 test("mixer sliders route applied float values separately from static change messages", () => {
   const file = new URL("../../../examples/slider-policy/src/core.ts", import.meta.url).pathname;
   const checked = checkFile(file, { contractEntry: "core_facade.ts" });
