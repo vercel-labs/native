@@ -911,6 +911,52 @@ pub fn widgetCompiledTextReconcile(widget: Widget, state: TextReconcilePolicySta
     };
 }
 
+pub const TextHistoryDelta = struct {
+    prefix_len: usize,
+    before_end: usize,
+    after_end: usize,
+};
+
+pub const TextHistoryRecordResult = union(enum) { none, delta: TextHistoryDelta };
+
+/// Compile the replacement ranges while both states still borrow native
+/// storage. The fixed result is copied before history allocation/compaction.
+pub fn widgetCompiledTextHistoryDelta(widget: Widget, before: text_model.TextEditState, after: text_model.TextEditState, provisional: bool) ?TextHistoryRecordResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (before.text.len > budget or after.text.len > budget) @panic("compiled text history delta exceeds byte budget");
+    const request = text_policy_scratch.get().request[0 .. 24 + before.text.len + after.text.len];
+    @memset(request[0..24], 0);
+    request[0] = 8;
+    request[1] = @intFromBool(provisional);
+    request[2] = @intFromBool(after.composition != null);
+    std.mem.writeInt(u32, request[4..8], @intCast(before.text.len), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(after.text.len), .little);
+    const removed = text_model.snapTextCaretSelection(before.text, before.selection).range(before.text.len);
+    std.mem.writeInt(u32, request[12..16], @intCast(removed.start), .little);
+    std.mem.writeInt(u32, request[16..20], @intCast(removed.end), .little);
+    std.mem.writeInt(u32, request[20..24], @intCast(if (after.composition) |composition| composition.end else 0), .little);
+    @memcpy(request[24..][0..before.text.len], before.text);
+    @memcpy(request[24 + before.text.len ..], after.text);
+    var output: [16]u8 = undefined;
+    if (policy(request, &output) != output.len) @panic("invalid compiled text history delta result");
+    const record = std.mem.readInt(u32, output[0..4], .little);
+    if (record == 0) {
+        if (!std.mem.allEqual(u8, output[4..], 0)) @panic("invalid empty compiled text history delta");
+        return .none;
+    }
+    const delta = TextHistoryDelta{
+        .prefix_len = std.mem.readInt(u32, output[4..8], .little),
+        .before_end = std.mem.readInt(u32, output[8..12], .little),
+        .after_end = std.mem.readInt(u32, output[12..16], .little),
+    };
+    if (record != 1 or delta.prefix_len > delta.before_end or delta.prefix_len > delta.after_end or
+        delta.before_end > before.text.len or delta.after_end > after.text.len)
+        @panic("invalid compiled text history delta ranges");
+    return .{ .delta = delta };
+}
+
 pub const TextHistoryReplayState = struct {
     mode: enum(u8) { start, next, commit },
     redo: bool,

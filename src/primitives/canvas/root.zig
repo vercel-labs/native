@@ -709,6 +709,9 @@ pub const widgetCompiledTextReconcile = event_model.widgetCompiledTextReconcile;
 pub const TextHistoryReplayState = event_model.TextHistoryReplayState;
 pub const TextHistoryReplayResult = event_model.TextHistoryReplayResult;
 pub const widgetCompiledTextHistoryReplay = event_model.widgetCompiledTextHistoryReplay;
+pub const TextHistoryDelta = event_model.TextHistoryDelta;
+pub const TextHistoryRecordResult = event_model.TextHistoryRecordResult;
+pub const widgetCompiledTextHistoryDelta = event_model.widgetCompiledTextHistoryDelta;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

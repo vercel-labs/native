@@ -43,6 +43,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 5) return nscvTextReconcile(request);
   if (request[0] === 6) return nscvTextInput(request);
   if (request[0] === 7) return nscvTextHistoryReplay(request);
+  if (request[0] === 8) return nscvTextHistoryDelta(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -296,6 +297,56 @@ function nscvTextHistoryReplay(request: Uint8Array): Uint8Array {
     result[0] = 6; out.setUint32(8, prefix, true); out.setUint32(16, prefix + oldLength, true);
   } else result[0] = 3;
   return result;
+}
+
+/** History recording: tag 8, provisional, composition-present, reserved;
+ * LE u32 before/after lengths, snapped replacement start/end and preedit end
+ * precede both text buffers. Result: record flag, common prefix, removed end
+ * and inserted end. Native copies these offsets before its history mutation.
+ */
+function nscvTextHistoryDelta(request: Uint8Array): Uint8Array {
+  const budget = 512 * 1024;
+  if (request.length < 24 || request[1]! > 1 || request[2]! > 1 || request[3] !== 0)
+    throw new Error("invalid text history delta request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const beforeLength = data.getUint32(4, true), afterLength = data.getUint32(8, true);
+  if (beforeLength > budget || afterLength > budget || request.length !== 24 + beforeLength + afterLength)
+    throw new Error("invalid text history delta budget");
+  const before = request.subarray(24, 24 + beforeLength), after = request.subarray(24 + beforeLength);
+  let prefix = 0, beforeEnd = before.length, afterEnd = after.length;
+  const result = new Uint8Array(16), out = new DataView(result.buffer);
+  if (request[1] === 1) {
+    if (request[2] === 0) return result;
+    prefix = data.getUint32(12, true); beforeEnd = data.getUint32(16, true); afterEnd = data.getUint32(20, true);
+    if (prefix > beforeEnd || beforeEnd > before.length || prefix > afterEnd || afterEnd > after.length)
+      throw new Error("invalid text history composition range");
+    // Retain adjacent delimiters before later previews can complete a CRLF.
+    if (prefix > 0 && before[prefix - 1] === 13) prefix -= 1;
+    if (beforeEnd < before.length && afterEnd < after.length && before[beforeEnd] === 10 && after[afterEnd] === 10) {
+      beforeEnd += 1; afterEnd += 1;
+    }
+  } else {
+    const shared = Math.min(before.length, after.length);
+    while (prefix < shared && before[prefix] === after[prefix]) prefix += 1;
+    prefix = Math.min(nscvHistoryCaretOffset(before, prefix), nscvHistoryCaretOffset(after, prefix));
+    let suffix = 0;
+    while (suffix < before.length - prefix && suffix < after.length - prefix &&
+        before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix += 1;
+    while (suffix > 0 && (nscvHistoryCaretOffset(before, before.length - suffix) !== before.length - suffix ||
+        nscvHistoryCaretOffset(after, after.length - suffix) !== after.length - suffix)) suffix -= 1;
+    beforeEnd = before.length - suffix; afterEnd = after.length - suffix;
+    if (beforeEnd === prefix && afterEnd === prefix) return result;
+  }
+  out.setUint32(0, 1, true); out.setUint32(4, prefix, true);
+  out.setUint32(8, beforeEnd, true); out.setUint32(12, afterEnd, true);
+  return result;
+}
+
+function nscvHistoryCaretOffset(text: Uint8Array, offset: number): number {
+  let cursor = Math.min(offset, text.length);
+  while (cursor > 0 && cursor < text.length && (text[cursor]! & 0xc0) === 0x80) cursor -= 1;
+  if (cursor > 0 && cursor < text.length && text[cursor] === 10 && text[cursor - 1] === 13) cursor -= 1;
+  return cursor;
 }
 
 function nscvInteger(value: number): number {

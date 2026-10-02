@@ -2691,6 +2691,106 @@ test "compiled clipboard paste uses shared storage freed by selection and compos
     }
 }
 
+test "compiled history recording matches native retained entries and payloads" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "compiled-history-deltas", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    const view = &harness.runtime.views[0];
+    const corpus = [_][]const u8{ "", "aéz", "aĩz", "a🙂z", "a\rz", "a\nz", "a\r\nz", "a\x80\xffz" };
+    const edits = [_]canvas.TextInputEvent{
+        .{ .insert_text = "ê" },
+        .{ .insert_text = "ĩ" },
+        .{ .insert_text = "\r\n" },
+        .delete_backward,
+        .delete_forward,
+        .clear,
+        .{ .set_composition = .{ .text = "" } },
+        .{ .set_composition = .{ .text = "日" } },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    var expected_bytes: [32]u8 = undefined;
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        for (corpus) |before| {
+            for ([_]canvas.TextSelection{
+                .{},                                                                                             .{ .anchor = before.len, .focus = 0 }, .{ .anchor = 1, .focus = 2 },
+                .{ .anchor = std.math.maxInt(usize), .focus = std.math.maxInt(usize), .affinity = .downstream },
+            }) |selection| {
+                for (edits) |edit| {
+                    var expected_entry: ?@TypeOf(view.canvas_widget_text_history_entries[0]) = null;
+                    var expected_len: usize = 0;
+                    for ([_]bool{ false, true }) |compiled| {
+                        // Unmount between variants so unchanged authored bytes
+                        // cannot retain the prior variant's local edit state.
+                        const empty = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+                        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", empty);
+                        view.canvas_widget_text_history_next_serial = 1;
+                        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{.{
+                            .id = 2,
+                            .kind = kind,
+                            .frame = geometry.RectF.init(12, 16, 180, 84),
+                            .text = before,
+                            .text_selection = selection,
+                            .interaction_policy = if (compiled) core.nativeTextPolicy else null,
+                        }} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+                        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                        _ = try view.applyCanvasWidgetTextEdit(2, edit);
+                        try std.testing.expect(view.canvas_widget_text_history_entry_count <= 1);
+                        const entry = if (view.canvas_widget_text_history_entry_count == 0) null else view.canvas_widget_text_history_entries[0];
+                        const payload = view.canvas_widget_text_history_bytes[0..view.canvas_widget_text_history_byte_count];
+                        if (!compiled) {
+                            expected_entry = entry;
+                            expected_len = payload.len;
+                            @memcpy(expected_bytes[0..expected_len], payload);
+                        } else {
+                            try std.testing.expectEqualDeep(expected_entry, entry);
+                            try std.testing.expectEqualSlices(u8, expected_bytes[0..expected_len], payload);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled history deltas support two full text budgets and survive arena resets" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const budget = canvas.max_widget_text_bytes_per_view;
+    const before = try std.testing.allocator.alloc(u8, budget);
+    defer std.testing.allocator.free(before);
+    const after = try std.testing.allocator.alloc(u8, budget);
+    defer std.testing.allocator.free(after);
+    @memset(before, 'a');
+    @memset(after, 'a');
+    @memcpy(before[budget / 2 ..][0..2], "é");
+    @memcpy(after[budget / 2 ..][0..2], "ĩ");
+    const widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy };
+    const source = canvas.TextEditState{ .text = before, .selection = .{} };
+    var target = canvas.TextEditState{ .text = after, .selection = .{} };
+    const delta = canvas.widgetCompiledTextHistoryDelta(widget, source, target, false).?.delta;
+    const bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    _ = canvas.widgetCompiledTextInput(widget, "other\ninput", 0, null, 0);
+    try std.testing.expectEqualDeep(canvas.TextHistoryDelta{ .prefix_len = budget / 2, .before_end = budget / 2 + 2, .after_end = budget / 2 + 2 }, delta);
+    @memset(after, 'b');
+    const entire = canvas.widgetCompiledTextHistoryDelta(widget, source, target, false).?.delta;
+    try std.testing.expectEqualDeep(canvas.TextHistoryDelta{ .prefix_len = 0, .before_end = budget, .after_end = budget }, entire);
+    target.text = before;
+    try std.testing.expect(canvas.widgetCompiledTextHistoryDelta(widget, source, target, false).? == .none);
+    try std.testing.expect(canvas.widgetCompiledTextHistoryDelta(widget, source, target, true).? == .none);
+    target.composition = .{ .start = budget, .end = budget };
+    const empty = canvas.widgetCompiledTextHistoryDelta(widget, .{ .text = before, .selection = .{ .anchor = std.math.maxInt(usize), .focus = std.math.maxInt(usize) } }, target, true).?.delta;
+    try std.testing.expectEqualDeep(canvas.TextHistoryDelta{ .prefix_len = budget, .before_end = budget, .after_end = budget }, empty);
+    try std.testing.expect(canvas.widgetCompiledTextHistoryDelta(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, source, target, false) == null);
+}
+
 test "compiled history replay matches native shortcut continuation and completion decisions" {
     const h = try Harness.create(null, "/feed.xml");
     defer h.destroy();

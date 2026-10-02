@@ -25,6 +25,9 @@ composition, and committing a composition records one undoable edit.
 Undo restores the selection's direction as well as its byte range. Each editor
 has its own history: editing another field keeps the first field's redo branch.
 Canceling an empty composition keeps redo; committing a new edit replaces it.
+Replacing characters that share UTF-8 bytes still undoes whole characters.
+An IME preview that joins CR and LF records their shared line-break context,
+so Undo restores the original delimiters and selection in one step.
 
 Scratchpad keeps its edits locally: Refresh preserves the draft and active
 composition, while Replace scratch supplies a new starting value. Restore

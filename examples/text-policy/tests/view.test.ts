@@ -235,6 +235,23 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await click("New desk");
     assert.notEqual(field("Scratchpad").id, scratchId);
     assert.equal(field("Scratchpad").text, "Scratch café\nA local draft.");
+    // A shared UTF-8 lead/suffix and an IME preview completing either side
+    // of a CRLF must retain enough context for whole-character Undo/Redo.
+    await set("Note", "LéR"); await select("Note", 1, 3);
+    s = await app.composeText(field("Note"), "ĩ"); save();
+    s = await app.commitComposition(field("Note")); save(); expectText("draft", "LĩR");
+    await key("cmd+z"); expectText("draft", "LéR"); selection("draft", 1, 3);
+    await key("cmd+shift+z"); expectText("draft", "LĩR");
+    for (const [before, at, preview, committed] of [
+      ["a\rz", 2, "\n", "a\r\nz"], ["a\nz", 1, "\r", "a\r\nz"],
+    ] as const) {
+      await set("Note", before); await select("Note", at, at);
+      s = await app.composeText(field("Note"), ""); save(); expectText("draft", before);
+      s = await app.composeText(field("Note"), preview); save(); expectText("draft", committed);
+      s = await app.commitComposition(field("Note")); save();
+      await key("cmd+z"); expectText("draft", before); selection("draft", at, at);
+      await key("cmd+shift+z"); expectText("draft", committed);
+    }
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

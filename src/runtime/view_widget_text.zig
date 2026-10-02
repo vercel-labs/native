@@ -115,7 +115,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 (starts_composition or
                     (current_state.composition == null and
                         !std.mem.eql(u8, current_state.text, next_state.text))) and
-                recordCanvasWidgetTextHistory(self, target_id, widget.kind, current_state, next_state, starts_composition);
+                recordCanvasWidgetTextHistory(self, target_id, widget, current_state, next_state, starts_composition);
             self.rewriteCanvasWidgetTextStorage(index, next_state) catch |err| {
                 if (history_recorded) removeCanvasWidgetTextHistoryEntry(self, self.canvas_widget_text_history_entry_count - 1);
                 return err;
@@ -652,11 +652,12 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         fn recordCanvasWidgetTextHistory(
             self: *RuntimeView,
             target_id: canvas.ObjectId,
-            target_kind: canvas.WidgetKind,
+            widget: canvas.Widget,
             before: canvas.TextEditState,
             after: canvas.TextEditState,
             provisional_composition: bool,
         ) bool {
+            const target_kind = widget.kind;
             const before_hash = textHistoryHash(before.text);
             if (!canvasWidgetTextHistoryMatchesState(self, target_id, target_kind, before.text.len, before_hash)) {
                 clearCanvasWidgetTextHistory(self, target_id);
@@ -667,7 +668,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             // byte-identical). The removed side is the selection the IME
             // replaced when it opened.
             const before_selection = canvas.snapTextCaretSelection(before.text, before.selection);
-            const delta = if (provisional_composition) blk: {
+            const delta = if (canvas.widgetCompiledTextHistoryDelta(widget, before, after, provisional_composition)) |compiled| switch (compiled) {
+                .none => return false,
+                .delta => |delta| delta,
+            } else if (provisional_composition) blk: {
                 const inserted = after.composition orelse return false;
                 const removed = before_selection.range(before.text.len);
                 var prefix_len = removed.start;
@@ -1511,11 +1515,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
     };
 }
 
-const CanvasWidgetTextHistoryDelta = struct {
-    prefix_len: usize,
-    before_end: usize,
-    after_end: usize,
-};
+const CanvasWidgetTextHistoryDelta = canvas.TextHistoryDelta;
 
 fn canvasWidgetTextHistoryDelta(before: []const u8, after: []const u8) CanvasWidgetTextHistoryDelta {
     var prefix_len: usize = 0;

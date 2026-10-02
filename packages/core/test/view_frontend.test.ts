@@ -649,3 +649,30 @@ test("history replay preserves minimal edits, stale refusal and exact selection 
   request[5] = 1; assert.throws(policy, /invalid text history request/);
   request[5] = 0; data.setUint32(64, 524289, true); assert.throws(policy, /invalid text history budget/);
 });
+
+test("history deltas keep complete UTF-8 and CRLF context, including empty preedit", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const delta = (before: string, after: string, range?: [number, number, number]) => {
+    const a = new TextEncoder().encode(before), b = new TextEncoder().encode(after);
+    const request = new Uint8Array(24 + a.length + b.length), data = new DataView(request.buffer);
+    request[0] = 8; request[1] = range ? 1 : 0; request[2] = range ? 1 : 0;
+    data.setUint32(4, a.length, true); data.setUint32(8, b.length, true);
+    if (range) range.forEach((offset, i) => data.setUint32(12 + i * 4, offset, true));
+    request.set(a, 24); request.set(b, 24 + a.length);
+    return Array.from(new Uint32Array(exports.native_text_policy!(request).buffer));
+  };
+  assert.deepEqual(delta("aéz", "aêz"), [1, 1, 3, 3]); // shared UTF-8 lead
+  assert.deepEqual(delta("aéz", "aĩz"), [1, 1, 3, 3]); // shared continuation suffix
+  assert.deepEqual(delta("a\rz", "a\r\nz"), [1, 1, 2, 3]);
+  assert.deepEqual(delta("a\nz", "a\r\nz"), [1, 1, 2, 3]);
+  assert.deepEqual(delta("same", "same"), [0, 0, 0, 0]);
+  assert.deepEqual(delta("a\r\nz", "a\r\nz", [1, 1, 1]), [1, 1, 1, 1]);
+  assert.deepEqual(delta("a\rz", "a\rz", [2, 2, 2]), [1, 1, 2, 2]);
+  assert.deepEqual(delta("a\nz", "a\nz", [1, 1, 1]), [1, 1, 2, 2]);
+  assert.throws(() => delta("a", "b", [1, 0, 0]), /invalid text history composition range/);
+  const invalid = new Uint8Array(24); invalid[0] = 8; invalid[3] = 1;
+  assert.throws(() => exports.native_text_policy!(invalid), /invalid text history delta request/);
+  invalid[3] = 0; new DataView(invalid.buffer).setUint32(4, 524289, true);
+  assert.throws(() => exports.native_text_policy!(invalid), /invalid text history delta budget/);
+});
