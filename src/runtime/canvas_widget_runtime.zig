@@ -877,7 +877,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                     std.math.clamp(if (!source_moved or entry.state.pressed) entry.value else copy.widget.value, 0, 1);
             },
             .resizable => {
-                const width = @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);
+                const width = canvas.widgetCompiledResizableWidth(copy.widget, 1, entry.value, 0) orelse
+                    @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);
                 copy.frame.width = width;
                 copy.widget.frame.width = width;
             },

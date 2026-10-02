@@ -612,7 +612,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     var slider_state: [4]u8 = undefined;
     const split_widget = canvas.Widget{ .kind = .split, .value = 0.3, .interaction_policy = core.nativeSplitPolicy };
     const scroll_widget = canvas.Widget{ .kind = .scroll_view, .interaction_policy = core.nativeScrollPolicy, .runtime_flags = .{ .compiled_scroll_policy = true } };
+    const resizable_widget = canvas.Widget{ .kind = .resizable, .frame = geometry.RectF.init(0, 0, 120, 44), .interaction_policy = core.nativeResizablePolicy };
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(f32, 150.5), canvas.widgetCompiledResizableWidth(resizable_widget, 0, 120, 30.5).?);
         try std.testing.expectEqual(@as(f32, 80.5), canvas.widgetCompiledScrollResult(scroll_widget, .{ .operation = 2, .current = 30.5, .previous_source = 30.5, .retained = 80.5 }).?.dx);
         try std.testing.expectEqual(@as(f32, 0.8), canvas.widgetCompiledSplitValue(split_widget, .{ .operation = 2, .value = 0.3, .previous_source = 0.3, .retained = 0.8 }).?);
         try std.testing.expectEqual(@as(usize, 4), core.nativeSliderPolicy(&slider_request, &slider_state));
@@ -1986,4 +1988,90 @@ test "compiled switch activation retains native knob animation and reversal" {
         try std.testing.expect(!((try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(4).?.widget.state.selected));
     }
     try std.testing.expectEqualSlices(f32, &samples[0], &samples[1]);
+}
+
+test "compiled resizable width policy preserves native f32 minimum and addition" {
+    var widget = canvas.Widget{ .kind = .resizable, .interaction_policy = core.nativeResizablePolicy };
+    for ([_]f32{ -1, 0, 44, 48, 48.25, 144, 777.3, std.math.nan(f32), std.math.inf(f32) }) |height| {
+        widget.frame.height = height;
+        for ([_]f32{ -120, 0, 0.25, 48, 120.5, 9999, std.math.nan(f32), std.math.inf(f32) }) |width| {
+            const minimum = @max(@as(f32, 48), height);
+            try std.testing.expectEqual(@max(minimum, width), canvas.widgetCompiledResizableWidth(widget, 1, width, 0).?);
+            for ([_]f32{ -10000, -0.1, 0, 0.1, 30.25, 1000 }) |delta| {
+                try std.testing.expectEqual(@max(minimum, width + delta), canvas.widgetCompiledResizableWidth(widget, 0, width, delta).?);
+            }
+        }
+    }
+    widget.kind = .panel;
+    try std.testing.expect(canvas.widgetCompiledResizableWidth(widget, 0, 120, 30) == null);
+}
+
+test "compiled resizable capture and retained rebuilds preserve independent frames" {
+    const TestApp = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-resizable-runtime", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const Fixture = struct {
+        fn layout(allocator: std.mem.Allocator, width: f32, height: f32, disabled: bool, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            const children = [_]canvas.Widget{.{ .id = 3, .kind = .text, .text = "Child", .frame = geometry.RectF.init(22, 24, 40, 20) }};
+            const siblings = [_]canvas.Widget{
+                .{ .id = 2, .kind = .resizable, .frame = geometry.RectF.init(10, 16, width, height), .children = try allocator.dupe(canvas.Widget, &children), .state = .{ .disabled = disabled }, .interaction_policy = if (compiled) core.nativeResizablePolicy else null },
+                .{ .id = 4, .kind = .panel, .frame = geometry.RectF.init(350, 16, 80, 44) },
+            };
+            return canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = try allocator.dupe(canvas.Widget, &siblings) }, geometry.RectF.init(0, 0, 600, 500), nodes);
+        }
+    };
+    var widths: [2][5]f32 = undefined;
+    for ([_]bool{ false, true }, 0..) |compiled, backend| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: TestApp = .{};
+        const app = state.app();
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 600, 500) });
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var nodes: [4]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 120, 44, false, compiled, &nodes));
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const child = retained.findById(3).?.frame;
+        const neighbor = retained.findById(4).?.frame;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 126, .y = 38 } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .x = 156.5, .y = 38, .delta_x = 30.5 } });
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        widths[backend][0] = retained.findById(2).?.frame.width;
+        try std.testing.expectEqual(@as(f32, 150.5), widths[backend][0]);
+        try std.testing.expectEqualDeep(child, retained.findById(3).?.frame);
+        try std.testing.expectEqualDeep(neighbor, retained.findById(4).?.frame);
+        // Source changes during and after capture do not replace retained widths.
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 300, 44, false, compiled, &nodes));
+        try std.testing.expectEqual(@as(f32, 150.5), (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.frame.width);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .x = -500, .y = 38, .delta_x = -1000 } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = -500, .y = 38 } });
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        widths[backend][1] = retained.findById(2).?.frame.width;
+        try std.testing.expectEqual(@as(f32, 48), widths[backend][1]);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 300, 144, false, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        widths[backend][2] = retained.findById(2).?.frame.width;
+        try std.testing.expectEqual(@as(f32, 144), widths[backend][2]);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 300, 144, true, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        widths[backend][3] = retained.findById(2).?.frame.width;
+        try std.testing.expectEqual(@as(f32, 300), widths[backend][3]);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(2, 30)) == null);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 200, 144, false, compiled, &nodes));
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        widths[backend][4] = retained.findById(2).?.frame.width;
+        try std.testing.expectEqual(@as(f32, 300), widths[backend][4]);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(2, std.math.nan(f32))) == null);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(2, std.math.inf(f32))) == null);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(2, 0)) == null);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(4, 30)) == null);
+        try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(999, 30)) == null);
+    }
+    try std.testing.expectEqualDeep(widths[0], widths[1]);
 }

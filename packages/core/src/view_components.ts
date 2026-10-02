@@ -492,6 +492,25 @@ export function native_split_policy(request: Uint8Array): Uint8Array {
   return result;
 }
 
+/** Resizable wire: operation u8 (0 drag, 1 retained reconcile), then
+ * panel height, current/retained width, and drag delta as f32LE. The
+ * minimum is max(48, height); authored width seeds fresh panels and
+ * retained width wins every enabled rebuild. Native owns capture,
+ * eligibility and mutation; neighboring and descendant frames stay put.
+ */
+export function native_resizable_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 13 || request[0]! > 1) throw new Error("invalid resizable policy request");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const height = wire.getFloat32(1, true), current = wire.getFloat32(5, true), delta = wire.getFloat32(9, true);
+  // Zig @max chooses the other operand for NaN, including retained data.
+  const minimum = Number.isNaN(height) ? 48 : Math.max(48, height);
+  const candidate = request[0] === 0 ? Math.fround(current + delta) : current;
+  const value = Number.isNaN(candidate) ? minimum : Math.max(minimum, candidate);
+  const result = new Uint8Array(4);
+  new DataView(result.buffer).setFloat32(0, value, true);
+  return result;
+}
+
 /** Scroll wire: tagged operation u8 (128 + operation), flags (1 granted axis, 2 previous source,
  * 4 retained offset, 8 horizontal keymap, 16 dual keymap), then six f32LE:
  * current/source, viewport, content, delta/authored source, previous source,

@@ -234,7 +234,8 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
 
             const previous_frame = self.widget_layout_nodes[index].frame;
             const min_width = canvasWidgetResizableMinWidth(widget);
-            const next_width = @max(min_width, previous_frame.width + delta_x);
+            const next_width = canvas.widgetCompiledResizableWidth(widget, 0, previous_frame.width, delta_x) orelse
+                @max(min_width, previous_frame.width + delta_x);
             if (next_width == previous_frame.width) return null;
 
             self.widget_layout_nodes[index].frame.width = next_width;

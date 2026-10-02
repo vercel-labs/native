@@ -19,6 +19,12 @@ A single panel with an engine-managed drag handle: `width` sets the initial widt
 </row>
 ```
 
+## Width and retained state
+
+`width` and `min-width` size a newly mounted panel. An enabled panel keeps its user-adjusted width across model updates, including changes to those attributes. A removed panel or a fresh key starts from the authored size again. Disabled panels use their authored size and ignore dragging.
+
+During a drag, the minimum width is the greater of 48 pixels and the panel’s height. Resizing changes the panel’s frame; its children and neighboring widgets keep their own frames.
+
 ## Programmatic construction (Zig)
 
 In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:

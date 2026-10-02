@@ -183,6 +183,7 @@ if (args["view-markup"]) {
   profile.exports.push({ export: "native_slider_policy", symbol: `${profile.abi.prefix}native_slider_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_split_policy", symbol: `${profile.abi.prefix}native_split_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_scroll_policy", symbol: `${profile.abi.prefix}native_scroll_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_resizable_policy", symbol: `${profile.abi.prefix}native_resizable_policy`, params: ["bytes"], returns: "bytes" });
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
 if (args["services-client"]) {

@@ -590,6 +590,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t pendingPointerMotionModifiers;
 @property(nonatomic, assign) uint64_t pendingPointerMotionTimestampNs;
 @property(nonatomic, assign) uint64_t pointerMotionInputLastEmitNs;
+@property(nonatomic, assign) BOOL pointerDragInputActive;
+@property(nonatomic, assign) NSPoint pointerDragInputPoint;
+@property(nonatomic, assign) NSInteger pointerDragInputButton;
 @property(nonatomic, assign) BOOL scrollInputPending;
 @property(nonatomic, assign) NSPoint pendingScrollPoint;
 @property(nonatomic, assign) double pendingScrollDeltaX;
@@ -7220,6 +7223,21 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0) return;
     const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);
+    // Coalesced motion retains its latest absolute point. Derive drag deltas
+    // from the last emitted point so a batch preserves every pixel of travel.
+    if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DOWN) {
+        self.pointerDragInputActive = YES;
+        self.pointerDragInputPoint = yDownPoint;
+        self.pointerDragInputButton = button;
+    } else if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DRAG &&
+               self.pointerDragInputActive && self.pointerDragInputButton == button) {
+        deltaX = yDownPoint.x - self.pointerDragInputPoint.x;
+        deltaY = yDownPoint.y - self.pointerDragInputPoint.y;
+        self.pointerDragInputPoint = yDownPoint;
+    } else if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL ||
+               (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_UP && self.pointerDragInputButton == button)) {
+        self.pointerDragInputActive = NO;
+    }
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     NSString *safeKeyText = keyText ?: @"";
     NSString *safeInputText = inputText ?: @"";

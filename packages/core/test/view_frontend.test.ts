@@ -507,3 +507,19 @@ test("checkable controls preserve labels, initial state and toggle envelopes", (
     assert.throws(() => compileView(`<${kind} role="treeitem"/>`, contract), /compiled treeitem requires/);
   }
 });
+
+test("resizable markup keeps stacking children, initial sizing and disabled state", () => {
+  const { view } = evaluate('<resizable width="260" min-width="100" height="{count}" disabled="{ticking}" label="Notes"><column gap="8"><text>Research</text></column></resizable>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "resizable");
+  assert.equal(nodes[0].width, 260);
+  assert.equal(nodes[0].minWidth, 100);
+  assert.equal(nodes[0].height, 7);
+  assert.equal(nodes[0].disabled, true);
+  assert.equal(nodes[0].end, 3);
+  assert.equal(nodes[1].gap, 8);
+  for (const markup of ['<resizable gap="8"/>', '<resizable on-resize="stamped"/>',
+    '<resizable resize-duration="100"/>', '<resizable>Mixed<text>child</text></resizable>']) {
+    assert.throws(() => compileView(markup, contract), /compiled TypeScript view:/, markup);
+  }
+});

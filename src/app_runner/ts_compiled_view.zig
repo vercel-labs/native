@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -96,6 +96,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (!std.math.isFinite(value.gap) or value.gap < 0 or !std.math.isFinite(value.grow) or value.grow < 0) return error.InvalidView;
     if (value.padding) |padding| if (!std.math.isFinite(padding) or padding < 0) return error.InvalidView;
     for ([_]f32{ value.width, value.height, value.minWidth }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+    if (value.kind == .resizable and value.gap != 0) return error.InvalidView;
     if (value.resize != null and value.kind != .split) return error.InvalidView;
     if (!std.math.isFinite(value.resizeOrigin) or (value.resizeOrigin != -1 and (value.resizeOrigin < 0 or value.resizeOrigin > 1))) return error.InvalidView;
     if ((value.resizeDuration != 0 or value.resizeEasing != .standard or value.resizeOrigin != -1) and value.kind != .split) return error.InvalidView;
@@ -107,7 +108,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
-    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split;
+    const container = value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
@@ -216,6 +217,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (comptime @hasDecl(core, "nativeSplitPolicy")) {
         if (value.kind == .split) result.widget.interaction_policy = core.nativeSplitPolicy;
+    }
+    if (comptime @hasDecl(core, "nativeResizablePolicy")) {
+        if (value.kind == .resizable) result.widget.interaction_policy = core.nativeResizablePolicy;
     }
     if (comptime @hasDecl(core, "nativeScrollPolicy")) {
         if (value.kind == .scroll) {
@@ -449,5 +453,23 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             var ui = Ui.init(arena.allocator());
             if (decode(&ui, source)) |_| return error.TestExpectedError else |_| {}
         }
+    } else return error.SkipZigTest;
+}
+
+test "compiled resizable panels preserve initial minimum sizing and reject flow gap" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const source = "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"resizable\",\"text\":\"\",\"width\":260,\"height\":112,\"minWidth\":100},{\"end\":2,\"kind\":\"text\",\"text\":\"Research\"}]}";
+        const result = try decode(&ui, source);
+        try std.testing.expectEqual(sdk.canvas.WidgetKind.resizable, result.widget.kind);
+        try std.testing.expectEqual(@as(f32, 260), result.widget.layout.min_size.width);
+        try std.testing.expectEqual(@as(f32, 0), result.widget.layout.max_size.width);
+        try std.testing.expect(result.widget.interaction_policy != null);
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"resizable\",\"text\":\"\",\"gap\":8}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"resizable\",\"text\":\"\",\"resize\":0}]}",
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
     } else return error.SkipZigTest;
 }

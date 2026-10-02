@@ -1,0 +1,47 @@
+<column key="{desk}" gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1" size="heading">Research Desk</text>
+    <button size="sm" on-press="refresh">Refresh</button>
+    <button size="sm" on-press="lock">Lock panels</button>
+    <button size="sm" variant="ghost" on-press="new_desk">New desk</button>
+  </row>
+  <text foreground="text_muted">Drag a panel’s right edge to adjust its width.</text>
+  <row gap="16" height="144">
+    <resizable width="240" height="144" disabled="{locked}" label="Sources">
+      <column gap="6" padding="12">
+        <text size="heading">Sources</text>
+        <text>Field notes</text>
+        <text>Interviews</text>
+        <text foreground="text_muted">This week</text>
+      </column>
+    </resizable>
+    <panel grow="1" label="Reading area">
+      <column gap="8" padding="12">
+        <text size="heading">Reading area</text>
+        <text wrap="true">Ideas take shape here. The sources panel keeps its width when the desk refreshes.</text>
+        <text foreground="text_muted" wrap="true">Use New desk to start again.</text>
+      </column>
+    </panel>
+  </row>
+  <row gap="8" cross="center">
+    <text grow="1">Research cards</text>
+    <button size="sm" on-press="seed">Wide defaults</button>
+    <button size="sm" on-press="height">Taller cards</button>
+    <button size="sm" on-press="reverse">Reverse</button>
+    <button size="sm" on-press="hide">Hide notes</button>
+    <button size="sm" on-press="empty">Empty</button>
+  </row>
+  <row gap="16" height="{panelHeight}">
+    <for each="panels" as="panel" key="id">
+      <resizable width="{panel.width}" height="{panelHeight}" disabled="{panel.disabled}" label="{panel.title}">
+        <column gap="6" padding="12">
+          <text size="heading">{panel.title}</text>
+          <text foreground="text_muted">Discoveries</text>
+        </column>
+      </resizable>
+    </for>
+    <if test="{empty}"><text>No research cards</text></if>
+  </row>
+  <spacer grow="1"/>
+  <status-bar>Desk {desk} · {refreshes} refreshes</status-bar>
+</column>

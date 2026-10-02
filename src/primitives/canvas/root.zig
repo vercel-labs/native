@@ -828,6 +828,7 @@ pub const splitFractionBounds = @import("widget_layout.zig").splitFractionBounds
 pub const splitEffectiveFraction = @import("widget_layout.zig").splitEffectiveFraction;
 pub const widgetSplitEffectiveFraction = @import("widget_layout.zig").widgetSplitEffectiveFraction;
 pub const widgetCompiledSplitValue = @import("events.zig").widgetCompiledSplitValue;
+pub const widgetCompiledResizableWidth = @import("events.zig").widgetCompiledResizableWidth;
 pub const ScrollPolicyRequest = @import("events.zig").ScrollPolicyRequest;
 pub const widgetCompiledScrollResult = @import("events.zig").widgetCompiledScrollResult;
 pub const SplitPolicyRequest = @import("events.zig").SplitPolicyRequest;

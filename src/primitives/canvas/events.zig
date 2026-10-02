@@ -880,6 +880,22 @@ pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEve
     return null;
 }
 
+/// Width policy uses native f32 geometry and copies the result before the
+/// compiler arena resets. Operation 0 applies drag, 1 reconciles retained width.
+pub fn widgetCompiledResizableWidth(widget: Widget, operation: u8, current: f32, delta: f32) ?f32 {
+    if (widget.kind != .resizable) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [13]u8 = undefined;
+    request[0] = operation;
+    for ([_]f32{ widget.frame.height, current, delta }, 0..) |value, index|
+        std.mem.writeInt(u32, request[1 + index * 4 ..][0..4], @bitCast(value), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled resizable policy result");
+    const width: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (std.math.isNan(width) or width < 48) @panic("invalid compiled resizable policy width");
+    return width;
+}
+
 pub const SplitPolicyRequest = struct {
     operation: u8,
     value: f32,
