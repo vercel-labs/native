@@ -484,6 +484,53 @@ pub fn widgetKeyboardClipboardActionForWidget(widget: Widget, event: WidgetKeybo
 
 pub const WidgetTextHistoryAction = enum { undo, redo };
 
+pub const WidgetTextBoundaryIntent = union(enum) {
+    fallback,
+    no_edit,
+    edit: TextInputEvent,
+};
+
+/// Escape cancels preedit before clearing search/combo values. Plain Up/Down
+/// reaches a single-line boundary, except on a closed combo where opening
+/// wins. An expanded trigger with no mounted focusable option keeps the move.
+/// Textarea painted-line navigation and native focus routing remain separate.
+pub fn widgetKeyboardTextBoundaryIntent(widget: Widget, event: WidgetKeyboardEvent) WidgetTextBoundaryIntent {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return .fallback;
+    if (widget.interaction_policy) |policy| {
+        const kind: u8 = switch (widget.kind) {
+            .textarea => 0,
+            .search_field => 2,
+            .combobox => 3,
+            else => 1,
+        };
+        const key: u8 = if (std.ascii.eqlIgnoreCase(event.key, "escape") or std.ascii.eqlIgnoreCase(event.key, "esc")) 1 else if (std.ascii.eqlIgnoreCase(event.key, "arrowup")) 2 else if (std.ascii.eqlIgnoreCase(event.key, "arrowdown")) 3 else 0;
+        const m = event.modifiers;
+        const request = [8]u8{ 14, kind, @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(m.shift)) |
+            (@as(u8, @intFromBool(m.control)) << 1) | (@as(u8, @intFromBool(m.alt)) << 2) | (@as(u8, @intFromBool(m.super)) << 3), key, @intFromBool(event.text.len != 0), @intFromBool(widget.text_composition != null), @intFromBool(widget.state.expanded orelse false) };
+        var output: [2]u8 = undefined;
+        if (policy(&request, &output) != output.len or output[0] > 5 or output[1] > 1) @panic("invalid compiled editor boundary result");
+        return switch (output[0]) {
+            0 => .fallback,
+            1 => .no_edit,
+            2 => .{ .edit = .cancel_composition },
+            3 => .{ .edit = .clear },
+            4, 5 => .{ .edit = .{ .move_caret = .{ .direction = if (output[0] == 4) .start else .end, .extend = output[1] == 1 } } },
+            else => unreachable,
+        };
+    }
+    if (event.phase != .key_down or event.modifiers.hasNavigationModifier()) return .fallback;
+    if (!event.modifiers.shift and (std.ascii.eqlIgnoreCase(event.key, "escape") or std.ascii.eqlIgnoreCase(event.key, "esc"))) {
+        if (widget.text_composition != null) return .{ .edit = .cancel_composition };
+        if (widget.kind == .search_field or widget.kind == .combobox) return .{ .edit = .clear };
+        return .no_edit;
+    }
+    if (widgetKindSingleLineTextEntry(widget.kind) and event.text.len == 0 and !(widget.kind == .combobox and !(widget.state.expanded orelse false))) {
+        if (std.ascii.eqlIgnoreCase(event.key, "arrowup")) return .{ .edit = .{ .move_caret = .{ .direction = .start, .extend = event.modifiers.shift } } };
+        if (std.ascii.eqlIgnoreCase(event.key, "arrowdown")) return .{ .edit = .{ .move_caret = .{ .direction = .end, .extend = event.modifiers.shift } } };
+    }
+    return .fallback;
+}
+
 /// Recognize the chord only; native callers retain eligibility, composition
 /// refusal, serial lookup and storage for the selected history direction.
 pub fn widgetKeyboardTextHistoryAction(widget: Widget, event: WidgetKeyboardEvent) ?WidgetTextHistoryAction {

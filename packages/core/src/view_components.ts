@@ -51,6 +51,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 11) return nscvCodeIndentation(request);
   if (request[0] === 12) return nscvTextClipboard(request);
   if (request[0] === 13) return nscvEditorShortcut(request);
+  if (request[0] === 14) return nscvEditorBoundary(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -109,6 +110,30 @@ function nscvEditorShortcut(request: Uint8Array): Uint8Array {
     else if (request[1] === 1 && meta && key === 4) action = shift ? 2 : 1;
   }
   const result = new Uint8Array(1); result[0] = action; return result;
+}
+
+/** Editor boundaries: tag 14, kind (0 textarea, 1 entry, 2 search, 3 combo),
+ * phase (0 down, 1 up, 2 text), shift/control/alt/super bits, normalized key
+ * (0 unknown, 1 Escape, 2 Up, 3 Down), text-present, composition, expanded.
+ * Result: 0 fall through, 1 consume without edit, 2 cancel composition,
+ * 3 clear, 4 start, 5 end; second byte extends selection. Escape deliberately
+ * ignores text payloads. Closed combo arrows open before any caret edit.
+ */
+function nscvEditorBoundary(request: Uint8Array): Uint8Array {
+  if (request.length !== 8 || request[1]! > 3 || request[2]! > 2 ||
+      request[3]! > 15 || request[4]! > 3 || request[5]! > 1 ||
+      request[6]! > 1 || request[7]! > 1) throw new Error("invalid editor boundary request");
+  const kind = request[1]!, bits = request[3]!, key = request[4]!;
+  const shift = (bits & 1) !== 0, navigation = (bits & 14) !== 0;
+  let action = 0;
+  if (request[2] === 0 && !navigation) {
+    if (key === 1 && !shift) action = request[6] === 1 ? 2 : kind >= 2 ? 3 : 1;
+    else if (kind !== 0 && request[5] === 0 && !(kind === 3 && request[7] === 0)) {
+      if (key === 2) action = 4;
+      else if (key === 3) action = 5;
+    }
+  }
+  const result = new Uint8Array(2); result[0] = action; result[1] = shift ? 1 : 0; return result;
 }
 
 /** Clipboard selection: tag 12, selection-present and two reserved bytes,
