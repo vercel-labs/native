@@ -48,6 +48,14 @@ export interface TextEditState {
     readonly selection: TextSelection;
     readonly composition: TextRange | null;
 }
+export declare function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextInputEvent | null;
+/** Select the word, whitespace run or punctuation cluster at a UTF-8 byte
+ * offset. An offset at or beyond the end selects the trailing run.
+ */
+export declare function textWordSelectionAtOffset(text: Uint8Array, offset: number): TextSelection;
+/** Select a hard-newline line without its LF or CRLF terminator. */
+export declare function textLineSelectionAtOffset(text: Uint8Array, offset: number): TextSelection;
+export declare function caretSelectionAt(anchor: number, focus: number): TextSelection;
 export declare function applyTextInputEvent(state: TextEditState, event: TextInputEvent, capacity: number): TextEditState | null;
 export declare function clampedInsertEvent(state: TextEditState, event: TextInputEvent, capacity: number): TextInputEvent | null;
 export declare function containsIgnoreCase(haystack: Uint8Array, needle: Uint8Array): boolean;
