@@ -30,7 +30,7 @@ test("increment and replay", async () => {
 });
 ```
 
-`findWidget` requires exactly one matching accessibility role and name. Add `view` to distinguish identical controls in different views. Use a fresh snapshot after an interaction. Widget identities and effect keys are decimal strings so JavaScript preserves all 64 bits.
+`findWidget` requires exactly one matching accessibility role and name. Add `view` to distinguish identical controls in different views. Use a fresh snapshot after an interaction. Widget identities and effect keys are decimal strings so JavaScript preserves all 64 bits. Scroll regions also expose `widget.scroll`, the applied two-axis `ScrollState` with offsets, velocities, and viewport/content extents widened exactly from native f32. Other widgets have `scroll: null`.
 
 Each `NativeApp.start()` creates an independent native process. `click`, `action`, `menu`, and `frame` return the resulting snapshot. Actions support `focus`, `press`, `toggle`, `increment`, `decrement`, and `dismiss`. Requests are serialized, time out after 10 seconds by default (`timeoutMs` overrides this), and reject on native errors or process exits. Always close the app in `finally`, or use `await using`.
 

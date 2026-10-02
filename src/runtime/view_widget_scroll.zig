@@ -197,6 +197,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             if (viewport.isEmpty()) return false;
 
             const current = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport).axis(axis);
+            if (canvas.widgetCompiledScrollResult(scroll_node.widget, .{ .operation = 14, .current = current.offset, .viewport = current.viewport_extent, .content = current.content_extent, .delta = delta })) |result| return result.dx != 0;
             const max_offset = current.maxOffset();
             if (current.offset < 0) return delta > 0;
             if (current.offset > max_offset) return delta < 0;
@@ -242,6 +243,11 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
                     current.applyWheelClamped(delta, physics),
                 .discrete => discrete: {
                     var axis_state = current;
+                    if (canvas.widgetCompiledScrollResult(scroll_node.widget, .{ .operation = 1, .current = current.offset, .viewport = current.viewport_extent, .content = current.content_extent, .delta = delta })) |result| {
+                        axis_state.offset = result.dx;
+                        axis_state.velocity = 0;
+                        break :discrete axis_state;
+                    }
                     axis_state.offset += delta;
                     axis_state.velocity = 0;
                     break :discrete axis_state.clamped();
@@ -368,7 +374,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             var next = current;
             if (canvas.widgetScrollsAxis(scroll_node.widget, .vertical)) {
                 var axis_state = current.axis(.vertical);
-                axis_state.offset = switch (target) {
+                axis_state.offset = if (canvas.widgetCompiledScrollResult(scroll_node.widget, .{ .operation = if (target == .start) 12 else 13, .viewport = axis_state.viewport_extent, .content = axis_state.content_extent })) |result| result.dx else switch (target) {
                     .start => 0,
                     .end => axis_state.maxOffset(),
                 };
@@ -377,7 +383,7 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
             }
             if (canvas.widgetScrollsAxis(scroll_node.widget, .horizontal)) {
                 var axis_state = current.axis(.horizontal);
-                axis_state.offset = switch (target) {
+                axis_state.offset = if (canvas.widgetCompiledScrollResult(scroll_node.widget, .{ .operation = if (target == .start) 12 else 13, .viewport = axis_state.viewport_extent, .content = axis_state.content_extent })) |result| result.dx else switch (target) {
                     .start => 0,
                     .end => axis_state.maxOffset(),
                 };
@@ -518,6 +524,9 @@ pub fn RuntimeViewCanvasWidgetScroll(comptime RuntimeView: type) type {
 
             const current_axis = self.canvasWidgetScrollState(scroll_index, scroll_node, viewport).axis(axis);
             var next_axis = current_axis;
+            if (canvas.widgetCompiledScrollResult(scroll_node.widget, .{ .operation = 1, .current = current_axis.offset, .viewport = current_axis.viewport_extent, .content = current_axis.content_extent, .delta = requested })) |result| {
+                return result.dx - current_axis.offset;
+            }
             next_axis.offset += requested;
             next_axis.velocity = 0;
             next_axis = next_axis.clamped();

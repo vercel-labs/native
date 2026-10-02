@@ -730,19 +730,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gtk_pixels_test_run.step);
     test_step.dependOn(&spectrum_bins_test_run.step);
     if (b.graph.host.result.os.tag == .macos) {
-        const focus_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
-        for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
-            focus_test_run.addArgs(&.{ "-framework", framework });
+        for ([_]struct { file: []const u8, step: []const u8, description: []const u8 }{
+            .{ .file = "widget_focus_test.m", .step = "test-macos-widget-focus", .description = "Verify native accessibility publication preserves keyboard focus without assistive feedback" },
+            .{ .file = "scroll_driver_test.m", .step = "test-macos-scroll-drivers", .description = "Verify native scroll resize reports settle after driver reconciliation" },
+        }) |probe| {
+            const probe_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
+            for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+                probe_run.addArgs(&.{ "-framework", framework });
+            }
+            probe_run.addArgs(&.{ "-cflags", "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" });
+            if (b.sysroot) |sysroot| probe_run.addArgs(&.{ "-isysroot", sysroot });
+            probe_run.addArg("--");
+            probe_run.addFileArg(b.path(b.fmt("src/platform/macos/{s}", .{probe.file})));
+            probe_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
+            probe_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
+            probe_run.expectExitCode(0);
+            b.step(probe.step, probe.description).dependOn(&probe_run.step);
+            test_step.dependOn(&probe_run.step);
         }
-        focus_test_run.addArgs(&.{ "-cflags", "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" });
-        if (b.sysroot) |sysroot| focus_test_run.addArgs(&.{ "-isysroot", sysroot });
-        focus_test_run.addArg("--");
-        focus_test_run.addFileArg(b.path("src/platform/macos/widget_focus_test.m"));
-        focus_test_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
-        focus_test_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
-        focus_test_run.expectExitCode(0);
-        b.step("test-macos-widget-focus", "Verify native accessibility publication preserves keyboard focus without assistive feedback").dependOn(&focus_test_run.step);
-        test_step.dependOn(&focus_test_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
@@ -1017,6 +1022,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&split_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&split_policy_driver_run.step);
         test_step.dependOn(&split_policy_driver_run.step);
+        const scroll_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        scroll_policy_reference_run.setCwd(b.path("examples/scroll-policy"));
+        scroll_policy_reference_run.has_side_effects = true;
+        scroll_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        scroll_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/scroll-policy-view-reference"));
+        _ = scroll_policy_reference_run.captureStdOut(.{});
+        _ = scroll_policy_reference_run.captureStdErr(.{});
+        const scroll_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        scroll_policy_driver_run.setCwd(b.path("examples/scroll-policy"));
+        scroll_policy_driver_run.has_side_effects = true;
+        scroll_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        scroll_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/scroll-policy-view-reference"));
+        _ = scroll_policy_driver_run.captureStdOut(.{});
+        _ = scroll_policy_driver_run.captureStdErr(.{});
+        scroll_policy_driver_run.step.dependOn(&scroll_policy_reference_run.step);
+        native_driver_step.dependOn(&scroll_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&scroll_policy_driver_run.step);
+        test_step.dependOn(&scroll_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2188,6 +2211,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-checkable-policy", "Run portable checkable policy example tests", "examples/checkable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-slider-policy", "Run portable slider policy example tests", "examples/slider-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

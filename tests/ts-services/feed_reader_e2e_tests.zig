@@ -611,7 +611,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     std.mem.writeInt(u32, slider_request[10..14], @bitCast(@as(f32, 0.8)), .little);
     var slider_state: [4]u8 = undefined;
     const split_widget = canvas.Widget{ .kind = .split, .value = 0.3, .interaction_policy = core.nativeSplitPolicy };
+    const scroll_widget = canvas.Widget{ .kind = .scroll_view, .interaction_policy = core.nativeScrollPolicy, .runtime_flags = .{ .compiled_scroll_policy = true } };
     for (0..16) |_| {
+        try std.testing.expectEqual(@as(f32, 80.5), canvas.widgetCompiledScrollResult(scroll_widget, .{ .operation = 2, .current = 30.5, .previous_source = 30.5, .retained = 80.5 }).?.dx);
         try std.testing.expectEqual(@as(f32, 0.8), canvas.widgetCompiledSplitValue(split_widget, .{ .operation = 2, .value = 0.3, .previous_source = 0.3, .retained = 0.8 }).?);
         try std.testing.expectEqual(@as(usize, 4), core.nativeSliderPolicy(&slider_request, &slider_state));
         try std.testing.expectEqual(@as(usize, 1), core.nativeTogglePolicy(&.{ 10, 5 }, &checkable_state));
@@ -640,6 +642,121 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     }
     try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
     try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
+}
+
+test "compiled scroll offsets preserve exact native f32 clamps and per-axis history" {
+    const widget = canvas.Widget{ .kind = .scroll_view, .interaction_policy = core.nativeScrollPolicy, .runtime_flags = .{ .compiled_scroll_policy = true } };
+    for ([_]f32{ -30.25, 0, 0.5, 120.75, 9999, std.math.nan(f32), std.math.inf(f32) }) |offset| {
+        for ([_]f32{ 0, 1, 150.5, 396, 777.3 }) |viewport| for ([_]f32{ 0, 120, 900.25 }) |content| {
+            const state = canvas.ScrollAxisState{ .offset = offset, .viewport_extent = viewport, .content_extent = content };
+            try std.testing.expectEqual(state.clamped().offset, canvas.widgetCompiledScrollResult(widget, .{ .operation = 0, .current = offset, .viewport = viewport, .content = content }).?.dx);
+            for ([_]f32{ -200.75, 0, 85.25, 9000 }) |delta| {
+                var expected = state;
+                expected.offset += delta;
+                try std.testing.expectEqual(expected.clamped().offset, canvas.widgetCompiledScrollResult(widget, .{ .operation = 1, .current = offset, .viewport = viewport, .content = content, .delta = delta }).?.dx);
+            }
+        };
+    }
+    for ([_]f32{ 0.5, 30.5 }) |source| for ([_]?f32{ null, 0.5, 30.5 }) |previous| for ([_]bool{ false, true }) |granted| {
+        const expected: f32 = if (previous != null and source == previous.? and granted) -18.5 else source;
+        try std.testing.expectEqual(expected, canvas.widgetCompiledScrollResult(widget, .{ .operation = 2, .current = source, .previous_source = previous, .retained = -18.5, .granted = granted }).?.dx);
+    };
+    for ([_]?f32{ null, 0.5, 30.5 }) |previous| for ([_]?f32{ null, -18.5, 30.5 }) |retained| {
+        const clamp = (previous == null or previous.? != 30.5) and (retained == null or retained.? != 30.5);
+        try std.testing.expectEqual(if (clamp) @as(f32, 0) else -18.5, canvas.widgetCompiledScrollResult(widget, .{ .operation = 3, .current = -18.5, .delta = 30.5, .previous_source = previous, .retained = retained, .viewport = 150, .content = 450 }).?.dx);
+    };
+}
+
+test "compiled scroll keyboard and semantic steps preserve every native axis map" {
+    for ([_]canvas.ScrollAxes{ .vertical, .horizontal, .both }) |axes| for ([_]bool{ false, true }) |virtualized| {
+        for ([_]geometry.SizeF{ .{ .width = 1, .height = 1 }, .{ .width = 333.3, .height = 155.5 } }) |size| {
+            const reference = canvas.Widget{ .kind = .scroll_view, .scroll_axes = axes, .layout = .{ .virtualized = virtualized, .padding = geometry.InsetsF.all(0.25) }, .frame = geometry.RectF.init(0, 0, size.width, size.height) };
+            var compiled = reference;
+            compiled.interaction_policy = core.nativeScrollPolicy;
+            compiled.runtime_flags.compiled_scroll_policy = true;
+            for ([_]canvas.WidgetSemanticAction{ .increment, .decrement }) |action| {
+                try std.testing.expectEqualDeep(canvas.widgetSemanticControlIntentWithActions(reference, action, .{ .increment = true, .decrement = true }), canvas.widgetSemanticControlIntentWithActions(compiled, action, .{ .increment = true, .decrement = true }));
+            }
+            for ([_][]const u8{ "arrowleft", "arrowright", "arrowup", "arrowdown", "home", "end", "pageup", "pagedown", "space" }) |key| {
+                for ([_]canvas.WidgetKeyboardModifiers{ .{}, .{ .shift = true }, .{ .control = true }, .{ .alt = true }, .{ .super = true } }) |modifiers| for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up }) |phase| {
+                    const keyboard = canvas.WidgetKeyboardEvent{ .key = key, .modifiers = modifiers, .phase = phase };
+                    try std.testing.expectEqualDeep(canvas.widgetKeyboardControlIntent(reference, keyboard), canvas.widgetKeyboardControlIntent(compiled, keyboard));
+                };
+            }
+            compiled.state.disabled = true;
+            try std.testing.expect(canvas.widgetKeyboardControlIntent(compiled, .{ .phase = .key_down, .key = "pagedown" }) == null);
+        }
+    };
+}
+
+test "compiled scroll runtime preserves driver overscroll, exact echoes and revoked axes" {
+    const Fixture = struct {
+        fn layout(allocator: std.mem.Allocator, x: f32, y: f32, axes: canvas.ScrollAxes, native: bool, compiled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+            var ui = canvas.Ui(core.Msg).init(allocator);
+            var scroll = ui.scroll(.{ .value = y, .value_x = x, .axis = axes }, .{
+                ui.column(.{ .width = 720, .height = 600 }, .{ui.text(.{}, "Scroll content")}),
+            });
+            scroll.widget.runtime_flags.native_scroll = native;
+            if (compiled) {
+                scroll.widget.interaction_policy = core.nativeScrollPolicy;
+                scroll.widget.runtime_flags.compiled_scroll_policy = true;
+            }
+            const tree = try ui.finalize(scroll);
+            return canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 300, 180), nodes);
+        }
+        fn capture(view: anytype, values: []canvas.ScrollState, frames: []geometry.RectF, stage: usize) void {
+            const node = view.widget_layout_nodes[0];
+            values[stage] = view.canvasWidgetScrollState(0, node, node.frame);
+            frames[stage] = view.widget_layout_nodes[1].frame;
+        }
+    };
+    for ([_]bool{ false, true }) |native| {
+        var values: [2][8]canvas.ScrollState = undefined;
+        var frames: [2][8]geometry.RectF = undefined;
+        for ([_]bool{ false, true }, 0..) |compiled, backend| {
+            const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+            defer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            var state = struct {
+                fn app(self: *@This()) native_sdk.App {
+                    return .{ .context = self, .name = "scroll-runtime", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+                }
+            }{};
+            try harness.start(state.app());
+            _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 180) });
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var nodes: [4]canvas.WidgetLayoutNode = undefined;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.5, 0.5, .both, native, compiled, &nodes));
+            const view = &harness.runtime.views[0];
+            Fixture.capture(view, &values[backend], &frames[backend], 0);
+            if (native) _ = try view.applyCanvasWidgetScrollDriverOffset(0, -18.5, 450.5) else _ = try view.applyCanvasWidgetScroll(0, .{ .dx = 30.25, .dy = 40.5 }, .discrete, false);
+            Fixture.capture(view, &values[backend], &frames[backend], 1);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), 0.5, 0.5, .both, native, compiled, &nodes));
+            Fixture.capture(view, &values[backend], &frames[backend], 2);
+            const echo_x = values[backend][2].offset_x;
+            const echo_y = values[backend][2].offset_y;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), echo_x, echo_y, .both, native, compiled, &nodes));
+            Fixture.capture(view, &values[backend], &frames[backend], 3);
+            try std.testing.expectEqual(echo_x, values[backend][3].offset_x);
+            try std.testing.expectEqual(echo_y, values[backend][3].offset_y);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), echo_x, 1000000.5, .both, native, compiled, &nodes));
+            Fixture.capture(view, &values[backend], &frames[backend], 4);
+            try std.testing.expectEqual(@as(f32, 420), values[backend][4].offset_y);
+            try std.testing.expectEqual(echo_x, values[backend][4].offset_x);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), echo_x, 1000000.5, .vertical, native, compiled, &nodes));
+            Fixture.capture(view, &values[backend], &frames[backend], 5);
+            try std.testing.expectEqual(@as(f32, 0), values[backend][5].offset_x);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Fixture.layout(arena.allocator(), echo_x, 1000000.5, .both, native, compiled, &nodes));
+            Fixture.capture(view, &values[backend], &frames[backend], 6);
+            try std.testing.expectEqual(@as(f32, 0), values[backend][6].offset_x);
+            _ = try view.applyCanvasWidgetScrollKeyboardTarget(0, .start);
+            Fixture.capture(view, &values[backend], &frames[backend], 7);
+            try std.testing.expectEqual(@as(f32, 0), values[backend][7].offset_y);
+        }
+        try std.testing.expectEqualDeep(values[0], values[1]);
+        try std.testing.expectEqualDeep(frames[0], frames[1]);
+    }
 }
 
 test "compiled split clamps preserve exact native f32 minimum-width bounds" {

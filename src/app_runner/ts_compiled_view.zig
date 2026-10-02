@@ -29,6 +29,9 @@ const Record = struct {
     resizeEasing: sdk.canvas.Easing = .standard,
     resizeOrigin: f32 = -1,
     value: f32 = 0,
+    valueX: ?f32 = null,
+    axis: ?sdk.canvas.ScrollAxes = null,
+    overscroll: ?sdk.canvas.WidgetOverscroll = null,
     image: u64 = 0,
     icon: []const u8 = "",
     label: []const u8 = "",
@@ -98,6 +101,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if ((value.resizeDuration != 0 or value.resizeEasing != .standard or value.resizeOrigin != -1) and value.kind != .split) return error.InvalidView;
     if ((value.resizeEasing != .standard or value.resizeOrigin != -1) and value.resizeDuration == 0) return error.InvalidView;
     if (!std.math.isFinite(value.value)) return error.InvalidView;
+    if ((value.valueX != null or value.axis != null or value.overscroll != null) and value.kind != .scroll) return error.InvalidView;
+    if (value.valueX) |offset| if (!std.math.isFinite(offset)) return error.InvalidView;
     if (value.key != null and value.keyInt != null or value.globalKey != null and value.globalKeyInt != null) return error.InvalidView;
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
@@ -154,6 +159,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .resize_easing = value.resizeEasing,
         .resize_origin = value.resizeOrigin,
         .value = value.value,
+        .value_x = value.valueX orelse 0,
+        .axis = value.axis orelse .vertical,
+        .overscroll = value.overscroll orelse .default,
         .image = value.image,
         .icon = value.icon,
         .window_drag = value.windowDrag,
@@ -209,12 +217,27 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (comptime @hasDecl(core, "nativeSplitPolicy")) {
         if (value.kind == .split) result.widget.interaction_policy = core.nativeSplitPolicy;
     }
+    if (comptime @hasDecl(core, "nativeScrollPolicy")) {
+        if (value.kind == .scroll) {
+            result.widget.runtime_flags.compiled_scroll_policy = true;
+            result.widget.interaction_policy = if (value.role == .tree) scrollTreePolicy else core.nativeScrollPolicy;
+        }
+    }
     if (paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
         spans[0] = .{ .text = result.widget.text, .weight = value.spanWeight orelse .regular, .color = value.spanColor, .scale = value.spanScale orelse 0 };
         result.widget.spans = spans;
     }
     return result;
+}
+
+/// A scroll container can also own logical tree navigation. The explicit
+/// scroll tag preserves both policies in one callback without tree scans.
+fn scrollTreePolicy(request: []const u8, output: []u8) usize {
+    if (comptime @hasDecl(core, "nativeScrollPolicy") and @hasDecl(core, "nativeTreePolicy")) {
+        if (request.len > 0 and request[0] >= 128) return core.nativeScrollPolicy(request, output);
+        return core.nativeTreePolicy(request, output);
+    } else unreachable;
 }
 
 fn event(ui: *Ui, bytes: []const u8) !core.Msg {
@@ -257,6 +280,32 @@ fn valueEvent(tag: u8) !Ui.ValueMsgFn {
         }
     }
     return error.InvalidView;
+}
+
+test "compiled scrolls reject misplaced properties and incompatible channels" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"axis\":\"both\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"valueX\":2}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"overscroll\":\"none\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"scroll\",\"text\":\"\",\"scroll\":255}]}",
+        }) |source| try std.testing.expectError(error.InvalidView, decode(&ui, source));
+        if (comptime @hasDecl(core, "nativeScrollPolicy") and @hasDecl(core, "nativeTreePolicy")) {
+            const source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"scroll\",\"text\":\"\",\"role\":\"tree\"}]}";
+            const result = try decode(&ui, source);
+            try std.testing.expect(result.widget.runtime_flags.compiled_scroll_policy);
+            const offset = sdk.canvas.widgetCompiledScrollResult(result.widget, .{ .operation = 1, .current = 20.5, .viewport = 100, .content = 400, .delta = 30.25 }).?;
+            try std.testing.expectEqual(@as(f32, 50.75), offset.dx);
+            const tree_request = [_]u8{ 0, 0, 0, 1, 0, 255, 255, 2, 0, 0, 0 };
+            var expected: [2]u8 = undefined;
+            var actual: [2]u8 = undefined;
+            try std.testing.expectEqual(core.nativeTreePolicy(&tree_request, &expected), result.widget.interaction_policy.?(&tree_request, &actual));
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+        }
+    } else return error.SkipZigTest;
 }
 
 test "compiled sliders reject incompatible value channels" {

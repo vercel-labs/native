@@ -1,0 +1,66 @@
+<column padding="20" gap="12">
+  <row cross="center" gap="12">
+    <text size="heading">Atlas Desk</text>
+    <text foreground="text_muted">Pan the project board, browse the shelf, and keep your reading place.</text>
+  </row>
+  <row gap="8">
+    <button on-press="origin">Origin</button><button on-press="middle">Middle</button>
+    <button on-press="far_corner">Far corner</button><button on-press="x_preset">X preset</button>
+    <button on-press="y_preset">Y preset</button><button on-press="refresh">Refresh</button>
+    <button on-press="axis">Change axis</button><button on-press="edges">Change edges</button>
+  </row>
+  <row gap="8">
+    <button on-press="reverse">Reverse</button><button on-press="hide_reading">Hide reading</button>
+    <button on-press="empty">Empty</button><button on-press="new_desk">New desk</button>
+    <text foreground="text_muted">Board {boardXLabel}, {boardYLabel} | Shelf {shelfLabel} | {axes}, {edges}</text>
+  </row>
+  <row grow="1" gap="16" key="{desk}">
+    <column grow="1" gap="8">
+      <text>Project board</text>
+      <scroll label="Project board" height="310" axis="{axes}" value="{boardY}" value-x="{boardX}" overscroll="{edges}" on-scroll="board_scrolled">
+        <column gap="10">
+          <scroll label="Activity log" height="100">
+            <column gap="10">
+              <for each="entries" as="entry" key="id"><text>{entry.title} activity: planning and review notes</text></for>
+              <if test="{empty}"><text>No activity</text></if>
+            </column>
+          </scroll>
+          <for each="entries" as="entry" key="id">
+            <row height="74" width="900" gap="12" padding="10" cross="center" background="surface" radius="md">
+              <text width="130">{entry.title}</text><text width="460" foreground="text_muted">Research, design, implementation, and review across the workspace.</text>
+              <button on-press="open:{entry.id}">Open {entry.title}</button>
+            </row>
+          </for>
+          <if test="{empty}"><text>No projects</text></if>
+        </column>
+      </scroll>
+      <text>Reference shelf</text>
+      <scroll label="Reference shelf" height="110" axis="horizontal" value-x="{shelfX}" on-scroll="shelf_scrolled">
+        <row gap="12">
+          <for each="entries" as="entry" key="id">
+            <panel width="180" height="94" padding="12" background="surface" radius="md"><text>{entry.title} reference</text></panel>
+          </for>
+          <if test="{empty}"><text>No references</text></if>
+        </row>
+      </scroll>
+    </column>
+    <column width="290" gap="10">
+      <for each="panels" as="panel" key="id">
+        <column gap="6">
+          <text>{panel.title}</text>
+          <scroll label="{panel.title}" height="145" value="{panel.source}">
+            <column gap="10">
+              <text wrap="true">Keep your place while the rest of the workspace changes.</text>
+              <text wrap="true">Use arrows and PageUp or PageDown to browse. Home and End reach the boundaries.</text>
+              <text wrap="true">These notes retain their own offset across refresh and keyed reversal.</text>
+              <text wrap="true">Source presets on the project board change one axis at a time.</text>
+              <text wrap="true">A fresh desk mounts new regions with their authored positions.</text>
+            </column>
+          </scroll>
+        </column>
+      </for>
+      <if test="{empty}"><text>No reading panels</text></if>
+    </column>
+  </row>
+  <text foreground="text_muted">{changes} scroll changes | {refreshes} refreshes | Opened project {opened} | Desk {desk}</text>
+</column>

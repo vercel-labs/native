@@ -710,6 +710,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * that hit-block scroll regions beneath them. */
 @property(nonatomic, strong) NSArray *scrollOccluderRects;
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
+@property(nonatomic, assign) BOOL reconcilingScrollDrivers;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
 @property(nonatomic, assign) double pendingScrollDriverOffsetX;
@@ -6921,6 +6922,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 // GPU_SURFACE_SCROLL_DRIVER events.
 
 - (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount {
+    self.reconcilingScrollDrivers = YES;
     if (!self.scrollDrivers) self.scrollDrivers = [[NSMutableArray alloc] init];
     // Occluder rects arrive in canvas coordinates (top-left origin,
     // y-down); store them flipped into this view's space, like the
@@ -7018,6 +7020,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         [ordered addObject:driver];
     }
     self.scrollDrivers = ordered;
+    self.reconcilingScrollDrivers = NO;
 }
 
 // Per-axis programmatic offset write: an axis the runtime did not move
@@ -7147,6 +7150,22 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     NSClipView *clipView = note.object;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (driver.contentView != clipView) continue;
+        // Resizing several documents can flush another driver's pending
+        // report. That callback rebuilds the app and re-enters this sync,
+        // overwriting reports and retained geometry from the outer push.
+        // Report resize constraints after the full push settles, reading
+        // the live origin so an intervening source write stays authoritative.
+        if (self.reconcilingScrollDrivers) {
+            __weak NativeSdkMetalSurfaceView *weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+                if (!strongSelf || driver.superview != strongSelf) return;
+                [strongSelf queueScrollDriverEventWithId:driver.driverId
+                                                offsetX:driver.contentView.bounds.origin.x
+                                                offsetY:driver.contentView.bounds.origin.y];
+            });
+            return;
+        }
         [self queueScrollDriverEventWithId:driver.driverId offsetX:clipView.bounds.origin.x offsetY:clipView.bounds.origin.y];
         return;
     }

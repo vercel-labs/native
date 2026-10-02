@@ -93,6 +93,28 @@ test("split panes preserve float resize channels, minimum widths and structural 
   assert.throws(() => render('<split resize-duration="0.5"><column/><column/></split>'), /resize-duration/);
 });
 
+test("scroll views preserve two-axis grants, offsets, overscroll and closed enum bindings", () => {
+  const scrollContract: ViewContract = { ...contract, types: { ...contract.types,
+    structs: [{ name: "Model", fields: [...contract.types.structs[0]!.fields,
+      { name: "axes", type: { kind: "enum", name: "ScrollAxes" } },
+      { name: "edges", type: { kind: "enum", name: "ScrollEdges" } }] }],
+    enums: [{ name: "ScrollAxes", members: ["vertical", "horizontal", "both"] },
+      { name: "ScrollEdges", members: ["default", "none", "rubber_band"] }],
+  } };
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<scroll axis="{axes}" overscroll="{edges}" value="25.5" value-x="45.25"><column/></scroll>', scrollContract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: { axes: "both", edges: "rubber_band" },
+  });
+  const root = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  assert.equal(root.axis, "both"); assert.equal(root.overscroll, "rubber_band");
+  assert.equal(root.value, 25.5); assert.equal(root.valueX, 45.25);
+  for (const markup of ['<column axis="both"/>', '<column overscroll="none"/>', '<column value-x="3"/>',
+    '<scroll axis="diagonal"/>', '<scroll overscroll="bounce"/>', '<scroll value-x="3"/>',
+    '<scroll axis="vertical" value-x="3"/>', '<scroll axis="{edges}"/>', '<scroll overscroll="{axes}"/>']) {
+    assert.throws(() => compileView(markup, scrollContract), /compiled TypeScript view:/, markup);
+  }
+});
+
 test("counter view reads the committed TypeScript model, helpers and canonical event tags", () => {
   const { model, view } = evaluate(source);
   const initial = view();

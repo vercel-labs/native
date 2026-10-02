@@ -268,6 +268,7 @@ pub const conditional_exports = [_][]const u8{
     "native_accordion_policy",
     "native_slider_policy",
     "native_split_policy",
+    "native_scroll_policy",
 };
 
 // ------------------------------------------------------------ reading
@@ -2448,6 +2449,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const split = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_split_policy\"]");
     const split_valid = try readValid(arena, split);
     try testing.expect(abiHasExport(split_valid.abi, "native_split_policy"));
+    const scroll = try replaced(arena, split, "\"native_split_policy\"]", "\"native_split_policy\", \"native_scroll_policy\"]");
+    const scroll_valid = try readValid(arena, scroll);
+    try testing.expect(abiHasExport(scroll_valid.abi, "native_scroll_policy"));
+    const scroll_duplicate = try replaced(arena, scroll, "\"native_scroll_policy\"]", "\"native_scroll_policy\", \"native_scroll_policy\"]");
+    try expectRefusal(scroll_duplicate, "abi.exports[34]", "out of canonical order");
     const split_duplicate = try replaced(arena, split, "\"native_split_policy\"]", "\"native_split_policy\", \"native_split_policy\"]");
     try expectRefusal(split_duplicate, "abi.exports[33]", "out of canonical order");
     const slider_duplicate = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_slider_policy\"]");

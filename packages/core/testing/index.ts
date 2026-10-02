@@ -2,6 +2,7 @@
  * Import from tests/*.test.ts, never from the deterministic app core.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ScrollState } from "../sdk/events.ts";
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 export interface NativeWidget {
@@ -14,6 +15,8 @@ export interface NativeWidget {
   readonly text: string;
   /** Applied numeric accessibility value; null for controls without one. */
   readonly value: number | null;
+  /** Applied two-axis runtime scroll state; null for other widget kinds. */
+  readonly scroll: ScrollState | null;
   readonly enabled: boolean;
   readonly focused: boolean;
   readonly selected: boolean;

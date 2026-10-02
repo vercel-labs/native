@@ -994,6 +994,41 @@ fn widgetRadioKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEven
     };
 }
 
+pub const ScrollPolicyRequest = struct {
+    operation: u8,
+    current: f32 = 0,
+    viewport: f32 = 0,
+    content: f32 = 0,
+    delta: f32 = 0,
+    previous_source: ?f32 = null,
+    retained: ?f32 = null,
+    granted: bool = true,
+    horizontal_keymap: bool = false,
+    dual_keymap: bool = false,
+};
+
+/// The callback copies two f32 results before the scriptc arena resets.
+/// Scalar offset operations use dx; keyboard operations return both axes.
+pub fn widgetCompiledScrollResult(widget: Widget, value: ScrollPolicyRequest) ?geometry.OffsetF {
+    if (widget.kind != .scroll_view or !widget.runtime_flags.compiled_scroll_policy) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [26]u8 = undefined;
+    request[0] = 128 + value.operation;
+    request[1] = @as(u8, if (value.granted) 1 else 0) |
+        @as(u8, if (value.previous_source != null) 2 else 0) |
+        @as(u8, if (value.retained != null) 4 else 0) |
+        @as(u8, if (value.horizontal_keymap) 8 else 0) |
+        @as(u8, if (value.dual_keymap) 16 else 0);
+    inline for (.{ value.current, value.viewport, value.content, value.delta, value.previous_source orelse @as(f32, 0), value.retained orelse @as(f32, 0) }, 0..) |number, index| {
+        std.mem.writeInt(u32, request[2 + index * 4 ..][0..4], @bitCast(number), .little);
+    }
+    var output: [8]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled scroll policy result");
+    const result = geometry.OffsetF.init(@bitCast(std.mem.readInt(u32, output[0..4], .little)), @bitCast(std.mem.readInt(u32, output[4..8], .little)));
+    if (!std.math.isFinite(result.dx) or !std.math.isFinite(result.dy)) @panic("invalid compiled scroll policy value");
+    return result;
+}
+
 pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
@@ -1030,6 +1065,16 @@ fn widgetScrollKeymapHorizontalOnly(widget: Widget) bool {
 pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?geometry.OffsetF {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
+    if (widget.kind == .scroll_view and widget.runtime_flags.compiled_scroll_policy and widget.interaction_policy != null) {
+        const operation: u8 = if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) 4 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) 5 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) 6 else if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) 7 else if (std.ascii.eqlIgnoreCase(keyboard.key, "pageup")) 8 else if (std.ascii.eqlIgnoreCase(keyboard.key, "pagedown")) 9 else return null;
+        return widgetCompiledScrollResult(widget, .{
+            .operation = operation,
+            .viewport = viewport.width,
+            .content = viewport.height,
+            .horizontal_keymap = widgetScrollKeymapHorizontalOnly(widget),
+            .dual_keymap = !widget.layout.virtualized and widget.scroll_axes == .both,
+        });
+    }
     if (widgetScrollKeymapHorizontalOnly(widget)) {
         const line_step = @max(24, viewport.width * 0.35);
         const page_step = @max(line_step, viewport.width * 0.85);
@@ -1111,6 +1156,7 @@ fn widgetSemanticScrollDelta(widget: Widget, direction: WidgetSemanticStepDirect
     const horizontal_primary = widgetScrollKeymapHorizontalOnly(widget) or
         (widget.kind == .scroll_view and !widget.layout.virtualized and widget.scroll_axes == .both and
             widgetChildrenScrollHorizontalOnly(widget, viewport));
+    if (widgetCompiledScrollResult(widget, .{ .operation = if (direction == .increment) 11 else 10, .viewport = viewport.width, .content = viewport.height, .horizontal_keymap = horizontal_primary })) |delta| return delta;
     if (horizontal_primary) {
         const page_step_x = @max(@max(24, viewport.width * 0.35), viewport.width * 0.85);
         return geometry.OffsetF.init(sign * page_step_x, 0);

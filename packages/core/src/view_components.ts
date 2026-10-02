@@ -7,7 +7,8 @@ type NscViewNode = {
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
-  value?: number; image?: number; icon?: string; label?: string; role?: string;
+  value?: number; valueX?: number; axis?: string; overscroll?: string;
+  image?: number; icon?: string; label?: string; role?: string;
   background?: string; foreground?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
   disabled?: boolean; selected?: boolean; focusable?: boolean;
@@ -488,6 +489,56 @@ export function native_split_policy(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(4);
   new DataView(result.buffer).setFloat32(0, value, true);
+  return result;
+}
+
+/** Scroll wire: tagged operation u8 (128 + operation), flags (1 granted axis, 2 previous source,
+ * 4 retained offset, 8 horizontal keymap, 16 dual keymap), then six f32LE:
+ * current/source, viewport, content, delta/authored source, previous source,
+ * retained offset. Results are two f32LE (scalar in X, keyboard delta X/Y).
+ * Operations: 0 layout clamp, 1 discrete move, 2 reconcile, 3 programmatic
+ * clamp, 4..9 Left/Right/Up/Down/PageUp/PageDown, 10/11 assistive decrement/
+ * increment, 12/13 Home/End, 14 can consume. Keyboard uses viewport/content
+ * slots for width/height. OS offsets and wheel/kinetic physics remain native.
+ */
+export function native_scroll_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 26 || request[0]! < 128 || request[0]! > 142 || request[1]! > 31) {
+    throw new Error("invalid scroll policy request");
+  }
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const operation = request[0]! - 128, flags = request[1]!;
+  const current = wire.getFloat32(2, true), viewport = wire.getFloat32(6, true);
+  const content = wire.getFloat32(10, true), delta = wire.getFloat32(14, true);
+  const previous = wire.getFloat32(18, true), retained = wire.getFloat32(22, true);
+  const nonnegative = (value: number): number => Number.isNaN(value) ? 0 : Math.max(0, value);
+  const maximum = Math.max(0, Math.fround(nonnegative(content) - nonnegative(viewport)));
+  let x = current, y = 0;
+  if (operation === 0 || operation === 3) {
+    const moved = (flags & 2) === 0 || delta !== previous;
+    const echo = (flags & 4) !== 0 && delta === retained;
+    if (operation === 0 || moved && !echo) {
+      x = (flags & 1) !== 0 ? Math.min(maximum, nonnegative(current)) : 0;
+    }
+  } else if (operation === 1) {
+    x = (flags & 1) !== 0 ? Math.min(maximum, nonnegative(Math.fround(current + delta))) : 0;
+  } else if (operation === 2) {
+    if ((flags & 7) === 7 && current === previous) x = retained;
+  } else if (operation >= 4 && operation <= 11) {
+    const horizontal = (flags & 8) !== 0 || (flags & 16) !== 0 && (operation === 4 || operation === 5);
+    const extent = horizontal ? viewport : content;
+    const line = Math.max(24, Math.fround(extent * Math.fround(0.35)));
+    const page = Math.max(line, Math.fround(extent * Math.fround(0.85)));
+    const step = operation >= 8 ? page : line;
+    const signed = operation === 4 || operation === 6 || operation === 8 || operation === 10 ? -step : step;
+    x = horizontal ? signed : 0; y = horizontal ? 0 : signed;
+  } else if (operation === 12 || operation === 13) {
+    x = (flags & 1) !== 0 && operation === 13 ? maximum : 0;
+  } else if (operation === 14) {
+    x = delta === 0 ? 0 : current < 0 ? (delta > 0 ? 1 : 0) : current > maximum ? (delta < 0 ? 1 : 0) :
+      delta > 0 ? (current < maximum ? 1 : 0) : (current > 0 ? 1 : 0);
+  }
+  const result = new Uint8Array(8), out = new DataView(result.buffer);
+  out.setFloat32(0, x, true); out.setFloat32(4, y, true);
   return result;
 }
 

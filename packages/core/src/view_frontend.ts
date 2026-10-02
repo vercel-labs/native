@@ -53,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -415,6 +415,22 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
     for (const [name, value] of node.attrs) {
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
+      else if (name === "value-x") {
+        if (node.name !== "scroll" || !node.attrs.has("axis") || node.attrs.get("axis") === "vertical") fail(node, "value-x requires scroll with axis=horizontal or both");
+        props.push(`valueX: ${bound(value, "number", node, scope)}`);
+      } else if (name === "axis" || name === "overscroll") {
+        if (node.name !== "scroll") fail(node, `${name} requires scroll`);
+        const vocabulary = name === "axis" ? ["vertical", "horizontal", "both"] : ["default", "none", "rubber_band"];
+        if (value.startsWith("{")) {
+          const expr = binding(value, node, scope);
+          const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
+          if (expr.type.kind !== "enum" || !members?.every(member => vocabulary.includes(member))) fail(node, `${name} requires its closed enum vocabulary`);
+          props.push(`${name}: ${expr.code}`);
+        } else {
+          if (!vocabulary.includes(value)) fail(node, `unsupported ${name}=${value}`);
+          props.push(`${name}: ${JSON.stringify(value)}`);
+        }
+      }
       else if (name === "min-width") props.push(`minWidth: ${bound(value, "number", node, scope)}`);
       else if (["resize-duration", "resize-easing", "resize-origin"].includes(name)) {
         if (node.name !== "split") fail(node, `${name} requires split`);

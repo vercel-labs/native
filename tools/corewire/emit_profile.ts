@@ -161,6 +161,7 @@ const signatures: Signature[] = [
   { suffix: "native_accordion_policy", name: "native_accordion_policy", params: ["bytes"] },
   { suffix: "native_slider_policy", name: "native_slider_policy", params: ["bytes"] },
   { suffix: "native_split_policy", name: "native_split_policy", params: ["bytes"] },
+  { suffix: "native_scroll_policy", name: "native_scroll_policy", params: ["bytes"] },
 ];
 
 const randomness_teaching = "randomness is an effect: the core requests it through a command and the value arrives as a Msg, so a recorded session replays it exactly.";

@@ -143,6 +143,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
             try json.objectField("widgets");
             try json.beginArray();
             for (snapshot_value.widgets) |widget| {
+                const scroll = self.scrollState(widget.window_id, widget.view_label, widget.id);
                 try json.write(.{
                     .id = try std.fmt.bufPrint(&id_buffer, "{d}", .{widget.id}),
                     .view = widget.view_label,
@@ -151,6 +152,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .name = widget.name,
                     .text = widget.text_value,
                     .value = if (widget.value) |value| @as(?f64, @floatCast(value)) else null,
+                    .scroll = scroll,
                     .enabled = widget.enabled,
                     .focused = widget.focused,
                     .selected = widget.selected,
@@ -192,6 +194,33 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
             try json.endArray();
             try json.endObject();
             try json.endObject();
+        }
+
+        fn scrollState(self: *@This(), window_id: u64, label: []const u8, id: u64) ?struct {
+            offsetX: f64,
+            offsetY: f64,
+            velocityX: f64,
+            velocityY: f64,
+            viewportExtentX: f64,
+            viewportExtentY: f64,
+            contentExtentX: f64,
+            contentExtentY: f64,
+        } {
+            for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+                if (!view.open or view.window_id != window_id or !std.mem.eql(u8, view.label, label)) continue;
+                const state = view.canvasWidgetScrollStateById(id) orelse return null;
+                return .{
+                    .offsetX = state.offset_x,
+                    .offsetY = state.offset_y,
+                    .velocityX = state.velocity_x,
+                    .velocityY = state.velocity_y,
+                    .viewportExtentX = state.viewport_extent_x,
+                    .viewportExtentY = state.viewport_extent_y,
+                    .contentExtentX = state.content_extent_x,
+                    .contentExtentY = state.content_extent_y,
+                };
+            }
+            return null;
         }
     };
 

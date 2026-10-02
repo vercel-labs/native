@@ -273,7 +273,10 @@ pub const WidgetRuntimeFlags = packed struct(u8) {
     /// The runtime installed an OS-native scroll driver; engine-drawn
     /// scrollbar and kinetic physics stand down for this scroll view.
     native_scroll: bool = false,
-    _reserved: u6 = 0,
+    /// The callback accepts tagged scroll requests, independently of an
+    /// optional tree role sharing this scroll container's callback slot.
+    compiled_scroll_policy: bool = false,
+    _reserved: u5 = 0,
 };
 
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them

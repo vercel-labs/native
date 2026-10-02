@@ -239,7 +239,7 @@ fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
             if (canvas.anchoredNestingDepth(nodes, index) != depth) continue;
         }
         const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id) orelse continue;
-        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id) orelse continue;
+        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id);
         // Each axis reconciles on its own: a programmatic vertical
         // scroll (source-side `value` change) must not snap a
         // user-scrolled horizontal offset back, and vice versa. Only
@@ -248,17 +248,15 @@ fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
         // would translate content that never moved (the clamp pass
         // pins the stale value home instead).
         var restore = geometry.OffsetF{};
-        if (canvas.widgetScrollsAxis(node.widget, .vertical) and
-            node.widget.value == previous_source.value and node.widget.value != previous_runtime.value)
-        {
-            restore.dy = previous_runtime.value - node.widget.value;
-            nodes[index].widget.value = previous_runtime.value;
+        const next_y = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 2, .current = node.widget.value, .previous_source = if (previous_source) |entry| entry.value else null, .retained = previous_runtime.value, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (previous_source != null and canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value == previous_source.?.value) previous_runtime.value else node.widget.value;
+        const next_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 2, .current = node.widget.value_x, .previous_source = if (previous_source) |entry| entry.value_x else null, .retained = previous_runtime.value_x, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (previous_source != null and canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x == previous_source.?.value_x) previous_runtime.value_x else node.widget.value_x;
+        if (next_y != node.widget.value) {
+            restore.dy = next_y - node.widget.value;
+            nodes[index].widget.value = next_y;
         }
-        if (canvas.widgetScrollsAxis(node.widget, .horizontal) and
-            node.widget.value_x == previous_source.value_x and node.widget.value_x != previous_runtime.value_x)
-        {
-            restore.dx = previous_runtime.value_x - node.widget.value_x;
-            nodes[index].widget.value_x = previous_runtime.value_x;
+        if (next_x != node.widget.value_x) {
+            restore.dx = next_x - node.widget.value_x;
+            nodes[index].widget.value_x = next_x;
         }
         if (restore.dx == 0 and restore.dy == 0) continue;
         translateCanvasWidgetLayoutScrollDescendants(nodes, index, .{ .dx = -restore.dx, .dy = -restore.dy });
@@ -299,21 +297,21 @@ fn clampCanvasWidgetLayoutProgrammaticScrollOffsets(
         const runtime_echo_x = previous_runtime != null and source_node.widget.value_x == previous_runtime.?.value_x;
         const clamp_y = source_moved_y and !runtime_echo_y;
         const clamp_x = source_moved_x and !runtime_echo_x;
-        if (!clamp_y and !clamp_x) continue;
+        if (!node.widget.runtime_flags.compiled_scroll_policy and !clamp_y and !clamp_x) continue;
 
         const viewport = node.frame.inset(node.widget.layout.padding).normalized();
         if (viewport.isEmpty()) continue;
 
         const current_y = node.widget.value;
         const current_x = node.widget.value_x;
-        const next_y = if (clamp_y)
+        const next_y = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 3, .current = current_y, .viewport = viewport.height, .content = canvasWidgetLayoutScrollContentExtent(nodes, index, viewport), .delta = source_node.widget.value, .previous_source = if (previous_source) |entry| entry.value else null, .retained = if (previous_runtime) |entry| entry.value else null, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (clamp_y)
             if (canvas.widgetScrollsAxis(node.widget, .vertical))
                 std.math.clamp(@max(0, current_y), 0, @max(0, canvasWidgetLayoutScrollContentExtent(nodes, index, viewport) - viewport.height))
             else
                 0
         else
             current_y;
-        const next_x = if (clamp_x)
+        const next_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 3, .current = current_x, .viewport = viewport.width, .content = canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport), .delta = source_node.widget.value_x, .previous_source = if (previous_source) |entry| entry.value_x else null, .retained = if (previous_runtime) |entry| entry.value_x else null, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (clamp_x)
             if (canvas.widgetScrollsAxis(node.widget, .horizontal))
                 std.math.clamp(@max(0, current_x), 0, @max(0, canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport) - viewport.width))
             else
@@ -1261,7 +1259,7 @@ fn clampCanvasWidgetLayoutScrollOffsetsImpl(
         // An offset on an axis the region does not grant pins home: a
         // rebuild that flips the axis (or virtualizes the region) must
         // not leave content displaced along the revoked axis.
-        const next_offset = if (canvas.widgetScrollsAxis(node.widget, .vertical))
+        const next_offset = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 0, .current = current_offset, .viewport = viewport.height, .content = content_extent, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (canvas.widgetScrollsAxis(node.widget, .vertical))
             std.math.clamp(@max(0, current_offset), 0, max_offset)
         else
             0;
@@ -1269,7 +1267,7 @@ fn clampCanvasWidgetLayoutScrollOffsetsImpl(
         const content_extent_x = canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport);
         const max_offset_x = @max(0, content_extent_x - viewport.width);
         const current_offset_x = node.widget.value_x;
-        const next_offset_x = if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+        const next_offset_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 0, .current = current_offset_x, .viewport = viewport.width, .content = content_extent_x, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (canvas.widgetScrollsAxis(node.widget, .horizontal))
             std.math.clamp(@max(0, current_offset_x), 0, max_offset_x)
         else
             0;
