@@ -24,6 +24,9 @@ Undo and redo preserve selections; successive IME previews replace the active
 composition, and committing a composition records one undoable edit.
 Undo restores the selection's direction as well as its byte range. Each editor
 has its own history: editing another field keeps the first field's redo branch.
+Undo takes the latest applied edit for that editor; Redo takes its earliest
+undone edit. Replacing a draft from the app starts a fresh timeline on the next
+edit and preserves the other editors' histories.
 Canceling an empty composition keeps redo; committing a new edit replaces it.
 Previews can grow, shrink, or temporarily match the original text while staying
 in one transaction. Completing with the original text keeps redo. Canceling a

@@ -439,9 +439,17 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             clearCanvasWidgetTextVerticalGoal(self);
 
             const redo = keyboard.modifiers.shift;
-            const history_index = canvasWidgetTextHistoryIndex(self, target.id, widget.kind, redo) orelse return null;
+            const current_hash = if (widget.interaction_policy != null) textHistoryHash(widget.text) else null;
+            const compiled_timeline = if (current_hash) |hash|
+                compiledCanvasWidgetTextHistoryTimeline(self, target.id, widget, widget.text.len, hash)
+            else
+                null;
+            const history_index = if (compiled_timeline) |timeline|
+                (if (redo) timeline.redo_index else timeline.undo_index) orelse return null
+            else
+                canvasWidgetTextHistoryIndex(self, target.id, widget.kind, redo) orelse return null;
             const entry = self.canvas_widget_text_history_entries[history_index];
-            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .start)) |result| {
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .start, current_hash)) |result| {
                 return switch (result) {
                     .clear => blk: {
                         clearCanvasWidgetTextHistory(self, target.id);
@@ -493,6 +501,9 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             }
 
             const current_hash = textHistoryHash(widget.text);
+            if (compiledCanvasWidgetTextHistoryTimeline(self, target_id, widget, widget.text.len, current_hash)) |timeline| {
+                return .{ .can_undo = timeline.can_undo, .can_redo = timeline.can_redo };
+            }
             var availability: CanvasWidgetTextHistoryAvailability = .{};
             if (canvasWidgetTextHistoryIndex(self, target_id, widget.kind, false)) |history_index| {
                 const entry = self.canvas_widget_text_history_entries[history_index];
@@ -537,7 +548,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return null;
             }
 
-            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .next)) |result| {
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .next, null)) |result| {
                 return switch (result) {
                     .clear => blk: {
                         clearCanvasWidgetTextHistory(self, target.id);
@@ -609,7 +620,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             {
                 return;
             }
-            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .commit)) |result| {
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .commit, null)) |result| {
                 if (result == .complete) self.canvas_widget_text_history_entries[history_index].applied = redo;
                 return;
             }
@@ -632,9 +643,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             entry: CanvasWidgetTextHistoryEntry,
             redo: bool,
             mode: @FieldType(canvas.TextHistoryReplayState, "mode"),
+            current_hash: ?u64,
         ) ?canvas.TextHistoryReplayResult {
             if (widget.interaction_policy == null) return null;
-            const hash = textHistoryHash(widget.text);
+            const hash = current_hash orelse textHistoryHash(widget.text);
             return canvas.widgetCompiledTextHistoryReplay(widget, .{
                 .mode = mode,
                 .redo = redo,
@@ -659,7 +671,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         ) bool {
             const target_kind = widget.kind;
             const before_hash = textHistoryHash(before.text);
-            if (!canvasWidgetTextHistoryMatchesState(self, target_id, target_kind, before.text.len, before_hash)) {
+            if (!canvasWidgetTextHistoryMatchesState(self, target_id, widget, before.text.len, before_hash)) {
                 clearCanvasWidgetTextHistory(self, target_id);
             }
 
@@ -765,6 +777,29 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             return true;
         }
 
+        /// Native supplies exact identity and byte-boundary witnesses for
+        /// the ordered pool. Compiled policy selects this editor's timeline.
+        fn compiledCanvasWidgetTextHistoryTimeline(
+            self: *const RuntimeView,
+            target_id: canvas.ObjectId,
+            widget: canvas.Widget,
+            text_len: usize,
+            text_hash: u64,
+        ) ?canvas.TextHistoryTimelineResult {
+            if (widget.interaction_policy == null) return null;
+            var entries: [canvas.max_text_history_timeline_entries]canvas.TextHistoryTimelineEntry = undefined;
+            const count = self.canvas_widget_text_history_entry_count;
+            for (self.canvas_widget_text_history_entries[0..count], 0..) |entry, index| entries[index] = .{
+                .target_matches = entry.target_id == target_id,
+                .kind_matches = entry.target_kind == widget.kind,
+                .applied = entry.applied,
+                .provisional = entry.provisional_composition,
+                .before_matches = text_len == entry.before_text_len and text_hash == entry.before_hash,
+                .after_matches = text_len == entry.after_text_len and text_hash == entry.after_hash,
+            };
+            return canvas.widgetCompiledTextHistoryTimeline(widget, entries[0..count]);
+        }
+
         /// A controlled source replacement can change the retained buffer
         /// without flowing through the text editor. Before a subsequent
         /// edit forks redo, verify that the applied history boundary still
@@ -773,10 +808,12 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         fn canvasWidgetTextHistoryMatchesState(
             self: *const RuntimeView,
             target_id: canvas.ObjectId,
-            target_kind: canvas.WidgetKind,
+            widget: canvas.Widget,
             text_len: usize,
             text_hash: u64,
         ) bool {
+            if (compiledCanvasWidgetTextHistoryTimeline(self, target_id, widget, text_len, text_hash)) |timeline| return timeline.matches_state;
+            const target_kind = widget.kind;
             var latest_applied: ?usize = null;
             for (self.canvas_widget_text_history_entries[0..self.canvas_widget_text_history_entry_count], 0..) |entry, index| {
                 if (entry.target_id != target_id) continue;

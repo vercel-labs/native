@@ -199,7 +199,7 @@ pub const max_canvas_widget_source_text_entries_per_view: usize = 256;
 /// plus inserted bytes exceed the pool simply starts a fresh history.
 pub const max_canvas_widget_text_history_bytes_per_view: usize = max_canvas_widget_text_bytes_per_view;
 pub const max_canvas_widget_inline_text_history_bytes_per_view: usize = 64 * 1024;
-pub const max_canvas_widget_text_history_entries_per_view: usize = 128;
+pub const max_canvas_widget_text_history_entries_per_view: usize = canvas.max_text_history_timeline_entries;
 // Inline styled runs retained across all `.text` widgets of a view. Each
 // span is a small struct (style flags + slices into the widget text
 // bytes); per-paragraph capacity is `canvas.max_text_spans_per_paragraph`.

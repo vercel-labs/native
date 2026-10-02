@@ -2979,6 +2979,141 @@ test "compiled composition updates preserve removed bytes redo and neighboring p
     }
 }
 
+test "compiled history timelines copy full-budget boundary indices before arena reset" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy };
+    var entries: [canvas.max_text_history_timeline_entries]canvas.TextHistoryTimelineEntry = @splat(.{});
+    entries[20] = .{ .target_matches = true, .kind_matches = true, .after_matches = true };
+    entries[60] = .{ .target_matches = true, .kind_matches = true, .applied = false, .before_matches = true };
+    entries[90] = .{ .target_matches = true, .kind_matches = true, .applied = false };
+    entries[127] = .{ .target_matches = true, .kind_matches = true, .after_matches = true };
+    const plan = canvas.widgetCompiledTextHistoryTimeline(widget, &entries).?;
+    const bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    _ = canvas.widgetCompiledTextInput(widget, "other\ninput", 0, null, 0);
+    const empty = canvas.widgetCompiledTextHistoryTimeline(widget, &.{}).?;
+    try std.testing.expectEqualDeep(canvas.TextHistoryTimelineResult{ .matches_state = true, .can_undo = false, .can_redo = false, .undo_index = null, .redo_index = null }, empty);
+    try std.testing.expectEqualDeep(canvas.TextHistoryTimelineResult{ .matches_state = true, .can_undo = true, .can_redo = true, .undo_index = 127, .redo_index = 60 }, plan);
+    entries[127].after_matches = false;
+    const stale = canvas.widgetCompiledTextHistoryTimeline(widget, &entries).?;
+    try std.testing.expect(!stale.matches_state and !stale.can_undo and stale.can_redo);
+    entries[127].after_matches = true;
+    entries[40] = .{ .target_matches = true, .kind_matches = false };
+    const wrong_kind = canvas.widgetCompiledTextHistoryTimeline(widget, &entries).?;
+    try std.testing.expect(!wrong_kind.matches_state and wrong_kind.can_undo and wrong_kind.can_redo);
+    entries[40].kind_matches = true;
+    entries[40].provisional = true;
+    try std.testing.expect(!canvas.widgetCompiledTextHistoryTimeline(widget, &entries).?.matches_state);
+    try std.testing.expect(canvas.widgetCompiledTextHistoryTimeline(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, &entries) == null);
+}
+
+test "compiled timeline lookup availability and stale recording match native exact witnesses" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "compiled-timeline", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    const view = &harness.runtime.views[0];
+    const Entry = @TypeOf(view.canvas_widget_text_history_entries[0]);
+    const target_id = std.math.maxInt(canvas.ObjectId) - 17;
+    const neighbor_id = target_id ^ (@as(canvas.ObjectId, 1) << 32);
+    const hash_a = comptime std.hash.Wyhash.hash(0, "a");
+    const hash_b = comptime std.hash.Wyhash.hash(0, "b");
+    // Same low halves must never alias through JS numbers: native compares
+    // identities and hashes before packing one-byte policy witnesses.
+    const alien_hash = hash_b ^ (@as(u64, 1) << 32);
+    const Pattern = struct { target: bool = true, kind: bool = true, applied: bool = true, provisional: bool = false, before_hash: u64 = hash_a, after_hash: u64 = hash_b };
+    const patterns = [_][]const Pattern{
+        &.{},
+        &.{.{ .target = false, .kind = false, .provisional = true }},
+        &.{ .{}, .{ .applied = false } },
+        &.{ .{}, .{ .target = false }, .{ .after_hash = alien_hash }, .{ .applied = false } },
+        &.{ .{ .applied = false, .before_hash = alien_hash }, .{ .applied = false } },
+        &.{ .{}, .{ .kind = false }, .{ .applied = false } },
+        &.{ .{}, .{ .provisional = true }, .{ .applied = false } },
+        &.{ .{ .target = false }, .{}, .{ .target = false, .applied = false }, .{ .applied = false }, .{ .applied = false, .before_hash = alien_hash } },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        for (patterns) |pattern| {
+            for ([_][]const u8{ "a", "b", "stale" }) |text| {
+                for (0..5) |mode| {
+                    var expected_availability: @TypeOf(view.canvasWidgetTextHistoryAvailability(target_id)) = .{};
+                    var expected_shortcut: ?@TypeOf(view.canvasWidgetTextHistoryShortcut(.{ .id = target_id, .kind = kind, .bounds = .{}, .index = 1, .state = .{} }, .{ .phase = .key_down, .key = "z", .modifiers = .{ .super = true } }).?) = null;
+                    var expected_entries: [16]Entry = undefined;
+                    var expected_count: usize = 0;
+                    var expected_payload: [32]u8 = undefined;
+                    var expected_payload_len: usize = 0;
+                    // Borrowed replay insert bytes must be copied before the
+                    // next variant compacts or overwrites the native pool.
+                    var expected_insert: [8]u8 = undefined;
+                    for ([_]bool{ false, true }) |compiled| {
+                        const empty = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+                        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", empty);
+                        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{.{ .id = target_id, .kind = kind, .frame = geometry.RectF.init(12, 16, 180, 84), .text = text, .text_selection = canvas.TextSelection.collapsed(text.len), .interaction_policy = if (compiled) core.nativeTextPolicy else null }} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+                        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                        view.canvas_widget_focused_id = target_id;
+                        view.canvas_widget_text_history_next_serial = 99;
+                        view.canvas_widget_text_history_entry_count = pattern.len;
+                        view.canvas_widget_text_history_byte_count = pattern.len * 2;
+                        for (pattern, 0..) |p, i| {
+                            @memcpy(view.canvas_widget_text_history_bytes[i * 2 ..][0..2], "ab");
+                            view.canvas_widget_text_history_entries[i] = .{
+                                .serial = std.math.maxInt(u64) - i,
+                                .target_id = if (p.target) target_id else neighbor_id,
+                                .target_kind = if (p.kind) kind else .button,
+                                .byte_start = i * 2,
+                                .removed_len = 1,
+                                .inserted_len = 1,
+                                .before_text_len = 1,
+                                .after_text_len = 1,
+                                .before_hash = p.before_hash,
+                                .after_hash = p.after_hash,
+                                .before_selection = canvas.TextSelection.collapsed(1),
+                                .after_selection = canvas.TextSelection.collapsed(1),
+                                .applied = p.applied,
+                                .provisional_composition = p.provisional,
+                            };
+                        }
+                        if (mode == 3) view.widget_layout_nodes[1].widget.state.disabled = true;
+                        if (mode == 4) view.widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 1 };
+                        const availability = view.canvasWidgetTextHistoryAvailability(target_id);
+                        const shortcut = if (mode < 2) view.canvasWidgetTextHistoryShortcut(.{ .id = target_id, .kind = kind, .bounds = .{}, .index = 1, .state = .{} }, .{ .phase = .key_down, .key = "z", .modifiers = .{ .super = true, .shift = mode == 1 } }) else null;
+                        if (mode == 2) _ = try view.applyCanvasWidgetTextEdit(target_id, .{ .insert_text = "!" });
+                        const count = view.canvas_widget_text_history_entry_count;
+                        const payload = view.canvas_widget_text_history_bytes[0..view.canvas_widget_text_history_byte_count];
+                        if (!compiled) {
+                            expected_availability = availability;
+                            expected_shortcut = shortcut;
+                            if (expected_shortcut) |*s| if (s.edit == .insert_text) {
+                                const inserted = s.edit.insert_text;
+                                @memcpy(expected_insert[0..inserted.len], inserted);
+                                s.edit.insert_text = expected_insert[0..inserted.len];
+                            };
+                            expected_count = count;
+                            @memcpy(expected_entries[0..count], view.canvas_widget_text_history_entries[0..count]);
+                            expected_payload_len = payload.len;
+                            @memcpy(expected_payload[0..payload.len], payload);
+                        } else {
+                            try std.testing.expectEqualDeep(expected_availability, availability);
+                            try std.testing.expectEqualDeep(expected_shortcut, shortcut);
+                            try std.testing.expectEqual(expected_count, count);
+                            try std.testing.expectEqualDeep(expected_entries[0..count], view.canvas_widget_text_history_entries[0..count]);
+                            try std.testing.expectEqualSlices(u8, expected_payload[0..expected_payload_len], payload);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 test "compiled history replay matches native shortcut continuation and completion decisions" {
     const h = try Harness.create(null, "/feed.xml");
     defer h.destroy();

@@ -1001,6 +1001,69 @@ pub fn widgetCompiledTextCompositionHistory(widget: Widget, state: TextCompositi
     return .{ .action = @enumFromInt(action), .after_end = end, .inserted_len = inserted };
 }
 
+pub const max_text_history_timeline_entries: usize = 128;
+
+pub const TextHistoryTimelineEntry = struct {
+    target_matches: bool = false,
+    kind_matches: bool = false,
+    applied: bool = true,
+    provisional: bool = false,
+    before_matches: bool = false,
+    after_matches: bool = false,
+};
+
+pub const TextHistoryTimelineResult = struct {
+    matches_state: bool,
+    can_undo: bool,
+    can_redo: bool,
+    undo_index: ?usize,
+    redo_index: ?usize,
+};
+
+/// Select ordered history boundaries using native identity/hash witnesses.
+/// The result contains copied indices; entry storage and serials stay native.
+pub fn widgetCompiledTextHistoryTimeline(widget: Widget, entries: []const TextHistoryTimelineEntry) ?TextHistoryTimelineResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (entries.len > max_text_history_timeline_entries) @panic("compiled text history timeline exceeds entry budget");
+    var request: [8 + max_text_history_timeline_entries]u8 = @splat(0);
+    request[0] = 10;
+    std.mem.writeInt(u32, request[4..8], @intCast(entries.len), .little);
+    for (entries, 0..) |entry, index| request[8 + index] =
+        @as(u8, @intFromBool(entry.target_matches)) |
+        (@as(u8, @intFromBool(entry.kind_matches)) << 1) |
+        (@as(u8, @intFromBool(entry.applied)) << 2) |
+        (@as(u8, @intFromBool(entry.provisional)) << 3) |
+        (@as(u8, @intFromBool(entry.before_matches)) << 4) |
+        (@as(u8, @intFromBool(entry.after_matches)) << 5);
+    var output: [12]u8 = undefined;
+    if (policy(request[0 .. 8 + entries.len], &output) != output.len) @panic("invalid compiled text history timeline result");
+    const flags = std.mem.readInt(u32, output[0..4], .little);
+    const undo = std.mem.readInt(u32, output[4..8], .little);
+    const redo = std.mem.readInt(u32, output[8..12], .little);
+    if (flags > 7 or undo > entries.len or redo > entries.len or
+        (flags & 2 != 0 and undo == 0) or (flags & 4 != 0 and redo == 0))
+        @panic("invalid compiled text history timeline indices");
+    const result = TextHistoryTimelineResult{
+        .matches_state = flags & 1 != 0,
+        .can_undo = flags & 2 != 0,
+        .can_redo = flags & 4 != 0,
+        .undo_index = if (undo == 0) null else undo - 1,
+        .redo_index = if (redo == 0) null else redo - 1,
+    };
+    if (result.undo_index) |index| {
+        const entry = entries[index];
+        if (!entry.target_matches or !entry.kind_matches or !entry.applied or entry.provisional or
+            (result.can_undo and !entry.after_matches)) @panic("invalid compiled text history Undo boundary");
+    }
+    if (result.redo_index) |index| {
+        const entry = entries[index];
+        if (!entry.target_matches or !entry.kind_matches or entry.applied or entry.provisional or
+            (result.can_redo and !entry.before_matches)) @panic("invalid compiled text history Redo boundary");
+    }
+    return result;
+}
+
 pub const TextHistoryReplayState = struct {
     mode: enum(u8) { start, next, commit },
     redo: bool,

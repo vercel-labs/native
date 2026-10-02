@@ -715,6 +715,10 @@ pub const widgetCompiledTextHistoryDelta = event_model.widgetCompiledTextHistory
 pub const TextCompositionHistoryState = event_model.TextCompositionHistoryState;
 pub const TextCompositionHistoryResult = event_model.TextCompositionHistoryResult;
 pub const widgetCompiledTextCompositionHistory = event_model.widgetCompiledTextCompositionHistory;
+pub const max_text_history_timeline_entries = event_model.max_text_history_timeline_entries;
+pub const TextHistoryTimelineEntry = event_model.TextHistoryTimelineEntry;
+pub const TextHistoryTimelineResult = event_model.TextHistoryTimelineResult;
+pub const widgetCompiledTextHistoryTimeline = event_model.widgetCompiledTextHistoryTimeline;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

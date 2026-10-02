@@ -705,3 +705,29 @@ test("composition history keeps active no-ops and finalizes within the shared by
   request[3] = 0; data.setUint32(20, 524289, true);
   assert.throws(() => exports.native_text_policy!(request), /invalid text composition history budget/);
 });
+
+test("history timelines select nearest editor boundaries and refuse stale forks", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  // Bits: target, kind, applied, provisional, before matches, after matches.
+  const plan = (entries: number[]) => {
+    const request = new Uint8Array(8 + entries.length), data = new DataView(request.buffer);
+    request[0] = 10; data.setUint32(4, entries.length, true); request.set(entries, 8);
+    return Array.from(new Uint32Array(exports.native_text_policy!(request).buffer));
+  };
+  assert.deepEqual(plan([]), [1, 0, 0]);
+  assert.deepEqual(plan([63 & ~1]), [1, 0, 0]); // unrelated editor
+  assert.deepEqual(plan([7 | 32, 3 | 16]), [7, 1, 2]);
+  assert.deepEqual(plan([7 | 32, 7, 3 | 16]), [4, 2, 3]); // nearest Undo is stale
+  assert.deepEqual(plan([3, 3 | 16]), [0, 0, 1]); // earliest Redo wins
+  assert.deepEqual(plan([7 | 32, 1, 3 | 16]), [6, 1, 3]); // wrong kind retires timeline
+  assert.deepEqual(plan([7 | 32, 3 | 8 | 16, 3 | 16]), [6, 1, 3]); // provisional excluded
+  assert.deepEqual(plan([7 | 32, 3]), [3, 1, 2]); // applied boundary owns fork matching
+  const full = Array<number>(128).fill(7 | 32); full[60] = 3 | 16;
+  assert.deepEqual(plan(full), [7, 128, 61]);
+  const invalid = new Uint8Array(8); invalid[0] = 10; invalid[1] = 1;
+  assert.throws(() => exports.native_text_policy!(invalid), /invalid text history timeline request/);
+  invalid[1] = 0; new DataView(invalid.buffer).setUint32(4, 129, true);
+  assert.throws(() => exports.native_text_policy!(invalid), /invalid text history timeline count/);
+  assert.throws(() => plan([64]), /invalid text history timeline entry/);
+});

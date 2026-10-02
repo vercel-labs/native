@@ -288,6 +288,37 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     s = await app.cancelComposition(field("Note")); save(); expectText("draft", "LR");
     await key("cmd+shift+z"); expectText("draft", "LR");
     await key("cmd+z"); expectText("draft", "Lé🙂R"); selection("draft", 7, 1);
+    // Interleaved timelines select each editor's nearest boundary. A new
+    // edit forks its own Redo while a neighbor's Redo survives refresh.
+    await click("New desk");
+    const append = async (name: string, text: string) => {
+      await select(name, Buffer.byteLength(field(name).text), Buffer.byteLength(field(name).text));
+      s = await app.composeText(field(name), text); save();
+      s = await app.commitComposition(field(name)); save();
+    };
+    const history = async (name: string, redo: boolean) => {
+      await focus(name); await key(redo ? "cmd+shift+z" : "cmd+z");
+    };
+    await set("Subject", "S"); await set("Note", "N"); await set("Message", "M");
+    await append("Subject", "é"); await append("Note", "🙂"); await append("Subject", "1"); await append("Message", "日");
+    await history("Subject", false); expectText("subject", "Sé");
+    await history("Note", false); expectText("draft", "N");
+    await history("Subject", false); expectText("subject", "S");
+    await history("Message", false); expectText("chat", "M");
+    await history("Subject", true); expectText("subject", "Sé");
+    await append("Note", "new"); expectText("draft", "Nnew");
+    await history("Note", true); expectText("draft", "Nnew");
+    await click("Refresh");
+    await history("Subject", true); expectText("subject", "Sé1");
+    await history("Message", true); expectText("chat", "M日");
+    // Replacing authored bytes makes the old retained history stale. A
+    // fresh edit starts a new timeline, leaving neighboring histories live.
+    await click("Restore note"); await append("Note", "!");
+    await history("Note", false); expectText("draft", "Restored café\nA fresh draft from the app.");
+    await history("Note", false); expectText("draft", "Restored café\nA fresh draft from the app.");
+    await history("Note", true); expectText("draft", "Restored café\nA fresh draft from the app.!");
+    await history("Subject", false); expectText("subject", "Sé");
+    await history("Message", false); expectText("chat", "M");
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

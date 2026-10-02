@@ -45,6 +45,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 7) return nscvTextHistoryReplay(request);
   if (request[0] === 8) return nscvTextHistoryDelta(request);
   if (request[0] === 9) return nscvTextCompositionHistory(request);
+  if (request[0] === 10) return nscvTextHistoryTimeline(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -373,6 +374,36 @@ function nscvTextCompositionHistory(request: Uint8Array): Uint8Array {
   if (removed + inserted > capacity) return result;
   out.setUint32(0, request[1] === 1 ? 1 : afterLength === beforeLength && request[2] === 1 ? 2 : 3, true);
   out.setUint32(4, end, true); out.setUint32(8, inserted, true);
+  return result;
+}
+
+/** Timeline: tag 10, three reserved bytes, LE u32 count, then up to 128
+ * ordered entry witnesses (target/kind/applied/provisional/before/after bits).
+ * Native compares exact identities and length/hash boundaries. Result: LE
+ * u32 flags (matching timeline/Undo available/Redo available), then nearest
+ * Undo/Redo indices plus one; zero means absent. No retained bytes cross.
+ */
+function nscvTextHistoryTimeline(request: Uint8Array): Uint8Array {
+  if (request.length < 8 || request[1] !== 0 || request[2] !== 0 || request[3] !== 0)
+    throw new Error("invalid text history timeline request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const count = data.getUint32(4, true);
+  if (count > 128 || request.length !== 8 + count) throw new Error("invalid text history timeline count");
+  let undo = 0, redo = 0, valid = true;
+  for (let index = 0; index < count; index++) {
+    const flags = request[8 + index]!;
+    if (flags > 63) throw new Error("invalid text history timeline entry");
+    if ((flags & 1) === 0) continue;
+    if ((flags & 2) === 0 || (flags & 8) !== 0) { valid = false; continue; }
+    if ((flags & 4) !== 0) undo = index + 1;
+    else if (redo === 0) redo = index + 1;
+  }
+  const canUndo = undo !== 0 && (request[7 + undo]! & 32) !== 0;
+  const canRedo = redo !== 0 && (request[7 + redo]! & 16) !== 0;
+  const matches = valid && (undo !== 0 ? canUndo : redo !== 0 ? canRedo : true);
+  const result = new Uint8Array(12), out = new DataView(result.buffer);
+  out.setUint32(0, (matches ? 1 : 0) | (canUndo ? 2 : 0) | (canRedo ? 4 : 0), true);
+  out.setUint32(4, undo, true); out.setUint32(8, redo, true);
   return result;
 }
 
