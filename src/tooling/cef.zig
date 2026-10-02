@@ -142,7 +142,6 @@ pub const PrepareOptions = struct {
 
 pub const InstallResult = struct {
     dir: []const u8,
-    archive_path: []const u8,
     platform: Platform,
     installed: bool,
 };
@@ -315,7 +314,7 @@ pub fn install(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.E
     resolved_options.dir = resolveDir(options.dir, platform);
     const existing = verifyLayoutFor(io, platform, resolved_options.dir);
     if (existing.ok and !options.force) {
-        return .{ .dir = resolved_options.dir, .archive_path = "", .platform = platform, .installed = false };
+        return .{ .dir = resolved_options.dir, .platform = platform, .installed = false };
     }
 
     return switch (options.source) {
@@ -336,7 +335,7 @@ fn installPrepared(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     var archive_name_buffer: [256]u8 = undefined;
     const archive_name = try preparedArchiveName(&archive_name_buffer, options.version, platform);
     const archive_path = try std.fs.path.join(allocator, &.{ cache_path, archive_name });
-    errdefer allocator.free(archive_path);
+    defer allocator.free(archive_path);
     const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
     defer allocator.free(sha_path);
 
@@ -379,7 +378,7 @@ fn installPrepared(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     try runCommand(io, &.{ "mv", layout_dir, options.dir });
     try ensureLayoutFor(io, platform, options.dir);
 
-    return .{ .dir = options.dir, .archive_path = archive_path, .platform = platform, .installed = true };
+    return .{ .dir = options.dir, .platform = platform, .installed = true };
 }
 
 fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, options: InstallOptions, platform: Platform, existing: LayoutReport) !InstallResult {
@@ -395,7 +394,7 @@ fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     var archive_name_buffer: [256]u8 = undefined;
     const archive_name = try archiveName(&archive_name_buffer, options.version, platform);
     const archive_path = try std.fs.path.join(allocator, &.{ cache_path, archive_name });
-    errdefer allocator.free(archive_path);
+    defer allocator.free(archive_path);
     const sha_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{archive_path});
     defer allocator.free(sha_path);
 
@@ -431,7 +430,7 @@ fn installOfficial(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
     try ensureWrapperArchive(allocator, io, platform, options.dir);
     try ensureLayoutFor(io, platform, options.dir);
 
-    return .{ .dir = options.dir, .archive_path = archive_path, .platform = platform, .installed = true };
+    return .{ .dir = options.dir, .platform = platform, .installed = true };
 }
 
 fn verifyArchiveChecksum(allocator: std.mem.Allocator, io: std.Io, cache_path: []const u8, archive_name: []const u8) !void {
