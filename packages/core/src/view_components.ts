@@ -2,7 +2,7 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
-import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection } from "@native-sdk/core/text";
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -39,6 +39,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 3) return nscvTextPointerSelection(request);
+  if (request[0] === 4) return nscvTextEdit(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -108,6 +109,60 @@ function nscvTextPointerSelection(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(16), out = new DataView(result.buffer);
   out.setUint32(0, anchor, true); out.setUint32(4, focus, true);
   out.setUint32(8, start, true); out.setUint32(12, end, true);
+  return result;
+}
+
+/** Tagged reducer request: 4, event (the SDK text event order), caret direction,
+ * extend, composition-present, cursor-present, two reserved zero bytes;
+ * then LE u32 text length, anchor/focus, composition start/end, event arguments,
+ * and capacity. UTF-8 source and insert/preedit bytes follow the 40-byte header.
+ * Result: LE u32 flags (1 accepted, 2 retain original text), anchor/focus,
+ * composition-present/start/end, then edited bytes. Four zero bytes refuse
+ * an over-capacity edit. Native keeps storage, history and painted affinity.
+ */
+function nscvTextEdit(request: Uint8Array): Uint8Array {
+  const budget = 512 * 1024;
+  if (request.length < 40 || request.length > 40 + 2 * budget || request[1]! > 12 ||
+      request[2]! > 5 || request[3]! > 1 || request[4]! > 1 || request[5]! > 1 ||
+      request[6] !== 0 || request[7] !== 0) throw new Error("invalid text reducer request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const length = data.getUint32(8, true), capacity = data.getUint32(36, true);
+  if (length > budget || request.length < 40 + length || request.length - 40 - length > budget || capacity > budget)
+    throw new Error("invalid text reducer budget");
+  const text = request.subarray(40, 40 + length), inserted = request.subarray(40 + length);
+  const selection = nscvSelection(data.getUint32(12, true), data.getUint32(16, true));
+  const composition = nscvSelection(data.getUint32(20, true), data.getUint32(24, true));
+  const args = nscvSelection(data.getUint32(28, true), data.getUint32(32, true));
+  let edit: NscvTextInputEvent;
+  switch (request[1]) {
+    case 0: edit = { kind: "insert_text", text: inserted }; break;
+    case 1: edit = { kind: "delete_backward" }; break;
+    case 2: edit = { kind: "delete_forward" }; break;
+    case 3: edit = { kind: "delete_word_backward" }; break;
+    case 4: edit = { kind: "delete_word_forward" }; break;
+    case 5: edit = { kind: "delete_to_start" }; break;
+    case 6: edit = { kind: "delete_to_line_start" }; break;
+    case 7: edit = { kind: "clear" }; break;
+    case 8: edit = { kind: "move_caret", move: {
+      direction: request[2] === 0 ? "previous" : request[2] === 1 ? "next" :
+        request[2] === 2 ? "previous_word" : request[2] === 3 ? "next_word" : request[2] === 4 ? "start" : "end",
+      extend: request[3] === 1 } }; break;
+    case 9: edit = { kind: "set_selection", selection: args }; break;
+    case 10: edit = { kind: "set_composition", text: inserted, cursor: request[5] === 1 ? args.anchor : null }; break;
+    case 11: edit = { kind: "commit_composition" }; break;
+    default: edit = { kind: "cancel_composition" }; break;
+  }
+  const next = nscvApplyTextEdit({ text, selection,
+    composition: request[4] === 1 ? { start: composition.anchor, end: composition.focus } : null }, edit, capacity);
+  if (next === null) return new Uint8Array(4);
+  const retained = next.text === text;
+  const result = new Uint8Array(24 + (retained ? 0 : next.text.length)), out = new DataView(result.buffer);
+  out.setUint32(0, retained ? 3 : 1, true);
+  out.setUint32(4, next.selection.anchor, true); out.setUint32(8, next.selection.focus, true);
+  out.setUint32(12, next.composition !== null ? 1 : 0, true);
+  out.setUint32(16, next.composition !== null ? next.composition.start : 0, true);
+  out.setUint32(20, next.composition !== null ? next.composition.end : 0, true);
+  if (!retained) result.set(next.text, 24);
   return result;
 }
 

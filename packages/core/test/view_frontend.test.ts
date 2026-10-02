@@ -547,3 +547,26 @@ test("textarea preserves multiline values, input/submit channels and bound Enter
     '<textarea on-toggle="increment"/>', '<textarea><text>Child</text></textarea>'])
     assert.throws(() => compileView(markup, contract), /compiled TypeScript view:/);
 });
+
+test("retained text reducer preserves CRLF caret stops and refuses whole over-capacity edits", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<input/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const source = new TextEncoder().encode("é\r\nx"), inserted = new TextEncoder().encode("🙂");
+  const request = new Uint8Array(40 + source.length + inserted.length), data = new DataView(request.buffer);
+  request[0] = 4; request[1] = 8; request[2] = 1;
+  data.setUint32(8, source.length, true); data.setUint32(12, 3, true); data.setUint32(16, 3, true);
+  request.set(source, 40);
+  const movement = exports.native_text_policy!(request.subarray(0, 40 + source.length));
+  assert.equal(movement.length, 24); // zero-capacity navigation borrows the original text
+  assert.deepEqual(Array.from(new Uint32Array(movement.buffer)), [3, 4, 4, 0, 0, 0]);
+  request[1] = 0; data.setUint32(12, 0, true); data.setUint32(16, 2, true); request.set(inserted, 40 + source.length);
+  data.setUint32(36, 6, true);
+  assert.deepEqual(Array.from(exports.native_text_policy!(request)), [0, 0, 0, 0]);
+  data.setUint32(36, 7, true);
+  const replacement = exports.native_text_policy!(request);
+  assert.deepEqual(Array.from(new Uint32Array(replacement.buffer, 0, 6)), [1, 4, 4, 0, 0, 0]);
+  assert.equal(new TextDecoder().decode(replacement.subarray(24)), "🙂\r\nx");
+  request[1] = 13; assert.throws(() => exports.native_text_policy!(request), /invalid text reducer request/);
+  request[1] = 0; data.setUint32(8, 512 * 1024 + 1, true);
+  assert.throws(() => exports.native_text_policy!(request), /invalid text reducer budget/);
+});

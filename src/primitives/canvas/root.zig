@@ -699,6 +699,7 @@ pub const textLineSelectionAtOffset = text_model.textLineSelectionAtOffset;
 pub const textLineStartOffset = text_model.textLineStartOffset;
 pub const textLineEndOffset = text_model.textLineEndOffset;
 pub const widgetCompiledTextPointerSelection = event_model.widgetCompiledTextPointerSelection;
+pub const widgetCompiledTextEdit = event_model.widgetCompiledTextEdit;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

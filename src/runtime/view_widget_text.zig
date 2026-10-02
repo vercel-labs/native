@@ -105,7 +105,8 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 .selection = widget.text_selection orelse canvas.TextSelection.collapsed(widget.text.len),
                 .composition = widget.text_composition,
             };
-            const next_state = try current_state.apply(edit, &scratch.edit_buffer);
+            const next_state = (try canvas.widgetCompiledTextEdit(widget, current_state, edit, &scratch.edit_buffer)) orelse
+                try current_state.apply(edit, &scratch.edit_buffer);
             if (canvasWidgetTextEditUnchanged(current_state, next_state)) return null;
             try validateCanvasWidgetTextStorageRewrite(self, index, next_state);
 

@@ -669,8 +669,9 @@ pub const TextPointerPolicyResult = struct {
     anchor: TextRange,
 };
 
-const text_pointer_policy_scratch = canvas.lazy_tls.LazyTls(struct {
-    request: [16 + text_model.max_widget_text_bytes_per_view]u8,
+const text_policy_scratch = canvas.lazy_tls.LazyTls(struct {
+    request: [40 + 2 * text_model.max_widget_text_bytes_per_view]u8,
+    result: [24 + text_model.max_widget_text_bytes_per_view]u8,
 });
 
 /// Native resolves the pointer into a byte offset. Compiled policy selects
@@ -679,7 +680,7 @@ pub fn widgetCompiledTextPointerSelection(widget: Widget, offset: usize, click_c
     if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
     const policy = widget.interaction_policy orelse return null;
     if (widget.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled text pointer request exceeds text budget");
-    const request = text_pointer_policy_scratch.get().request[0 .. 16 + widget.text.len];
+    const request = text_policy_scratch.get().request[0 .. 16 + widget.text.len];
     request[0] = 3;
     request[1] = @intFromBool(widget.kind == .textarea);
     request[2] = @min(click_count, 3);
@@ -697,6 +698,96 @@ pub fn widgetCompiledTextPointerSelection(widget: Widget, offset: usize, click_c
     if (result.selection.anchor > widget.text.len or result.selection.focus > widget.text.len or
         result.anchor.start > result.anchor.end or result.anchor.end > widget.text.len)
         @panic("invalid compiled text pointer range");
+    return result;
+}
+
+/// Compile the same SDK reducer used by app models. Copy edited bytes before
+/// arena reset; caret-only results retain the native source without copying.
+/// Painted affinity remains native metadata, including CRLF canonicalization.
+pub fn widgetCompiledTextEdit(widget: Widget, state: text_model.TextEditState, edit: TextInputEvent, output: []u8) error{TextEditBufferTooSmall}!?text_model.TextEditState {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const capacity = @min(output.len, text_model.max_widget_text_bytes_per_view);
+    const inserted: []const u8 = switch (edit) {
+        .insert_text => |text| text,
+        .set_composition => |composition| composition.text,
+        else => "",
+    };
+    if (inserted.len > capacity) return error.TextEditBufferTooSmall;
+    if (state.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled text reducer source exceeds text budget");
+    const scratch = text_policy_scratch.get();
+    const request = scratch.request[0 .. 40 + state.text.len + inserted.len];
+    @memset(request[0..40], 0);
+    request[0] = 4;
+    request[1] = switch (edit) {
+        .insert_text => 0,
+        .delete_backward => 1,
+        .delete_forward => 2,
+        .delete_word_backward => 3,
+        .delete_word_forward => 4,
+        .delete_to_start => 5,
+        .delete_to_line_start => 6,
+        .clear => 7,
+        .move_caret => 8,
+        .set_selection => 9,
+        .set_composition => 10,
+        .commit_composition => 11,
+        .cancel_composition => 12,
+    };
+    if (edit == .move_caret) {
+        request[2] = switch (edit.move_caret.direction) {
+            .previous => 0,
+            .next => 1,
+            .previous_word => 2,
+            .next_word => 3,
+            .start => 4,
+            .end => 5,
+        };
+        request[3] = @intFromBool(edit.move_caret.extend);
+    }
+    request[4] = @intFromBool(state.composition != null);
+    request[5] = @intFromBool(edit == .set_composition and edit.set_composition.cursor != null);
+    std.mem.writeInt(u32, request[8..12], @intCast(state.text.len), .little);
+    std.mem.writeInt(u32, request[12..16], @intCast(@min(state.selection.anchor, state.text.len)), .little);
+    std.mem.writeInt(u32, request[16..20], @intCast(@min(state.selection.focus, state.text.len)), .little);
+    if (state.composition) |composition| {
+        std.mem.writeInt(u32, request[20..24], @intCast(@min(composition.start, state.text.len)), .little);
+        std.mem.writeInt(u32, request[24..28], @intCast(@min(composition.end, state.text.len)), .little);
+    }
+    if (edit == .set_selection) {
+        std.mem.writeInt(u32, request[28..32], @intCast(@min(edit.set_selection.anchor, state.text.len)), .little);
+        std.mem.writeInt(u32, request[32..36], @intCast(@min(edit.set_selection.focus, state.text.len)), .little);
+    } else if (edit == .set_composition) {
+        std.mem.writeInt(u32, request[28..32], @intCast(@min(edit.set_composition.cursor orelse 0, inserted.len)), .little);
+    }
+    std.mem.writeInt(u32, request[36..40], @intCast(capacity), .little);
+    @memcpy(request[40..][0..state.text.len], state.text);
+    @memcpy(request[40 + state.text.len ..], inserted);
+    const len = policy(request, &scratch.result);
+    if (len == 4 and std.mem.readInt(u32, scratch.result[0..4], .little) == 0) return error.TextEditBufferTooSmall;
+    if (len < 24 or len > scratch.result.len) @panic("invalid compiled text reducer result length");
+    const flags = std.mem.readInt(u32, scratch.result[0..4], .little);
+    if (flags != 1 and flags != 3) @panic("invalid compiled text reducer result flags");
+    const retained = flags == 3;
+    if ((retained and len != 24) or (!retained and len - 24 > capacity)) @panic("invalid compiled text reducer byte budget");
+    const text = if (retained) state.text else output[0 .. len - 24];
+    if (!retained) @memcpy(output[0 .. len - 24], scratch.result[24..len]);
+    const composition_present = std.mem.readInt(u32, scratch.result[12..16], .little);
+    if (composition_present > 1) @panic("invalid compiled text reducer composition flag");
+    const result = text_model.TextEditState{
+        .text = text,
+        .selection = .{ .anchor = std.mem.readInt(u32, scratch.result[4..8], .little), .focus = std.mem.readInt(u32, scratch.result[8..12], .little), .affinity = switch (edit) {
+            .set_selection => |selection| canvas.snapTextCaretSelection(state.text, selection).affinity,
+            .commit_composition => canvas.snapTextCaretSelection(state.text, state.selection).affinity,
+            .cancel_composition => if (state.composition == null) canvas.snapTextCaretSelection(state.text, state.selection).affinity else .upstream,
+            else => .upstream,
+        } },
+        .composition = if (composition_present == 1) .{ .start = std.mem.readInt(u32, scratch.result[16..20], .little), .end = std.mem.readInt(u32, scratch.result[20..24], .little) } else null,
+    };
+    if (result.selection.anchor > text.len or result.selection.focus > text.len) @panic("invalid compiled text reducer selection");
+    if (result.composition) |composition| {
+        if (composition.start > composition.end or composition.end > text.len) @panic("invalid compiled text reducer composition");
+    }
     return result;
 }
 
