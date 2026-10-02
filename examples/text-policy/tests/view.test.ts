@@ -81,6 +81,28 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await focus("Subject"); await key("tab"); assert.equal(field("Note").focused, true);
     await key("shift+tab"); assert.equal(field("Subject").focused, true);
     await click("New desk"); assert.notEqual(field("Note").id, noteId); expectText("chat", "Hello"); assert.equal(s.model.submits, 0);
+    // Clipboard transport stays native; prepared edits reach the model and
+    // retained editor identically, with single-line and multiline rules.
+    await set("Note", "a\r\né\n🙂z"); await select("Note", 0, Buffer.byteLength("a\r\né\n🙂z"));
+    await key("cmd+c");
+    await set("Subject", "Keep"); await select("Subject", 0, 4); await key("cmd+v"); expectText("subject", "aé🙂z");
+    await key("cmd+z"); expectText("subject", "Keep"); await key("cmd+shift+z"); expectText("subject", "aé🙂z");
+    await select("Subject", 1, 3); await key("cmd+x"); expectText("subject", "a🙂z");
+    await key("cmd+z"); expectText("subject", "aé🙂z");
+    await set("Note", "\r\n\n"); await select("Note", 0, 3); await key("cmd+c");
+    await select("Subject", 0, Buffer.byteLength("aé🙂z")); await key("cmd+v"); expectText("subject", "aé🙂z");
+    await set("Message", "old"); await select("Message", 0, 3); await key("cmd+v"); expectText("chat", "\r\n\n");
+    await set("Subject", "AB"); await select("Subject", 1, 1);
+    s = await app.composeText(field("Subject"), "\r日本\né"); save(); expectText("subject", "A日本éB");
+    s = await app.composeText(field("Subject"), "\r\n"); save(); expectText("subject", "AB");
+    s = await app.composeText(field("Subject"), "é\r\n🙂"); save(); expectText("subject", "Aé🙂B");
+    s = await app.commitComposition(field("Subject")); save();
+    await key("cmd+z"); expectText("subject", "AB"); await key("cmd+shift+z"); expectText("subject", "Aé🙂B");
+    await set("Note", "a\r\né\n🙂z"); await select("Note", 0, Buffer.byteLength("a\r\né\n🙂z")); await key("cmd+c");
+    await set("Scratchpad", "Local"); await select("Scratchpad", 0, 5); await key("cmd+v");
+    assert.equal(field("Scratchpad").text, "a\r\né\n🙂z");
+    await click("Refresh"); assert.equal(field("Scratchpad").text, "a\r\né\n🙂z");
+    await click("New desk");
     // Real pointer events derive click counts from journaled timestamps.
     // Probe a plain caret to aim inside the word without pinning font widths.
     const pointer = async (name: string, phase: "down" | "drag" | "up", x: number, y: number, shift = false) => {

@@ -4,12 +4,34 @@ import {
   applyTextInputEvent,
   textWordSelectionAtOffset,
   textLineSelectionAtOffset,
+  sanitizedSingleLineTextInputEvent,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("single-line new input strips breaks, preserves empty previews and adjusts only rewritten cursors", () => {
+  const insert = (text: string): TextInputEvent => ({ kind: "insert_text", text: encoder.encode(text) });
+  const clean = insert("café 🙂");
+  assert.equal(sanitizedSingleLineTextInputEvent(clean), clean);
+  assert.equal(sanitizedSingleLineTextInputEvent(insert("\r\n\n")), null);
+  assert.deepEqual(sanitizedSingleLineTextInputEvent(insert("")), insert(""));
+  assert.deepEqual(sanitizedSingleLineTextInputEvent(insert("a\r\né\n🙂")), insert("aé🙂"));
+  for (const [cursor, expected] of [[null, null], [0, 0], [2, 1], [3, 1], [999, 3]] as const) {
+    assert.deepEqual(sanitizedSingleLineTextInputEvent({ kind: "set_composition", text: encoder.encode("a\r\né"), cursor }),
+      { kind: "set_composition", text: encoder.encode("aé"), cursor: expected });
+  }
+  assert.deepEqual(sanitizedSingleLineTextInputEvent({ kind: "set_composition", text: encoder.encode("\r\n"), cursor: null }),
+    { kind: "set_composition", text: new Uint8Array(0), cursor: null });
+  const preview: TextInputEvent = { kind: "set_composition", text: encoder.encode("é"), cursor: 999 };
+  assert.equal(sanitizedSingleLineTextInputEvent(preview), preview);
+  const deletion: TextInputEvent = { kind: "delete_backward" };
+  assert.equal(sanitizedSingleLineTextInputEvent(deletion), deletion);
+  const oversized = { kind: "insert_text", text: new Uint8Array(512 * 1024 + 1).fill(10) } as const;
+  assert.equal(sanitizedSingleLineTextInputEvent(oversized), oversized);
+});
 
 test("pointer selection shares UTF-8 word classes and excludes hard line terminators", () => {
   const words = encoder.encode("café  snake_case!!! 日本");

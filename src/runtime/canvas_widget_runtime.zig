@@ -595,6 +595,17 @@ pub const CanvasWidgetPasteClamp = struct {
 };
 
 pub fn clampCanvasWidgetPasteText(widget: canvas.Widget, view_text_len: usize, text: []const u8) CanvasWidgetPasteClamp {
+    const capacity = @import("canvas_limits.zig").max_canvas_widget_text_bytes_per_view;
+    const replaced_len = blk: {
+        if (widget.text_composition) |composition| break :blk composition.byteLen(widget.text.len);
+        if (canvas.widgetTextSelectionRange(widget)) |range| break :blk range.byteLen(widget.text.len);
+        break :blk 0;
+    };
+    const available = capacity -| (view_text_len -| replaced_len);
+    if (widget.interaction_policy != null and (widget.kind == .textarea or canvas.widgetKindSingleLineTextEntry(widget.kind)) and text.len <= capacity) {
+        const prepared = canvas.widgetCompiledTextInput(widget, text, 2, null, available) orelse return .{};
+        return .{ .text = prepared.text, .truncated = prepared.truncated };
+    }
     // Sanitize BEFORE clamping — the shared step for BOTH paste entry
     // points (the cmd+V shortcut and the context-menu Paste). A
     // single-line target strips \r/\n at the edit-derivation seam
@@ -611,14 +622,6 @@ pub fn clampCanvasWidgetPasteText(widget: canvas.Widget, view_text_len: usize, t
         event.insert_text
     else
         return .{};
-    const capacity = @import("canvas_limits.zig").max_canvas_widget_text_bytes_per_view;
-    const replaced_len = blk: {
-        if (widget.text_composition) |composition| break :blk composition.byteLen(widget.text.len);
-        if (canvas.widgetTextSelectionRange(widget)) |range| break :blk range.byteLen(widget.text.len);
-        break :blk 0;
-    };
-    const used = view_text_len -| replaced_len;
-    const available = capacity -| used;
     if (sanitized.len <= available) return .{ .text = sanitized };
     const clamped = canvas.snapTextOffset(sanitized, available);
     return .{ .text = sanitized[0..clamped], .truncated = true };

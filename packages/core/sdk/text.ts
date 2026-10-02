@@ -73,6 +73,38 @@ export interface TextEditState {
   readonly composition: TextRange | null;
 }
 
+/// Prepare new single-line input by removing CR/LF bytes. An insertion
+/// containing only line breaks is suppressed; an empty composition stays
+/// meaningful and its explicit cursor moves past the removed bytes.
+/// Clean and over-budget events retain their original borrowed payload.
+/// Retained history is state, so replay it without this new-input step.
+export function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextInputEvent | null {
+  if (event.kind !== "insert_text" && event.kind !== "set_composition") return event;
+  const text = event.text;
+  if (text.length > 512 * 1024) return event;
+  let length = 0;
+  for (const byte of text) if (byte !== 10 && byte !== 13) length += 1;
+  if (length === text.length) return event;
+  if (event.kind === "insert_text" && length === 0) return null;
+  const stripped = new Uint8Array(length);
+  const cursor = event.kind === "set_composition" ? Math.min(event.cursor === null ? text.length : event.cursor, text.length) : 0;
+  let written = 0, removedBeforeCursor = 0;
+  for (let i = 0; i < text.length; i++) {
+    const byte = text[i];
+    if (byte === 10 || byte === 13) {
+      if (i < cursor) removedBeforeCursor += 1;
+    } else {
+      stripped[written] = byte;
+      written += 1;
+    }
+  }
+  if (event.kind === "insert_text") return { kind: "insert_text", text: stripped };
+  const shifted = cursor - removedBeforeCursor;
+  if (!(shifted >= 0 && shifted <= 512 * 1024)) return null;
+  return { kind: "set_composition", text: stripped,
+    cursor: event.cursor === null && shifted === stripped.length ? null : Math.trunc(shifted) };
+}
+
 function rangeNormalized(r: TextRange, textLen: number): TextRange {
   const start = Math.min(r.start, textLen);
   const end = Math.min(r.end, textLen);

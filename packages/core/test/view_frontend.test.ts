@@ -594,3 +594,27 @@ test("text rebuild policy distinguishes replacements, echoes and exact 64-bit se
   request[3] = 0; request[6] = 4; assert.throws(policy, /invalid text reconcile request/);
   assert.throws(() => exports.native_text_policy!(request.subarray(0, 39)), /invalid text reconcile request/);
 });
+
+test("compiled text input prepares composition and sanitizes before UTF-8 paste limits", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<input/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const prepare = (text: string, mode: number, singleLine: boolean, available = 0, cursor: number | null = null) => {
+    const bytes = new TextEncoder().encode(text), request = new Uint8Array(16 + bytes.length), data = new DataView(request.buffer);
+    request.set([6, mode, singleLine ? 1 : 0, cursor === null ? 0 : 1]);
+    data.setUint32(4, cursor === null ? 0 : cursor, true); data.setUint32(8, available, true); request.set(bytes, 16);
+    const result = exports.native_text_policy!(request), header = new DataView(result.buffer, result.byteOffset, result.byteLength);
+    const flags = header.getUint32(0, true), length = header.getUint32(8, true);
+    return { flags, cursor: header.getUint32(4, true), text: Array.from(flags & 2 ? bytes.subarray(0, length) : result.subarray(12)) };
+  };
+  const bytes = (s: string) => Array.from(new TextEncoder().encode(s));
+  assert.deepEqual(prepare("a\r\nbc", 2, true, 3), { flags: 1, cursor: 0, text: bytes("abc") });
+  assert.deepEqual(prepare("a\r\nbc", 2, false, 3), { flags: 11, cursor: 0, text: bytes("a\r\n") });
+  assert.deepEqual(prepare("a\né🙂", 2, true, 4), { flags: 9, cursor: 0, text: bytes("aé") });
+  assert.deepEqual(prepare("é🙂", 2, true, 3), { flags: 11, cursor: 0, text: bytes("é") });
+  assert.deepEqual(prepare("\r\n", 2, true, 0), { flags: 0, cursor: 0, text: [] });
+  assert.deepEqual(prepare("", 0, true), { flags: 3, cursor: 0, text: [] });
+  assert.deepEqual(prepare("a\r\né", 1, true, 0, 3), { flags: 5, cursor: 1, text: bytes("aé") });
+  assert.deepEqual(prepare("\r\n", 1, true), { flags: 1, cursor: 0, text: [] });
+  assert.throws(() => prepare("x", 2, true, 512 * 1024 + 1), /invalid text input arguments/);
+  assert.throws(() => prepare("x", 0, true, 0, 1), /invalid text input arguments/);
+});

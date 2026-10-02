@@ -1526,7 +1526,7 @@ pub fn Ui(comptime Msg: type) type {
                         if (locally_derived) |text_edit| {
                             // Direct Tree consumers still sanitize locally:
                             // these bytes have not crossed the runtime seam.
-                            if (canvas.sanitizedSingleLineTextInputEvent(widget.kind, text_edit)) |sanitized| {
+                            if (canvas.sanitizedTextInputEventForWidget(widget, text_edit)) |sanitized| {
                                 if (self.msgForTextEdit(target_id, sanitized)) |msg| return msg;
                             }
                         }

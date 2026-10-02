@@ -27,3 +27,9 @@ Scratchpad keeps its edits locally: Refresh preserves the draft and active
 composition, while Replace scratch supplies a new starting value. Restore
 note replaces the app-owned note. Locking editors uses their authored values;
 New desk starts every editor afresh.
+
+Copy, cut, and paste use the system clipboard. Subject joins pasted lines by
+removing CR/LF; Note, Message, and Scratchpad keep them. Single-line IME
+previews use the same rule, including empty previews. Paste fits the view's
+remaining text budget at a UTF-8 boundary after removing line breaks; undo
+and redo restore retained bytes exactly.

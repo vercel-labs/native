@@ -2300,6 +2300,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             const target = keyboard_event.target orelse return;
+            const target_node = self.views[index].widgetLayoutTree().findById(target.id) orelse return;
             const history_shortcut = if (!keyboard_event.history_replay)
                 self.views[index].canvasWidgetTextHistoryShortcut(target, keyboard_event.keyboard)
             else
@@ -2327,7 +2328,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const edit = if (keyboard_event.history_replay)
                 derived
             else
-                canvas.sanitizedSingleLineTextInputEvent(target.kind, derived) orelse {
+                canvas.sanitizedTextInputEventForWidget(target_node.widget, derived) orelse {
                     keyboard_event.keyboard.edit = null;
                     return;
                 };

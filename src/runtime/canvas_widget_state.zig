@@ -1011,7 +1011,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // source (the keyboard choke point's rule): a single-line
             // field's editor never accepts a line break, whoever writes.
             const node = self.views[index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
-            const sanitized = canvas.sanitizedSingleLineTextInputEvent(node.widget.kind, edit) orelse return self.views[index].info();
+            const sanitized = canvas.sanitizedTextInputEventForWidget(node.widget, edit) orelse return self.views[index].info();
             if (self.views[index].canvasWidgetTextEditNeedsLargeStorage(id, sanitized)) {
                 try ensureCanvasWidgetLargeTextStorageThrough(self, index);
             }

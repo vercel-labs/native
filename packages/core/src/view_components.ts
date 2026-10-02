@@ -2,7 +2,7 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
-import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -41,6 +41,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request[0] === 4) return nscvTextEdit(request);
   if (request[0] === 5) return nscvTextReconcile(request);
+  if (request[0] === 6) return nscvTextInput(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -195,6 +196,47 @@ function nscvTextReconcile(request: Uint8Array): Uint8Array {
     if (echoed && !affinityChanged) flags |= 8;
   }
   result[0] = flags;
+  return result;
+}
+
+/** New input: tag 6, mode (0 insert/1 composition/2 paste), single-line,
+ * cursor-present, LE u32 cursor/available paste bytes/reserved zero, then
+ * input bytes. Sanitize before applying the paste limit. The result's LE
+ * u32 flags (1 present/2 borrowed prefix/4 cursor-present/8 truncated),
+ * cursor and length precede copied bytes. Native copies before arena reset.
+ */
+function nscvTextInput(request: Uint8Array): Uint8Array {
+  const budget = 512 * 1024;
+  if (request.length < 16 || request.length > 16 + budget || request[1]! > 2 ||
+      request[2]! > 1 || request[3]! > 1) throw new Error("invalid text input request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const mode = request[1]!, available = data.getUint32(8, true);
+  if (available > budget || data.getUint32(12, true) !== 0 ||
+      mode !== 1 && (request[3] !== 0 || data.getUint32(4, true) !== 0))
+    throw new Error("invalid text input arguments");
+  const source = request.subarray(16);
+  const rawCursor = data.getUint32(4, true);
+  const cursorOffset = rawCursor >= 0 && rawCursor <= 4294967295 ? Math.trunc(rawCursor) : 0;
+  const event: NscvTextInputEvent = mode === 1 ?
+    { kind: "set_composition", text: source, cursor: request[3] === 1 ? cursorOffset : null } :
+    { kind: "insert_text", text: source };
+  const sanitized = request[2] === 1 ? nscvSanitizeTextInput(event) : event;
+  if (sanitized === null) return new Uint8Array(12);
+  if (sanitized.kind !== "insert_text" && sanitized.kind !== "set_composition")
+    throw new Error("invalid prepared text event");
+  let text = sanitized.text;
+  const borrowed = text === source;
+  const truncated = mode === 2 && text.length > available;
+  if (truncated) {
+    let end = available;
+    while (end > 0 && end < text.length && (text[end]! & 0xc0) === 0x80) end -= 1;
+    text = text.subarray(0, end);
+  }
+  const cursor = sanitized.kind === "set_composition" ? sanitized.cursor : null;
+  const result = new Uint8Array(12 + (borrowed ? 0 : text.length)), out = new DataView(result.buffer);
+  out.setUint32(0, 1 | (borrowed ? 2 : 0) | (cursor !== null ? 4 : 0) | (truncated ? 8 : 0), true);
+  out.setUint32(4, cursor === null ? 0 : cursor, true); out.setUint32(8, text.length, true);
+  if (!borrowed) result.set(text, 12);
   return result;
 }
 

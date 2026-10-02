@@ -364,6 +364,76 @@ fn stripLineBreakBytes(text: []const u8, buffer: []u8) []const u8 {
     return buffer[0..len];
 }
 
+pub const TextInputPreparation = struct {
+    text: []const u8,
+    cursor: ?usize,
+    truncated: bool,
+};
+
+/// New input preparation uses the text policy's operation 6. Borrowed
+/// results refer only to the source prefix; rewritten results are copied
+/// to native scratch before another compiled callback resets its arena.
+pub fn widgetCompiledTextInput(widget: Widget, text: []const u8, mode: u8, cursor: ?usize, available: usize) ?TextInputPreparation {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (text.len > text_model.max_widget_text_bytes_per_view or available > text_model.max_widget_text_bytes_per_view or mode > 2)
+        @panic("compiled text input request exceeds budget");
+    const scratch = text_policy_scratch.get();
+    const request = scratch.request[0 .. 16 + text.len];
+    @memset(request[0..16], 0);
+    request[0] = 6;
+    request[1] = mode;
+    request[2] = @intFromBool(widgetKindSingleLineTextEntry(widget.kind));
+    request[3] = @intFromBool(cursor != null);
+    std.mem.writeInt(u32, request[4..8], @intCast(@min(cursor orelse 0, text.len)), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(available), .little);
+    @memcpy(request[16..], text);
+    const len = policy(request, &scratch.result);
+    if (len < 12 or len > 12 + text.len) @panic("invalid compiled text input result length");
+    const flags = std.mem.readInt(u32, scratch.result[0..4], .little);
+    const result_cursor = std.mem.readInt(u32, scratch.result[4..8], .little);
+    const text_len = std.mem.readInt(u32, scratch.result[8..12], .little);
+    if (flags > 15 or text_len > text.len or result_cursor > text_len or
+        (flags & 4 != 0 and mode != 1) or (flags & 8 != 0 and mode != 2))
+        @panic("invalid compiled text input result");
+    if (flags == 0) {
+        if (len != 12 or text_len != 0 or result_cursor != 0) @panic("invalid suppressed text input result");
+        return null;
+    }
+    if (flags & 1 == 0 or (flags & 4 == 0 and result_cursor != 0)) @panic("invalid compiled text input flags");
+    const borrowed = flags & 2 != 0;
+    if (len != 12 + (if (borrowed) @as(usize, 0) else text_len) or (mode == 2 and text_len > available))
+        @panic("invalid compiled text input byte budget");
+    if (!borrowed) @memcpy(sanitized_text_edit_scratch.get().bytes[0..text_len], scratch.result[12..len]);
+    return .{
+        .text = if (borrowed) text[0..text_len] else sanitized_text_edit_scratch.get().bytes[0..text_len],
+        // A clean preview is borrowed unchanged, including an authored
+        // cursor beyond its length. Only rewritten previews clamp/shift it.
+        .cursor = if (borrowed and mode == 1) cursor else if (flags & 4 != 0) result_cursor else null,
+        .truncated = flags & 8 != 0,
+    };
+}
+
+/// Resolve new input against its actual widget so compiled views use the
+/// same sanitizer for direct edits, keyboard/IME and Tree fallbacks.
+pub fn sanitizedTextInputEventForWidget(widget: Widget, event: TextInputEvent) ?TextInputEvent {
+    if (!widgetKindSingleLineTextEntry(widget.kind) or widget.interaction_policy == null)
+        return sanitizedSingleLineTextInputEvent(widget.kind, event);
+    const text = switch (event) {
+        .insert_text => |text| text,
+        .set_composition => |composition| composition.text,
+        else => return event,
+    };
+    // Preserve the existing over-budget pass-through/refuse-whole rule.
+    if (text.len > max_sanitized_text_edit_bytes) return event;
+    const composition = event == .set_composition;
+    const result = widgetCompiledTextInput(widget, text, if (composition) 1 else 0, if (composition) event.set_composition.cursor else null, 0) orelse return null;
+    return if (composition)
+        .{ .set_composition = .{ .text = result.text, .cursor = result.cursor } }
+    else
+        .{ .insert_text = result.text };
+}
+
 /// The clipboard intent of a key event: cmd+C/X/V on macOS, ctrl+C/X/V
 /// elsewhere (`hasCommandModifier` covers both). Shift/alt variants are
 /// deliberately excluded so shift+ctrl+V-style paste-special chords stay

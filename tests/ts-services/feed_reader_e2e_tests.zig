@@ -2540,3 +2540,153 @@ test "compiled text reconciliation retains the full budget and respects disabled
         try std.testing.expect(retained.findById(3).?.widget.text_selection == null);
     }
 }
+
+test "compiled single-line new input matches native inserts composition cursors and borrowed payloads" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const texts = [_][]const u8{ "", "\r\n\n", "a\r\né\n🙂z", "café 🙂", "\xc3\n\xa9", "\x80\r\xff", "a\tb" };
+    const cursors = [_]?usize{ null, 0, 1, 2, 3, 7, 999, std.math.maxInt(usize) };
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        const widget = canvas.Widget{ .kind = kind, .interaction_policy = core.nativeTextPolicy };
+        for (texts) |text| {
+            var expected_buffer: [64]u8 = undefined;
+            const insertion = canvas.sanitizedSingleLineTextInputEvent(kind, .{ .insert_text = text });
+            if (insertion) |expected| @memcpy(expected_buffer[0..expected.insert_text.len], expected.insert_text);
+            const actual = canvas.sanitizedTextInputEventForWidget(widget, .{ .insert_text = text });
+            try std.testing.expectEqual(insertion == null, actual == null);
+            if (insertion) |expected| {
+                try std.testing.expectEqualStrings(expected_buffer[0..expected.insert_text.len], actual.?.insert_text);
+                if (std.mem.indexOfAny(u8, text, "\r\n") == null) try std.testing.expectEqual(text.ptr, actual.?.insert_text.ptr);
+            }
+            for (cursors) |cursor| {
+                const event = canvas.TextInputEvent{ .set_composition = .{ .text = text, .cursor = cursor } };
+                const expected = canvas.sanitizedSingleLineTextInputEvent(kind, event).?.set_composition;
+                @memcpy(expected_buffer[0..expected.text.len], expected.text);
+                const prepared = canvas.sanitizedTextInputEventForWidget(widget, event).?.set_composition;
+                try std.testing.expectEqualStrings(expected_buffer[0..expected.text.len], prepared.text);
+                try std.testing.expectEqual(expected.cursor, prepared.cursor);
+            }
+        }
+        const selection = canvas.TextInputEvent{ .set_selection = .{ .anchor = 8, .focus = 2, .affinity = .downstream } };
+        try std.testing.expectEqualDeep(selection, canvas.sanitizedTextInputEventForWidget(widget, selection).?);
+    }
+}
+
+test "compiled paste matches native sanitization and UTF-8 prefix boundaries" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const texts = [_][]const u8{ "", "\r\n", "a\nbc", "é\r\n🙂z", "a\x80\x80b", "\xff\xc3\xa9" };
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        for (texts) |text| {
+            for (0..12) |available| {
+                const sanitized = canvas.sanitizedSingleLineTextInputEvent(kind, .{ .insert_text = text });
+                var expected_buffer: [64]u8 = undefined;
+                const expected = if (sanitized) |event| event.insert_text else "";
+                const length = canvas.snapTextOffset(expected, available);
+                @memcpy(expected_buffer[0..length], expected[0..length]);
+                const actual = canvas.widgetCompiledTextInput(.{ .kind = kind, .interaction_policy = core.nativeTextPolicy }, text, 2, null, available);
+                try std.testing.expectEqualStrings(expected_buffer[0..length], if (actual) |prepared| prepared.text else "");
+                try std.testing.expectEqual(expected.len > available, if (actual) |prepared| prepared.truncated else false);
+            }
+        }
+    }
+}
+
+test "compiled input preparation preserves full-budget rewritten bytes across view and edit arenas" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const input = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view + 1);
+    defer std.testing.allocator.free(input);
+    @memset(input, 'a');
+    input[7] = '\n';
+    input[11] = '\r';
+    const widget = canvas.Widget{ .kind = .input, .interaction_policy = core.nativeTextPolicy };
+    const text = input[0..canvas.max_widget_text_bytes_per_view];
+    const prepared = canvas.sanitizedTextInputEventForWidget(widget, .{ .insert_text = text }).?.insert_text;
+    try std.testing.expectEqual(text.len - 2, prepared.len);
+    try std.testing.expect(std.mem.indexOfAny(u8, prepared, "\r\n") == null);
+    const view_bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(view_bytes);
+    _ = canvas.widgetCompiledTextPointerSelection(.{ .kind = .textarea, .text = "one two", .interaction_policy = core.nativeTextPolicy }, 1, 2, 0, .{}).?;
+    try std.testing.expectEqual(@as(u8, 'a'), prepared[7]);
+    try std.testing.expectEqual(@as(u8, 'a'), prepared[prepared.len - 1]);
+    const over_budget = canvas.sanitizedTextInputEventForWidget(widget, .{ .insert_text = input }).?.insert_text;
+    try std.testing.expectEqual(input.ptr, over_budget.ptr);
+    try std.testing.expectEqual(input.len, over_budget.len);
+    const borrowed = canvas.widgetCompiledTextInput(widget, "é🙂", 2, null, 3).?;
+    try std.testing.expectEqualStrings("é", borrowed.text);
+    try std.testing.expect(borrowed.truncated);
+    try std.testing.expect(canvas.widgetCompiledTextInput(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, "x", 0, null, 0) == null);
+}
+
+test "compiled clipboard paste uses shared storage freed by selection and composition" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const Fixture = struct {
+        truncated: bool = false,
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-paste-capacity", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>"), .event_fn = onEvent };
+        }
+        fn onEvent(context: *anyopaque, _: *native_sdk.Runtime, event: native_sdk.Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event == .canvas_widget_keyboard and event.canvas_widget_keyboard.keyboard.edit_truncated) self.truncated = true;
+        }
+    };
+    const filler = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view - 32);
+    defer std.testing.allocator.free(filler);
+    @memset(filler, 'a');
+    for ([_]canvas.WidgetKind{ .input, .textarea }) |kind| {
+        for ([_]bool{ false, true }) |compiled| {
+            const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+            defer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            var fixture: Fixture = .{};
+            const application = fixture.app();
+            try harness.start(application);
+            _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+            const policy: ?*const fn ([]const u8, []u8) usize = if (compiled) core.nativeTextPolicy else null;
+            const children = [_]canvas.Widget{
+                .{ .id = 2, .kind = kind, .frame = geometry.RectF.init(12, 16, 180, 84), .text = "Keep", .text_selection = .{ .anchor = 0, .focus = 4 }, .interaction_policy = policy },
+                .{ .id = 3, .kind = .text, .frame = geometry.RectF.init(12, 112, 180, 24), .text = filler },
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            try harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 100, .y = 30 } });
+            try harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "a", .modifiers = .{ .primary = true } } });
+            const before = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget;
+            const replaced = canvas.widgetTextSelectionRange(before).?.byteLen(before.text.len);
+            const available = canvas.max_widget_text_bytes_per_view - (harness.runtime.views[0].widget_text_len - replaced);
+            try std.testing.expect(available > 4 and available < 64);
+            var raw: [192]u8 = undefined;
+            var raw_len: usize = 0;
+            for (0..available) |_| {
+                raw[raw_len] = 'b';
+                raw[raw_len + 1] = '\n';
+                raw_len += 2;
+            }
+            try harness.runtime.writeClipboard(raw[0..raw_len]);
+            try harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "v", .modifiers = .{ .primary = true } } });
+            var current = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget;
+            try std.testing.expectEqual(available, current.text.len);
+            try std.testing.expectEqual(kind == .textarea, fixture.truncated);
+            if (kind == .input) try std.testing.expect(std.mem.indexOfScalar(u8, current.text, '\n') == null);
+            // A full view still admits exactly the bytes freed by active
+            // preedit, and reports a truncated multibyte suffix loudly.
+            harness.runtime.views[0].widget_layout_nodes[1].widget.text_composition = .{ .start = 0, .end = 2 };
+            fixture.truncated = false;
+            try harness.runtime.writeClipboard("é🙂");
+            try harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "v", .modifiers = .{ .primary = true } } });
+            current = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget;
+            try std.testing.expectEqual(available, current.text.len);
+            try std.testing.expect(std.mem.startsWith(u8, current.text, "é"));
+            try std.testing.expect(current.text_composition == null);
+            try std.testing.expect(fixture.truncated);
+            try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+        }
+    }
+}
