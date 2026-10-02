@@ -1,0 +1,74 @@
+---
+title: "Package Distribution"
+---
+
+The Native SDK is distributed as a Zig codebase plus npm packages for the CLI. The former primitive modules (`geometry`, `assets`, `app_dirs`, `trace`, `app_manifest`, `diagnostics`, and `platform_info`) are now internal Native SDK modules and are available through the main `native_sdk` import instead of standalone Zig packages.
+
+## Install
+
+```bash
+npm install -g @native-sdk/cli
+```
+
+See the [Quick Start](/docs/quick-start) for the full flow.
+
+## How the npm install works
+
+`@native-sdk/cli` installs the `native` command. Platform-specific optional dependencies supply the prebuilt CLI binary. The package also declares the TypeScript checker and scriptc compiler dependencies used to build TypeScript apps.
+
+The CLI package includes the SDK source and resolves it from its install location. Set `NATIVE_SDK_PATH` to build against a checkout. Offline builds require the compiler dependencies, Zig toolchain, and any app dependencies to be installed already.
+
+The CLI can also download the pinned Zig toolchain: on first `native dev|build|test`, the CLI uses a compatible `zig` from your PATH or offers to download the pinned version into `~/.native/toolchains/` (checksum-verified).
+
+All packages share one version, and the binary packages are pinned exactly, so a given `@native-sdk/cli` version always runs the binary built from the same commit.
+
+## Packages
+
+<table>
+  <thead>
+    <tr>
+      <th>Package</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>@native-sdk/cli</code></td>
+      <td>Installs the <code>native</code> command, carries the SDK source apps build against, and selects the right binary package for your platform</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-darwin-arm64</code></td>
+      <td>Prebuilt <code>native</code> binary for macOS on Apple silicon</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-darwin-x64</code></td>
+      <td>Prebuilt <code>native</code> binary for macOS on Intel</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-linux-arm64-gnu</code></td>
+      <td>Prebuilt <code>native</code> binary for Linux arm64 (glibc)</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-linux-x64-gnu</code></td>
+      <td>Prebuilt <code>native</code> binary for Linux x64 (glibc)</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-linux-arm64-musl</code></td>
+      <td>Prebuilt <code>native</code> binary for Linux arm64 (musl)</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-linux-x64-musl</code></td>
+      <td>Prebuilt <code>native</code> binary for Linux x64 (musl)</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-win32-x64</code></td>
+      <td>Prebuilt <code>native</code> binary for Windows x64</td>
+    </tr>
+    <tr>
+      <td><code>@native-sdk/cli-win32-arm64</code></td>
+      <td>Prebuilt <code>native</code> binary for Windows on ARM</td>
+    </tr>
+  </tbody>
+</table>
+
+The wrapper scripts and packaging metadata live in `packages/native-sdk/` in the repository, and every binary is also published as a checksummed GitHub release asset for use outside npm.

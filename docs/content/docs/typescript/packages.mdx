@@ -1,0 +1,189 @@
+---
+title: "Where Packages Go"
+---
+
+import { CodeToggle } from "@/components/code-toggle";
+
+
+
+The app core uses a checked, deterministic TypeScript subset and compiles to native code. It does not run npm packages or ship a JavaScript engine. Choose where library code runs according to what it needs: a compiled service, an HTTP effect, an embedded web frontend, a Node subprocess, or a compatible local core module.
+
+Use the following options:
+
+<table>
+  <thead>
+    <tr>
+      <th>You want</th>
+      <th>The pattern</th>
+      <th>Where the code runs</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Filesystem, JSON/regex parsing, transforms, or imperative work in ordinary TypeScript</td>
+      <td>A compiled module under <code>src/services/</code></td>
+      <td>A native service-host process, reached through <code>@native-sdk/services</code> commands</td>
+    </tr>
+    <tr>
+      <td>An HTTP API — including AI/LLM endpoints</td>
+      <td><code>Cmd.fetch</code> with routed results</td>
+      <td>The effect engine, in the binary</td>
+    </tr>
+    <tr>
+      <td>An npm-heavy UI (an editor, a charting stack, an existing React app)</td>
+      <td>Embed a web frontend</td>
+      <td>A WebView surface, full npm</td>
+    </tr>
+    <tr>
+      <td>A Node library for one job</td>
+      <td><code>Cmd.spawn</code> a node sidecar</td>
+      <td>A subprocess, streaming lines back</td>
+    </tr>
+    <tr>
+      <td>A pure utility (parsing, formatting, math)</td>
+      <td>Usually nothing — or vendor it under <code>src/</code></td>
+      <td>Inside the core, compiled to native</td>
+    </tr>
+  </tbody>
+</table>
+
+## Compiled TypeScript services
+
+Put ordinary static-tier TypeScript under `src/services/` when the work needs Node built-ins, regexes, JSON, `Map`/`Set`, `Date`, classes, or ambient process authority. Each directly exported, non-default named synchronous function becomes an operation named `<module-basename>.<export>`. Its request and result may be shared, contract-encodable records; the core calls the generated constructor from `@native-sdk/services`, so success and failure still arrive as Msgs and record/replay remains offline.
+
+Services compile to native code. `native vendor . package@X.Y.Z` resolves an exact package graph with lifecycle scripts disabled and writes checked-in sources and hashes to the app manifest. Builds verify those sources without installing packages. `native check` requires complete static coverage from the pinned compiler; unsupported packages fail with its diagnostics. Desktop services use a child process by default, with an in-process option on supported targets. See [TypeScript Services](/docs/typescript/services) for platform support, typed calls, streaming, cancellation, and authority. The [feed reader example](https://github.com/vercel-labs/native/tree/main/examples/service-feed-reader) fetches a feed and parses it through a typed service operation.
+
+## Calling APIs, AI endpoints included
+
+`Cmd.fetch` sends HTTP requests without an API-client package. Use a buffered request for one `{ status, body }` result, or line streaming for SSE and NDJSON. Results return as messages and are recorded for offline replay. This core sends a buffered request to an OpenAI-compatible chat endpoint:
+
+<CodeToggle>
+
+```ts:src/core.ts
+import { Cmd, asciiBytes } from "@native-sdk/core";
+
+export interface Model {
+  readonly answer: Uint8Array;
+  readonly waiting: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "ask" }
+  | { readonly kind: "answered"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "ask_failed"; readonly reason: Uint8Array };
+
+export const viewUnbound = ["answered", "ask_failed"] as const;
+
+export function initialModel(): Model {
+  return { answer: new Uint8Array(0), waiting: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "ask":
+      if (model.waiting) return model; // one request in flight, by model state
+      return [
+        { ...model, waiting: true },
+        Cmd.fetch(
+          {
+            url: asciiBytes("http://127.0.0.1:11434/v1/chat/completions"),
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: asciiBytes('{"model":"local-model","messages":[{"role":"user","content":"Say hi in five words"}]}'),
+            timeoutMs: 120000,
+          },
+          { key: "chat", ok: "answered", err: "ask_failed" },
+        ),
+      ];
+    case "answered":
+      // The status is the real HTTP status - a 404 is a delivered
+      // response. This sample displays the raw body; the chatbot
+      // example includes response parsing.
+      return { ...model, waiting: false, answer: msg.body };
+    case "ask_failed":
+      // The transport reason ("timed_out", "connect_failed", ...) -
+      // failure is never silence.
+      return { ...model, waiting: false, answer: msg.reason };
+  }
+}
+```
+
+```zig
+// The same exchange on the Zig effects channel.
+.ask => fx.fetch(.{
+    .key = chat_key,
+    .method = .POST,
+    .url = "http://127.0.0.1:11434/v1/chat/completions",
+    .headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    .body = "{\"model\":\"local-model\",\"messages\":[...]}",
+    .on_response = Effects.responseMsg(.answered),
+}),
+.answered => |response| model.recordAnswer(response), // copy response.body
+```
+
+</CodeToggle>
+
+For token-by-token UI, request the endpoint's streaming mode and add a `line` route:
+
+```ts
+Cmd.fetch(
+  {
+    url: endpoint,
+    method: "POST",
+    headers: { accept: "text/event-stream", authorization: bearerToken },
+    body: requestBody,
+    timeoutMs: 120000,
+    maxLineBytes: 65536,
+  },
+  { key: "chat", line: "chat_event", ok: "chat_done", err: "chat_failed" },
+)
+```
+
+`chat_event` carries one `Uint8Array` field for each complete SSE/NDJSON line; parse its `data:` payload and append the delta to the assistant message in the Model. `chat_done` carries one number field with the terminal HTTP status. Cancellation and transport failures reach `chat_failed` as reason bytes, including `cancelled`, so a partially displayed answer never ends silently.
+
+The [chatbot example](https://github.com/vercel-labs/native/tree/main/examples/chatbot) streams responses from Vercel AI Gateway, reads credentials through the environment effect, and appends response deltas to model state. It includes request construction, response parsing, cancellation, and replay tests.
+
+## Full npm ecosystem UIs
+
+Use a [web frontend](/docs/frontend) for an existing React app, editor component, or other UI library that needs a JavaScript engine. The WebView runs inside the native shell, and the [bridge](/docs/bridge) carries typed messages between it and the app. The scaffold configures development-server loading and production asset bundling:
+
+```bash
+native init my_app --frontend next   # or vite | react | svelte | vue
+```
+
+npm lives in the web surface, where a JS engine actually exists; the native tier keeps the window, menus, tray, dialogs, and everything else the frontend cannot reach. [Web Content](/docs/frontend) covers the full setup, including production asset bundling.
+
+## Node as a worker
+
+`Cmd.spawn` can run a Node script for a discrete job, such as rendering a template or transforming a file. Send input through stdin and receive stdout lines as messages. The argv must be a compile-time array literal. Lines are bounded at 4 KiB; `collect: true` buffers output up to 512 KiB instead. **The deployed host must have Node installed**, and the executable path must match that host.
+
+```ts
+case "render":
+  return [
+    { ...model, rendering: true },
+    Cmd.spawn([asciiBytes("/usr/local/bin/node"), asciiBytes("scripts/render.mjs")], {
+      key: "render",
+      stdin: model.template,
+      line: "render_line",
+      exit: "render_done",
+      err: "render_failed",
+    }),
+  ];
+```
+
+Cancellation (`Cmd.cancel("render")`), the exit code on the `exit` arm, and machine-readable failure reasons all follow the standard effect contract — see [the streaming ops](/docs/typescript#effects-are-cmd-data). `examples/system-monitor-ts` is the reference for the collect shape: spawn a tool, parse its whole output in the core.
+
+## Pure utilities
+
+For parsing, formatting, or math helpers, choose one of the reuse options below. Core helpers must fit the checked subset; text values use `Uint8Array`.
+
+```ts:src/core.ts
+import { parseCsvRow } from "./csv.ts";                    // vendored under src/
+import { containsIgnoreCase } from "@native-sdk/core/text"; // the SDK library channel
+```
+
+- **Vendor subset-clean code under `src/` outside `src/services/`.** It compiles into the core like your own modules ([splitting a core into modules](/docs/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether it fits.
+- **Vendor ordinary static-tier code or exact npm packages under `src/services/`.** Classes, regexes, JSON, `Map`/`Set`, `Date`, Node built-ins, and imperative transforms stay in TypeScript and compile into the service host; run `native vendor . package@X.Y.Z` for a package, then reach its typed exported operations through `@native-sdk/services`.
+- **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, compiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. See `examples/chatbot/src/api.ts` for local helpers that process JSON over bytes.
+
+Core builds resolve local modules under `src/` and the shipped SDK modules. Service packages must be vendored under `src/services/` and pinned by name, version, and tree hash in the app manifest. Builds do not install packages or fetch sources.

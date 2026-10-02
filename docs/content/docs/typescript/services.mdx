@@ -1,0 +1,349 @@
+---
+title: "TypeScript Services"
+---
+
+Modules under `src/services/` are ordinary TypeScript compiled to native code on the compiler's full static tier: `fs`, `path`, `process`, `os`, `child_process`, `fetch`, regexes, `JSON`, `Map`/`Set`, `Date`, and classes, when the pinned compiler supports them. The same pinned compiler builds the deterministic core ([TypeScript Cores](/docs/typescript)) and the services; no JavaScript engine ships in either.
+
+The core calls a service by returning a command from `update`. The typed result returns as an ordinary `Msg`:
+
+```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+
+case "parse":
+  return [model, feedsParse({ source: model.source, caseSensitive: false }, {
+    key: "parse",
+    ok: "parsed",        // the one Msg arm carrying ParseResult
+    err: "parse_failed", // a one-Uint8Array-field arm
+  })];
+```
+
+Services run on a supervised carrier — on desktop, a separate child process by default or an explicitly selected worker-thread pool compiled into the app binary; on iOS and Android, the in-process pool only (see [Runtime behavior](#runtime-behavior)).
+
+## The two roles
+
+The split is by role: the core is the app's deterministic logic — `Model`, `Msg`, `update` — and services do the app's imperative work. Record→replay, headless testing, and [automation](/docs/automation) depend on `update` being a pure function of its inputs. A service reads the real filesystem, clock, and network, so the checker refuses a core import of a service file (NS1065) and the core-to-service edge is always a command. Service results are journaled like every other effect result.
+
+<table>
+  <thead>
+    <tr>
+      <th>Role</th>
+      <th>Owns</th>
+      <th>Language rules</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Core (<code>src/core.ts</code> + imports outside <code>src/services/</code>)</td>
+      <td>App state and decisions: <code>Model</code>, <code>Msg</code>, <code>update</code>, pure helpers</td>
+      <td>The deterministic subset (NS1001–NS1064)</td>
+    </tr>
+    <tr>
+      <td>Service (<code>src/services/**/*.ts</code>)</td>
+      <td>Imperative work: parsing, filesystem transforms, environment inspection, subprocesses</td>
+      <td>Ordinary static-tier TypeScript; only the boundary rules NS1065–NS1067 apply</td>
+    </tr>
+  </tbody>
+</table>
+
+Services are not a storage engine or a general FFI surface. Durable data uses the engine-owned [persistence](/docs/persistence) and [record store](/docs/record-store) effects; custom widgets, render passes, and new engine capabilities are Zig ([Building Components](/docs/building-components)).
+
+## Service authority
+
+A service runs with the app's privileges. The child carrier uses the app data directory as its working directory and the environment allowlist below. The in-process carrier shares the app's working directory and environment. Neither carrier is an OS security sandbox. Services may use supported APIs for:
+
+- **Filesystem** — Node built-ins over the real disk.
+- **Environment** — `process` and the allowlisted variables below.
+- **Network** — `fetch` and sockets, directly.
+- **Ambient time and randomness** — `Date.now()`, `Math.random()`, and friends. Their results reach the core only as journaled message payloads.
+
+The child process receives an explicit environment allowlist; everything else, including every `NATIVE_SDK_*` internal, is stripped.
+
+<table>
+  <thead>
+    <tr>
+      <th>Group</th>
+      <th>Variables</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Path</td>
+      <td><code>PATH</code></td>
+    </tr>
+    <tr>
+      <td>Home / user / temp</td>
+      <td><code>HOME</code>, <code>USER</code>, <code>TMPDIR</code>, <code>TMP</code>, <code>TEMP</code></td>
+    </tr>
+    <tr>
+      <td>Locale / time zone</td>
+      <td><code>LANG</code>, <code>LC_ALL</code>, <code>LC_CTYPE</code>, <code>TZ</code></td>
+    </tr>
+    <tr>
+      <td>Certificates</td>
+      <td><code>SSL_CERT_FILE</code>, <code>SSL_CERT_DIR</code></td>
+    </tr>
+    <tr>
+      <td>Proxies</td>
+      <td><code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code>, <code>NO_PROXY</code></td>
+    </tr>
+    <tr>
+      <td>Windows additions</td>
+      <td><code>USERPROFILE</code>, <code>USERNAME</code>, <code>SystemRoot</code>, <code>COMSPEC</code>, <code>PATHEXT</code>; all names match case-insensitively</td>
+    </tr>
+  </tbody>
+</table>
+
+Standard output carries the framed transport between app and service, so service diagnostics go to standard error.
+
+## Writing a service
+
+A service module is any `.ts` file under `src/services/`. Every directly exported, non-default named function is an operation:
+
+- It is synchronous and has a body.
+- It takes zero or one explicitly annotated request parameter.
+- It declares a contract-encodable result type.
+- Its name is `<module-basename>.<export>` — `export function parse` in `src/services/feeds.ts` is `feeds.parse`.
+
+Boundary shapes live in a shared, subset-legal module outside `src/services/`, imported by the core and the service:
+
+```ts:src/shared.ts
+export type ParseRequest = {
+  readonly source: Uint8Array;
+  readonly caseSensitive: boolean;
+};
+
+export type ParseResult = {
+  readonly bytes: Uint8Array;
+  readonly matches: boolean;
+};
+```
+
+```ts:src/services/feeds.ts
+import * as fs from "node:fs";
+import type { ParseRequest, ParseResult } from "../shared.ts";
+
+export function parse(request: ParseRequest): ParseResult {
+  if (!fs.existsSync(".")) {
+    throw { kind: "data_directory_missing", message: "the app data directory is unavailable" };
+  }
+  const source = new TextDecoder().decode(request.source);
+  const matches = request.caseSensitive ? /feed/.test(source) : /feed/i.test(source);
+  return { bytes: new TextEncoder().encode(JSON.stringify({ matches })), matches };
+}
+```
+
+`native check` projects the complete type table into a contract sidecar (`services.contract.json`), checks both classes, and generates the typed client the core imports. An operation shaped any other way — `async`, a default export, an unannotated request, a non-encodable result — is a teaching error (NS1067) naming the rewrite.
+
+### Boundary types
+
+<table>
+  <thead>
+    <tr>
+      <th>Crosses</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Booleans, numbers</td>
+      <td>Integer-class fields are proven and carried as integers</td>
+    </tr>
+    <tr>
+      <td><code>Uint8Array</code></td>
+      <td>The bytes form the core and services already share</td>
+    </tr>
+    <tr>
+      <td>Optionals, readonly slices</td>
+      <td><code>T | null</code> and <code>readonly T[]</code> of encodable elements</td>
+    </tr>
+    <tr>
+      <td>Named records, enums, kind-tagged unions</td>
+      <td>Declared in the shared module; both sides import the one declaration</td>
+    </tr>
+    <tr>
+      <td>Functions, behavior-bearing classes, Promises</td>
+      <td>Do not cross — the boundary is encoded data, not object references</td>
+    </tr>
+  </tbody>
+</table>
+
+Services may use classes, `Map`, and other APIs supported by the pinned compiler. Request and result types must still satisfy the boundary contract.
+
+### Errors
+
+An explicit throw crossing the operation boundary must be exactly an inline `{ kind: "...", message: "..." }` shape with a string-valued message, and it must escape the operation rather than be caught locally:
+
+```ts
+throw { kind: "parse", message: "bad feed" };
+```
+
+The encoded kind and message arrive on the core's error arm as UTF-8 JSON bytes. Do not throw `new Error(...)` from the exported surface. The build mechanically lowers the escaping tagged value into the form the pinned compiler carries across the boundary; your checked-in source — and its behavior under Node — does not change.
+
+## Calling a service
+
+`native check` derives the virtual module `@native-sdk/services` from the contract: one constructor per operation, named `<module><Export>` (`feeds.parse` → `feedsParse`), taking the typed request plus a route.
+
+```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+import type { ParseRequest, ParseResult } from "./shared.ts";
+
+export type Msg =
+  | { readonly kind: "parse"; readonly request: ParseRequest }
+  | { readonly kind: "parsed"; readonly result: ParseResult }
+  | { readonly kind: "parse_failed"; readonly error: Uint8Array };
+
+case "parse":
+  return [model, feedsParse(msg.request, {
+    key: "feed-parse",
+    ok: "parsed",
+    err: "parse_failed",
+  })];
+```
+
+The route is typechecked: the constructor's type proves that `ok` names the one Msg arm carrying exactly the declared result record and that `err` names a one-bytes-field arm. A stale field or wrong route is a `native check` type error at the call site. The generated source lives only in build scratch space and the ignored editor package under `node_modules/@native-sdk/services`, never in authored `src/`.
+
+Raw `Cmd.request("feeds.parse", bytes, { key?, ok, err })` remains the low-level byte seam beneath the client — same transport, same routing, request and result as raw bytes you encode yourself.
+
+### Keys
+
+Keys share the engine effect-key space. A second live request on the same key — buffered or streaming — is rejected (`err` receives `rejected`) rather than replacing the first, so two calls can never splice into one result. Cancel the first if you mean to supersede it.
+
+### Timeouts
+
+Every request carries a deadline: 30 seconds by default, or the operation's declared `@deadlineMs` (a JSDoc tag, 1 to 86400000 ms). Expiry routes JSON with `kind: "timeout"` to `err`.
+
+### Cancellation
+
+`Cmd.cancel(key)` on a buffered request drops it — no message is dispatched — and cooperatively interrupts the service child. Cancelling a stream routes `cancelled` to `err` (see [Streaming](#streaming)).
+
+## Streaming
+
+To return incremental results, declare a final typed `emit` capability. Each chunk arrives through a channel-event Msg arm; the function's return stays the one typed terminal result.
+
+```ts:src/services/feeds.ts
+import type { ServiceCancellation } from "@native-sdk/core";
+import type { ParseChunk, ParseRequest, ParseResult } from "../shared.ts";
+
+/**
+ * @deadlineMs 5000
+ * @streamBuffer 8
+ */
+export function parseLarge(
+  request: ParseRequest,
+  emit: (chunk: ParseChunk) => void,
+  cancellation: ServiceCancellation,
+): ParseResult {
+  for (let index = 0; index < request.source.length; index += 4096) {
+    cancellation.throwIfCancelled();
+    emit({ bytes: request.source.slice(index, index + 4096), index });
+  }
+  return parse(request);
+}
+```
+
+The generated route gains two fields beside `key`, `ok`, and `err`: `channelKey` (an app-chosen numeric channel key) and `event` (the channel-event Msg arm each chunk dispatches). The terminal result closes the channel after all accepted chunks. `@streamBuffer` caps in-flight chunks at 1–64 (default 8).
+
+### Cooperative cancellation
+
+An optional final `ServiceCancellation` parameter opts an operation into cooperative cancellation — legal only as the last parameter. Poll `cancelled()` or call `throwIfCancelled()` at bounded intervals.
+
+- `Cmd.cancel(key)` on a stream flips the token, closes the channel, routes `cancelled` to `err`, and drops every later chunk.
+- A deadline expiry flips the same token and routes `kind: "timeout"` to `err`.
+- The child gets a short grace period to unwind and stays alive when it cooperates. An operation that ignores its token is hard-killed, and the next request starts a clean host.
+
+## npm packages
+
+Service modules may import local service files, shared core-class declarations, and exact vendored npm packages — never a bare install:
+
+```bash
+native vendor . escape-string-regexp@5.0.0
+```
+
+The command resolves the exact version once (lifecycle scripts disabled), copies the flattened package graph and license files into `src/services/vendor/`, and writes the exact name/version/tree-hash facts into the app manifest. Check both in. Builds are hermetic: no npm, no network — every vendored byte is re-hashed, and the compiler receives only the explicit declared package allowlist. Importing a package that was never vendored is NS1066:
+
+> Run `native vendor . package@X.Y.Z`, check in `src/services/vendor/` and the generated manifest `service_packages` facts, then import that exact package name; or vendor a local source module and import it relatively.
+
+A vendored package must reach 100% static coverage with the pinned compiler. Otherwise, `native check` fails and includes the compiler's coverage diagnostics. This is a build requirement, not a general claim about npm compatibility.
+
+
+Run `native check` to verify the exact package sources you vendored. There is no automatic or dynamic fallback. If a package is refused, use a compatible implementation or move the work to a [web frontend or Node worker](/docs/typescript/packages). Local service modules must also compile on the pinned static tier.
+
+## Runtime behavior
+
+Two carriers run the same operations behind the same routes, keys, deadlines, cancellation, streaming, and replay semantics. The build selects one:
+
+<table>
+  <thead>
+    <tr>
+      <th>Carrier</th>
+      <th>Where services run</th>
+      <th>Selection</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>child</code></td>
+      <td>A second native executable — <code>&lt;app&gt;_services</code> — beside the app binary, packaged with it</td>
+      <td>Unset/<code>auto</code> default on desktop; unavailable on mobile</td>
+    </tr>
+    <tr>
+      <td><code>in_process</code></td>
+      <td>Compiled into the app binary; a small thread pool, one isolated module instance per thread</td>
+      <td>Explicit opt-in on native Linux, cross-Linux x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU, or macOS built on macOS; unset/<code>auto</code> default on iOS and Android</td>
+    </tr>
+  </tbody>
+</table>
+
+`.service_carrier = "in_process" | "child"` in app.zon (or `-Dservice-carrier`) states the choice. Unset/`"auto"` selects the child carrier on desktop and the in-process pool on iOS/Android, where a child process is unavailable. `.service_pool_size` (or `-Dservice-pool-size`, 1-16) sets the in-process pool width; the default is min(4, cores).
+
+Shared guarantees:
+
+- **Lazy start.** Nothing starts before the first real request — no child process, no pool thread.
+- **Verified pairing.** The child's startup handshake checks the protocol version and a fingerprint of the generated operation/type/package registry; the in-process carrier checks the same fingerprint against the linked archive. A mismatch rejects before any operation dispatches.
+- **Supervision.** A second live request with the same key is rejected. After cancellation, an abandoned dispatch retains the key until it stops; replacement work waits behind it. The in-process pool runs different keys in parallel across its instances; the child runs everything on one worker. A cancellation or deadline publishes the cooperative token and grants a short grace: an operation that returns inside it keeps its instance (or process) warm. Past the grace, the child is killed and respawns on the next request; the in-process carrier abandons the instance's thread, routes the failure, and adds a fresh instance to the pool. An abandoned dispatch keeps its key reserved until it physically stops, so a same-key replacement cannot overlap its side effects (and can itself expire while waiting). A detected trap poisons only the instance it fired in (`kind: "service_trap"`); other instances keep answering. Every failure produces a routed result: a dead transport `kind: "service_host"`, an expired deadline `kind: "timeout"`.
+- **Replay.** Terminal results and stream events are journaled like every other effect. Replaying a recorded session parks each request and feeds the recorded result; neither carrier starts anything.
+- **Scope.** Child executables are desktop-only and follow the pinned compiler's broad matrix: same-platform builds, Linux and Windows GNU targets cross-compiled from a macOS/Linux/Windows host, and macOS targets built on macOS. A Windows MSVC target builds natively on a matching Windows host; cross-Windows uses GNU because Zig supplies that target's CRT and system libraries. In-process archives use the compiler's narrower object-localization matrix: native Linux, cross-Linux x86_64/aarch64 (`aarch64-linux-android` included, API 26 floor, NDK required), native Windows x86_64, cross-Windows x86_64 GNU, or the Mach-O targets — macOS, `aarch64-ios`, and `aarch64-ios-simulator` (iOS 15.0 floor) — built on macOS. Mobile targets are archive-only: no sibling process exists there, so `service_carrier = "auto"` resolves to the in-process pool and an explicit `"child"` is refused with a teaching. A pairing outside the relevant matrix fails with a teaching, as does any explicitly spelled Linux `-gnu` target without a glibc version — even when it matches the build host, Zig's target uses its default floor. The service runtime needs glibc 2.36+ or musl, so explicit Linux targets are spelled `x86_64-linux-gnu.2.36` (or later) or `x86_64-linux-musl`. Operations are synchronous.
+
+In-process specifics:
+
+- Service code shares the app process: its ambient authority is the app's own (no environment allowlist, the app's working directory), and a hardware fault in service code — a stack overflow above all — is process-wide. Use the child carrier to keep service hardware faults outside the app process.
+- Each pool worker owns a separate instance of the service modules. Mutable module globals are worker-local, so different-key requests may observe different copies; keep shared durable state outside service-module globals.
+- An abandoned instance's memory is reclaimed only at process exit; each trap or ignored token costs one leaked instance.
+- `process.exit()` in service code exits the app.
+
+## Development
+
+`native dev --core` runs service operations in an isolated Node worker through the same generated contract: the same vendored-package hash verification, request/result codecs, error arms, cooperative cancellation and deadlines, and channel-event chunk shape. Pair `--script scenario.ndjson` with `--watch` for repeatable iteration.
+
+The devhost honors session record/replay the same way the packaged runtime does — replay starts no service worker — and service-only recordings cross between the devhost and the packaged app. `native dev` runs the app with its build-selected carrier: the in-process pool linked into the binary, or the compiled service executable beside it.
+
+## Boundary diagnostics
+
+Three checker rules enforce the boundary. Each diagnostic identifies the invalid boundary and the required change.
+
+<table>
+  <thead>
+    <tr>
+      <th>Rule</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>NS1065</strong> — the core does not import services</td>
+      <td>A direct import would run ambient, non-deterministic service authority inside update and erase the command/result boundary that journaling and replay depend on. The core-to-service edge is always an effect.</td>
+    </tr>
+    <tr>
+      <td><strong>NS1066</strong> — service package imports are exact vendored facts</td>
+      <td>Service builds have no package-manager or network input: the compiler sees only manifest-declared, hash-verified checked-in sources through an explicit static-package allowlist.</td>
+    </tr>
+    <tr>
+      <td><strong>NS1067</strong> — service calls match the generated typed contract</td>
+      <td>The host codecs, runner registry, and typed client are projections of <code>services.contract.json</code>; every crossing data shape, stream declaration, deadline, and operation name must be stated there once.</td>
+    </tr>
+  </tbody>
+</table>
+
+## Reference
+
+The [feed reader example](https://github.com/vercel-labs/native/tree/main/examples/service-feed-reader) fetches a feed, passes its bytes to `feeds.parse`, and renders typed `FeedResult` records. Invalid input returns a tagged error. Its tests record the loop and replay it without a service executable or network. Use `native skills get ts-services` for the CLI authoring guide.

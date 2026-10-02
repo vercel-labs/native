@@ -1,0 +1,69 @@
+---
+title: "Input Group"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `input-group` to combine a [textarea](/docs/components/textarea) and an accessory row inside one border. The group shows a focus ring when any child has focus and removes the textarea’s individual surface styling. The textarea retains its text bindings and input events. Set `submit-on-enter="true"` to submit on Enter, and `autofocus` to focus it when mounted.
+
+<ComponentPreview name="input-group" alt="An input group rendered by the engine" />
+
+## Markup
+
+The textarea comes first (document order is focus order), then the optional `input-group-actions` row. Put a `spacer` between the leading and trailing controls; `if`/`else` inside the row swap send for stop while a run is streaming.
+
+```html
+<input-group label="Message composer" height="120">
+  <textarea placeholder="Type a message" text="{draft}" submit-on-enter="true" on-input="draft_edited" on-submit="send" />
+  <input-group-actions>
+    <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
+    <spacer grow="1" />
+    <button icon="send" size="icon" on-press="send" label="Send"></button>
+  </input-group-actions>
+</input-group>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.inputGroup(.{
+    .height = 120,
+    .semantics = .{ .label = "Message composer" },
+}, ui.el(.textarea, .{
+    .placeholder = "Type a message",
+    .text = model.draft,
+    .submit_on_enter = true,
+    .on_input = Ui.inputMsg(.draft_edited),
+    .on_submit = .send,
+    .semantics = .{ .label = "Message" },
+}, .{}), ui.inputGroupActions(.{}, .{
+    ui.el(.button, .{ .icon = "plus", .variant = .ghost, .size = .icon, .on_press = .attach, .semantics = .{ .label = "Attach" } }, .{}),
+    ui.spacer(1),
+    ui.el(.button, .{ .icon = "send", .size = .icon, .on_press = .send, .semantics = .{ .label = "Send" } }, .{}),
+}))
+```
+
+## Attributes
+
+<AttrTable
+  element="input-group"
+  attrs={[
+    "label",
+    "width",
+    "height",
+    "min-width",
+    "grow",
+  ]}
+/>
+
+### input-group-actions
+
+<AttrTable
+  element="input-group-actions"
+  attrs={[
+    "gap",
+  ]}
+/>

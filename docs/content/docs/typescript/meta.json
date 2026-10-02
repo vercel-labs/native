@@ -1,0 +1,9 @@
+{
+  "title": "TypeScript Cores",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "packages",
+    "services"
+  ]
+}

@@ -1,0 +1,33 @@
+---
+title: "Progress"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `progress` to display a fraction from 0 to 1. The renderer clamps values outside that range. Set `width` or `grow` to size the track. The control has no input events. Use [slider](/docs/components/slider) for an adjustable value or [spinner](/docs/components/spinner) for an indeterminate wait.
+
+<ComponentPreview name="progress" alt="A progress bar rendered by the engine" />
+
+## Markup
+
+```html
+<progress value="{upload_fraction}" width="280" />
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.progress, .{ .value = model.upload_fraction, .width = 280 }, .{})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "value",
+    "width",
+  ]}
+/>

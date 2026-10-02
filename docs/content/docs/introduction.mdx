@@ -1,0 +1,59 @@
+---
+title: "Introduction"
+---
+
+Native SDK is an open source toolkit for building native desktop applications with TypeScript and Native markup. It compiles app logic and views into a native executable and renders the interface in OS windows. The toolkit is implemented in Zig; apps can also use a Zig core.
+
+Native-rendered apps do not require a browser or JavaScript engine at runtime. Apps that need web content can include [WebView surfaces](/docs/frontend) alongside native views.
+
+## Create an app
+
+Start with the [Quick Start](/docs/quick-start) to install the CLI, generate a counter app, and run it. The default project uses TypeScript for app logic and `.native` files for the interface. The CLI manages the build graph; use [Config](/docs/app-zon) to set app identity, windows, permissions, and security policy.
+
+<span id="simple-authoring" />
+
+## App structure
+
+The main files in a generated app are:
+
+- `src/core.ts`: the model, typed messages, update function, and effect declarations.
+- `src/app.native`: layout, model bindings, and message dispatch.
+- `app.json`: the app manifest. Existing `app.zon` manifests remain supported.
+
+App cores use a checked [TypeScript subset](/docs/typescript). Filesystem access, network requests, and other external work run through effects and [TypeScript services](/docs/typescript/services). Create a project with `--template zig-core` to write the core in Zig instead.
+
+<span id="predictable-state" />
+
+## State and development
+
+Events dispatch messages to `update`, which produces the next model and any effects. The view derives its content from the model; markup reads state and dispatches messages without mutating it. See [App Model](/docs/app-model) for the runtime loop and [State & Data Flow](/docs/state) for data binding patterns.
+
+`native dev` rebuilds markup while preserving app state. Core edits rebuild and restart the app. Use `native dev --core` to exercise TypeScript logic under Node.js without opening a window.
+
+<span id="beautiful-by-default" />
+<span id="customizable-by-design" />
+
+## Components and themes
+
+The [component catalog](/docs/components) includes buttons, text inputs, lists, tables, dialogs, and charts. Components use named design tokens for colors, spacing, typography, and other styling. Configure tokens and switch themes through the [theming API](/docs/theming).
+
+<span id="native-from-the-start" />
+
+## Platform support
+
+Native SDK has desktop hosts for macOS, Linux, and Windows. Rendering backends and OS capabilities vary by host. Mobile support is experimental. Check [Platform Support](/docs/platform-support) for the status of each capability before choosing a target.
+
+<span id="ai-is-part-of-the-workflow" />
+
+## Testing and automation
+
+[Tests](/docs/testing) can exercise app logic and runtime integration without a window server. Apps can also enable an [automation server](/docs/automation) to expose accessibility snapshots, accept input commands, and capture screenshots. The CLI includes [agent skills](/docs/skills) for app authoring and inspection.
+
+<span id="where-to-go-next" />
+
+## Next steps
+
+- [Quick Start](/docs/quick-start): install the CLI and run your first app.
+- [CLI](/docs/cli): commands and options.
+- [Native UI](/docs/native-ui): markup, layout, and bindings.
+- [Packaging](/docs/packaging): create distributable packages.

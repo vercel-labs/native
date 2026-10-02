@@ -1,0 +1,658 @@
+---
+title: "TypeScript Cores"
+---
+
+import { CodeToggle } from "@/components/code-toggle";
+
+
+
+An app core defines `Model` (app state), `Msg` (typed messages), `update(model, msg)` (state transitions), and pure helpers. The default core is `src/core.ts`. The `@native-sdk/core` frontend checks its supported TypeScript subset, and the external core compiler produces native code. Unsupported operations produce diagnostics before the app builds.
+
+The default project uses `src/core.ts`, `src/app.native`, and `app.json`; existing `app.zon` manifests remain supported. Put filesystem access, JSON processing, regexes, collections, or child-process work in [TypeScript services](/docs/typescript/services) under `src/services/`. Services compile to native code and return results through messages. Zig cores use the same runtime loop. Toolkit extensions, including custom widgets and render passes, are implemented in Zig.
+
+The same core can also run under Node.js. Use `native dev --core` to exercise messages, effects, and subscriptions without rebuilding or opening a window:
+
+```bash
+native dev --core   # run the core under node's virtual host: dispatch Msgs as
+                    # JSON lines, watch the model + effect transcript
+native dev          # build and run the real app (markup hot reload)
+native check        # subset-check core.ts + validate markup + app.json
+native build        # ReleaseFast binary; native test runs the app's tests
+```
+
+## The contract
+
+### Compiled TypeScript views (preview)
+
+The compiled TypeScript view backend is an opt-in preview. Enable it with `native build -Dtypescript-view=true` or `native test -Dtypescript-view=true`. It compiles Native markup to TypeScript view code beside the core; the native host still owns layout, rendering, input geometry, and replay.
+
+The preview includes selection and keyboard policies for radios, tabs, trees, lists, menus, toggles, accordions, sliders, splits, scrolling, and text entry. The component pages describe their interaction contracts. Selection and disclosure state can be model-controlled; unchanged source values retain local control state, while changed source values take precedence. A changed slider source applies after an active drag ends.
+
+Text fields use the SDK text reducer for UTF-8 editing, selection, word navigation, deletion, and composition. CRLF is one caret stop; edits that exceed capacity are refused as a whole. A changed source matching the edited text is an echo, while a different replacement replaces it. Explicit source selections remain authoritative. Native retains pointer hit testing, visual-line navigation, IME delivery, clipboard transport, and history storage. The [Writing Desk example](https://github.com/vercel-labs/native/tree/main/examples/text-policy) demonstrates controlled text and textarea submission policies.
+
+Single-line input removes CR/LF from typing, paste, and IME previews. IME cursor offsets account for removed bytes. Paste applies the view text capacity after sanitizing and stops at a UTF-8 boundary, reporting truncation. Undo and redo compile selection, replacement, and selection restoration while replaying retained bytes exactly. They preserve selection direction and affinity, refuse stale history, and commit only after reaching the full target state. Native owns clipboard transport, history storage, and serial lookup.
+
+Editable code accepts `<code source="{draft}" language="typescript" editable="true" wrap="false" line-numbers="true" on-input="edit_draft"/>`, where `draft` is UTF-8 bytes and `edit_draft` carries a `TextInputEvent`. Language names are literals; `line-numbers` accepts a boolean binding. Plain Tab inserts the file's inferred indentation: tabs when tab-indented lines dominate, otherwise two through eight spaces. Tied tab votes follow the caret's logical line; ambiguous sources use two spaces. Shift+Tab follows normal focus traversal. Line numbers stay outside source and clipboard bytes, and long lines scroll horizontally. Native retains syntax painting, text geometry, storage, IME and scroll delivery. This preview requires editable, unwrapped code and supports width, height, min-width, grow, label and keys; read-only code, wrapped code and diff-line decorations use the default backend. The [Code Workbench example](https://github.com/vercel-labs/native/tree/main/examples/code-workbench) demonstrates independent drafts, source replacement and Undo/Redo.
+
+Debug and Release use the same generated view. Rebuild after markup edits; this preview does not hot-reload markup.
+
+The preview supports `column`, `row`, `stack`, `panel`, `badge`, `text`, `input`, `search-field`, `textarea`, editable `code`, `button`, `checkbox`, `switch`, `toggle`, `split`, `radio`, `radio-group`, `toggle-button`, `toggle-group`, `accordion`, `tabs`, `segmented-control`, `tree`, `list`, `list-item`, `select`, `dropdown-menu`, `menu-item`, `separator`, `status-bar`, `spacer`, `scroll`, and `avatar`. Bindings include numbers, booleans, byte text, record paths, helper-returned lists, and enum comparisons with literal members. Composition includes `if`/`else`, keyed `for`, imports, templates with required arguments, and slots. Integer and string `key` bindings preserve native widget identities across sibling reorders; `global-key` preserves them across reparenting too. Tree rows use `panel`, `column`, or `row` and declare `role="treeitem"`, `on-press`, optional `expanded`/`on-toggle`, and optional integer `tree-level` from 0 to 65535; `column`, `row`, `panel`, and `scroll` can also declare `role="tree"` for their rows.
+
+Events include void and scalar payload bindings through `on-press`, `on-toggle`, `on-submit`, and menu `on-dismiss`, the thirteen-arm `TextInputEvent` union through `on-input`, the six-field drag record through `on-drag`, and the two-axis `ScrollState` record through `on-scroll`. The native runtime supplies live text edits, drag geometry, and scroll state. Layout attributes are `gap`, `padding`, `grow`, `width`, `height`, `min-width`, `main`, and `cross`, with `size`, `variant`, `checked`, `selected`, `disabled`, `value`, `image`, literal `icon`, `label`, `role="listitem"`, and `window-drag`. Text leaves accept `wrap`; text-entry widgets and select triggers accept `text` and `placeholder`. Splits require exactly two panes after structural expansion. `on-resize` names a bare one-number float Msg arm; echo its applied fraction through `value`. Pane `min-width` bounds drag and keyboard resizing. Optional `resize-duration`, literal `resize-easing`, and literal `resize-origin` retain native animation and reduced-motion behavior. Accordion headers use `text`, with child elements for the body. Checkbox labels accept `text` or leaf content. Dropdown menus accept literal `anchor="below"` or `"above"`, `anchor-alignment="start"`, `"end"`, or `"stretch"`, and a finite literal `anchor-offset`; alignment and offset require `anchor`. The initial style tokens are `background`/`surface` for backgrounds, `text`/`text_muted`/`destructive` for foregrounds, and `sm`/`md`/`lg` for radii. Unsupported constructs fail the build with a source diagnostic. Apps using the rest of Native markup continue to use the default view backend.
+
+`stepper`, `timeline`, and `timeline-item` also work in the preview. Their composition runs in TypeScript compiled by scriptc: stepper derives completed/active/pending indicators, bold or muted labels, selected state, and accessible list positions; timeline items derive badge/connector layout, wrapped descriptions, meta text, and focusability from `on-press`. Native still measures and renders the primitive widgets. Pressable timeline items activate with Enter or Space; items without `on-press` remain display-only. The [pipeline example](https://github.com/vercel-labs/native/tree/main/examples/pipeline) demonstrates stage changes, payload events, keyed timeline reordering, and empty states.
+
+Secondary windows use the same preview path: export `windows(model)` with literal descriptor labels and provide `src/windows/<label>.native`. Each open window evaluates its bindings against the shared committed model. Window roots can import components under `src/windows/`; input routes by the descriptor's unique `canvasLabel`. Native close policies and `onCloseCommand` retain their usual behavior. The feed reader demonstrates shared URL editing, service updates, and close/reopen across both windows.
+
+### Core types
+
+```ts:src/core.ts
+// Model: readonly data fields only.
+export interface Model {
+  readonly count: number;
+}
+
+// Msg: one arm per thing that can happen, at least two arms.
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "reset" };
+
+// Pure: the same model every time.
+export function initialModel(): Model {
+  return { count: 0 };
+}
+
+// One case per arm; the switch must be exhaustive (no default needed once
+// every arm is present — a missing arm is a teaching error at build time).
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "add":
+      return { ...model, count: model.count + 1 };
+    case "reset":
+      return { ...model, count: 0 };
+  }
+}
+```
+
+`update` is pure and synchronous: it never mutates `model` or `msg`, never performs IO, and returns the next model — plus optionally command data describing effects (below). Purity is what makes the core testable as a plain function, replayable deterministically, and identical in behavior under node and native.
+
+A complete core in the idiom — readonly interfaces, a tagged Msg, spread updates, map/filter, bytes for text, derived exports:
+
+```ts:src/core.ts
+import { utf8Bytes } from "@native-sdk/core";
+
+export type Bytes = Uint8Array;
+export type Filter = "all" | "active" | "done";
+
+export interface Task {
+  readonly id: number;
+  readonly title: Bytes;
+  readonly done: boolean;
+}
+
+export interface Model {
+  readonly tasks: readonly Task[];
+  readonly nextId: number;
+  readonly filter: Filter;
+  readonly draft: Bytes;
+}
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "toggle"; readonly id: number }
+  | { readonly kind: "set_filter"; readonly filter: Filter }
+  | { readonly kind: "draft_edit"; readonly text: Bytes };
+
+export function initialModel(): Model {
+  return {
+    tasks: [{ id: 1, title: utf8Bytes("Ship the core"), done: false }],
+    nextId: 2,
+    filter: "all",
+    draft: new Uint8Array(0),
+  };
+}
+
+export function visibleTasks(model: Model): readonly Task[] {
+  if (model.filter === "active") return model.tasks.filter((t) => !t.done);
+  if (model.filter === "done") return model.tasks.filter((t) => t.done);
+  return model.tasks;
+}
+
+export function doneCount(model: Model): number {
+  return model.tasks.filter((t) => t.done).length;
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "add": {
+      if (model.draft.length === 0) return model;
+      const task: Task = { id: model.nextId, title: model.draft, done: false };
+      return {
+        ...model,
+        tasks: [...model.tasks, task],
+        nextId: model.nextId + 1,
+        draft: new Uint8Array(0),
+      };
+    }
+    case "toggle":
+      return {
+        ...model,
+        tasks: model.tasks.map((t) => (t.id === msg.id ? { ...t, done: !t.done } : t)),
+      };
+    case "set_filter":
+      return { ...model, filter: msg.filter };
+    case "draft_edit":
+      return { ...model, draft: msg.text };
+  }
+}
+```
+
+Markup binds your model's field names exactly as you wrote them: `nextId` binds as `{nextId}` (the core's model keeps the TS spellings), string-literal unions bind as their member name (`{filter}` renders `all`), and record arrays iterate with `<for each="tasks" as="t" key="id">`. Exported helpers taking exactly one `Model` parameter join the binding surface as derived values — `{doneCount}` reads `doneCount`, and slice-returning ones like `visibleTasks` drive `for each` — so derived data needs no model field. Update-only state nothing in markup binds (host-fired timer arms, bookkeeping fields) is declared once as `export const viewUnbound = ["tick"] as const;` so `native check`'s unbound-state lint can distinguish intentional omissions.
+
+<span id="why-the-immutable-style-is-free" />
+
+## Model memory
+
+Values created by `update` use a per-dispatch arena, released after the returned model commits. The commit copies newly created nodes into the persistent model heap and shares unchanged nodes from the previous model.
+
+The frame arena and model heap each have a fixed build-time capacity of 1 MiB by default. The frame arena bounds transient values for one dispatch; the model heap bounds committed state. Capacity overflow produces a runtime panic identifying the region.
+
+<span id="the-subset-posture" />
+
+## Supported TypeScript
+
+The core checker admits a deterministic TypeScript subset. Supported features include readonly records, discriminated unions, exhaustive switches, loops, arithmetic and assignment operators, record destructuring, namespace imports, spreads, array transforms, `Math`, and template literals encoded as bytes. Generic functions, interfaces, and aliases compile to an implementation for each resolved type instantiation. Data classes compile to records and functions; inheritance is unavailable. Tagged subset values can use `throw`, `try`, `catch`, and `finally`; an uncaught throw panics.
+
+Mutation is allowed on locally owned data, such as a scratch array or `.slice()` copy, until it escapes. Shared model and message data remain immutable. Readonly reader parameters borrow arrays without transferring ownership.
+
+The core excludes npm imports, regular expressions, `JSON`, Promises, `eval`, inheritance, `async`/`await`, `Map`/`Set`, mutable module state, ambient time and randomness, and runtime type tests. Dynamic text uses bytes. Diagnostics identify the rule and a supported alternative. Put ordinary imperative TypeScript behind a [service request](/docs/typescript/services).
+
+Checker rules have two classifications. `guarantee` protects core invariants such as determinism, fixed data shapes, immutable shared state, and byte text. `deferred` marks a currently unavailable capability that does not inherently violate those invariants. This classification describes current rules; it is not a release schedule.
+
+- `guarantee` — core invariants: NS1001 (shared data is immutable), NS1002 (updates are synchronous), NS1005 (update is deterministic), NS1010 (module state lives in the Model), the byte-text rules (NS1004, NS1018, NS1024, NS1060), and every other rule not listed as deferred.
+- `deferred` — currently unavailable: NS1011 (`Map`/`Set`), NS1019 (fixed arity: parameter defaults, rest, `arguments`, call spreads), NS1040 (regular expressions), NS1042 (generators), NS1044 (`BigInt`/`Symbol`).
+
+<CodeToggle>
+
+```ts
+// One generic helper; tsc resolves each call's type arguments.
+export interface Task { readonly id: number; readonly done: boolean; }
+export function pick<T>(xs: readonly T[], i: number): T {
+  return xs[i];
+}
+export function firstTask(tasks: readonly Task[]): Task { return pick(tasks, 0); }
+export function lastNum(ns: readonly number[]): number { return pick(ns, ns.length - 1); }
+```
+
+```zig
+// The Zig-core equivalent: one monomorphic fn per distinct instantiation.
+pub fn pick__Task(xs: []const Task, i: i64) Task {
+    return xs[uz(i)];
+}
+pub fn pick__f64(xs: []const f64, i: i64) f64 {
+    return xs[uz(i)];
+}
+```
+
+</CodeToggle>
+
+One rule deserves calling out early: **text is bytes**. Dynamic, user-visible text lives in the Model as `Uint8Array` — `string` is for literals, string-literal-union tags, and `===` comparisons. Turn display literals and templates into UTF-8 with `utf8Bytes`; use `asciiBytes` only when ASCII is part of the value's contract, such as a command name, key, or protocol token:
+
+```ts
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+
+const label = utf8Bytes(`${done} of ${total} done`); // per-dispatch UTF-8
+const seed = utf8Bytes("Café…");                    // UTF-8 rodata
+const command = asciiBytes("app.refresh");          // guaranteed ASCII
+```
+
+The compiler folds both byte intrinsics at compile time; under node the same imports run as plain functions with the same result. `asciiBytes` fails with NS1064 when a literal/template contains non-ASCII and throws `RangeError` if called directly with such text under node. `utf8Bytes` encodes Unicode exactly like `TextEncoder`, including U+FFFD for lone surrogates. Observing a `string`'s code units (`.length`, `s[i]`) is a taught error because UTF-16 and UTF-8 would disagree, and `+` concatenation is taught away because runtime string building needs a JS string heap the binary does not carry.
+
+Bytes still read like text: the everyday string methods work directly on `Uint8Array` values, with **byte-based semantics** — every length, offset, and index is a BYTE length/offset (never a character count: `é` measures 2), search is byte-wise, and case mapping is Unicode simple case mapping (code point to code point from the Unicode tables, locale-free, no special casing — `ß` stays `ß`; invalid UTF-8 passes through unchanged). The compiled core and node run the same methods from the same generated tables, so both produce identical bytes by construction.
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th>Byte-based behavior</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>toUpperCase()</code> / <code>toLowerCase()</code></td>
+      <td>Unicode simple case mapping over UTF-8 (locale-free); fresh bytes</td>
+    </tr>
+    <tr>
+      <td><code>repeat(n)</code></td>
+      <td>The bytes repeated <code>n</code> times; <code>repeat(0)</code> is empty, a negative literal is a build error (JS throws RangeError there)</td>
+    </tr>
+    <tr>
+      <td><code>startsWith(b)</code> / <code>endsWith(b)</code> / <code>includes(b)</code></td>
+      <td>Byte-wise prefix/suffix/substring tests with a bytes needle; <code>includes(65)</code> with a number keeps TypedArray element search — one byte value</td>
+    </tr>
+    <tr>
+      <td><code>indexOf(b)</code> / <code>lastIndexOf(b)</code></td>
+      <td>First/last BYTE offset of the byte substring, -1 when absent (a number argument searches one byte value)</td>
+    </tr>
+    <tr>
+      <td><code>padStart(n, fill?)</code> / <code>padEnd(n, fill?)</code></td>
+      <td>Pad to <code>n</code> BYTES (not characters) with fill bytes (default <code>" "</code>), last repetition truncated by bytes</td>
+    </tr>
+    <tr>
+      <td><code>trim()</code> / <code>trimStart()</code> / <code>trimEnd()</code></td>
+      <td>Strip the JS whitespace set decoded over UTF-8; a view, no copy</td>
+    </tr>
+    <tr>
+      <td><code>split(sep)</code></td>
+      <td>Split on a bytes separator into <code>Uint8Array[]</code> (String.split shapes; the parts array is yours to mutate); an empty separator literal is a taught stop</td>
+    </tr>
+    <tr>
+      <td><code>at(i)</code></td>
+      <td>The byte value at a byte index (negatives count from the end), or <code>undefined</code> out of range</td>
+    </tr>
+  </tbody>
+</table>
+
+What stays out teaches its reason and the byte-based alternative by name: `charCodeAt`/`charAt`/`codePointAt` read UTF-16 code units bytes do not have (read `b[i]`/`.at(i)`), the locale family (`localeCompare`, `toLocaleUpperCase`) depends on ambient locale state, the regex-taking methods (`match`, `search`) need a regex engine the binary does not carry, and `normalize`/`replace`/`replaceAll` are named deferrals with their rewrites.
+
+## Effects are Cmd data
+
+`update` never performs an effect — it can return one, as inert data, alongside the next model. Declare the pair-return type and build commands inline in the return path (never stored in the model, a message, or a local — that is what keeps effect descriptions outside app state):
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export interface Model {
+  readonly count: number;
+  readonly lastTick: number;
+}
+
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "request_time" }
+  | { readonly kind: "tick"; readonly at: number };
+
+export const viewUnbound = ["tick", "lastTick"] as const;
+
+export function initialModel(): Model {
+  return { count: 0, lastTick: -1 };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add":
+      return { ...model, count: model.count + 1 };
+    case "request_time":
+      return [model, Cmd.now("tick")]; // dispatches { kind: "tick", at: <ms> }
+    case "tick":
+      return { ...model, lastTick: msg.at }; // bare model means no command
+  }
+}
+```
+
+The runtime interprets the command after the model commits and dispatches any result back as an ordinary `Msg` — routing is data (string-literal arm names, never callbacks), so the result decoder derives from your Msg types at build time. `initialModel` may return the same pair to run one boot effect before the first view build (loading a store is the canonical use). The vocabulary:
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>What it does</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Cmd.none</code></td>
+      <td>No effects; returning a bare <code>Model</code> is sugar for it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.now("tick")</code></td>
+      <td>Request a timestamp; dispatches the named arm with the time (ms) as its one number payload</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.delay(key, ms, "fired")</code></td>
+      <td>A keyed one-shot timer; re-issuing a live key re-arms it from now — the debounce discipline</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.readFile(path, &#123; key?, ok, err &#125;)</code></td>
+      <td>Read a whole file; <code>ok</code> carries the content bytes, <code>err</code> a reason (<code>not_found</code>, <code>io_failed</code>, <code>truncated</code>, ...)</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.writeFile(path, bytes, &#123; key?, ok, err &#125;)</code></td>
+      <td>Write a whole file (parents created, replaced whole); <code>ok</code> carries no payload — a successful write has nothing to report</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.appendFile</code> / <code>Cmd.statFile</code> / <code>Cmd.deleteFile</code></td>
+      <td>Append one bounded payload, inspect <code>&#123; exists, size, mtimeMs &#125;</code>, or delete one file with explicit <code>not_found</code> handling</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.readFileStream</code> / <code>Cmd.writeFileStream</code> + <code>writeFileChunk</code>/<code>writeFileClose</code></td>
+      <td>Read 256-KiB chunks without a total-size cliff, or build an atomic export one acknowledged chunk at a time — see <a href="/docs/files">Files &amp; Streaming</a></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.fetch(spec, &#123; key?, ok, err &#125;)</code></td>
+      <td>A buffered HTTP(S) exchange; <code>ok</code> carries <code>&#123; status, body &#125;</code> (a 404 is still <code>ok</code> — a delivered response), <code>err</code> the transport reason</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.fetch(spec, &#123; key?, line, ok, err &#125;)</code></td>
+      <td>A line-streamed HTTP(S) exchange for SSE/NDJSON; each <code>line</code> carries bytes as it arrives, then <code>ok</code> carries the terminal HTTP status or <code>err</code> the transport reason</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.clipboardWrite(bytes)</code> / <code>Cmd.clipboardRead(&#123; key?, ok, err &#125;)</code></td>
+      <td>System clipboard: write is fire-and-forget, read routes the text bytes back</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.showNotification(&#123; id?, title, subtitle?, body?, actionLabel?, actionCommand? &#125;)</code></td>
+      <td>Show or replace a desktop notification, fire-and-forget; paired action fields dispatch through the ordinary app-command path while the process is running</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.openExternalUrl(url)</code> / <code>Cmd.revealPath(path)</code></td>
+      <td>Open an allowed HTTP(S) URL in the system browser or reveal a path in Finder/Files/Explorer; both are fire-and-forget and fail closed</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.credentials.set(...)</code> / <code>Cmd.credentials.get(...)</code> / <code>Cmd.credentials.delete(...)</code></td>
+      <td>App-scoped access to the OS credential store; get returns secret bytes, missing items route <code>miss</code>, and the manifest must declare the <code>credentials</code> capability and permission</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code></td>
+      <td>Format an epoch timestamp as localized <code>date</code>, <code>time</code>, or <code>datetime</code> text in the host's current time zone</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.spawn(argv, &#123; key?, stdin?, line?, exit, err &#125;)</code></td>
+      <td>Run a subprocess, streaming stdout line by line; <code>collect: true</code> buffers whole stdout into the <code>exit</code> arm instead</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.audioPlay(key, source, &#123; event &#125;)</code> + <code>audioPause</code>/<code>audioResume</code>/<code>audioStop</code>/<code>audioSeek</code>/<code>audioSetVolume</code></td>
+      <td>The audio player: one event stream (<code>loaded</code>, <code>position</code>, <code>completed</code>, <code>failed</code>, <code>spectrum</code>, ...) until <code>audioStop</code> closes it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.showWindow(label)</code> / <code>Cmd.hideWindow(label)</code> / <code>Cmd.quitApp()</code></td>
+      <td>The menu-bar lifecycle verbs: show or retain-but-hide the labeled window, and gracefully terminate the app</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.setDockPresence(visible)</code></td>
+      <td>Switch macOS between regular Dock/app-switcher presence and accessory/headless behavior; unsupported hosts ignore it</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.launchAtLoginStatus(route)</code> / <code>Cmd.setLaunchAtLogin(enabled, route)</code></td>
+      <td>Query or change the installed app bundle's <code>SMAppService</code> registration; the ok bytes name <code>enabled</code>, <code>disabled</code>, <code>requires_approval</code>, or <code>not_found</code></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.imageLoad(id, source, &#123; event &#125;)</code> + <code>imageCancel(id)</code>/<code>imageUnregister(id)</code></td>
+      <td>Load an image at runtime under the model-owned numeric ImageId your markup binds; one <code>event</code> result — <code>loaded</code> with the decoded width/height, or a failure class. <code>imageCancel</code> ends a live load loudly (state <code>cancelled</code>) and frees the id; <code>imageUnregister</code> releases a loaded image's registry slot (no result — synchronous, like registration) — see <a href="/docs/dynamic-images">Dynamic Images</a></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.channelOpen(key, &#123; event &#125;)</code> / <code>channelClose(key)</code></td>
+      <td>Open an external-source channel under an app-chosen numeric key: the native side holds the posting handle and feeds bytes from its own threads, and every post arrives through the one <code>event</code> arm with the back-pressure counters aboard. <code>channelClose</code> flushes staged posts, dispatches exactly one <code>closed</code> event with the final drop totals, and frees the key</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.audioCaptureStart(key, spec, &#123; event &#125;)</code> / <code>audioCaptureStop(key)</code></td>
+      <td>Capture <code>microphone</code> or <code>system</code> audio as bounded, timestamped, interleaved signed-16 LE PCM chunks. The stream reports <code>started</code>, <code>data</code>, <code>failed</code>, <code>stopped</code>, and <code>rejected</code>, with observable drop counters</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.persist()</code></td>
+      <td>Snapshot the just-committed Model through the engine-owned, capability-gated atomic store; restore arrives through the manifest's configured boot Msg route — see <a href="/docs/persistence">Model Persistence</a></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.store.set/get/delete/scan/setMany</code></td>
+      <td>Persist independent byte records in the engine-owned, capability-gated record store; every result returns through the declared Msg route — see <a href="/docs/record-store">Record Store</a></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.db.query(sql, params, route)</code> / <code>Cmd.db.exec(statements, route)</code></td>
+      <td>Run read-only relational queries as bounded row pages or commit a statement list atomically through the engine-owned SQLite database — see <a href="/docs/sqlite">Relational SQLite</a></td>
+    </tr>
+    <tr>
+      <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
+      <td>App-defined host commands by literal name: fire-and-forget, or routed with exactly one result Msg back</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.cancel(key)</code> / <code>Cmd.batch([a, b])</code></td>
+      <td>Drop an in-flight keyed effect; issue several commands from one dispatch, in order</td>
+    </tr>
+  </tbody>
+</table>
+
+Result arms must match the effect payload: bytes for raw host results and errors, a generated record for typed service results, numbers for timer fires and stream totals, no payload for write acknowledgments, and `{ status, body }` for buffered fetches.
+
+Duplicate keys and cancellation depend on the effect. Buffered engine effects and streamed file reads replace a live predecessor and cancel silently. Service requests reject live duplicate keys, including buffered requests; cancelling a buffered service request dispatches no result. Spawn, streaming-fetch, streaming-service, and streamed write-sink operations reject duplicate keys and route cancellation through `err`. A streaming fetch with a cut or dropped line ends with `truncated`. Check each operation's reference before reusing a key.
+
+`Cmd.openExternalUrl(url)` enforces the [external-link policy](/docs/security#external-links), and `Cmd.revealPath(path)` opens the desktop file manager. `Cmd.credentials.set(key, secret, route)`, `.get(key, route)`, and `.delete(key, route)` use a string key within the namespace derived from the app manifest id. Set/delete use payload-free success arms; get returns secret bytes. A missing get routes `miss`; deleting an absent key succeeds. Declare both the `credentials` capability and permission.
+
+`Cmd.formatLocalTime(timestampMs, "date" | "time" | "datetime", route)` returns localized UTF-8 text using the host locale and time zone. Recording captures the result, so replay does not read those ambient settings.
+
+Durable in-memory state uses `Cmd.persist()`: declare the `persist` capability, configure the boot routes and schema version, then return the command beside the committed model. The engine owns canonical serialization, trailing-edge coalescing, atomic app-data placement, backup recovery, migration, and journal/replay. See [Model Persistence](/docs/persistence) for the complete setup. Raw file commands remain for user-visible files, exports, and blobs; [Files & Streaming](/docs/files) covers their bounds, atomic sink protocol, replay, and `filesystem` permission gate.
+
+Independent byte records use `Cmd.store`: declare the `store` capability, then route set/get/delete/scan/setMany results back to Msg arms. The engine owns the app-data path, SQLite schema, atomic batches, pagination, and replay boundary. See [Record Store](/docs/record-store).
+
+External sources — sockets, file watchers, native worker threads — reach `update` through a channel. `Cmd.channelOpen(key, { event })` opens a long-lived stream under an app-chosen numeric key, and every event dispatches the one `event` arm as a five-field record; `state` must be a named string-literal-union alias carrying exactly the three members — a narrower union would silently drop states the host emits, so the build refuses it. Posting is not a TS verb: compiled cores are single-threaded by design, so the posting handle lives on the native side (`Effects.channelHandle(key)`), where embedders and platform-services extensions post bytes from their own threads. Back-pressure is observable — posts the native handle refused count into `droppedPending`/`droppedTotal` on the next delivered event, never silence — and a duplicate open on a live key dispatches `rejected`. `Cmd.channelClose(key)` ends the stream: staged posts flush, exactly one `closed` event carries the final totals, and the key frees.
+
+```ts:src/core.ts
+import { Cmd } from "@native-sdk/core";
+
+export type ChannelState = "data" | "closed" | "rejected";
+
+export interface Model {
+  readonly samples: number;
+  readonly dropped: number;
+  readonly live: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "start" }
+  | { readonly kind: "stop" }
+  | {
+      readonly kind: "feed";
+      readonly key: number;
+      readonly state: ChannelState;
+      readonly bytes: Uint8Array;
+      readonly droppedPending: number;
+      readonly droppedTotal: number;
+    };
+
+export const viewUnbound = ["feed"] as const;
+
+export function initialModel(): Model {
+  return { samples: 0, dropped: 0, live: false };
+}
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start":
+      return [{ ...model, live: true }, Cmd.channelOpen(1, { event: "feed" })];
+    case "stop":
+      return [model, Cmd.channelClose(1)];
+    case "feed":
+      switch (msg.state) {
+        case "data":
+          return { ...model, samples: model.samples + 1, dropped: msg.droppedTotal };
+        case "closed":
+          return { ...model, live: false, dropped: msg.droppedTotal };
+        case "rejected":
+          return { ...model, live: false };
+      }
+  }
+}
+```
+
+Audio input uses the same bounded, wake-driven stream transport without requiring native posting code. `Cmd.audioCaptureStart(key, { source, sampleRate?, channels? }, { event })` captures the microphone or the desktop output mix. The supported canonical rates are 16, 24, and 48 kHz; channels are mono or stereo; the default is 48 kHz mono. Each `data` event carries at most 20 ms of interleaved signed 16-bit little-endian PCM in `pcm`, plus `timestampMs`, `frames`, the delivered format, and drop counters. Microphone and system capture can run concurrently, but only one stream per source is live; starting that source again stops the prior key. `Cmd.audioCaptureStop(key)` quiesces the native callback, drains accepted chunks, then emits one `stopped` terminal. A key remains occupied until that terminal is delivered, so wait for `stopped` before reusing it. Add `"microphone"` and/or `"system_audio"` to the `app.json` permissions array so packaged macOS apps receive the required usage descriptions and consent prompts.
+
+```ts:src/core.ts
+import { Cmd, type AudioCaptureState, type AudioCaptureSource } from "@native-sdk/core";
+
+export type Msg =
+  | { readonly kind: "record" }
+  | { readonly kind: "stop" }
+  | { readonly kind: "audio_chunk"; readonly key: number; readonly state: AudioCaptureState; readonly source: AudioCaptureSource; readonly sampleRate: number; readonly channels: number; readonly timestampMs: number; readonly frames: number; readonly pcm: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+
+// In update:
+// case "record": return [model, Cmd.audioCaptureStart(1, { source: "microphone", sampleRate: 48000, channels: 1 }, { event: "audio_chunk" })];
+// case "stop": return [model, Cmd.audioCaptureStop(1)];
+```
+
+## Model-derived menu-bar status items
+
+A `src/core.ts` app can own its complete native menu-bar item without custom Zig wiring. Export `statusItem(model): StatusItemState`; the generated launcher installs its icon, tooltip, click/open commands, presentation, and rows from the boot model, then re-derives all of them after committed updates. It patches shell, presentation, and menu independently and never recreates the item just because model state changed.
+
+```ts:src/core.ts
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/menu-bar.svg"),
+    tooltip: utf8Bytes("Sync status"),
+    activationCommand: asciiBytes("app.sync"),
+    alternateActivationCommand: asciiBytes(""),
+    openCommand: asciiBytes("app.sync"),
+    presentation: { title: model.syncing ? utf8Bytes("SYNC…") : utf8Bytes("READY"), width: 62, tone: model.failed ? "critical" : "normal", iconOpacity: model.stale ? 0.5 : 1, monospaced: true, fontSize: 13, fontWeight: "semibold" },
+    items: [
+      { id: 1, label: utf8Bytes("Open"), command: asciiBytes("app.open"), separator: false, enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 2, label: utf8Bytes("Sync now…"), command: asciiBytes("app.sync"), separator: false, enabled: !model.syncing, detail: asciiBytes(""), role: "command", key: asciiBytes("r"), modifiers: { primary: true, command: false, control: false, option: false, shift: false } },
+    ],
+  };
+}
+```
+
+Import the canonical records and unions from `@native-sdk/core/events`. Presentation includes byte `title`, numeric `width`, tone, `iconOpacity`, `monospaced`, `fontSize`, and `fontWeight`; `statusItems` composes several independently styled persistent menu-bar items. Rows include id/label/command/separator/enabled plus secondary `detail`, semantic `role`, key equivalent, and all five modifier booleans. Actionable ids are unique and non-zero, and there are at most 32 rows. `commandMsg(name): Msg | null` maps row selection, status-button activation, Option-activation, and menu-open refresh into the ordinary update loop. See [System Tray](/docs/tray).
+
+Export `statusItems(model): readonly StatusItemDescriptor[]` when the app needs several independent items. Each descriptor adds stable non-zero `id` identity and a live `visible` flag to the same shell/presentation/menu record. Adding/removing descriptors creates/removes only those ids; icon, title, tooltip, visibility, activation/open commands, and menu changes patch in place. Export either the singular or collection helper, not both. macOS supports up to eight simultaneous items; every item keeps its own 32-row menu.
+
+## Model-declared secondary windows
+
+Export `windows(model): readonly WindowDescriptor[]` to derive the live secondary-window set from model state. Construct entries with `windowDescriptor` from `@native-sdk/core`, import `WindowDescriptor` from `@native-sdk/core/events`, and put each window's markup at `src/windows/<label>.native`. Spell the constructor label as a literal `label: asciiBytes("<label>")`; `native check` and every build reject dynamic labels or a label without that matching root. Window roots can import shared components nested under `src/windows/`; the generated launcher embeds and hot-reloads the complete import closure. Adding/removing descriptors creates/closes only those windows; all open windows rebuild from the same committed model.
+
+The main `src/app.native` view can import component files anywhere under `src/`, with `src/components/` as the convention. The generated launcher embeds every other `.native` source and watches the imported closure, so the same imports work in development, release builds, and mobile builds. Secondary-window roots remain narrower: they import within `src/windows/`.
+
+`closePolicy` accepts `"quit"` (the default) or `"hide"`. A `"quit"` user close routes `onCloseCommand` through `commandMsg`, where the app maps it to the Msg that clears its open flag. A `"hide"` close retains the same native window and view and dispatches no close command; `Cmd.showWindow(label)` reveals it. Model-declared secondary windows are desktop-only. See `examples/system-monitor-ts`.
+
+`restorePolicy` accepts `"clamp_to_visible_screen"` (the default) or `"center_on_primary"`. Model-declared windows do not restore persisted frames. On macOS, `"center_on_primary"` centers a fresh descriptor with no authored `x`/`y`; Windows and Linux currently keep their native default placement.
+
+`titlebar` accepts `"standard"`, `"hidden_inset"`, `"hidden_inset_tall"`, or `"chromeless"`. Transparent Windows windows require `"chromeless"`; because that removes the system buttons, fully skinned windows must draw working close/minimize controls.
+
+## Subscriptions are Sub data
+
+Recurring effects are declared, not issued: export `subscriptions(model): Sub<Msg>` and return descriptors derived from the current model. After every commit the host reconciles the returned set against its active timers by key — a new key (or a changed interval) arms a timer, a missing key cancels it — so starting, stopping, and re-tuning timers is just returning different data:
+
+```ts:src/core.ts
+import { Sub } from "@native-sdk/core";
+
+export interface Model {
+  readonly running: boolean;
+  readonly fast: boolean;
+  readonly ticks: number;
+}
+
+export type Msg =
+  | { readonly kind: "toggle" }
+  | { readonly kind: "set_fast" }
+  | { readonly kind: "tick"; readonly at: number };
+
+export const viewUnbound = ["tick"] as const;
+
+export function initialModel(): Model {
+  return { running: false, fast: false, ticks: 0 };
+}
+
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "toggle":
+      return { ...model, running: !model.running };
+    case "set_fast":
+      return { ...model, fast: true };
+    case "tick":
+      return { ...model, ticks: model.ticks + 1 };
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.running) return Sub.none;
+  return Sub.batch([
+    Sub.timer("tick", model.fast ? 250 : 1000, "tick"),
+    Sub.timer("autosave", 30000, "tick"),
+  ]);
+}
+```
+
+Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.fetch`'s response lines, `Cmd.spawn`'s stdout lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
+
+## Text input from markup
+
+A markup text control (`<text-field text="{draft}" on-input="draft_edit" />`) needs a bytes field the control renders and a Msg arm carrying the text-input event. The event union mirrors the runtime's event vocabulary structurally — import it (`import { type TextInputEvent } from "@native-sdk/core/text"`, also re-exported by `@native-sdk/core/events`) or declare the same shape in your core; the pairing rules are in [Native UI: Messages](/docs/native-ui#messages). Your `update` reduces the events over the draft bytes; a minimal reducer (append / backspace / clear) covers simple fields. Full caret/selection/IME fidelity is one import: the SDK ships the byte-splice text engine as `@native-sdk/core/text` (below).
+
+## Splitting a core into modules
+
+A core that outgrows one file splits into modules under `src/` except `src/services/`: relative imports spelled with their real filenames (`./parsers.ts` — the same file runs under node, whose loader resolves real files), `src/` as the hard boundary (`../` and npm packages are diagnostics), and no runtime cycles (`import type` back-edges are fine and idiomatic — a helper module typically type-imports `Model` from the entry). The core may not import service files, even type-only; shared subset-legal shapes live in an ordinary core-class module which a service may import. Export lists and value re-exports are ordinary module surface: `export { helper, doneCount as remaining }` binds names over existing declarations, and `export { parsePs } from "./parsers.ts"` forwards another module's export by name — what stays out is `export default`, `export =`, and `export * from` (the core's flat namespace resolves by name, so every export names what it binds). `core.ts` stays the entry module and the app's public face: `update`, `initialModel`, `subscriptions`, the wiring channels, `themeState` / `themePack` / `statusItem` / `statusItems` / `windows`, and the exported binding helpers live there (declared and exported under their own names — a rename or re-export cannot bind an entry point), and imported modules hold the machinery they call. The SDK also ships library modules in the same subset — `@native-sdk/core/text` is the byte-splice text engine (caret, selection, IME composition, ASCII case-insensitive compare), and `@native-sdk/core/events` is the canonical event and shell vocabulary (`TextInputEvent` re-exported, `ScrollState`, `FrameEvent`, `KeyEvent`, `PinchPhase`/`PinchEvent`, `ColorScheme`, `ThemeState`, the chrome records, `AudioState`/`AudioEvent`, status-item records, and `WindowDescriptor`) so no core re-types it — compiled into your core when imported and absent when not.
+
+<CodeToggle>
+
+```ts
+// src/core.ts — the entry module: Model, Msg, update, and the exports
+// markup binds. Imports feed them.
+import { parseSample, type Sample } from "./parsers.ts";
+import { containsIgnoreCase } from "@native-sdk/core/text";
+
+// src/parsers.ts — a module of the same core, plain subset TypeScript:
+import type { Model } from "./core.ts"; // type-only back-edges are legal
+export interface Sample { readonly value: number; }
+export function parseSample(bytes: Uint8Array): Sample | null { /* ... */ }
+```
+
+```zig
+// src/main.zig — a Zig core splits the ordinary way:
+const parsers = @import("parsers.zig");
+
+// src/parsers.zig
+pub const Sample = struct { value: i64 };
+pub fn parseSample(bytes: []const u8) ?Sample { ... }
+```
+
+</CodeToggle>
+
+## TypeScript services
+
+The core is the app's deterministic logic — `Model`, `Msg`, `update`; services do the app's imperative work. A service operation is a directly exported, non-default named synchronous function under `src/services/`, taking zero or one explicitly typed request and declaring a contract-encodable result. Crossing shapes live in an exported, subset-legal module outside `src/services/` so the core and service import one declaration. The operation name is `<module-basename>.<export>`; `native check` projects its complete type table into `services.contract.json`, checks both classes, and generates the typed core client:
+
+```ts:src/core.ts
+import { feedsParse } from "@native-sdk/services";
+
+case "parse":
+  return [
+    model,
+    feedsParse({ source: model.source, caseSensitive: false }, {
+      key: "parse",
+      ok: "parsed",       // one ParseResult field
+      err: "parse_failed", // one Uint8Array field
+    }),
+  ];
+```
+
+The core never receives a synchronous handle. Its update returns a command, the typed result crosses back as the named Msg arm, and the runtime journals that result like every other effect. Replay parks the request and feeds the recorded result without starting the carrier. The service itself is ordinary static-tier TypeScript — Node built-ins, `fetch`, regexes, JSON, `Map`/`Set`, `Date`, classes — running with the app's privileges on a supervised, lazily started carrier: a sibling child process with a sanitized environment by default, or an explicitly selected in-process worker-thread pool. Writing operations, kind-tagged error throws, streaming and cancellation, exact vendored npm, and the boundary rules NS1065–NS1067 have their own chapter: [TypeScript Services](/docs/typescript/services).
+
+## The dev loop
+
+`native dev --core` runs logic without rebuilding the native app: the core runs under Node with a virtual host — dispatch Msgs as JSON lines (`{"kind":"add"}`, `{"$bytes":"…"}` for bytes payloads), advance a virtual clock (`{"advance":1000}`) to fire timers deterministically, and watch the committed model and effect transcript. Service requests run in an isolated Node worker through the same generated contract: vendored hashes are verified, request/results use the same codecs and error arms, cooperative cancellation/deadlines interrupt CPU-bound work, and stream chunks use the same channel-event shape. Pair `--script msgs.ndjson` with `--watch` to replay a scenario on every edit. The devhost also consumes `NATIVE_SDK_SESSION_RECORD`/`NATIVE_SDK_SESSION_REPLAY` (the environment set by `native automate record|replay`): it writes the native journal format, and replay starts no service worker. Service-only recordings cross between it and the packaged runtime; packaged recordings containing other effect families use `native automate replay`, and devhost rejects those records explicitly. `native dev` runs compiled services for real beside the native app. [Quick Start](/docs/quick-start#run-the-core-under-nodejs) shows a full transcript.
+
+`native dev` hot-reloads `.native` edits into the running window. A `src/core.ts` edit rebuilds the core through the external core compiler and restarts the app. Use `native dev --core` to check logic without rebuilding, then run `native dev` to test the compiled app.
+
+`native check` runs the subset checker (real tsc semantics plus the app-core rules) over the core class, emits and validates the service contract, runs the pinned compiler's coverage verdict over each independent service root, then validates markup and the app manifest. Diagnostics identify the rule and a supported rewrite.
+
+## Build targets
+
+Builds compile everything in the app — the core archive, any service executables or in-process archives, and the runner — for one stated target. The default is the build host; `-Dtarget` selects a cross desktop target following the pinned compiler's build matrix: Linux and Windows GNU targets build from any macOS, Linux, or Windows host, and macOS targets build on a macOS host (Apple linking needs the host toolchain's SDK). A Windows MSVC target builds natively on a matching Windows host; cross-Windows builds use the GNU ABI because Zig supplies that target's CRT and system libraries. An explicitly spelled Linux `-gnu` target also states its glibc version — `x86_64-linux-gnu.2.36` or later, or `x86_64-linux-musl` — because the compiled runtime needs glibc 2.36+ (a bare `-gnu` spelling lands on Zig's older default floor and is refused with the same teaching). The executable name and packaging follow the target OS.
+
+Mobile targets compile the same core as a static archive merged into the mobile embed library, which `native dev|package --target ios|android` link into the toolkit hosts exactly as they do for Zig cores. The mobile matrix is aarch64 only: `aarch64-ios` and `aarch64-ios-simulator` build on a macOS host against the selected Apple SDK with an iOS 15.0 floor, and `aarch64-linux-android` builds on any desktop host against an installed NDK (`ANDROID_NDK_ROOT`, or the newest `ndk/<version>` under the SDK) with an API 26 floor. Services on mobile run only on the in-process pool — mobile apps cannot spawn a sibling process — so `service_carrier = "auto"` resolves to the pool there and an explicit `"child"` is refused with a teaching; desktop builds of the same app keep the child carrier under `auto`. The vendored npm lane is unchanged. Model persistence (`persist`), boot images, and URL media caching are not wired on mobile yet.
+
+## Editor support
+
+The scaffold includes `package.json` and `tsconfig.json` for editor typechecking with tsc. `@native-sdk/core` and its subpaths resolve through `node_modules`. The CLI materializes and refreshes the editor package from the SDK it ships; `native doctor` reports version skew. Apps with services also get an ignored `node_modules/@native-sdk/services` package when `native check` or `native dev --core` regenerates the client. Builds resolve the shipped SDK and checked sources directly, rather than relying on the editor packages.
+
+## Outgrowing the subset
+
+The compiled core is a native static archive, not generated source: `native check` checks and leaves nothing behind, and there is no emitted Zig to read or adopt. If logic needs ambient APIs or ordinary static-tier TypeScript, keep deterministic state transitions in the core and move that work into `src/services/`. Port the core to Zig only when the logic tier itself needs capabilities outside both TypeScript classes; the [App Model](/docs/app-model) page covers that wiring.
+
+## Where the subset ends
+
+The core owns app state and decisions — the app's deterministic logic. Services own imperative application work in ordinary TypeScript: parsing, filesystem transforms, environment inspection, subprocesses, and other ambient operations whose results cross back as messages. The toolkit-extension tier — custom widgets, rasterizer work, new engine-owned effects, and platform integration — remains Zig by design: that layer is the machinery itself, and [Building Components](/docs/building-components) is its guide. Services are not a backdoor storage engine or general FFI surface.
+
+## Reference
+
+The complete core guide ships as `native skills get ts-core`; typed service contracts, vendored npm, streaming, authority, and transport limits ship as `native skills get ts-services`. Both are written for AI agents and precise enough for humans.

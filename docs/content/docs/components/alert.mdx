@@ -1,0 +1,40 @@
+---
+title: "Alert"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `alert` for an inline message. `text` supplies the title, and children supply the description. The title appears beside a 16px icon. Set `variant="destructive"` for a warning icon and destructive colors. The element rejects `gap`; wrap multiple description elements in a `column`.
+
+<ComponentPreview name="alert" alt="Default and destructive alerts rendered by the engine" caption="a titled alert with a description, and the destructive variant" />
+
+## Markup
+
+```html
+<column gap="12" width="380">
+  <alert text="A new version of the shell is available.">
+    <text wrap="true" foreground="text_muted">Restart the app to finish updating.</text>
+  </alert>
+  <alert text="Your session has expired. Sign in again." variant="destructive"></alert>
+</column>
+```
+
+For a dismissible message, render the alert inside an `if` and clear the visibility flag from a button. Use [dialog](/docs/components/dialog), [drawer](/docs/components/drawer), or [sheet](/docs/components/sheet) for a modal message.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.column(.{ .gap = 12, .width = 380 }, .{
+    ui.el(.alert, .{ .text = "A new version of the shell is available." }, .{
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Restart the app to finish updating."),
+    }),
+    ui.el(.alert, .{ .text = "Your session has expired. Sign in again.", .variant = .destructive }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["text", "variant"]} />

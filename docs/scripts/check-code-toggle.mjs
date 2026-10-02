@@ -4,7 +4,7 @@
 // and silently fell back to stacked fences on every page — and nothing
 // caught it because no check looked at rendered output. This one does.
 //
-// For every page.mdx that uses <CodeToggle>, the built HTML under
+// For every content/docs/*.mdx that uses <CodeToggle>, the built HTML under
 // ${NEXT_DIST_DIR:-.next}/server/app must contain exactly as many
 // role="tablist" headers as the source has <CodeToggle> usages.
 //
@@ -15,7 +15,7 @@ import { join, relative, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const docsDir = join(dirname(fileURLToPath(import.meta.url)), "..");
-const appDir = join(docsDir, "src", "app");
+const appDir = join(docsDir, "content", "docs");
 const distDir = join(docsDir, process.env.NEXT_DIST_DIR || ".next");
 const htmlDir = join(distDir, "server", "app");
 
@@ -23,7 +23,7 @@ function* mdxPages(dir) {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) yield* mdxPages(full);
-    else if (entry === "page.mdx") yield full;
+    else if (entry.endsWith(".mdx")) yield full;
   }
 }
 
@@ -39,15 +39,19 @@ for (const page of mdxPages(appDir)) {
   if (expected === 0) continue;
   togglePages += 1;
 
-  const route = relative(appDir, dirname(page)); // e.g. "typescript/packages"
-  const htmlPath = join(htmlDir, `${route}.html`);
+  const route = relative(appDir, page).replace(/\\/g, "/").replace(/\.mdx$/, "").replace(/\/index$/, ""); // e.g. "typescript/packages"
+  const htmlPath = join(htmlDir, "en", "docs", `${route}.html`);
   if (!existsSync(htmlPath)) {
     console.error(`FAIL /${route}: no prerendered HTML at ${htmlPath} — expected a static page with ${expected} code toggle(s)`);
     failures += 1;
     continue;
   }
 
-  const actual = count(readFileSync(htmlPath, "utf8"), 'role="tablist"');
+  const html = readFileSync(htmlPath, "utf8");
+  const actual = count(html, 'aria-label="Sample language"');
+  if (!html.includes('data-language="ts"') || !html.includes('data-language="zig"')) {
+    throw new Error(`${route}: language wrappers missing`);
+  }
   if (actual !== expected) {
     console.error(`FAIL /${route}: ${expected} <CodeToggle> usage(s) in MDX but ${actual} role="tablist" in prerendered HTML — the toggle is falling back to stacked fences`);
     failures += 1;
@@ -57,7 +61,7 @@ for (const page of mdxPages(appDir)) {
 }
 
 if (togglePages === 0) {
-  console.error("FAIL: no page.mdx uses <CodeToggle> — if the component was renamed, update scripts/check-code-toggle.mjs so this pin keeps checking rendered output");
+  console.error("FAIL: no content page uses <CodeToggle> — if the component was renamed, update scripts/check-code-toggle.mjs so this pin keeps checking rendered output");
   failures += 1;
 }
 

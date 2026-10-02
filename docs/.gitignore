@@ -5,3 +5,4 @@ next-env.d.ts
 .next-agent/
 .next-check/
 .next-final/
+.source/

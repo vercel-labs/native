@@ -1,6 +1,6 @@
 // Docs honesty gate: every complete app-core sample in the docs checks clean.
 //
-// Scans docs/src/app/docs/**/page.mdx for ```ts fences (with or without a
+// Scans docs/content/docs/**/*.mdx for ```ts fences (with or without a
 // :filename info-string suffix) and runs the full
 // pipeline (tsc semantics + subset rules + contract analysis) over each block that
 // is a whole core — exported Model, Msg, and update declarations. Fragments
@@ -18,14 +18,14 @@ import { check } from "./helpers.ts";
 const repoRoot = path.dirname(
   path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))),
 );
-const docsAppDir = path.join(repoRoot, "docs", "src", "app");
+const docsAppDir = path.join(repoRoot, "docs", "content", "docs");
 
 function mdxPages(dir: string): string[] {
   const pages: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) pages.push(...mdxPages(full));
-    else if (entry.name === "page.mdx") pages.push(full);
+    else if (entry.name.endsWith(".mdx")) pages.push(full);
   }
   return pages;
 }

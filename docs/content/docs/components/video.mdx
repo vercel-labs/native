@@ -1,0 +1,54 @@
+---
+title: "Video"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `video` to display the app’s single platform-decoded video. macOS uses AVFoundation; Windows and Linux currently report no decoder capability and dispatch a `failed` event when loading.
+
+`src` accepts an app-assets path or an HTTP(S) URL and resolves local assets first. Changing it replaces playback. `autoplay` is enabled by default; `loop` and `muted` configure new playback. The picture preserves its aspect ratio and fits inside the box with black bars as needed.
+
+Set `controls` to include play/pause, seeking, and time readouts without model-owned transport state. For custom controls, use `Cmd.videoLoad` and `Cmd.videoCtl` in TypeScript, or the Zig video effects.
+
+Before the first frame, the surface displays an id-derived placeholder. Reference screenshots and replay use the same placeholder. Transport events are journaled; decoded pixels remain outside the model and replay data.
+
+<ComponentPreview name="video" alt="A video element rendering its placeholder with the house transport chrome" caption="the deterministic placeholder with house controls (no decoder attached)" />
+
+## Markup
+
+```html
+<column gap="10">
+  <video src="assets/clips/launch.mp4" controls height="200" label="Launch clip" />
+  <video src="{model.trailerUrl}" autoplay="false" muted height="200" label="Trailer" />
+</column>
+```
+
+The element is a leaf (no children) with no intrinsic size — give it definite `width`/`height` or flex `grow`, and a `label` for screen readers (the image rule).
+
+## Programmatic construction (Zig)
+
+```zig
+ui.video(.{
+    .src = "assets/clips/launch.mp4",
+    .controls = true,
+    .height = 200,
+    .label = "Launch clip",
+})
+```
+
+## Custom controls
+
+Bare `<video src>` plus your own chrome is the audio pattern end to end: transport events arrive as ordinary messages, and the transport verbs drive the same single player the element loaded.
+
+```zig
+// update
+.toggle_play => if (model.playing) fx.pauseVideo() else fx.playVideo(),
+.scrubbed => |fraction| fx.seekVideo(@intFromFloat(fraction * @as(f64, @floatFromInt(model.duration_ms)))),
+```
+
+See the video-player example for a complete player at both tiers — house chrome on one screen, custom controls on another.
+
+## Attributes
+
+<AttrTable element="video" attrs={["src", "controls", "autoplay", "loop", "muted", "width", "height", "grow", "label", "key", "global-key"]} />

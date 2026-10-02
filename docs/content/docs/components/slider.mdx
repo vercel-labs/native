@@ -1,0 +1,65 @@
+---
+title: "Slider"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
+
+Use `slider` to adjust a fraction from 0 to 1. Bind `value` to the model and handle `on-change` after dragging, keyboard adjustments, or an accessibility set-value action. A message with one numeric payload receives the applied fraction; a message without a payload reports only that a change occurred.
+
+For controlled state, store the fraction in `update` and bind it back to `value`. A changed model value overrides retained state. Repeating the same source value preserves a user adjustment, and a live drag is not interrupted by reconciliation. For a display-only bar, use [progress](/docs/components/progress).
+
+<ComponentPreview name="slider" alt="Sliders rendered by the engine" caption="a bound slider and a disabled slider" />
+
+## Markup
+
+```html
+<column gap="20" width="280">
+  <slider value="{volume}" on-change="volume_changed" label="Volume" />
+  <slider value="0.7" disabled="true" label="Balance" />
+</column>
+```
+
+With a one-number float arm — `{ kind: "volume_changed"; fraction: number }` in a TypeScript core, `volume_changed: f32` in a Zig core — the arm receives the applied fraction directly (the `examples/soundboard-ts` seek bar is the live pattern):
+
+<CodeToggle>
+
+```ts
+// in update: the value event delivers the applied fraction
+case "volume_changed":
+  return { ...model, volume: msg.fraction };
+```
+
+```zig
+// in update: the value event delivers the applied fraction
+.volume_changed => |fraction| model.volume = fraction,
+```
+
+</CodeToggle>
+
+A void `volume_changed` arm keeps the older plain form; the `Options.sync` hook remains available to Zig apps that mirror runtime widget state wholesale.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically; `on_value = Ui.valueMsg(.tag)` is the value channel:
+
+```zig
+ui.column(.{ .gap = 20, .width = 280 }, .{
+    ui.el(.slider, .{
+        .value = model.volume,
+        .on_value = Ui.valueMsg(.volume_changed),
+    }, .{}),
+    ui.el(.slider, .{ .value = 0.7, .disabled = true, .semantics = .{ .label = "Balance" } }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "value",
+    "disabled",
+    "on-change",
+  ]}
+/>

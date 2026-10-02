@@ -1423,19 +1423,19 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "close:function(options){return invoke('native-sdk.view.close',viewSelectorPayload(options))" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-command-contracts", "Verify command docs match native view update contracts", &.{
-        .{ .path = "docs/src/app/docs/commands/page.mdx", .pattern = ".text = \"Refreshed\"" },
-        .{ .path = "docs/src/app/docs/commands/page.mdx", .pattern = "const commands = await window.zero.commands.list();" },
+        .{ .path = "docs/content/docs/commands.mdx", .pattern = ".text = \"Refreshed\"" },
+        .{ .path = "docs/content/docs/commands.mdx", .pattern = "const commands = await window.zero.commands.list();" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-native-view-contracts", "Verify native surface docs describe view identity", &.{
-        .{ .path = "docs/src/app/docs/native-surfaces/page.mdx", .pattern = "ViewInfo.id" },
-        .{ .path = "docs/src/app/docs/native-surfaces/page.mdx", .pattern = "window.zero.views.update(\"status\"" },
-        .{ .path = "docs/src/app/docs/native-surfaces/page.mdx", .pattern = "first-frame latency budget" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "ViewInfo.id" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "window.zero.views.update(\"status\"" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "first-frame latency budget" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-shell-manifest-contracts", "Verify app.zon docs describe shell compatibility window labels", &.{
-        .{ .path = "docs/src/app/docs/app-zon/page.mdx", .pattern = "labels must stay unique across both lists" },
+        .{ .path = "docs/content/docs/app-zon.mdx", .pattern = "labels must stay unique across both lists" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-media-producer-contracts", "Verify the media producer docs' typed callback stays mirrored by the compile-shaped pin in media_surface_tests.zig", &.{
-        .{ .path = "docs/src/app/docs/media-producers/page.mdx", .pattern = "producer: media.MediaSurfaceProducer" },
+        .{ .path = "docs/content/docs/media-producers.mdx", .pattern = "producer: media.MediaSurfaceProducer" },
         .{ .path = "src/runtime/media_surface_tests.zig", .pattern = "producer: media.MediaSurfaceProducer" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-session-replay-image-codec", "Verify the replay runner installs the host image codec headlessly (the desktop arms cannot link in unit tests; the null-fallback arm is covered in session_tests.zig)", &.{
@@ -2070,8 +2070,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
-        .{ .path = "docs/src/app/docs/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
-        .{ .path = "docs/src/app/docs/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
+        .{ .path = "docs/content/docs/security.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
+        .{ .path = "docs/content/docs/bridge/builtin-commands.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
     });
 
     addTestStep(b, "test-geometry", "Run geometry module tests", geometry_tests);
