@@ -135,7 +135,7 @@ pub fn boot(model: *Model, fx: *Effects) void {
         model.history_index = 0;
         model.address_field.set(home_url);
     }
-    fx.ptySpawn(.{
+    _ = fx.ptySpawn(.{
         .key = shell_effect_key,
         .argv = default_shell_argv,
         .cols = 80,

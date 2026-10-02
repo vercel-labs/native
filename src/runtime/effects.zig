@@ -3460,6 +3460,20 @@ pub fn Effects(comptime Msg: type) type {
             on_event: PtyMsgFn,
         };
 
+        /// A versioned reference to one `ptySpawn` occupancy, returned
+        /// by `ptySpawn` and accepted by `ptyWriteChecked`. `key` alone
+        /// is reusable (a later spawn may claim the same key once this
+        /// occupancy's exit has delivered and its slot retired);
+        /// `generation` is stamped fresh on every spawn and is what
+        /// `ptyWriteChecked` actually pins a write to. Prefer this over
+        /// the bare-key `ptyWrite` whenever a write could otherwise
+        /// race a respawn under the same key (see `ptyWrite`'s
+        /// key-reuse-misdelivery note).
+        pub const PtyHandle = struct {
+            key: u64,
+            generation: u64,
+        };
+
         /// A recorded fake-pty spawn request, exposed for test
         /// assertions (`pendingPtyAt`). Strings borrow the slot's
         /// storage — valid until the slot retires.
@@ -8267,10 +8281,11 @@ pub fn Effects(comptime Msg: type) type {
         /// per-drain Msgs (and journal records), never per-read ones.
         /// Under session replay nothing spawns — the journaled batches
         /// and exit ARE the session (`feedPtyOutput`/`feedPtyExit`).
-        pub fn ptySpawn(self: *Self, options: PtySpawnOptions) void {
+        pub fn ptySpawn(self: *Self, options: PtySpawnOptions) ?PtyHandle {
             self.reclaimSlots();
             if (options.argv.len == 0 or options.argv.len > max_effect_argv) {
-                return self.rejectPty(options.key, options.on_event, true);
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
             }
             var total_bytes: usize = 0;
             for (options.argv) |arg| {
@@ -8280,26 +8295,46 @@ pub fn Effects(comptime Msg: type) type {
                 // a cut argument (validated here so the fake executor
                 // and replay refuse identically, before the real
                 // transport's own guard).
-                if (std.mem.indexOfScalar(u8, arg, 0) != null) return self.rejectPty(options.key, options.on_event, true);
+                if (std.mem.indexOfScalar(u8, arg, 0) != null) {
+                    self.rejectPty(options.key, options.on_event, true);
+                    return null;
+                }
             }
-            if (total_bytes > max_effect_argv_bytes) return self.rejectPty(options.key, options.on_event, true);
-            if (options.cols == 0 or options.rows == 0) return self.rejectPty(options.key, options.on_event, true);
+            if (total_bytes > max_effect_argv_bytes) {
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
+            }
+            if (options.cols == 0 or options.rows == 0) {
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
+            }
             if (options.term.len == 0 or options.term.len > max_effect_pty_term_bytes) {
-                return self.rejectPty(options.key, options.on_event, true);
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
             }
             // TERM rides the child environment; an embedded NUL would
             // truncate it at the C boundary, so a spawn that "succeeded"
             // would hand the child a different TERM than requested.
-            if (std.mem.indexOfScalar(u8, options.term, 0) != null) return self.rejectPty(options.key, options.on_event, true);
-            if (self.keyOccupiedUntilDelivery(options.key)) return self.rejectPty(options.key, options.on_event, true);
-            const slot_index = self.findIdlePtySlot() orelse return self.rejectPty(options.key, options.on_event, true);
+            if (std.mem.indexOfScalar(u8, options.term, 0) != null) {
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
+            }
+            if (self.keyOccupiedUntilDelivery(options.key)) {
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
+            }
+            const slot_index = self.findIdlePtySlot() orelse {
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
+            };
             // Table capacity obeys the replay-hold invariant, the
             // channel argument verbatim: executor-truth start failures
             // park a real slot under replay until the journaled
             // terminal feeds, so live holds the open counted through
             // the staged window too.
             if (self.idlePtySlotCount() <= self.stagedPtyReservationCount()) {
-                return self.rejectPty(options.key, options.on_event, true);
+                self.rejectPty(options.key, options.on_event, true);
+                return null;
             }
             // A build without a pty transport (a libc-free Linux
             // build; a target outside the support matrix) refuses up
@@ -8314,7 +8349,10 @@ pub fn Effects(comptime Msg: type) type {
             // spawn), instead of the replayed spawn parking with no
             // journaled terminal to retire it.
             if (comptime !pty_transport.supported) {
-                if (self.executor != .fake) return self.rejectPty(options.key, options.on_event, false);
+                if (self.executor != .fake) {
+                    self.rejectPty(options.key, options.on_event, false);
+                    return null;
+                }
             }
 
             const slot = &self.pty_slots[slot_index];
@@ -8338,6 +8376,7 @@ pub fn Effects(comptime Msg: type) type {
             }
             @memcpy(slot.term_storage[0..options.term.len], options.term);
             slot.term_len = options.term.len;
+            const handle: PtyHandle = .{ .key = options.key, .generation = generation };
 
             if (slot.fake) {
                 // Session replay: PARK — the fake-slot discipline. The
@@ -8349,9 +8388,16 @@ pub fn Effects(comptime Msg: type) type {
                     slot.park_seq = self.nextPendingSeq();
                     slot.park_state = .reserved;
                 }
-                return;
+                return handle;
             }
             self.startRealPty(slot, options);
+            // `startRealPty` may fail synchronously and release the slot
+            // (staging `.spawn_failed` instead) — the returned handle is
+            // still correct either way: `ptyWriteChecked` re-validates
+            // the generation against whatever currently occupies `key`
+            // at write time, so a handle for an already-released slot
+            // simply reads back as "unknown" rather than misdelivering.
+            return handle;
         }
 
         /// Write bytes toward the pty child's stdin, all-or-nothing.
@@ -8377,6 +8423,43 @@ pub fn Effects(comptime Msg: type) type {
         /// exact: a verdict is journaled (and consumed) iff the key names
         /// a live occupancy and the payload is non-empty — both
         /// deterministic across the replayed dispatch stream.
+        // NOTE(key-reuse misdelivery): `findPtySlot` below matches purely
+        // on the bare `u64` key. Once a key's slot is retired
+        // (`retirePtySlot`, state -> `.idle`) it becomes eligible for
+        // reuse by a *new* `ptySpawn` under the same key, so a `ptyWrite`
+        // intended for the OLD occupant but issued after a NEW occupant
+        // has already spawned under that same key silently lands on the
+        // new occupant's stdin instead of being dropped.
+        //
+        // `ts_core_host.zig`'s `issuePtySpawn`/`runPtyWrite` owns both the
+        // spawn and the write for its keys, so it now stamps and reuses
+        // `PtyHandle.generation` via `ptyWriteChecked` below — closing the
+        // gap outright rather than just relying on its `entry.used`
+        // liveness gate.
+        //
+        // `ui_app.zig`'s `terminalGatewayWrite` (the built-in `<terminal>`
+        // element's write path, via `terminal_session.zig`'s
+        // `TerminalSessions`) still uses this bare-key form. That module
+        // does not own the spawn — the embedding app calls `ptySpawn` and
+        // merely binds the resulting key to a `<terminal>` element, and
+        // deliberately keeps the SAME session object across a respawn
+        // under the same key (`notePtyEvent`'s `.output` handler calls
+        // `resetForRespawn` rather than allocating a new session) — so
+        // adopting `ptyWriteChecked` there would mean threading a
+        // generation through the public `EffectPtyEvent` contract
+        // `session_journal.zig`/`session_replay.zig` serialize, a wire-
+        // format change well beyond this fix's scope. It remains safe
+        // under the same single-threaded-dispatch argument verified for
+        // `ts_core_host.zig`, via a different mechanism: `keyEvent`/
+        // `textInput` (the only two paths that call `gateway.write`) both
+        // gate on `Session.acceptsInput()` (`!session.ended`), and
+        // `session.ended` is set at the same exit-delivery instant that
+        // frees the key for reuse, only clearing again once the new
+        // spawn's first output batch arrives — so no write can reach the
+        // gateway for a key between an old occupant's exit and a new
+        // occupant's first output. New callers that own both the spawn
+        // and the write should prefer `ptyWriteChecked` over this
+        // bare-key form.
         pub fn ptyWrite(self: *Self, key: u64, bytes: []const u8) bool {
             const slot = self.findPtySlot(key) orelse {
                 // A spawn whose transport failed SYNCHRONOUSLY released
@@ -8410,6 +8493,26 @@ pub fn Effects(comptime Msg: type) type {
                 .code = if (accepted) 1 else 0,
             });
             return accepted;
+        }
+
+        /// `ptyWrite`, but pinned to the exact occupancy `handle` names
+        /// instead of whatever currently holds `handle.key`. Closes the
+        /// key-reuse-misdelivery gap `ptyWrite` documents: if `handle`'s
+        /// occupancy has already retired and the key was reused by a
+        /// newer `ptySpawn`, `handle.generation` no longer matches the
+        /// slot's current generation, so the write is refused exactly
+        /// like an unknown key rather than landing on the new occupant.
+        /// The mismatch case is deliberately NOT counted into
+        /// `dropped_writes` (that tally belongs to the CURRENT occupant,
+        /// which never saw this write) and is not journaled — from
+        /// `handle`'s perspective this occupancy is simply gone, the same
+        /// silent-refuse contract `ptyWrite` already gives a key with no
+        /// spawn at all.
+        pub fn ptyWriteChecked(self: *Self, handle: PtyHandle, bytes: []const u8) bool {
+            if (self.findPtySlot(handle.key)) |slot| {
+                if (slot.generation != handle.generation) return false;
+            }
+            return self.ptyWrite(handle.key, bytes);
         }
 
         /// The admission decision behind `ptyWrite` — the live half the
