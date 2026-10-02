@@ -4017,6 +4017,7 @@ fn tsCoreE2eArtifact(
         \\pub const nativeWindowView = core.nativeWindowView;
         \\pub const nativeViewEvent = core.nativeViewEvent;
         \\pub const nativeResizablePolicy = core.nativeResizablePolicy;
+        \\pub const nativeTextPolicy = core.nativeTextPolicy;
     );
     const feed_reader_mod = b.createModule(.{
         .root_source_file = feed_reader_root,
