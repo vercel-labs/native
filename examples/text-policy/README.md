@@ -25,6 +25,10 @@ composition, and committing a composition records one undoable edit.
 Undo restores the selection's direction as well as its byte range. Each editor
 has its own history: editing another field keeps the first field's redo branch.
 Canceling an empty composition keeps redo; committing a new edit replaces it.
+Previews can grow, shrink, or temporarily match the original text while staying
+in one transaction. Completing with the original text keeps redo. Canceling a
+preview that replaced selected text leaves that selection removed; Undo restores
+the original text and selection in one step.
 Replacing characters that share UTF-8 bytes still undoes whole characters.
 An IME preview that joins CR and LF records their shared line-break context,
 so Undo restores the original delimiters and selection in one step.

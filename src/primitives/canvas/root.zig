@@ -712,6 +712,9 @@ pub const widgetCompiledTextHistoryReplay = event_model.widgetCompiledTextHistor
 pub const TextHistoryDelta = event_model.TextHistoryDelta;
 pub const TextHistoryRecordResult = event_model.TextHistoryRecordResult;
 pub const widgetCompiledTextHistoryDelta = event_model.widgetCompiledTextHistoryDelta;
+pub const TextCompositionHistoryState = event_model.TextCompositionHistoryState;
+pub const TextCompositionHistoryResult = event_model.TextCompositionHistoryResult;
+pub const widgetCompiledTextCompositionHistory = event_model.widgetCompiledTextCompositionHistory;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

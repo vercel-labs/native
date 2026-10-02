@@ -957,6 +957,50 @@ pub fn widgetCompiledTextHistoryDelta(widget: Widget, before: text_model.TextEdi
     return .{ .delta = delta };
 }
 
+pub const TextCompositionHistoryState = struct {
+    prefix_len: usize,
+    removed_len: usize,
+    before_text_len: usize,
+    after_text_len: usize,
+    capacity: usize,
+    active: bool,
+    before_matches: bool,
+};
+
+pub const TextCompositionHistoryResult = struct {
+    action: enum(u32) { discard, retain, remove, commit },
+    after_end: usize = 0,
+    inserted_len: usize = 0,
+};
+
+/// Plan a provisional entry update without borrowing text or history bytes.
+/// Copy the fixed result before another policy call resets the compiler arena.
+pub fn widgetCompiledTextCompositionHistory(widget: Widget, state: TextCompositionHistoryState) ?TextCompositionHistoryResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (state.before_text_len > budget or state.after_text_len > budget or state.capacity > budget or
+        state.prefix_len > std.math.maxInt(u32) or state.removed_len > std.math.maxInt(u32))
+        @panic("compiled text composition history exceeds byte budget");
+    var request: [24]u8 = @splat(0);
+    request[0] = 9;
+    request[1] = @intFromBool(state.active);
+    request[2] = @intFromBool(state.before_matches);
+    const args = [_]usize{ state.prefix_len, state.removed_len, state.before_text_len, state.after_text_len, state.capacity };
+    for (args, 0..) |value, index| std.mem.writeInt(u32, request[4 + index * 4 ..][0..4], @intCast(value), .little);
+    var output: [12]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled text composition history result");
+    const action = std.mem.readInt(u32, output[0..4], .little);
+    const end = std.mem.readInt(u32, output[4..8], .little);
+    const inserted = std.mem.readInt(u32, output[8..12], .little);
+    if (action > 3 or (action == 0 and (end != 0 or inserted != 0)))
+        @panic("invalid compiled text composition history action");
+    if (action != 0 and (end < state.prefix_len or end > state.after_text_len or
+        inserted != end - state.prefix_len or state.removed_len > state.capacity or inserted > state.capacity - state.removed_len))
+        @panic("invalid compiled text composition history range");
+    return .{ .action = @enumFromInt(action), .after_end = end, .inserted_len = inserted };
+}
+
 pub const TextHistoryReplayState = struct {
     mode: enum(u8) { start, next, commit },
     redo: bool,

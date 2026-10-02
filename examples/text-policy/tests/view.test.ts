@@ -252,6 +252,42 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
       await key("cmd+z"); expectText("draft", before); selection("draft", at, at);
       await key("cmd+shift+z"); expectText("draft", committed);
     }
+    // Repeated IME resizes preserve the original removed bytes while another
+    // editor has its own standing history. Intermediate original-byte matches
+    // stay active; only completion decides the fork.
+    await click("New desk");
+    await set("Message", "Neighbor"); await select("Message", 8, 8);
+    s = await app.composeText(field("Message"), "é"); save();
+    s = await app.commitComposition(field("Message")); save();
+    await set("Note", "Lé🙂R"); await select("Note", 7, 1);
+    s = await app.composeText(field("Note"), "old"); save();
+    s = await app.commitComposition(field("Note")); save();
+    await key("cmd+z"); expectText("draft", "Lé🙂R"); selection("draft", 7, 1);
+    s = await app.composeText(field("Note"), "x"); save();
+    for (const preview of ["日本🙂long preview", "", "é🙂", "ĩ🙂"]) {
+      s = await app.composeText(field("Note"), preview); save(); expectText("draft", `L${preview}R`);
+      assert.ok(value("draft").compStart >= 0);
+      await click("Refresh"); expectText("draft", `L${preview}R`);
+    }
+    s = await app.commitComposition(field("Note")); save();
+    await focus("Note"); await key("cmd+shift+z"); expectText("draft", "Lĩ🙂R");
+    await key("cmd+z"); expectText("draft", "Lé🙂R"); selection("draft", 7, 1);
+    await key("cmd+shift+z"); expectText("draft", "Lĩ🙂R");
+    await focus("Message"); await key("cmd+z"); expectText("chat", "Neighbor");
+    await key("cmd+shift+z"); expectText("chat", "Neighboré");
+    // A no-op completion preserves Redo despite temporary growth. Canceling
+    // a replacement instead commits the removal and remains one undo step.
+    await focus("Note"); await key("cmd+z");
+    s = await app.composeText(field("Note"), "日本🙂long preview"); save();
+    s = await app.composeText(field("Note"), "é🙂"); save();
+    s = await app.commitComposition(field("Note")); save(); expectText("draft", "Lé🙂R");
+    await key("cmd+shift+z"); expectText("draft", "Lĩ🙂R");
+    await key("cmd+z");
+    s = await app.composeText(field("Note"), "日本🙂long preview"); save();
+    s = await app.composeText(field("Note"), "x"); save();
+    s = await app.cancelComposition(field("Note")); save(); expectText("draft", "LR");
+    await key("cmd+shift+z"); expectText("draft", "LR");
+    await key("cmd+z"); expectText("draft", "Lé🙂R"); selection("draft", 7, 1);
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

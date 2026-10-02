@@ -676,3 +676,32 @@ test("history deltas keep complete UTF-8 and CRLF context, including empty preed
   invalid[3] = 0; new DataView(invalid.buffer).setUint32(4, 524289, true);
   assert.throws(() => exports.native_text_policy!(invalid), /invalid text history delta budget/);
 });
+
+test("composition history keeps active no-ops and finalizes within the shared byte budget", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const request = new Uint8Array(24), data = new DataView(request.buffer);
+  request[0] = 9;
+  const plan = (active: boolean, matches: boolean, args: number[]) => {
+    request[1] = active ? 1 : 0; request[2] = matches ? 1 : 0;
+    args.forEach((value, i) => data.setUint32(4 + i * 4, value, true));
+    return Array.from(new Uint32Array(exports.native_text_policy!(request).buffer));
+  };
+  // Preserve a prefix and suffix while previews grow, shrink and return to
+  // the original bytes; matching active bytes still belong to the transaction.
+  assert.deepEqual(plan(true, false, [1, 6, 8, 15, 32]), [1, 14, 13]);
+  assert.deepEqual(plan(true, false, [1, 6, 8, 2, 32]), [1, 1, 0]);
+  assert.deepEqual(plan(true, true, [1, 6, 8, 8, 32]), [1, 7, 6]);
+  assert.deepEqual(plan(false, true, [1, 6, 8, 8, 32]), [2, 7, 6]);
+  assert.deepEqual(plan(false, false, [1, 6, 8, 8, 32]), [3, 7, 6]); // same length, different hash
+  assert.deepEqual(plan(false, true, [1, 6, 8, 9, 32]), [3, 8, 7]);
+  assert.deepEqual(plan(true, false, [1, 6, 8, 15, 18]), [0, 0, 0]);
+  assert.deepEqual(plan(true, false, [1, 8, 8, 15, 32]), [0, 0, 0]);
+  assert.deepEqual(plan(true, false, [1, 6, 8, 1, 32]), [0, 0, 0]);
+  assert.deepEqual(plan(true, false, [4294967295, 1, 8, 8, 32]), [0, 0, 0]);
+  assert.deepEqual(plan(true, false, [0, 0, 0, 524288, 524288]), [1, 524288, 524288]);
+  request[3] = 1;
+  assert.throws(() => exports.native_text_policy!(request), /invalid text composition history request/);
+  request[3] = 0; data.setUint32(20, 524289, true);
+  assert.throws(() => exports.native_text_policy!(request), /invalid text composition history budget/);
+});

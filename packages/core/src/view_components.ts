@@ -44,6 +44,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 6) return nscvTextInput(request);
   if (request[0] === 7) return nscvTextHistoryReplay(request);
   if (request[0] === 8) return nscvTextHistoryDelta(request);
+  if (request[0] === 9) return nscvTextCompositionHistory(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -347,6 +348,32 @@ function nscvHistoryCaretOffset(text: Uint8Array, offset: number): number {
   while (cursor > 0 && cursor < text.length && (text[cursor]! & 0xc0) === 0x80) cursor -= 1;
   if (cursor > 0 && cursor < text.length && text[cursor] === 10 && text[cursor - 1] === 13) cursor -= 1;
   return cursor;
+}
+
+/** Composition history update: tag 9, active, original-byte-match witness,
+ * reserved; LE u32 prefix, removed length, original/current text lengths and
+ * history capacity. Result: action (0 discard/1 retain/2 remove no-op/3 commit),
+ * inserted end and length. Native retains the original removed bytes, hashes,
+ * selections and pool compaction; no text payload crosses this boundary.
+ */
+function nscvTextCompositionHistory(request: Uint8Array): Uint8Array {
+  if (request.length !== 24 || request[1]! > 1 || request[2]! > 1 || request[3] !== 0)
+    throw new Error("invalid text composition history request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const prefix = data.getUint32(4, true), removed = data.getUint32(8, true);
+  const beforeLength = data.getUint32(12, true), afterLength = data.getUint32(16, true);
+  const capacity = data.getUint32(20, true), budget = 512 * 1024;
+  if (beforeLength > budget || afterLength > budget || capacity > budget)
+    throw new Error("invalid text composition history budget");
+  const result = new Uint8Array(12), out = new DataView(result.buffer);
+  if (prefix + removed > beforeLength) return result;
+  const suffix = beforeLength - prefix - removed;
+  if (afterLength < prefix + suffix) return result;
+  const end = afterLength - suffix, inserted = end - prefix;
+  if (removed + inserted > capacity) return result;
+  out.setUint32(0, request[1] === 1 ? 1 : afterLength === beforeLength && request[2] === 1 ? 2 : 3, true);
+  out.setUint32(4, end, true); out.setUint32(8, inserted, true);
+  return result;
 }
 
 function nscvInteger(value: number): number {

@@ -2791,6 +2791,194 @@ test "compiled history deltas support two full text budgets and survive arena re
     try std.testing.expect(canvas.widgetCompiledTextHistoryDelta(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, source, target, false) == null);
 }
 
+test "compiled composition history handles bounds full budgets and arena ownership" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy };
+    var state = canvas.TextCompositionHistoryState{
+        .prefix_len = 1,
+        .removed_len = 6,
+        .before_text_len = 8,
+        .after_text_len = 15,
+        .capacity = 32,
+        .active = true,
+        .before_matches = false,
+    };
+    const plan = canvas.widgetCompiledTextCompositionHistory(widget, state).?;
+    const bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    _ = canvas.widgetCompiledTextInput(widget, "other\ninput", 0, null, 0);
+    try std.testing.expectEqualDeep(canvas.TextCompositionHistoryResult{ .action = .retain, .after_end = 14, .inserted_len = 13 }, plan);
+    state.after_text_len = 8;
+    state.before_matches = true;
+    try std.testing.expectEqual(.retain, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.active = false;
+    try std.testing.expectEqual(.remove, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.before_matches = false;
+    try std.testing.expectEqual(.commit, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.after_text_len = 2;
+    try std.testing.expectEqualDeep(canvas.TextCompositionHistoryResult{ .action = .commit, .after_end = 1 }, canvas.widgetCompiledTextCompositionHistory(widget, state).?);
+    state.after_text_len = 1;
+    try std.testing.expectEqual(.discard, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.after_text_len = 15;
+    state.capacity = 18;
+    try std.testing.expectEqual(.discard, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.capacity = 19;
+    try std.testing.expectEqual(.commit, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.removed_len = 8;
+    try std.testing.expectEqual(.discard, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state.prefix_len = std.math.maxInt(u32);
+    try std.testing.expectEqual(.discard, canvas.widgetCompiledTextCompositionHistory(widget, state).?.action);
+    state = .{ .prefix_len = 0, .removed_len = 0, .before_text_len = 0, .after_text_len = canvas.max_widget_text_bytes_per_view, .capacity = canvas.max_widget_text_bytes_per_view, .active = true, .before_matches = false };
+    try std.testing.expectEqualDeep(canvas.TextCompositionHistoryResult{ .action = .retain, .after_end = canvas.max_widget_text_bytes_per_view, .inserted_len = canvas.max_widget_text_bytes_per_view }, canvas.widgetCompiledTextCompositionHistory(widget, state).?);
+    try std.testing.expect(canvas.widgetCompiledTextCompositionHistory(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, state) == null);
+}
+
+test "compiled composition updates preserve removed bytes redo and neighboring pool entries" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-composition-history", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 400, 300) });
+    const view = &harness.runtime.views[0];
+    const history_pool = view.canvas_widget_text_history_bytes;
+    defer view.canvas_widget_text_history_bytes = history_pool;
+    // Force actual eviction and movement using a small shared pool, without
+    // changing the editors' text capacity or the number of entry slots.
+    view.canvas_widget_text_history_bytes = history_pool[0..40];
+    const Entry = @TypeOf(view.canvas_widget_text_history_entries[0]);
+    const HistorySnapshot = struct {
+        entries: [16]Entry = @splat(.{}),
+        count: usize = 0,
+        payload: [40]u8 = @splat(0),
+        payload_len: usize = 0,
+        text: [3][128]u8 = @splat(@splat(0)),
+        lengths: [3]usize = @splat(0),
+        selection: [3]canvas.TextSelection = @splat(.{}),
+        composition: [3]?canvas.TextRange = @splat(null),
+        next_serial: u64 = 0,
+    };
+    const Battery = struct {
+        expected: [64]HistorySnapshot = undefined,
+        step: usize = 0,
+        compiled: bool = false,
+        fn save(self: *@This(), v: anytype) !void {
+            var snapshot: HistorySnapshot = .{ .count = v.canvas_widget_text_history_entry_count, .next_serial = v.canvas_widget_text_history_next_serial, .payload_len = v.canvas_widget_text_history_byte_count };
+            @memcpy(snapshot.entries[0..snapshot.count], v.canvas_widget_text_history_entries[0..snapshot.count]);
+            @memcpy(snapshot.payload[0..v.canvas_widget_text_history_byte_count], v.canvas_widget_text_history_bytes[0..v.canvas_widget_text_history_byte_count]);
+            for (v.widget_layout_nodes[1..4], 0..) |node, i| {
+                const widget = node.widget;
+                @memcpy(snapshot.text[i][0..widget.text.len], widget.text);
+                snapshot.lengths[i] = widget.text.len;
+                snapshot.selection[i] = widget.text_selection orelse .{};
+                snapshot.composition[i] = widget.text_composition;
+            }
+            if (self.compiled) try std.testing.expectEqualDeep(self.expected[self.step], snapshot) else self.expected[self.step] = snapshot;
+            self.step += 1;
+        }
+        fn edit(self: *@This(), v: anytype, id: canvas.ObjectId, event: canvas.TextInputEvent) !void {
+            _ = try v.applyCanvasWidgetTextEdit(id, event);
+            try self.save(v);
+        }
+        fn shortcut(self: *@This(), test_harness: anytype, application: native_sdk.App, id: canvas.ObjectId, redo: bool) !void {
+            test_harness.runtime.views[0].canvas_widget_focused_id = id;
+            try test_harness.runtime.dispatchPlatformEvent(application, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "z", .modifiers = .{ .primary = true, .shift = redo } } });
+            try self.save(&test_harness.runtime.views[0]);
+        }
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        // Each ending must resolve the original transaction after multiple
+        // resizes: explicit commit, no-op completion, cancel, pointer commit.
+        for (0..5) |ending| {
+            var battery: Battery = .{};
+            for ([_]bool{ false, true }) |compiled| {
+                const empty = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack }, geometry.RectF.init(0, 0, 400, 300), &nodes);
+                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", empty);
+                view.canvas_widget_text_history_next_serial = 1;
+                var children: [3]canvas.Widget = undefined;
+                for (&children, 0..) |*child, i| child.* = .{
+                    .id = @intCast(2 + i),
+                    .kind = kind,
+                    .frame = geometry.RectF.init(12, 16 + @as(f32, @floatFromInt(i)) * 88, 180, 84),
+                    .text = if (i == 0) "Lé🙂R" else "Neighbor",
+                    .text_selection = canvas.TextSelection.collapsed(8),
+                    .interaction_policy = if (compiled) core.nativeTextPolicy else null,
+                };
+                const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 400, 300), &nodes);
+                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                battery.compiled = compiled;
+                battery.step = 0;
+                try battery.edit(view, 4, .{ .insert_text = "123456789012" });
+                try battery.edit(view, 2, .{ .set_selection = .{ .anchor = 7, .focus = 1, .affinity = .downstream } });
+                try battery.edit(view, 2, .{ .insert_text = "é" });
+                try battery.shortcut(harness, app, 2, false);
+                try std.testing.expectEqualStrings("Lé🙂R", view.widget_layout_nodes[1].widget.text);
+                try battery.edit(view, 3, .{ .insert_text = "old" });
+                try battery.shortcut(harness, app, 3, false);
+                try battery.edit(view, 2, .{ .set_composition = .{ .text = "x" } });
+                // This later entry has to shift on every composition resize.
+                try battery.edit(view, 3, .{ .insert_text = "N" });
+                for ([_][]const u8{ "日本🙂previewlong", "", "é🙂", "ĩ🙂" }) |preview| {
+                    try battery.edit(view, 2, .{ .set_composition = .{ .text = preview, .cursor = 0 } });
+                    var saw_provisional = false;
+                    for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| {
+                        if (!entry.provisional_composition) continue;
+                        saw_provisional = true;
+                        try std.testing.expectEqualStrings("é🙂", view.canvas_widget_text_history_bytes[entry.byte_start..][0..entry.removed_len]);
+                    }
+                    try std.testing.expect(saw_provisional);
+                }
+                // The oldest widget's edit was evicted to fit the long
+                // preview; target Redo and the later neighbor still fit.
+                for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(entry.target_id != 4);
+                switch (ending) {
+                    0 => try battery.edit(view, 2, .commit_composition),
+                    1 => {
+                        try battery.edit(view, 2, .{ .set_composition = .{ .text = "é🙂" } });
+                        try battery.edit(view, 2, .commit_composition);
+                    },
+                    2 => try battery.edit(view, 2, .cancel_composition),
+                    3 => {
+                        _ = try view.applyCanvasWidgetTextPointer(2, .{ .x = 40, .y = 30 }, false, false, 1);
+                        try battery.save(view);
+                    },
+                    else => {
+                        // An oversized entry retires only the provisional
+                        // transaction; neighboring payloads remain usable.
+                        try battery.edit(view, 2, .{ .set_composition = .{ .text = "01234567890123456789012345678901234567890" } });
+                        try std.testing.expectEqual(@as(usize, 2), view.canvas_widget_text_history_entry_count);
+                        try battery.edit(view, 2, .commit_composition);
+                    },
+                }
+                for (view.canvas_widget_text_history_entries[0..view.canvas_widget_text_history_entry_count]) |entry| try std.testing.expect(!entry.provisional_composition);
+                if (ending == 1) {
+                    try battery.shortcut(harness, app, 2, true);
+                    try std.testing.expectEqualStrings("LéR", view.widget_layout_nodes[1].widget.text);
+                } else if (ending != 4) {
+                    try battery.shortcut(harness, app, 2, true);
+                    try std.testing.expectEqualStrings(if (ending == 2) "LR" else "Lĩ🙂R", view.widget_layout_nodes[1].widget.text);
+                    try battery.shortcut(harness, app, 2, false);
+                    try std.testing.expectEqualStrings("Lé🙂R", view.widget_layout_nodes[1].widget.text);
+                    try std.testing.expectEqual(@as(usize, 7), view.widget_layout_nodes[1].widget.text_selection.?.anchor);
+                    try std.testing.expectEqual(@as(usize, 1), view.widget_layout_nodes[1].widget.text_selection.?.focus);
+                }
+                try battery.shortcut(harness, app, 3, false);
+                try std.testing.expectEqualStrings("Neighbor", view.widget_layout_nodes[2].widget.text);
+                try battery.shortcut(harness, app, 3, true);
+                try std.testing.expectEqualStrings("NeighborN", view.widget_layout_nodes[2].widget.text);
+                try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+            }
+        }
+    }
+}
+
 test "compiled history replay matches native shortcut continuation and completion decisions" {
     const h = try Harness.create(null, "/feed.xml");
     defer h.destroy();

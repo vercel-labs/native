@@ -121,7 +121,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return err;
             };
             if (record_history and current_state.composition != null) {
-                updateCanvasWidgetTextCompositionHistory(self, target_id, next_state);
+                updateCanvasWidgetTextCompositionHistory(self, target_id, widget, next_state);
             }
             self.scrollCanvasTextInputCaretIntoView(index);
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
@@ -802,27 +802,28 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         fn updateCanvasWidgetTextCompositionHistory(
             self: *RuntimeView,
             target_id: canvas.ObjectId,
+            widget: canvas.Widget,
             after: canvas.TextEditState,
         ) void {
             var provisional_index = canvasWidgetTextCompositionHistoryIndex(self, target_id) orelse return;
             var provisional = self.canvas_widget_text_history_entries[provisional_index];
-            if (provisional.prefix_len + provisional.removed_len > provisional.before_text_len) {
+            const after_hash = textHistoryHash(after.text);
+            const state = canvas.TextCompositionHistoryState{
+                .prefix_len = provisional.prefix_len,
+                .removed_len = provisional.removed_len,
+                .before_text_len = provisional.before_text_len,
+                .after_text_len = after.text.len,
+                .capacity = self.canvas_widget_text_history_bytes.len,
+                .active = after.composition != null,
+                .before_matches = after.text.len == provisional.before_text_len and after_hash == provisional.before_hash,
+            };
+            const plan = canvas.widgetCompiledTextCompositionHistory(widget, state) orelse canvasWidgetTextCompositionHistoryPlan(state);
+            if (plan.action == .discard) {
                 removeCanvasWidgetTextHistoryEntry(self, provisional_index);
                 return;
             }
-            const suffix_len = provisional.before_text_len - provisional.prefix_len - provisional.removed_len;
-            if (after.text.len < provisional.prefix_len + suffix_len) {
-                removeCanvasWidgetTextHistoryEntry(self, provisional_index);
-                return;
-            }
-            const after_end = after.text.len - suffix_len;
-            const inserted = after.text[provisional.prefix_len..after_end];
-            const new_inserted_len = inserted.len;
-            const new_entry_byte_len = provisional.removed_len + new_inserted_len;
-            if (new_entry_byte_len > self.canvas_widget_text_history_bytes.len) {
-                removeCanvasWidgetTextHistoryEntry(self, provisional_index);
-                return;
-            }
+            const inserted = after.text[provisional.prefix_len..plan.after_end];
+            const new_inserted_len = plan.inserted_len;
 
             while (self.canvas_widget_text_history_byte_count - provisional.inserted_len + new_inserted_len >
                 self.canvas_widget_text_history_bytes.len)
@@ -867,13 +868,12 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 inserted,
             );
 
-            const after_hash = textHistoryHash(after.text);
             self.canvas_widget_text_history_entries[provisional_index].inserted_len = new_inserted_len;
             self.canvas_widget_text_history_entries[provisional_index].after_text_len = after.text.len;
             self.canvas_widget_text_history_entries[provisional_index].after_hash = after_hash;
             self.canvas_widget_text_history_entries[provisional_index].after_selection = after.selection;
-            if (after.composition != null) return;
-            if (after.text.len == provisional.before_text_len and after_hash == provisional.before_hash) {
+            if (plan.action == .retain) return;
+            if (plan.action == .remove) {
                 removeCanvasWidgetTextHistoryEntry(self, provisional_index);
                 return;
             }
@@ -1072,7 +1072,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             self.widget_layout_nodes[index].widget.text_selection = next_selection;
             self.widget_layout_nodes[index].widget.text_composition = null;
             if (widget.text_composition != null) {
-                updateCanvasWidgetTextCompositionHistory(self, target_id, .{
+                updateCanvasWidgetTextCompositionHistory(self, target_id, widget, .{
                     .text = widget.text,
                     .selection = next_selection,
                     .composition = null,
@@ -1512,6 +1512,22 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             self.widget_revision += 1;
             return self.canvasWidgetDirtyBounds(index, self.widget_layout_nodes[index].frame);
         }
+    };
+}
+
+fn canvasWidgetTextCompositionHistoryPlan(state: canvas.TextCompositionHistoryState) canvas.TextCompositionHistoryResult {
+    if (state.prefix_len > state.before_text_len or state.removed_len > state.before_text_len - state.prefix_len)
+        return .{ .action = .discard };
+    const suffix_len = state.before_text_len - state.prefix_len - state.removed_len;
+    if (state.after_text_len < state.prefix_len + suffix_len) return .{ .action = .discard };
+    const after_end = state.after_text_len - suffix_len;
+    const inserted_len = after_end - state.prefix_len;
+    if (state.removed_len > state.capacity or inserted_len > state.capacity - state.removed_len)
+        return .{ .action = .discard };
+    return .{
+        .action = if (state.active) .retain else if (state.before_matches) .remove else .commit,
+        .after_end = after_end,
+        .inserted_len = inserted_len,
     };
 }
 
