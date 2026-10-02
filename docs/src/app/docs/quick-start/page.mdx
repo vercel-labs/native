@@ -2,7 +2,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 # Quick Start
 
-Native SDK is the complete toolkit for building beautiful native desktop applications: declarative markup, a predictable message-based state model, a modern component library, a native renderer, and tooling for building, running, and packaging apps — no browser or WebView in the binary. Apps are authored in TypeScript and Native markup by default, or in Zig — same loop, same runtime, your choice. This page takes you from install to a running app.
+Install the CLI, create a TypeScript app, and run it in a native window. This guide also covers markup reloads, core checks, and release builds. To write the app core in Zig, use the `zig-core` template.
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ npm install -g @native-sdk/cli
 native version
 ```
 
-Two things the CLI handles for you, so you never configure them:
+The CLI configures the SDK and toolchain:
 
 - **The SDK location.** Apps build against the SDK the CLI ships with — `native init` records the path automatically (override with `--framework <sdk path>`).
 - **The Zig toolchain.** `native dev|build|test` use the Zig on your PATH when its version is compatible, and otherwise offer to download the pinned version into `~/.native/toolchains/` (checksum-verified; pass `--yes` to skip the prompt in scripts). The toolkit requires Zig 0.16.0 — if you learned Zig on an older version, [Zig 0.16 Notes](/docs/zig) maps the standard-library changes.
@@ -28,7 +28,7 @@ native init my_app
 cd my_app
 ```
 
-This scaffolds a native-rendered app — and nothing else. There are no build files to maintain: the CLI owns the build graph, generating it under `.native/build/` (gitignored) on each run. The app itself is three files of truth:
+The CLI generates a counter app and manages its build graph under `.native/build/`. The project contains:
 
 <table>
   <thead>
@@ -67,7 +67,7 @@ This scaffolds a native-rendered app — and nothing else. There are no build fi
 
 Editor support is stock tsc — no extension, no plugin. `package.json` and `tsconfig.json` exist for editors and versioning only, and `node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package: materialized at init, kept fresh by `native check`/`dev`/`build`, and replaced transparently by `npm install` once the package is published to npm. None of it is build truth — builds check and compile against the SDK the CLI ships with and never read node_modules; delete it and every `native` verb still works.
 
-There is no Zig in this tree and no language flag anywhere: the build detects `src/core.ts` and wires everything (`package.json` is not a language marker). Prefer to write the core in Zig? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` (plus generated full-loop tests in `src/tests.zig`) — the tree is the truth, and the build detects whichever core it carries. Zig is the language the whole toolkit is built in, and a Zig core is first-class by choice, not a fallback. Prefer to own `build.zig` from day one? Add `--full` to either template.
+There is no Zig in this tree and no language flag anywhere: the build detects `src/core.ts` and wires everything (`package.json` is not a language marker). Prefer to write the core in Zig? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` (plus generated full-loop tests in `src/tests.zig`) — the tree is the truth, and the build detects whichever core it carries. The toolkit is implemented in Zig, and both core languages use the same runtime. Prefer to own `build.zig` from day one? Add `--full` to either template.
 
 ## Run it
 
@@ -75,7 +75,7 @@ There is no Zig in this tree and no language flag anywhere: the build detects `s
 native dev
 ```
 
-The first run compiles the app and the SDK, so give it a minute; subsequent runs are incremental. A native window opens with a working counter. The whole view is `src/app.native` — a Native markup file:
+The first run compiles the app and the SDK. A native window opens with a counter. Its view is in `src/app.native`:
 
 ```html:src/app.native
 <column gap="12" padding="16">
@@ -239,11 +239,13 @@ That is the whole loop: the model holds state, messages describe what happened, 
 
 ## Edit while it runs
 
-`src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen. A `src/core.ts` edit is different: the core rebuilds through the external core compiler and the app restarts — a few seconds per rebuild, not sub-second — so for fast logic iteration use `native dev --core` (next section).
+`src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates while preserving the count. Parse failures keep the last good view on screen. A `src/core.ts` edit is different: the core rebuilds through the external core compiler and the app restarts — use `native dev --core` (next section).
 
-## The fastest loop: the core under node
+<span id="the-fastest-loop-the-core-under-node" />
 
-Logic changes have an even faster loop than rebuilding the app. `native dev --core` runs `src/core.ts` under node with a virtual host — no window, no renderer, just the dispatch cycle: send messages as JSON lines, watch the committed model and the effect transcript, and advance a virtual clock to fire timers deterministically:
+## Run the core under Node.js
+
+`native dev --core` runs `src/core.ts` under Node.js with a virtual host. Send messages as JSON lines, inspect the committed model and effects, and advance a virtual clock to fire timers. This mode does not open a window or render the UI:
 
 ```bash
 printf '%s\n' '{"kind":"increment"}' '{"kind":"toggle_ticking"}' '{"advance":3000}' | native dev --core

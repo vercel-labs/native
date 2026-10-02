@@ -9,9 +9,9 @@ A Native SDK app is one loop with four parts:
 - **update(model, msg)** — the only place state changes.
 - **View** — a Native markup file (`.native`, or a Zig view function) that derives the UI from the model.
 
-The runtime owns everything else: window creation, GPU presentation, resize, pointer and keyboard dispatch, timers, accessibility, and hot reload. Your code never handles a raw event — input lands on a widget, the widget's bound message dispatches into `update`, the view rebuilds from the new model, and the engine repaints what changed.
+The runtime manages windows, rendering, input dispatch, timers, accessibility, and hot reload. A widget dispatches its bound message to `update`; the runtime then derives the view from the committed model and renders the changes.
 
-The loop is the same in both authoring languages. By default the core is TypeScript (`src/core.ts`, compiled to native code at build time — [TypeScript Cores](/docs/typescript) covers that tier in depth); a Zig core (`src/main.zig`, from `native init --template zig-core`) is first-class by choice, and the rest of this page — wiring, identity, hot reload — applies to both. The Zig-specific wiring sections below are exactly what the build generates for a TypeScript app, so they double as the blueprint for porting a core to Zig by hand.
+Both TypeScript and Zig cores use this loop. The default project has `src/core.ts`, compiled to native code at build time. A `zig-core` project has `src/main.zig`. The wiring sections below show the runtime setup that the build generates for TypeScript apps and that a Zig app can configure directly. See [TypeScript Cores](/docs/typescript) for the TypeScript contract.
 
 ## The loop in full
 

@@ -148,57 +148,13 @@ function InlineCode({ children }: { children: React.ReactNode }) {
 
 // ----------------------------------------------------------------- data
 
-// Verified in this repository on macOS arm64 (Apple silicon):
-// - Sizes: fresh release build per app —
-//   `cd examples/<app> && native build && ls -lh zig-out/bin/<app>`;
-//   the largest of the seven showcase apps measures 4.8M unstripped
-//   (4.3M after `strip -x`), so "<6 MB" holds for every binary either way.
-// - Launch: process spawn to the window shown with its first frame present,
-//   warm median of 6 launches per app on an idle box, measured 71-131 ms
-//   across the showcase apps (the ~131 ms outlier carries a known host-side
-//   present-to-shown gap). Reproduce per app with
-//   `NATIVE_SDK_WINDOW_TIMING=1 ./zig-out/bin/<app>` and wall-clock the
-//   spawn externally, differencing the printed launch-phase laps.
-const stats = [
-  {
-    value: "<6 MB",
-    label: "Every app on this page — engine, widgets, renderer — as one static release binary.",
-  },
-  {
-    value: "~100 ms",
-    label: "From launch to the first frame on the glass — 71–131 ms warm across these apps on macOS arm64.",
-  },
-  {
-    value: "0",
-    label: "Embedded browsers, script engines, or interpreters inside those binaries.",
-  },
-];
-
-const principles = [
-  {
-    name: "Beautiful by default",
-    detail: "Great software should not start from a blank slate.",
-  },
-  {
-    name: "Customizable by design",
-    detail: "Your app should have its own identity, not ours.",
-  },
-  {
-    name: "Native from the start",
-    detail: "Every interface is rendered without a browser or WebView.",
-  },
-  {
-    name: "Predictable state",
-    detail: "State changes should be explicit, inspectable and easy to reason about.",
-  },
-  {
-    name: "Simple authoring",
-    detail: "Interfaces should be easy to read, easy to write and easy to generate.",
-  },
-  {
-    name: "AI is part of the workflow",
-    detail: "Native SDK is designed for a world where humans and AI agents build software together.",
-  },
+const features = [
+  { name: "Components", detail: "Buttons, text inputs, lists, tables, dialogs, and charts." },
+  { name: "Design tokens", detail: "Configure colors, spacing, typography, and themes by name." },
+  { name: "Native rendering", detail: "The toolkit renders views in OS windows; web content is optional." },
+  { name: "App state", detail: "Typed messages drive updates; views derive their content from the model." },
+  { name: "Native markup", detail: "Declare layout, bindings, and message dispatch in .native files." },
+  { name: "Automation", detail: "Inspect accessibility snapshots, send input, and capture screenshots." },
 ];
 
 const nativeFeel = [
@@ -266,8 +222,7 @@ export default function HomePage() {
             native desktop apps
           </h1>
           <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            Write your app in native markup and TypeScript — or Zig. The toolkit&apos;s own
-            engine renders it into real OS windows — no browser, no WebView, no JS runtime.
+            Write app logic in TypeScript and views in Native markup. The toolkit compiles them to native code and renders the interface in OS windows. Zig cores and embedded web content are also supported.
           </p>
           <div className="mx-auto mt-8 w-full max-w-xs sm:max-w-sm">
             <InstallToggle />
@@ -278,37 +233,13 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Numbers */}
-      <section className="border-t border-gray-alpha-400 bg-background-200 dark:bg-gray-alpha-100">
-        <div className="mx-auto max-w-[1200px] px-6 py-16">
-          <div className="grid gap-10 sm:grid-cols-3">
-            {stats.map((stat) => (
-              <div key={stat.value} className="text-center sm:text-left">
-                <div className="font-mono text-5xl font-semibold tabular-nums text-gray-1000 sm:text-[56px] sm:leading-[56px]">
-                  {stat.value}
-                </div>
-                <p className="mt-3 copy-14 text-gray-900">{stat.label}</p>
-              </div>
-            ))}
-          </div>
-          <p className="mt-10 text-center copy-13 text-gray-900">
-            Measured in this repository: <code>zig build -Doptimize=ReleaseFast</code> on macOS
-            arm64; launch is process spawn to first presented frame.
-          </p>
-        </div>
-      </section>
-
-      {/* Principles */}
+      {/* Components and themes */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
-          <SectionLabel>Principles</SectionLabel>
-          <SectionTitle>Beautiful by default. Customizable by design.</SectionTitle>
+          <SectionLabel>Components and themes</SectionLabel>
+          <SectionTitle>Configure components with design tokens</SectionTitle>
           <SectionLede>
-            {siteName} exists because expressive UI and native performance should not be competing
-            goals. Developers often choose web-based runtimes because they offer freedom, speed and
-            control over the product experience. But that freedom often comes with a heavy runtime.{" "}
-            {siteName} keeps the expressive authoring model and replaces the runtime with native
-            rendering.
+            {siteName} provides native-rendered components with named tokens for colors, spacing, and typography. These examples use the same widgets and playback logic with different themes.
           </SectionLede>
           {/* The proof: soundboard and deck are the same player — same
               library, transport, and search — separated only by
@@ -351,7 +282,7 @@ export default function HomePage() {
             </div>
             <figcaption className="mx-auto mt-6 max-w-3xl text-center">
               <p className="copy-16 text-gray-1000">
-                The same toolkit. The same player. Two identities.
+                Two themes for the same app
               </p>
               <p className="mt-2 copy-14 text-gray-900">
                 Every difference between <InlineCode>examples/soundboard</InlineCode> and{" "}
@@ -362,10 +293,10 @@ export default function HomePage() {
             </figcaption>
           </figure>
           <div className="mx-auto mt-14 grid max-w-4xl gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
-            {principles.map((principle) => (
-              <div key={principle.name} className="border-t border-gray-alpha-400 pt-4">
-                <h3 className="heading-16 text-gray-1000">{principle.name}</h3>
-                <p className="mt-2 copy-14 text-gray-900">{principle.detail}</p>
+            {features.map((feature) => (
+              <div key={feature.name} className="border-t border-gray-alpha-400 pt-4">
+                <h3 className="heading-16 text-gray-1000">{feature.name}</h3>
+                <p className="mt-2 copy-14 text-gray-900">{feature.detail}</p>
               </div>
             ))}
           </div>
@@ -375,15 +306,10 @@ export default function HomePage() {
       {/* The loop */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
-          <SectionLabel>Predictable by design</SectionLabel>
+          <SectionLabel>App model</SectionLabel>
           <SectionTitle>Events. Messages. State. Interface.</SectionTitle>
           <SectionLede>
-            Events produce messages, messages update state, and state renders the interface —
-            simple to debug, simple to maintain, and simple for AI to generate. This is{" "}
-            the default authoring shape: the whole UI is one declarative view, and one TypeScript
-            update function is the only place state changes. The TypeScript is compiled to native
-            code; no JavaScript runtime ships with the app. Mistakes in a view are compile errors
-            with line and column, and in dev you edit the view while the app runs, keeping state.
+            Events dispatch typed messages to the update function, which produces the next model and any effects. The view reads the committed model. TypeScript cores compile to native code; markup changes can reload while the app runs, preserving state.
           </SectionLede>
           <div className="mt-10 grid gap-6 lg:grid-cols-2">
             <CodePane title="src/app.native" lang="html" code={markupSample} />
@@ -412,8 +338,8 @@ export default function HomePage() {
       {/* Showcase */}
       <section className="border-t border-gray-alpha-400" id="showcase">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
-          <SectionLabel>Built for modern apps</SectionLabel>
-          <SectionTitle>Seven real apps, in the repo</SectionTitle>
+          <SectionLabel>Examples</SectionLabel>
+          <SectionTitle>Explore the example apps</SectionTitle>
           <SectionLede>
             Dashboards, editors, tools, internal apps, creative software — every screenshot is
             rendered by {siteName}’s deterministic engine from the example apps in{" "}
@@ -432,16 +358,13 @@ export default function HomePage() {
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
               <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
-                Native from the start
+                Platform integration
               </p>
               <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
-                Feels native because it is
+                OS windows and platform services
               </h2>
               <p className="mt-4 copy-16 text-gray-900">
-                {siteName} owns its renderer — no embedded browser, no heavy runtime pretending to
-                be native. One engine draws every widget into real OS windows, and the parts users
-                touch stay with the operating system: scrolling carries OS momentum, menus are
-                real menus, and the tray is the real tray.
+                {siteName} renders widgets in OS windows and integrates with platform menus, dialogs, text input, and scrolling. Available capabilities vary by host; see the platform support matrix for details.
               </p>
               <Link
                 href="/docs/native-ui"
@@ -478,18 +401,13 @@ export default function HomePage() {
             </div>
             <div className="order-1 lg:order-2">
               <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
-                AI is part of the workflow
+                Automation
               </p>
               <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
-                Built to be written by AI agents
+                Inspect and drive a running app
               </h2>
               <p className="mt-4 copy-16 text-gray-900">
-                Declarative markup and one typed update function make a surface agents author
-                reliably — and the repository ships an agent skill that teaches all of it. Every
-                app embeds an automation server, so any agent can see and drive the running window:
-                snapshots, assertions, input, screenshots. An eval harness hands a clean agent a
-                scaffolded workspace and grades the result — builds, markup checks, live snapshots,
-                and an LLM judge.
+                Enable the automation server to expose accessibility snapshots, send input commands, assert on app state, and capture screenshots. The CLI includes agent skills for app authoring and inspection.
               </p>
               <Link
                 href="/docs/automation"
@@ -502,24 +420,19 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* One binary */}
+      {/* Distribution */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
               <p className="font-mono label-12 font-medium uppercase tracking-[0.2em] text-gray-900">
-                One binary
+                Distribution
               </p>
               <h2 className="mt-3 heading-32 text-gray-1000 sm:heading-40">
-                The whole app is one small file
+                Build and package your app
               </h2>
               <p className="mt-4 copy-16 text-gray-900">
-                Markup compiles into the executable, so release builds carry no parser, no
-                interpreter, and no scripting engine — just your logic and the engine, linking the
-                system’s own frameworks. Effects run HTTP fetches, process spawns, file I/O, and
-                timers off the loop; results come back into <InlineCode>update</InlineCode> as
-                plain messages. And when part of your product is the web, WebView panes coexist
-                with the canvas in the same window.
+                Native markup and app logic compile into the executable. Packaging includes app assets and metadata. Apps that embed web content also include the configured frontend assets and, when selected, a web engine.
               </p>
               <Link
                 href="/docs/packaging"
@@ -528,17 +441,15 @@ export default function HomePage() {
                 Packaging →
               </Link>
             </div>
-            <Terminal title="examples — release builds">
-              <Prompt>zig build -Doptimize=ReleaseFast</Prompt>
-              <Prompt>ls -lh */zig-out/bin</Prompt>
-              <Muted>3.6M calculator</Muted>
-              <Muted>4.2M deck</Muted>
-              <Muted>3.6M feed</Muted>
-              <Muted>3.5M markdown-viewer</Muted>
-              <Muted>3.5M notes</Muted>
-              <Muted>5.7M soundboard</Muted>
-              <Muted>3.7M system-monitor</Muted>
-            </Terminal>
+            <div className="rounded-md border border-gray-alpha-400 bg-background-100 p-6">
+              <h3 className="heading-20 text-gray-1000">Distribution guides</h3>
+              <ul className="mt-4 space-y-4 copy-14 text-gray-900">
+                <li><Link href="/docs/packaging">Package a desktop app</Link></li>
+                <li><Link href="/docs/packaging/signing">Sign a release</Link></li>
+                <li><Link href="/docs/updates">Configure app updates</Link></li>
+                <li><Link href="/docs/platform-support">Check platform requirements</Link></li>
+              </ul>
+            </div>
           </div>
         </div>
       </section>
@@ -547,12 +458,9 @@ export default function HomePage() {
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 sm:py-24">
           <SectionLabel>Cross-platform</SectionLabel>
-          <SectionTitle>One SDK, desktop and mobile</SectionTitle>
+          <SectionTitle>Desktop and experimental mobile hosts</SectionTitle>
           <SectionLede>
-            One codebase compiles for macOS, Linux, Windows, iOS, and Android. Desktop is the
-            mature surface; mobile is experimental — verified on the simulator and emulator, with
-            APIs and tooling still evolving. These statuses describe what ships and is verified
-            today — not a roadmap.
+            Native SDK has hosts for macOS, Linux, and Windows. Mobile support is experimental, and capabilities and verification differ by platform. Check the support matrix before choosing a target.
           </SectionLede>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {platforms.map((platform) => (

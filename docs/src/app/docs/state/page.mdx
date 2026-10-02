@@ -2,7 +2,7 @@ import { CodeToggle } from "@/components/code-toggle";
 
 # State & Data Flow
 
-The model stores source-of-truth state only: the raw items, the current filter, the draft text. Everything the view shows that is computable from those — counts, sums, filtered lists, formatted strings — is derived at view time, never stored. This page collects the data-flow patterns that keep a Native SDK app honest; they hold in both core languages, and the samples show each where the expression differs.
+Store source data in the model, such as items, the current filter, and draft text. Derive counts, filtered lists, and formatted strings from that state when rendering the view. The patterns below apply to TypeScript and Zig cores; samples show both languages where their APIs differ.
 
 ## Pick one canonical store
 
