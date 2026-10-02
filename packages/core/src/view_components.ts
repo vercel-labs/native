@@ -42,6 +42,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 4) return nscvTextEdit(request);
   if (request[0] === 5) return nscvTextReconcile(request);
   if (request[0] === 6) return nscvTextInput(request);
+  if (request[0] === 7) return nscvTextHistoryReplay(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -237,6 +238,63 @@ function nscvTextInput(request: Uint8Array): Uint8Array {
   out.setUint32(0, 1 | (borrowed ? 2 : 0) | (cursor !== null ? 4 : 0) | (truncated ? 8 : 0), true);
   out.setUint32(4, cursor === null ? 0 : cursor, true); out.setUint32(8, text.length, true);
   if (!borrowed) result.set(text, 12);
+  return result;
+}
+
+/** History replay: tag 7, mode (0 start/1 continue/2 commit), redo,
+ * before/after byte-match bits and current/before/after affinity bits.
+ * Three exact LE u64 anchor/focus pairs follow at byte 8. LE u32 prefix,
+ * removed length and inserted length at byte 56 precede retained payloads.
+ * The 24-byte result carries action (none/clear/complete/insert/backward/
+ * forward/selection), affinity and exact u64 selection. Native retains
+ * history bytes and applies one step before re-reading the entry by serial.
+ */
+function nscvTextHistoryReplay(request: Uint8Array): Uint8Array {
+  const budget = 512 * 1024;
+  if (request.length < 68 || request[1]! > 2 || request[2]! > 1 || request[3]! > 3 ||
+      request[4]! > 7 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid text history request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const prefix = data.getUint32(56, true), removed = data.getUint32(60, true), inserted = data.getUint32(64, true);
+  if (removed + inserted > budget || prefix + removed > budget || prefix + inserted > budget ||
+      request.length !== 68 + removed + inserted) throw new Error("invalid text history budget");
+  const redo = request[2] === 1, mode = request[1]!, desired = redo ? 40 : 24;
+  const currentAffinity = request[4]! & 1, desiredAffinity = (request[4]! >> (redo ? 2 : 1)) & 1;
+  const equal = (a: number, b: number): boolean => data.getUint32(a, true) === data.getUint32(b, true) &&
+    data.getUint32(a + 4, true) === data.getUint32(b + 4, true) &&
+    data.getUint32(a + 8, true) === data.getUint32(b + 8, true) &&
+    data.getUint32(a + 12, true) === data.getUint32(b + 12, true);
+  const at = (a: number, anchor: number, focus: number): boolean => data.getUint32(a, true) === anchor &&
+    data.getUint32(a + 4, true) === 0 && data.getUint32(a + 8, true) === focus && data.getUint32(a + 12, true) === 0;
+  const single = (start: number, length: number): boolean => {
+    if (length === 0) return false;
+    let offset = length - 1;
+    while (offset > 0 && (request[start + offset]! & 0xc0) === 0x80) offset -= 1;
+    return offset === 0;
+  };
+  const targetMatches = (request[3]! & (redo ? 2 : 1)) !== 0;
+  const sourceMatches = (request[3]! & (redo ? 1 : 2)) !== 0;
+  const selectionMatches = currentAffinity === desiredAffinity && equal(8, desired);
+  const result = new Uint8Array(24), out = new DataView(result.buffer);
+  if (mode === 2) { result[0] = targetMatches && selectionMatches ? 2 : 0; return result; }
+  if (mode === 1 && targetMatches) {
+    if (selectionMatches) result[0] = 2;
+    else { result[0] = 6; result[1] = desiredAffinity; result.set(request.subarray(desired, desired + 16), 8); }
+    return result;
+  }
+  if (!sourceMatches) { result[0] = 1; return result; }
+  const oldLength = redo ? removed : inserted, newLength = redo ? inserted : removed;
+  if (!redo && removed === 0 && single(68 + removed, inserted) && at(8, prefix + inserted, prefix + inserted) &&
+      desiredAffinity === 0 && at(desired, prefix, prefix)) result[0] = 4;
+  else if ((!redo && inserted === 0 || redo && removed === 0) && at(8, prefix, prefix) &&
+      desiredAffinity === 0 && at(desired, prefix + newLength, prefix + newLength)) result[0] = 3;
+  else if (redo && inserted === 0 && single(68, removed) && desiredAffinity === 0 && at(desired, prefix, prefix) &&
+      at(8, prefix + removed, prefix + removed)) result[0] = 4;
+  else if (redo && inserted === 0 && single(68, removed) && desiredAffinity === 0 && at(desired, prefix, prefix) &&
+      at(8, prefix, prefix)) result[0] = 5;
+  else if (currentAffinity !== 0 || !at(8, prefix, prefix + oldLength)) {
+    result[0] = 6; out.setUint32(8, prefix, true); out.setUint32(16, prefix + oldLength, true);
+  } else result[0] = 3;
   return result;
 }
 

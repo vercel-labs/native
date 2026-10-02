@@ -706,6 +706,9 @@ pub const widgetCompiledTextEdit = event_model.widgetCompiledTextEdit;
 pub const TextReconcilePolicyState = event_model.TextReconcilePolicyState;
 pub const TextReconcilePolicyResult = event_model.TextReconcilePolicyResult;
 pub const widgetCompiledTextReconcile = event_model.widgetCompiledTextReconcile;
+pub const TextHistoryReplayState = event_model.TextHistoryReplayState;
+pub const TextHistoryReplayResult = event_model.TextHistoryReplayResult;
+pub const widgetCompiledTextHistoryReplay = event_model.widgetCompiledTextHistoryReplay;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

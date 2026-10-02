@@ -22,6 +22,9 @@ from the standing anchor; dragging back into the anchor run restores that run.
 The editors keep UTF-8 byte boundaries and treat CRLF as one caret stop.
 Undo and redo preserve selections; successive IME previews replace the active
 composition, and committing a composition records one undoable edit.
+Undo restores the selection's direction as well as its byte range. Each editor
+has its own history: editing another field keeps the first field's redo branch.
+Canceling an empty composition keeps redo; committing a new edit replaces it.
 
 Scratchpad keeps its edits locally: Refresh preserves the draft and active
 composition, while Replace scratch supplies a new starting value. Restore

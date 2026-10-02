@@ -911,6 +911,73 @@ pub fn widgetCompiledTextReconcile(widget: Widget, state: TextReconcilePolicySta
     };
 }
 
+pub const TextHistoryReplayState = struct {
+    mode: enum(u8) { start, next, commit },
+    redo: bool,
+    before_matches: bool,
+    after_matches: bool,
+    selection: text_model.TextSelection,
+    before_selection: text_model.TextSelection,
+    after_selection: text_model.TextSelection,
+    prefix: usize,
+    removed: []const u8,
+    inserted: []const u8,
+};
+
+pub const TextHistoryReplayResult = union(enum) {
+    none,
+    clear,
+    complete,
+    edit: TextInputEvent,
+};
+
+/// The compiled planner returns one replay step. Insert payloads borrow the
+/// native history pool; selection data is copied before any arena reset.
+pub fn widgetCompiledTextHistoryReplay(widget: Widget, state: TextHistoryReplayState) ?TextHistoryReplayResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (state.removed.len > budget or state.inserted.len > budget - state.removed.len or
+        state.prefix > budget - @max(state.removed.len, state.inserted.len))
+        @panic("compiled text history exceeds byte budget");
+    const request = text_policy_scratch.get().request[0 .. 68 + state.removed.len + state.inserted.len];
+    @memset(request[0..68], 0);
+    request[0] = 7;
+    request[1] = @intFromEnum(state.mode);
+    request[2] = @intFromBool(state.redo);
+    request[3] = @as(u8, @intFromBool(state.before_matches)) | (@as(u8, @intFromBool(state.after_matches)) << 1);
+    const selections = [_]text_model.TextSelection{ state.selection, state.before_selection, state.after_selection };
+    for (selections, 0..) |selection, index| {
+        request[4] |= @as(u8, @intFromBool(selection.affinity == .downstream)) << @intCast(index);
+        const start = 8 + index * 16;
+        std.mem.writeInt(u64, request[start..][0..8], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[start + 8 ..][0..8], @intCast(selection.focus), .little);
+    }
+    std.mem.writeInt(u32, request[56..60], @intCast(state.prefix), .little);
+    std.mem.writeInt(u32, request[60..64], @intCast(state.removed.len), .little);
+    std.mem.writeInt(u32, request[64..68], @intCast(state.inserted.len), .little);
+    @memcpy(request[68..][0..state.removed.len], state.removed);
+    @memcpy(request[68 + state.removed.len ..], state.inserted);
+    var output: [24]u8 = undefined;
+    if (policy(request, &output) != output.len or output[0] > 6 or output[1] > 1 or
+        !std.mem.allEqual(u8, output[2..8], 0)) @panic("invalid compiled text history result");
+    if (output[0] != 6 and !std.mem.allEqual(u8, output[1..], 0)) @panic("invalid compiled text history arguments");
+    return switch (output[0]) {
+        0 => .none,
+        1 => .clear,
+        2 => .complete,
+        3 => .{ .edit = .{ .insert_text = if (state.redo) state.inserted else state.removed } },
+        4 => .{ .edit = .delete_backward },
+        5 => .{ .edit = .delete_forward },
+        6 => .{ .edit = .{ .set_selection = .{
+            .anchor = @intCast(std.mem.readInt(u64, output[8..16], .little)),
+            .focus = @intCast(std.mem.readInt(u64, output[16..24], .little)),
+            .affinity = if (output[1] == 1) .downstream else .upstream,
+        } } },
+        else => unreachable,
+    };
+}
+
 pub fn widgetKeyboardTextSubmit(widget: Widget, event: WidgetKeyboardEvent) bool {
     if (!isWidgetTextEntry(widget)) return false;
     if (widget.state.disabled or event.phase != .key_down) return false;

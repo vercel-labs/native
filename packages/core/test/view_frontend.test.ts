@@ -618,3 +618,34 @@ test("compiled text input prepares composition and sanitizes before UTF-8 paste 
   assert.throws(() => prepare("x", 2, true, 512 * 1024 + 1), /invalid text input arguments/);
   assert.throws(() => prepare("x", 0, true, 0, 1), /invalid text input arguments/);
 });
+
+test("history replay preserves minimal edits, stale refusal and exact selection witnesses", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const request = new Uint8Array(70), data = new DataView(request.buffer);
+  request[0] = 7; request[3] = 2;
+  const selection = (at: number, anchor: bigint, focus = anchor) => {
+    data.setBigUint64(at, anchor, true); data.setBigUint64(at + 8, focus, true);
+  };
+  data.setUint32(56, 1, true); data.setUint32(64, 2, true); request.set(new TextEncoder().encode("é"), 68);
+  selection(8, 3n); selection(24, 1n); selection(40, 3n);
+  const policy = () => exports.native_text_policy!(request);
+  assert.equal(policy()[0], 4); // Undo one UTF-8 codepoint via Backspace.
+  request[4] = 1; assert.equal(policy()[0], 4); // The fast path ignores current affinity.
+  request[4] = 2; let result = policy(); assert.equal(result[0], 6);
+  assert.equal(new DataView(result.buffer).getBigUint64(16, true), 3n);
+  request[4] = 0; request[2] = 1; request[3] = 1; selection(8, 1n);
+  assert.equal(policy()[0], 3); // Redo borrows the inserted bytes.
+  request[1] = 1; request[3] = 2; selection(40, 0xfffffffffffffff0n, 0xfffffffffffffff1n);
+  result = policy(); assert.equal(result[0], 6);
+  assert.equal(new DataView(result.buffer).getBigUint64(8, true), 0xfffffffffffffff0n);
+  assert.equal(new DataView(result.buffer).getBigUint64(16, true), 0xfffffffffffffff1n);
+  selection(8, 0xfffffffffffffff0n, 0xfffffffffffffff1n); assert.equal(policy()[0], 2);
+  request[1] = 2; assert.equal(policy()[0], 2);
+  request[4] = 4; assert.equal(policy()[0], 0); // Affinity is part of completion.
+  request[4] = 5; assert.equal(policy()[0], 2);
+  request[1] = 1; request[3] = 0; assert.equal(policy()[0], 1);
+  request[1] = 2; assert.equal(policy()[0], 0); // A refused edit never commits.
+  request[5] = 1; assert.throws(policy, /invalid text history request/);
+  request[5] = 0; data.setUint32(64, 524289, true); assert.throws(policy, /invalid text history budget/);
+});

@@ -177,6 +177,33 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await set("Subject", "é\r\n🙂"); expectText("subject", "é🙂");
     await click("Refresh"); await click("Hide note"); await click("Hide note");
     expectText("draft", "日本 café  "); expectText("subject", "é🙂"); expectText("chat", " draft");
+    // Compound Undo/Redo restores the oriented selection after replacing
+    // retained bytes, and each editor keeps its own redo branch.
+    await set("Note", "Lé🙂R"); await select("Note", 7, 1);
+    s = await app.composeText(field("Note"), "日本"); save();
+    s = await app.commitComposition(field("Note")); save(); expectText("draft", "L日本R");
+    await key("cmd+z"); expectText("draft", "Lé🙂R"); selection("draft", 7, 1);
+    await key("cmd+shift+z"); expectText("draft", "L日本R"); selection("draft", 7, 7);
+    await key("cmd+z"); expectText("draft", "Lé🙂R");
+    await set("Message", "Neighbor"); await select("Message", 8, 8);
+    s = await app.composeText(field("Message"), "é"); save();
+    s = await app.commitComposition(field("Message")); save(); expectText("chat", "Neighboré");
+    await focus("Note"); await key("cmd+shift+z"); expectText("draft", "L日本R"); expectText("chat", "Neighboré");
+    await focus("Message"); await key("cmd+z"); expectText("chat", "Neighbor");
+    // Canceling an empty composition preserves a pending redo branch.
+    await set("Subject", "AB"); await select("Subject", 1, 1);
+    s = await app.composeText(field("Subject"), "é"); save();
+    s = await app.commitComposition(field("Subject")); save(); expectText("subject", "AéB");
+    await key("cmd+z"); expectText("subject", "AB");
+    s = await app.composeText(field("Subject"), ""); save();
+    s = await app.cancelComposition(field("Subject")); save();
+    await key("cmd+shift+z"); expectText("subject", "AéB");
+    await key("cmd+z"); s = await app.composeText(field("Subject"), "x"); save();
+    s = await app.commitComposition(field("Subject")); save();
+    await key("cmd+shift+z"); expectText("subject", "AxB");
+    // Forward deletion keeps its native Delete replay shortcut.
+    await set("Subject", "AéB"); await select("Subject", 1, 1); await key("delete"); expectText("subject", "AB");
+    await key("cmd+z"); expectText("subject", "AéB"); await key("cmd+shift+z"); expectText("subject", "AB");
     // Scratchpad has no on-input handler: its authored source stays fixed
     // while native retains local edits, selection, composition and history.
     const scratchId = field("Scratchpad").id;

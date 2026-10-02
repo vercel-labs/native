@@ -441,6 +441,16 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             const redo = keyboard.modifiers.shift;
             const history_index = canvasWidgetTextHistoryIndex(self, target.id, widget.kind, redo) orelse return null;
             const entry = self.canvas_widget_text_history_entries[history_index];
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .start)) |result| {
+                return switch (result) {
+                    .clear => blk: {
+                        clearCanvasWidgetTextHistory(self, target.id);
+                        break :blk null;
+                    },
+                    .edit => |edit| .{ .edit = edit, .serial = entry.serial, .redo = redo },
+                    .none, .complete => null,
+                };
+            }
             const expected_len = if (redo) entry.before_text_len else entry.after_text_len;
             const expected_hash = if (redo) entry.before_hash else entry.after_hash;
             if (widget.text.len != expected_len or textHistoryHash(widget.text) != expected_hash) {
@@ -527,6 +537,21 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return null;
             }
 
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .next)) |result| {
+                return switch (result) {
+                    .clear => blk: {
+                        clearCanvasWidgetTextHistory(self, target.id);
+                        break :blk null;
+                    },
+                    .complete => blk: {
+                        self.canvas_widget_text_history_entries[history_index].applied = redo;
+                        break :blk null;
+                    },
+                    .edit => |edit| edit,
+                    .none => null,
+                };
+            }
+
             const selection = widget.text_selection orelse canvas.TextSelection.collapsed(widget.text.len);
             const current_hash = textHistoryHash(widget.text);
             const desired_len = if (redo) entry.after_text_len else entry.before_text_len;
@@ -584,6 +609,10 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             {
                 return;
             }
+            if (compiledCanvasWidgetTextHistoryReplay(self, widget, entry, redo, .commit)) |result| {
+                if (result == .complete) self.canvas_widget_text_history_entries[history_index].applied = redo;
+                return;
+            }
             const desired_len = if (redo) entry.after_text_len else entry.before_text_len;
             const desired_hash = if (redo) entry.after_hash else entry.before_hash;
             const desired_selection = if (redo) entry.after_selection else entry.before_selection;
@@ -595,6 +624,29 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return;
             }
             self.canvas_widget_text_history_entries[history_index].applied = redo;
+        }
+
+        fn compiledCanvasWidgetTextHistoryReplay(
+            self: *const RuntimeView,
+            widget: canvas.Widget,
+            entry: CanvasWidgetTextHistoryEntry,
+            redo: bool,
+            mode: @FieldType(canvas.TextHistoryReplayState, "mode"),
+        ) ?canvas.TextHistoryReplayResult {
+            if (widget.interaction_policy == null) return null;
+            const hash = textHistoryHash(widget.text);
+            return canvas.widgetCompiledTextHistoryReplay(widget, .{
+                .mode = mode,
+                .redo = redo,
+                .before_matches = widget.text.len == entry.before_text_len and hash == entry.before_hash,
+                .after_matches = widget.text.len == entry.after_text_len and hash == entry.after_hash,
+                .selection = widget.text_selection orelse canvas.TextSelection.collapsed(widget.text.len),
+                .before_selection = entry.before_selection,
+                .after_selection = entry.after_selection,
+                .prefix = entry.prefix_len,
+                .removed = canvasWidgetTextHistoryRemoved(self, entry),
+                .inserted = canvasWidgetTextHistoryInserted(self, entry),
+            });
         }
 
         fn recordCanvasWidgetTextHistory(

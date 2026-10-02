@@ -2690,3 +2690,155 @@ test "compiled clipboard paste uses shared storage freed by selection and compos
         }
     }
 }
+
+test "compiled history replay matches native shortcut continuation and completion decisions" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const Fixture = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-history", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var fixture: Fixture = .{};
+    try harness.start(fixture.app());
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{.{ .id = 2, .kind = .textarea, .frame = geometry.RectF.init(12, 16, 180, 84), .text = "az" }} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    const Pair = struct { removed: []const u8, inserted: []const u8 };
+    const pairs = [_]Pair{
+        .{ .removed = "", .inserted = "é" },
+        .{ .removed = "é", .inserted = "" },
+        .{ .removed = "", .inserted = "🙂" },
+        .{ .removed = "🙂", .inserted = "" },
+        .{ .removed = "", .inserted = "\r\n" },
+        .{ .removed = "\r\n", .inserted = "" },
+        .{ .removed = "old", .inserted = "日本" },
+        .{ .removed = "\x80\x80", .inserted = "\xff" },
+        .{ .removed = "", .inserted = "" },
+        .{ .removed = "a", .inserted = "b" },
+    };
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        const target = canvas.WidgetFocusTarget{ .id = 2, .kind = kind, .bounds = geometry.RectF.init(12, 16, 180, 84), .index = 1, .state = .{} };
+        for (pairs) |pair| {
+            var before_buffer: [32]u8 = undefined;
+            var after_buffer: [32]u8 = undefined;
+            const before = try std.fmt.bufPrint(&before_buffer, "a{s}z", .{pair.removed});
+            const after = try std.fmt.bufPrint(&after_buffer, "a{s}z", .{pair.inserted});
+            const selections = [_]canvas.TextSelection{
+                .{ .anchor = 1, .focus = 1 },                                         .{ .anchor = 1 + pair.removed.len, .focus = 1 + pair.removed.len },
+                .{ .anchor = 1 + pair.inserted.len, .focus = 1 + pair.inserted.len }, .{ .anchor = 1, .focus = 1 + pair.inserted.len },
+                .{ .anchor = 1 + pair.removed.len, .focus = 1 },                      .{ .anchor = 1, .focus = 1, .affinity = .downstream },
+            };
+            for (selections[0..4], 0..) |before_selection, selection_index| {
+                const after_selection = selections[(selection_index + 2) % selections.len];
+                for (selections) |current_selection| {
+                    for ([_][]const u8{ before, after, "stale" }) |text| {
+                        for ([_]bool{ false, true }) |redo| {
+                            for (0..3) |mode| {
+                                var expected: ?canvas.TextInputEvent = null;
+                                var expected_count: usize = 0;
+                                var expected_applied = false;
+                                for ([_]bool{ false, true }) |compiled| {
+                                    view.widget_layout_nodes[1].widget.kind = kind;
+                                    view.widget_layout_nodes[1].widget.interaction_policy = if (compiled) core.nativeTextPolicy else null;
+                                    view.widget_layout_nodes[1].widget.text = text;
+                                    view.widget_layout_nodes[1].widget.text_selection = current_selection;
+                                    view.canvas_widget_focused_id = 2;
+                                    view.canvas_widget_text_history_entry_count = 1;
+                                    view.canvas_widget_text_history_byte_count = pair.removed.len + pair.inserted.len;
+                                    @memcpy(view.canvas_widget_text_history_bytes[0..pair.removed.len], pair.removed);
+                                    @memcpy(view.canvas_widget_text_history_bytes[pair.removed.len..][0..pair.inserted.len], pair.inserted);
+                                    view.canvas_widget_text_history_entries[0] = .{
+                                        .serial = std.math.maxInt(u64) - 1,
+                                        .target_id = 2,
+                                        .target_kind = kind,
+                                        .removed_len = pair.removed.len,
+                                        .inserted_len = pair.inserted.len,
+                                        .prefix_len = 1,
+                                        .before_text_len = before.len,
+                                        .after_text_len = after.len,
+                                        .before_hash = std.hash.Wyhash.hash(0, before),
+                                        .after_hash = std.hash.Wyhash.hash(0, after),
+                                        .before_selection = before_selection,
+                                        .after_selection = after_selection,
+                                        .applied = !redo,
+                                    };
+                                    const serial = view.canvas_widget_text_history_entries[0].serial;
+                                    const edit = switch (mode) {
+                                        0 => if (view.canvasWidgetTextHistoryShortcut(target, .{ .phase = .key_down, .key = "Z", .modifiers = .{ .super = true, .shift = redo } })) |shortcut| shortcut.edit else null,
+                                        1 => view.canvasWidgetTextHistoryReplayNext(target, serial, redo),
+                                        else => blk: {
+                                            view.commitCanvasWidgetTextHistoryReplayIfComplete(target, serial, redo);
+                                            break :blk @as(?canvas.TextInputEvent, null);
+                                        },
+                                    };
+                                    const count = view.canvas_widget_text_history_entry_count;
+                                    const applied = if (count == 0) false else view.canvas_widget_text_history_entries[0].applied;
+                                    if (!compiled) {
+                                        expected = edit;
+                                        expected_count = count;
+                                        expected_applied = applied;
+                                    } else {
+                                        try std.testing.expectEqualDeep(expected, edit);
+                                        try std.testing.expectEqual(expected_count, count);
+                                        try std.testing.expectEqual(expected_applied, applied);
+                                        if (edit) |event| if (event == .insert_text and event.insert_text.len > 0) {
+                                            const start: usize = if (redo) pair.removed.len else 0;
+                                            try std.testing.expectEqual(view.canvas_widget_text_history_bytes[start..].ptr, event.insert_text.ptr);
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled history replay borrows full-budget payloads and copies exact selection results" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const large = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    const widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy };
+    var state = canvas.TextHistoryReplayState{
+        .mode = .start,
+        .redo = false,
+        .before_matches = false,
+        .after_matches = true,
+        .selection = .{},
+        .before_selection = .{},
+        .after_selection = .{},
+        .prefix = 0,
+        .removed = large,
+        .inserted = "",
+    };
+    const borrowed = canvas.widgetCompiledTextHistoryReplay(widget, state).?.edit.insert_text;
+    try std.testing.expectEqual(large.ptr, borrowed.ptr);
+    state.mode = .next;
+    state.before_matches = true;
+    state.before_selection = .{ .anchor = std.math.maxInt(usize) - 1, .focus = std.math.maxInt(usize), .affinity = .downstream };
+    const selected = canvas.widgetCompiledTextHistoryReplay(widget, state).?.edit.set_selection;
+    const bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    _ = canvas.widgetCompiledTextInput(widget, "new\ninput", 0, null, 0);
+    try std.testing.expectEqualDeep(state.before_selection, selected);
+    try std.testing.expectEqual(large.ptr, borrowed.ptr);
+    try std.testing.expectEqualSlices(u8, large, borrowed);
+    state.mode = .commit;
+    state.selection = state.before_selection;
+    try std.testing.expect(canvas.widgetCompiledTextHistoryReplay(widget, state).? == .complete);
+    state.selection.affinity = .upstream;
+    try std.testing.expect(canvas.widgetCompiledTextHistoryReplay(widget, state).? == .none);
+    try std.testing.expect(canvas.widgetCompiledTextHistoryReplay(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, state) == null);
+}
