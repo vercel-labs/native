@@ -1,0 +1,8 @@
+{
+  "title": "Testing",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "ci"
+  ]
+}

@@ -1,0 +1,71 @@
+---
+title: "Bubble"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `bubble` for a chat message. Children stack inside the surface. The default variant uses a muted background; `primary` uses the sent-message colors and sets the child text color. `outline`, `destructive`, and `ghost` are also supported. The default padding is 10px vertically and 12px horizontally. The element rejects `gap`; use `padding` to change the inset.
+
+Without an explicit `width`, a bubble fits its content up to 80% of the container width, then wraps. The `ghost` variant uses the full available width. Set `cross="end"` on the containing column to align sent messages to the trailing edge.
+
+<ComponentPreview name="bubble" alt="A received run of two grouped chat bubbles, one carrying a reaction pill, and a sent primary bubble" caption="a grouped received run with a reaction pill, and a primary sent turn" />
+
+## Grouped runs
+
+Group consecutive messages from the same sender in a column. This example uses 8px between messages in a group and 32px between groups:
+
+```html
+<column gap="32" width="340">
+  <column gap="8">
+    <bubble>
+      <text wrap="true">Ready to ship the components page?</text>
+    </bubble>
+    <bubble>
+      <text wrap="true">The previews and the docs page both need one more pass before we cut it.</text>
+      <reactions>+2</reactions>
+    </bubble>
+  </column>
+  <column gap="8" cross="end">
+    <bubble variant="primary">
+      <text wrap="true">Previews are rendering now.</text>
+    </bubble>
+  </column>
+</column>
+```
+
+## Reactions
+
+Add a `reactions` child for a text badge on the bubble’s bottom edge. Its text supports bindings. `text-alignment` controls placement: `end` is the default, with `start` and `center` also available. Reactions use their own colors, including inside a `primary` bubble.
+
+Reactions do not reserve layout space. Leave enough space below the bubble to avoid overlap with the next message. Each bubble accepts one reaction element; events, keys, and layout properties belong to the bubble. Literal text must be covered by the bundled font. Bind emoji from model data for live platform rendering; the reference renderer cannot render glyphs outside its font.
+
+## Programmatic construction (Zig)
+
+In a Zig view, set `text` and `text_alignment` on the bubble to configure reactions. The builder defaults to `.start`; set `.end` to match the markup default.
+
+```zig
+ui.column(.{ .gap = 32, .width = 340 }, .{
+    ui.column(.{ .gap = 8 }, .{
+        ui.el(.bubble, .{}, .{
+            ui.text(.{ .wrap = true }, "Ready to ship the components page?"),
+        }),
+        ui.el(.bubble, .{ .text = "+2", .text_alignment = .end }, .{
+            ui.text(.{ .wrap = true }, "The previews and the docs page both need one more pass before we cut it."),
+        }),
+    }),
+    ui.column(.{ .gap = 8, .cross = .end }, .{
+        ui.el(.bubble, .{ .variant = .primary }, .{
+            ui.text(.{ .wrap = true }, "Previews are rendering now."),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["padding", "variant"]} />
+
+On the `reactions` child:
+
+<AttrTable attrs={["text-alignment"]} element="reactions" />

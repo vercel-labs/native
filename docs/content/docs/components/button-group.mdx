@@ -1,0 +1,63 @@
+---
+title: "Button Group"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `button-group` to attach related [buttons](/docs/components/button). With the default `gap="0"`, adjacent buttons share borders and only the first and last buttons keep their outer corners. Each button retains its own label, `on-press` handler, and disabled state.
+
+For a selected value, use [toggle-group](/docs/components/toggle) or [tabs](/docs/components/tabs). A button group dispatches separate actions.
+
+<ComponentPreview name="button-group" alt="A flush button group rendered by the engine" caption="three outline actions attached into one bar with shared seams" />
+
+## Markup
+
+```html
+<button-group>
+  <button variant="outline" on-press="cut">Cut</button>
+  <button variant="outline" on-press="copy">Copy</button>
+  <button variant="outline" on-press="paste">Paste</button>
+</button-group>
+```
+
+## Variants and icon segments
+
+Grouped buttons retain their individual variants. Use `size="icon"` for icon-only actions, such as pagination or zoom controls.
+
+```html
+<button-group>
+  <button variant="outline" icon="chevron-left" on-press="prev">Back</button>
+  <button variant="outline" on-press="today">Today</button>
+  <button variant="outline" icon="chevron-right" icon-placement="trailing" on-press="next">Next</button>
+</button-group>
+```
+
+## Spacing out
+
+`gap` above 0 opts out of the attached treatment: the children render as ordinary separate buttons with full corners and borders. Use a plain [row](/docs/native-ui) if the actions are not related enough to attach.
+
+```html
+<button-group gap="8">
+  <button variant="outline" on-press="approve">Approve</button>
+  <button variant="outline" on-press="reject">Reject</button>
+</button-group>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.button_group, .{}, .{
+    ui.button(.{ .variant = .outline, .on_press = .cut }, "Cut"),
+    ui.button(.{ .variant = .outline, .on_press = .copy }, "Copy"),
+    ui.button(.{ .variant = .outline, .on_press = .paste }, "Paste"),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["gap", "cross"]} />
+
+Children are ordinary buttons; see the [button attributes](/docs/components/button) for the per-segment surface.

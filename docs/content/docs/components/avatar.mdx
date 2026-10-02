@@ -1,0 +1,45 @@
+---
+title: "Avatar"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `avatar` to display an image with an initials fallback. The element content supplies the initials, and `image` binds to a registered `ImageId`. Register bytes through `fx.registerImageBytes` in a Zig app or declare files in the app manifest’s `assets.images` list. Image ID `0` means no image, so keep that value until registration succeeds.
+
+<ComponentPreview name="avatar" alt="Avatars rendered by the engine" caption="initials fallbacks" />
+
+## Markup
+
+```html
+<row gap="12" cross="center">
+  <avatar>ZN</avatar>
+  <avatar>CT</avatar>
+  <avatar image="{profile_image}" label="Profile picture">NS</avatar>
+</row>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.avatar(.{}, "ZN")
+```
+
+With a registered image the engine clips it to the avatar circle (`cover` fit); the initials remain the fallback while the id is 0:
+
+```zig
+ui.avatar(.{ .image = image_id }, "ZN")
+```
+
+An avatar can select one region from a registered texture atlas by declaring all four source coordinates in decoded-image pixels. The same crop is `ElementOptions.image_src` in a Zig view:
+
+```html
+<avatar image="{atlas_image}" source-x="64" source-y="0"
+  source-width="32" source-height="32" label="Profile picture">ZN</avatar>
+```
+
+## Attributes
+
+<AttrTable element="avatar" attrs={["text", "image", "source-x", "source-y", "source-width", "source-height", "label"]} />

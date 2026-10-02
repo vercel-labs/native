@@ -1,0 +1,53 @@
+---
+title: "Card"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `card` for a bordered surface with elevation. Children stack on top of each other, so place a `column` or `row` inside for flow layout. The element rejects `gap`. Default padding is 24px, or 16px at `size="sm"`; set `padding` to override it. `on-press` makes the whole card pressable. Use [panel](/docs/components/panel) for a surface without the card treatment.
+
+<ComponentPreview name="card" alt="A card rendered by the engine" />
+
+## Markup
+
+```html
+<card width="340">
+  <column gap="12">
+    <text>Deploy your app</text>
+    <text wrap="true" foreground="text_muted">The runtime packages your views, commands, and assets into one native binary.</text>
+    <row gap="8">
+      <button variant="primary" on-press="deploy">Deploy</button>
+      <button variant="ghost" on-press="cancel">Cancel</button>
+    </row>
+  </column>
+</card>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.card, .{ .width = 340 }, .{
+    ui.column(.{ .gap = 12 }, .{
+        ui.text(.{}, "Deploy your app"),
+        ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "The runtime packages your views, commands, and assets into one native binary."),
+        ui.row(.{ .gap = 8 }, .{
+            ui.button(.{ .variant = .primary, .on_press = .deploy }, "Deploy"),
+            ui.button(.{ .variant = .ghost, .on_press = .cancel }, "Cancel"),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "padding",
+    "width",
+    "on-press",
+  ]}
+/>
