@@ -2211,13 +2211,18 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             paste_buffer: []u8,
         ) anyerror!void {
             if (input_event.kind != .key_down) return;
-            const action = canvas.widgetKeyboardClipboardAction(.{
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return;
+            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return;
+            const keyboard = canvas.WidgetKeyboardEvent{
                 .phase = .key_down,
                 .key = input_event.key,
                 .modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers),
-            }) orelse return;
-            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return;
-            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return;
+            };
+            const focused_index = self.views[index].canvasWidgetNodeIndexById(self.views[index].canvas_widget_focused_id);
+            const action = (if (focused_index) |node_index|
+                canvas.widgetKeyboardClipboardActionForWidget(self.views[index].widget_layout_nodes[node_index].widget, keyboard)
+            else
+                canvas.widgetKeyboardClipboardAction(keyboard)) orelse return;
 
             switch (action) {
                 .copy => {

@@ -101,6 +101,27 @@ test("clipboard requests preserve source ranges, exact huge offsets and validati
   assert.throws(() => exports.native_text_policy!(new Uint8Array([12])), /clipboard request/);
 });
 
+test("editor shortcut requests preserve primary modifiers and refuse malformed input", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const shortcut = (mode: number, phase: number, bits: number, key: number) => [...exports.native_text_policy!(new Uint8Array([13, mode, phase, bits, key]))];
+  for (const bits of [2, 8, 10]) {
+    assert.deepEqual(shortcut(0, 0, bits, 1), [1]);
+    assert.deepEqual(shortcut(0, 0, bits, 2), [2]);
+    assert.deepEqual(shortcut(0, 0, bits, 3), [3]);
+    assert.deepEqual(shortcut(0, 0, bits | 1, 3), [0]);
+    assert.deepEqual(shortcut(0, 0, bits | 4, 1), [0]);
+  }
+  assert.deepEqual(shortcut(1, 0, 8, 4), [1]);
+  assert.deepEqual(shortcut(1, 0, 9, 4), [2]);
+  assert.deepEqual(shortcut(1, 0, 10, 4), [1]);
+  assert.deepEqual(shortcut(1, 0, 2, 4), [0]);
+  assert.deepEqual(shortcut(1, 0, 12, 4), [0]);
+  for (const phase of [1, 2]) for (const mode of [0, 1]) assert.deepEqual(shortcut(mode, phase, 8, mode === 0 ? 1 : 4), [0]);
+  for (const request of [[13], [13, 0, 0, 8, 1, 0], [13, 2, 0, 8, 1], [13, 0, 3, 8, 1], [13, 0, 0, 16, 1], [13, 0, 0, 8, 5]])
+    assert.throws(() => exports.native_text_policy!(new Uint8Array(request)), /editor shortcut request/);
+});
+
 test("compiled code diff specs support literal and byte bindings and reject invalid annotations", () => {
   const { model, view } = evaluate('<code source="{status}" editable="true" wrap="false" added-lines="{status}" removed-lines="128, 127" line-numbers="true"/>');
   model.status = new TextEncoder().encode("2-4, 7, 3");

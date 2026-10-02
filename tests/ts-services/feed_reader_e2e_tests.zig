@@ -3459,3 +3459,94 @@ test "compiled clipboard keyboard and edit menus preserve source bytes eligibili
         }
     }
 }
+
+test "compiled editor shortcut chords match native phases modifiers and folded primary keys" {
+    const kinds = [_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea };
+    const keys = [_][]const u8{ "", "c", "C", "x", "X", "v", "V", "z", "Z", "y", "Y", "enter", "copy" };
+    for (kinds) |kind| {
+        const reference = canvas.Widget{ .kind = kind };
+        const compiled = canvas.Widget{ .kind = kind, .interaction_policy = core.nativeTextPolicy };
+        for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up, .text_input }) |phase| {
+            for (0..16) |bits| {
+                for (keys) |key| {
+                    const event = canvas.WidgetKeyboardEvent{ .phase = phase, .key = key, .text = "c", .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
+                    try std.testing.expectEqual(canvas.widgetKeyboardClipboardAction(event), canvas.widgetKeyboardClipboardActionForWidget(compiled, event));
+                    try std.testing.expectEqual(canvas.widgetKeyboardTextHistoryAction(reference, event), canvas.widgetKeyboardTextHistoryAction(compiled, event));
+                }
+            }
+        }
+    }
+    const Never = struct {
+        fn policy(_: []const u8, _: []u8) usize {
+            @panic("unsupported widget called editor shortcut policy");
+        }
+    };
+    for ([_]canvas.WidgetKind{ .text, .button, .terminal }) |kind| {
+        const unsupported = canvas.Widget{ .kind = kind, .interaction_policy = Never.policy };
+        const copy = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "C", .modifiers = .{ .super = true } };
+        try std.testing.expectEqual(canvas.WidgetClipboardAction.copy, canvas.widgetKeyboardClipboardActionForWidget(unsupported, copy).?);
+        const redo = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "Z", .modifiers = .{ .super = true, .shift = true } };
+        try std.testing.expectEqual(canvas.WidgetTextHistoryAction.redo, canvas.widgetKeyboardTextHistoryAction(unsupported, redo).?);
+    }
+}
+
+test "runtime clipboard and history routing consult the focused compiled editor policy" {
+    const Spy = struct {
+        var clipboard_calls: usize = 0;
+        var history_calls: usize = 0;
+        var suppress: bool = true;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 13) {
+                if (request[1] == 0) clipboard_calls += 1 else history_calls += 1;
+                if (suppress) {
+                    output[0] = 0;
+                    return 1;
+                }
+            }
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    Spy.clipboard_calls = 0;
+    Spy.history_calls = 0;
+    Spy.suppress = true;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-shortcut-routing", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    const field = canvas.Widget{ .id = 2, .kind = .textarea, .frame = geometry.RectF.init(12, 16, 180, 84), .text = "aé", .interaction_policy = Spy.policy };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{field} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 30 } });
+    harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 3 };
+    try harness.runtime.writeClipboard("sentinel");
+    const writes = harness.null_platform.clipboardWriteCount();
+    const copy = native_sdk.platform.Event{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "C", .modifiers = .{ .primary = true } } };
+    try harness.runtime.dispatchPlatformEvent(app, copy);
+    try std.testing.expectEqual(writes, harness.null_platform.clipboardWriteCount());
+    try std.testing.expectEqual(@as(usize, 1), Spy.clipboard_calls);
+    Spy.suppress = false;
+    try harness.runtime.dispatchPlatformEvent(app, copy);
+    var clipboard: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("aé", try harness.runtime.readClipboard(&clipboard));
+    // Paste creates real native history, then suppressing the planner's chord
+    // proves Undo/Redo do not bypass the compiled recognition result.
+    try harness.runtime.writeClipboard("🙂");
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "v", .modifiers = .{ .primary = true } } });
+    try std.testing.expectEqualStrings("🙂", (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+    const undo = native_sdk.platform.Event{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "z", .modifiers = .{ .primary = true } } };
+    Spy.suppress = true;
+    const before_history = Spy.history_calls;
+    try harness.runtime.dispatchPlatformEvent(app, undo);
+    try std.testing.expect(Spy.history_calls > before_history);
+    try std.testing.expectEqualStrings("🙂", (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+    Spy.suppress = false;
+    try harness.runtime.dispatchPlatformEvent(app, undo);
+    try std.testing.expectEqualStrings("aé", (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "Z", .modifiers = .{ .primary = true, .shift = true } } });
+    try std.testing.expectEqualStrings("🙂", (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.text);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+}

@@ -50,6 +50,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 10) return nscvTextHistoryTimeline(request);
   if (request[0] === 11) return nscvCodeIndentation(request);
   if (request[0] === 12) return nscvTextClipboard(request);
+  if (request[0] === 13) return nscvEditorShortcut(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -87,6 +88,27 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
   return result;
+}
+
+/** Editor shortcuts: tag 13, mode (0 clipboard, 1 history), phase
+ * (0 down, 1 up, 2 text), modifier bits (shift/control/alt/super), key
+ * (0 unknown, 1 C, 2 X, 3 V, 4 Z). One-byte result: 0 none;
+ * clipboard 1 Copy/2 Cut/3 Paste, history 1 Undo/2 Redo. Native retains
+ * eligibility, OS transport and history lookup. History uses the host's
+ * primary/super projection; a raw control flag alone remains inert.
+ */
+function nscvEditorShortcut(request: Uint8Array): Uint8Array {
+  if (request.length !== 5 || request[1]! > 1 || request[2]! > 2 ||
+      request[3]! > 15 || request[4]! > 4) throw new Error("invalid editor shortcut request");
+  const bits = request[3]!, key = request[4]!;
+  const shift = (bits & 1) !== 0, control = (bits & 2) !== 0;
+  const alt = (bits & 4) !== 0, meta = (bits & 8) !== 0;
+  let action = 0;
+  if (request[2] === 0 && !alt) {
+    if (request[1] === 0 && (control || meta) && !shift && key >= 1 && key <= 3) action = key;
+    else if (request[1] === 1 && meta && key === 4) action = shift ? 2 : 1;
+  }
+  const result = new Uint8Array(1); result[0] = action; return result;
 }
 
 /** Clipboard selection: tag 12, selection-present and two reserved bytes,
