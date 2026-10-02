@@ -3833,3 +3833,103 @@ test "runtime grants stamped radio navigation and toggle activation to compiled 
     try std.testing.expect(retained.findById(5).?.widget.state.selected);
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
 }
+
+test "compiled semantic controls match native grants kind and tree role precedence" {
+    const policies = [_]*const fn ([]const u8, []u8) usize{
+        core.nativeTextPolicy,   core.nativeRadioPolicy,     core.nativeTabsPolicy,
+        core.nativeTreePolicy,   core.nativeListPolicy,      core.nativeMenuPolicy,
+        core.nativeTogglePolicy, core.nativeAccordionPolicy, core.nativeSliderPolicy,
+        core.nativeSplitPolicy,  core.nativeResizablePolicy, core.nativeScrollPolicy,
+    };
+    for (std.enums.values(canvas.WidgetKind)) |kind| {
+        for ([_]bool{ false, true }) |tree_row| {
+            for (0..32) |bits| {
+                const actions = canvas.WidgetActions{ .press = bits & 1 != 0, .toggle = bits & 2 != 0, .select = bits & 4 != 0, .increment = bits & 8 != 0, .decrement = bits & 16 != 0, .focus = true, .dismiss = true };
+                for (std.enums.values(canvas.WidgetSemanticAction)) |action| {
+                    for ([_]bool{ false, true }) |command| {
+                        var widget = canvas.Widget{ .kind = kind, .value = 0.5, .frame = geometry.RectF.init(0, 0, 160, 100), .command = if (command) "activate" else "", .semantics = .{ .role = if (tree_row) .treeitem else .none } };
+                        const expected = canvas.widgetSemanticControlIntentWithActions(widget, action, actions);
+                        const defaults = canvas.widgetSemanticControlIntent(widget, action);
+                        widget.interaction_policy = if (kind == .slider) core.nativeSliderPolicy else policies[(bits + @intFromEnum(kind)) % policies.len];
+                        try std.testing.expectEqualDeep(expected, canvas.widgetSemanticControlIntentWithActions(widget, action, actions));
+                        try std.testing.expectEqualDeep(defaults, canvas.widgetSemanticControlIntent(widget, action));
+                    }
+                }
+            }
+        }
+    }
+    const Never = struct {
+        fn policy(_: []const u8, _: []u8) usize {
+            @panic("ineligible semantic control called compiled policy");
+        }
+    };
+    for (std.enums.values(canvas.WidgetSemanticAction)) |action| {
+        for ([_]bool{ false, true }) |disabled| {
+            for ([_]bool{ false, true }) |hidden| {
+                if (!disabled and !hidden) continue;
+                try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetSemanticControlIntentWithActions(.{ .kind = .button, .state = .{ .disabled = disabled }, .semantics = .{ .hidden = hidden }, .interaction_policy = Never.policy }, action, .{ .press = true, .toggle = true, .select = true, .increment = true, .decrement = true }));
+            }
+        }
+    }
+    const retained = canvas.widgetSemanticControlIntent(.{ .kind = .menu_item, .interaction_policy = core.nativeMenuPolicy }, .press);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = core.initialModel();
+    _ = core.nativeView(arena.allocator());
+    var output: [2]u8 = undefined;
+    _ = core.nativeTreePolicy(&.{ 16, 1, 0, 5, 1 }, &output);
+    try std.testing.expectEqualDeep(@as(?canvas.WidgetControlIntent, .{ .kind = .select, .actions = .{ .press = true, .select = true } }), retained);
+}
+
+test "compiled semantic policy owns pointer handler choice and preserves radio change delivery" {
+    const Msg = union(enum) { press, toggle, change };
+    const Ui = canvas.Ui(Msg);
+    const Spy = struct {
+        var calls: usize = 0;
+        var suppress = false;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 16) {
+                calls += 1;
+                if (suppress) {
+                    output[0] = 0;
+                    output[1] = 0;
+                    return 2;
+                }
+            }
+            return core.nativeTextPolicy(request, output);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    var button = ui.button(.{ .on_press = .press }, "Run");
+    button.widget.interaction_policy = Spy.policy;
+    var check = ui.el(.checkbox, .{ .text = "Option", .on_toggle = .toggle }, .{});
+    check.widget.interaction_policy = Spy.policy;
+    var radio = ui.el(.radio, .{ .text = "Choice", .on_press = .press, .on_toggle = .toggle, .on_change = .change }, .{});
+    radio.widget.interaction_policy = Spy.policy;
+    var row = ui.button(.{ .on_press = .press, .on_toggle = .toggle, .semantics = .{ .role = .treeitem } }, "Row");
+    row.widget.interaction_policy = Spy.policy;
+    const tree = try ui.finalize(ui.column(.{}, .{ button, check, radio, row }));
+    const button_id = tree.root.children[0].id;
+    const check_id = tree.root.children[1].id;
+    const radio_id = tree.root.children[2].id;
+    const row_id = tree.root.children[3].id;
+    Spy.calls = 0;
+    Spy.suppress = true;
+    for ([_]canvas.ObjectId{ button_id, check_id, radio_id, row_id }) |id| {
+        try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(id, .up));
+    }
+    try std.testing.expect(Spy.calls > 0);
+    Spy.calls = 0;
+    Spy.suppress = false;
+    try std.testing.expectEqualDeep(@as(?Msg, .press), tree.msgForPointer(button_id, .up));
+    try std.testing.expectEqualDeep(@as(?Msg, .toggle), tree.msgForPointer(check_id, .up));
+    try std.testing.expectEqualDeep(@as(?Msg, .press), tree.msgForPointer(row_id, .up));
+    try std.testing.expectEqualDeep(@as(?Msg, .change), tree.msgForPointerEvent(radio_id, .{ .phase = .up, .point = .{}, .radio_selection_changed = true }));
+    try std.testing.expectEqualDeep(@as(?Msg, .toggle), tree.msgForPointerEvent(radio_id, .{ .phase = .up, .point = .{}, .radio_selection_changed = false }));
+    const before = Spy.calls;
+    try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(button_id, .down));
+    try std.testing.expectEqual(@as(?Msg, null), tree.msgForPointer(999999, .up));
+    try std.testing.expectEqual(before, Spy.calls);
+}

@@ -68,6 +68,18 @@ test("checkable preferences retain state, keyboard order, identities and replay"
     s = await app.click(widget(s, "New profile")); state(0);
     assert.equal(s.model.profile, 1); assert.notEqual(widget(s, "Product café updates").id, productId);
     selected("Product café updates", false); selected("Weekly digest", true); selected("Notifications", true); selected("Sync over mobile data", false); selected("Compact rows", true);
+    // Semantic pointer dispatch and assistive keyboard dispatch both
+    // deliver the same authored messages, including after fresh mounting.
+    s = await app.action(widget(s, "Product café updates"), "toggle"); selected("Product café updates", true); state(1);
+    s = await app.action(widget(s, "Notifications"), "toggle"); selected("Notifications", false); state(2);
+    const digest = widget(s, "Weekly digest"), point = { x: digest.bounds.x + digest.bounds.width / 2, y: digest.bounds.y + digest.bounds.height / 2 };
+    await app.pointer(digest, "down", point);
+    s = await app.pointer(digest, "cancel", point); selected("Weekly digest", true); state(2);
+    s = await app.click(widget(s, "Weekly digest")); selected("Weekly digest", false); state(3);
+    s = await app.click(widget(s, "Compact rows")); selected("Compact rows", false); state(4);
+    s = await app.action(widget(s, "Compact rows"), "toggle"); selected("Compact rows", true); state(5);
+    s = await app.click(widget(s, "Refresh")); state(5, 1);
+    s = await app.click(widget(s, "New profile")); state(0); selected("Weekly digest", true); selected("Notifications", true);
     const replay = await app.verifyReplay();
     assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
