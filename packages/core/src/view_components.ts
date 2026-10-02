@@ -2,6 +2,8 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection } from "@native-sdk/core/text";
+
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
@@ -36,6 +38,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -72,6 +75,39 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
+  return result;
+}
+
+/** Tagged pointer request: 3, multiline, click count (2/3), mode
+ * (0 fresh click/1 drag/2 Shift extension), then offset and anchor run's
+ * start/end as LE u32, followed by borrowed UTF-8 text. Result is four LE
+ * u32 values: oriented selection anchor/focus and retained anchor run.
+ */
+function nscvTextPointerSelection(request: Uint8Array): Uint8Array {
+  if (request.length < 16 || request.length > 16 + 512 * 1024 || request[1]! > 1 ||
+      request[2]! < 2 || request[2]! > 3 || request[3]! > 2) throw new Error("invalid text pointer policy request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const text = request.subarray(16), offset = data.getUint32(4, true);
+  const unit = (at: number): { readonly anchor: number; readonly focus: number } => {
+    if (request[2] === 2) return nscvWordSelection(text, at);
+    if (request[1] === 1) return nscvLineSelection(text, at);
+    return nscvSelection(0, text.length);
+  };
+  const selected = unit(offset);
+  let start = Math.min(selected.anchor, selected.focus), end = Math.max(selected.anchor, selected.focus);
+  if (request[3] === 1) {
+    const a = Math.min(data.getUint32(8, true), text.length), b = Math.min(data.getUint32(12, true), text.length);
+    start = Math.min(a, b); end = Math.max(a, b);
+  } else if (request[3] === 2) {
+    const anchor = unit(data.getUint32(8, true));
+    start = Math.min(anchor.anchor, anchor.focus); end = Math.max(anchor.anchor, anchor.focus);
+  }
+  let anchor = start, focus = end;
+  if (selected.anchor < start) { anchor = end; focus = selected.anchor; }
+  else if (selected.focus > end) { anchor = start; focus = selected.focus; }
+  const result = new Uint8Array(16), out = new DataView(result.buffer);
+  out.setUint32(0, anchor, true); out.setUint32(4, focus, true);
+  out.setUint32(8, start, true); out.setUint32(12, end, true);
   return result;
 }
 

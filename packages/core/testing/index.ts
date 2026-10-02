@@ -183,10 +183,10 @@ export class NativeApp implements AsyncDisposable {
     return this.#snapshot({ op: "automation", command: `widget-click ${token(widget.view)} ${identity(widget.id)}` });
   }
   /** Physical pointer input through native hit testing and pointer capture. */
-  pointer(widget: NativeWidget, phase: "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }): Promise<NativeSnapshot> {
+  pointer(widget: NativeWidget, phase: "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }, modifiers: { readonly shift?: boolean } = {}): Promise<NativeSnapshot> {
     for (const number of [point.x, point.y, delta.x, delta.y]) if (!Number.isFinite(number)) throw new Error("Expected finite pointer coordinates");
     return this.#snapshot({ op: "input", view: token(widget.view), window: widget.window,
-      input: `pointer_${phase}`, x: point.x, y: point.y, delta_x: delta.x, delta_y: delta.y });
+      input: `pointer_${phase}`, x: point.x, y: point.y, delta_x: delta.x, delta_y: delta.y, shift: modifiers.shift ?? false });
   }
   /** Leave the gesture active so tests can inspect the projected insertion slot. */
   async beginDrag(widget: NativeWidget, destination: NativePoint): Promise<NativeSnapshot> {

@@ -13,3 +13,8 @@ Enter adds a newline to the note. Cmd+Enter on macOS (Ctrl+Enter elsewhere)
 publishes it. The message starts with Enter to send; Shift+Enter always adds
 a line. Toggle Enter to send changes that setting without replacing the editor.
 Refresh preserves text and widget identities; New desk starts a fresh draft.
+
+Double-click selects a word, whitespace run, or punctuation cluster. Drag while
+holding the second click to extend by whole runs. Triple-click selects the
+whole subject or the clicked note line, excluding its newline. Shift extends
+from the standing anchor; dragging back into the anchor run restores that run.

@@ -1053,6 +1053,15 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
         ) ?canvas.TextSelection {
             if (click_count >= 2) {
                 const offset = canvas.textOffsetForWidgetPoint(widget, point, self.widget_tokens) orelse return null;
+                const mode: u8 = if (shift_extend) 2 else if (dragging) 1 else 0;
+                const anchor = if (shift_extend)
+                    canvas.TextRange.init(current_selection.anchor, current_selection.anchor)
+                else
+                    self.canvas_widget_multi_click_anchor;
+                if (canvas.widgetCompiledTextPointerSelection(widget, offset, click_count, mode, anchor)) |result| {
+                    self.canvas_widget_multi_click_anchor = result.anchor;
+                    return result.selection;
+                }
                 const unit = canvasWidgetMultiClickUnitSelection(widget, offset, click_count);
                 if (shift_extend) {
                     // Shift+double/triple-click starts a fresh unit-wise

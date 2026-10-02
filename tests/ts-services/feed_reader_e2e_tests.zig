@@ -2109,3 +2109,117 @@ test "compiled text keyboard intent matches native keys modifiers phases and aut
     try std.testing.expectEqual(@as(usize, 2), core.nativeTextPolicy(&.{ 2, 1, 0, 2, 0, 0, 1, 0 }, &output));
     try std.testing.expectEqualDeep([2]u8{ 15, 0 }, output);
 }
+
+test "compiled pointer selection matches native UTF-8 word and hard-line units" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const texts = [_][]const u8{
+        "",                     "hello", "hello  world!!!", "snake_case\t next",
+        "café 日本",
+        "a\xcc\x81 🙂!",
+        "one\r\ntwo\n\nlast\r", "\r\n",  " \t\x0b\x0c\r\n", "\x80x\xff",
+        "\xf0\x9f",
+    };
+    for (texts) |text| {
+        for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+            const widget = canvas.Widget{ .kind = kind, .text = text, .interaction_policy = core.nativeTextPolicy };
+            for ([_]u8{ 2, 3 }) |count| {
+                for (0..text.len + 3) |offset| {
+                    const expected: canvas.TextSelection = if (count == 2)
+                        canvas.textWordSelectionAtOffset(text, offset)
+                    else if (kind == .textarea)
+                        canvas.textLineSelectionAtOffset(text, offset)
+                    else
+                        .{ .anchor = 0, .focus = text.len };
+                    const result = canvas.widgetCompiledTextPointerSelection(widget, offset, count, 0, .{}).?;
+                    try std.testing.expectEqualDeep(expected, result.selection);
+                    try std.testing.expectEqualDeep(expected.range(text.len), result.anchor);
+                }
+            }
+        }
+    }
+    const widget = canvas.Widget{ .kind = .textarea, .text = "one two three", .interaction_policy = core.nativeTextPolicy };
+    const anchor = canvas.TextRange.init(4, 7);
+    const before = canvas.widgetCompiledTextPointerSelection(widget, 1, 2, 1, anchor).?;
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 7, .focus = 0 }, before.selection);
+    const after = canvas.widgetCompiledTextPointerSelection(widget, 10, 2, 1, anchor).?;
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 4, .focus = 13 }, after.selection);
+    const inside = canvas.widgetCompiledTextPointerSelection(widget, 5, 2, 1, anchor).?;
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 4, .focus = 7 }, inside.selection);
+    const shifted = canvas.widgetCompiledTextPointerSelection(widget, 1, 2, 2, .{ .start = 5 }).?;
+    try std.testing.expectEqualDeep(before, shifted);
+    // Full text budget, copied result lifetime, and shared policy/view arenas.
+    const large = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'a');
+    const full = canvas.Widget{ .kind = .textarea, .text = large, .interaction_policy = core.nativeTextPolicy };
+    const selected = canvas.widgetCompiledTextPointerSelection(full, large.len, 2, 0, .{}).?;
+    const view_bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(view_bytes);
+    var key_output: [2]u8 = undefined;
+    _ = core.nativeTextPolicy(&.{ 1, 1, 0, 0, 1, 0, 5, 0 }, &key_output);
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = large.len }, selected.selection);
+}
+
+test "compiled editable pointer gestures preserve native selection orientation and isolation" {
+    const Fixture = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-text-pointer", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+        fn point(widget: canvas.Widget, target: usize) ?geometry.PointF {
+            var y = widget.frame.y + 2;
+            while (y < widget.frame.y + widget.frame.height) : (y += 4) {
+                var x = widget.frame.x + 1;
+                while (x < widget.frame.x + widget.frame.width) : (x += 0.5) {
+                    const value = geometry.PointF.init(x, y);
+                    if (canvas.textOffsetForWidgetPoint(widget, value, .{})) |offset| {
+                        if (offset == target) return value;
+                    }
+                }
+            }
+            return null;
+        }
+    };
+    const Step = struct { offset: usize, count: u8 = 2, drag: bool = false, shift: bool = false, expected: canvas.TextSelection };
+    const steps = [_]Step{
+        .{ .offset = 5, .expected = .{ .anchor = 4, .focus = 9 } },
+        .{ .offset = 11, .drag = true, .expected = .{ .anchor = 4, .focus = 15 } },
+        .{ .offset = 1, .drag = true, .expected = .{ .anchor = 9, .focus = 0 } },
+        .{ .offset = 5, .drag = true, .expected = .{ .anchor = 4, .focus = 9 } },
+        .{ .offset = 1, .shift = true, .expected = .{ .anchor = 9, .focus = 0 } },
+        .{ .offset = 5, .count = 3, .expected = .{ .anchor = 0, .focus = 15 } },
+        .{ .offset = 18, .count = 3, .drag = true, .expected = .{ .anchor = 0, .focus = 26 } },
+        .{ .offset = 5, .count = 3, .drag = true, .expected = .{ .anchor = 0, .focus = 15 } },
+    };
+    var selections: [2][steps.len]canvas.TextSelection = undefined;
+    for ([_]bool{ false, true }, 0..) |compiled, backend| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var state: Fixture = .{};
+        try harness.start(state.app());
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 600, 300) });
+        const fields = [_]canvas.Widget{
+            .{ .id = 2, .kind = .textarea, .frame = geometry.RectF.init(12, 16, 260, 120), .text = "one café three\r\nfour last", .interaction_policy = if (compiled) core.nativeTextPolicy else null },
+            .{ .id = 3, .kind = .input, .frame = geometry.RectF.init(300, 16, 240, 36), .text = "neighbor", .state = .{ .disabled = true }, .interaction_policy = if (compiled) core.nativeTextPolicy else null },
+        };
+        var nodes: [3]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &fields }, geometry.RectF.init(0, 0, 600, 300), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        const view = &harness.runtime.views[0];
+        for (steps, 0..) |step, index| {
+            const widget = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget;
+            _ = try view.applyCanvasWidgetTextPointer(2, Fixture.point(widget, step.offset).?, step.drag, step.shift, step.count);
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            selections[backend][index] = retained.findById(2).?.widget.text_selection.?;
+            try std.testing.expectEqualDeep(step.expected, selections[backend][index]);
+            try std.testing.expectEqual(@as(?canvas.TextSelection, null), retained.findById(3).?.widget.text_selection);
+        }
+        try std.testing.expect((try view.applyCanvasWidgetTextPointer(3, geometry.PointF.init(320, 30), false, false, 3)) == null);
+        const anchor = view.canvas_widget_multi_click_anchor;
+        try std.testing.expect((try view.applyCanvasWidgetTextPointer(999, geometry.PointF.init(20, 30), false, false, 2)) == null);
+        try std.testing.expectEqualDeep(anchor, view.canvas_widget_multi_click_anchor);
+    }
+    try std.testing.expectEqualDeep(selections[0], selections[1]);
+}

@@ -27,6 +27,7 @@ const Request = struct {
     y: f32 = 0,
     delta_x: f32 = 0,
     delta_y: f32 = 0,
+    shift: bool = false,
     paths: []const []const u8 = &.{},
 };
 
@@ -293,6 +294,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                         .y = request.y,
                         .delta_x = request.delta_x,
                         .delta_y = request.delta_y,
+                        .modifiers = .{ .shift = request.shift },
                         .timestamp_ns = value.frame_index * 16_000_000 + 1,
                     } });
                 },

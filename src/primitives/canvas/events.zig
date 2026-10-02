@@ -664,6 +664,42 @@ fn compiledTextKeyboardEdit(widget: Widget, event: WidgetKeyboardEvent, operatio
     };
 }
 
+pub const TextPointerPolicyResult = struct {
+    selection: text_model.TextSelection,
+    anchor: TextRange,
+};
+
+const text_pointer_policy_scratch = canvas.lazy_tls.LazyTls(struct {
+    request: [16 + text_model.max_widget_text_bytes_per_view]u8,
+});
+
+/// Native resolves the pointer into a byte offset. Compiled policy selects
+/// the run and orients its union with the gesture anchor; copy before reset.
+pub fn widgetCompiledTextPointerSelection(widget: Widget, offset: usize, click_count: u8, mode: u8, anchor: TextRange) ?TextPointerPolicyResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (widget.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled text pointer request exceeds text budget");
+    const request = text_pointer_policy_scratch.get().request[0 .. 16 + widget.text.len];
+    request[0] = 3;
+    request[1] = @intFromBool(widget.kind == .textarea);
+    request[2] = @min(click_count, 3);
+    request[3] = mode;
+    std.mem.writeInt(u32, request[4..8], @intCast(@min(offset, widget.text.len)), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(@min(anchor.start, widget.text.len)), .little);
+    std.mem.writeInt(u32, request[12..16], @intCast(@min(anchor.end, widget.text.len)), .little);
+    @memcpy(request[16..], widget.text);
+    var output: [16]u8 = undefined;
+    if (policy(request, &output) != output.len) @panic("invalid compiled text pointer result");
+    const result = TextPointerPolicyResult{
+        .selection = .{ .anchor = std.mem.readInt(u32, output[0..4], .little), .focus = std.mem.readInt(u32, output[4..8], .little) },
+        .anchor = .{ .start = std.mem.readInt(u32, output[8..12], .little), .end = std.mem.readInt(u32, output[12..16], .little) },
+    };
+    if (result.selection.anchor > widget.text.len or result.selection.focus > widget.text.len or
+        result.anchor.start > result.anchor.end or result.anchor.end > widget.text.len)
+        @panic("invalid compiled text pointer range");
+    return result;
+}
+
 pub fn widgetKeyboardTextSubmit(widget: Widget, event: WidgetKeyboardEvent) bool {
     if (!isWidgetTextEntry(widget)) return false;
     if (widget.state.disabled or event.phase != .key_down) return false;

@@ -192,6 +192,33 @@ function textOffsetStartsWord(text: Uint8Array, offset: number): boolean {
   return cls !== null && cls === 0;
 }
 
+/** Select the word, whitespace run or punctuation cluster at a UTF-8 byte
+ * offset. An offset at or beyond the end selects the trailing run.
+ */
+export function textWordSelectionAtOffset(text: Uint8Array, offset: number): TextSelection {
+  if (text.length === 0) return caretSelectionAt(0, 0);
+  let cursor = snapTextOffset(text, offset);
+  if (cursor >= text.length) cursor = previousTextOffset(text, text.length);
+  const kind = textRunClassAt(text, cursor);
+  let start = cursor;
+  while (start > 0) {
+    const previous = previousTextOffset(text, start);
+    if (textRunClassAt(text, previous) !== kind) break;
+    start = previous;
+  }
+  let end = nextTextOffset(text, cursor);
+  while (end < text.length && textRunClassAt(text, end) === kind) end = nextTextOffset(text, end);
+  return caretSelectionAt(start, end);
+}
+
+/** Select a hard-newline line without its LF or CRLF terminator. */
+export function textLineSelectionAtOffset(text: Uint8Array, offset: number): TextSelection {
+  let end = snapTextOffset(text, offset);
+  while (end < text.length && text[end] !== 0x0a) end += 1;
+  if (end > 0 && end < text.length && text[end - 1] === 0x0d) end -= 1;
+  return caretSelectionAt(textLineStartOffset(text, offset), end);
+}
+
 function previousTextWordOffset(text: Uint8Array, offset: number): number {
   let cursor = snapTextOffset(text, offset);
   while (cursor > 0) {
@@ -223,7 +250,7 @@ function nextTextWordOffset(text: Uint8Array, offset: number): number {
 /// excludes NaN) and stated whole with Math.trunc. A value outside the
 /// provable ±(2^53 − 1) window clamps to 0, the same floor every
 /// caller's snap already applies.
-function caretSelectionAt(anchor: number, focus: number): TextSelection {
+export function caretSelectionAt(anchor: number, focus: number): TextSelection {
   const wholeAnchor = anchor >= 0 && anchor <= 9007199254740991 ? Math.trunc(anchor) : 0;
   const wholeFocus = focus >= 0 && focus <= 9007199254740991 ? Math.trunc(focus) : 0;
   return { anchor: wholeAnchor, focus: wholeFocus };

@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
+import { runInNewContext as runView } from "node:vm";
+import * as textLibrary from "../sdk/text.ts";
 import ts from "@typescript/old";
 import { compileView, compileViewBundle, type ViewContract } from "../src/view_frontend.ts";
 import { checkFile } from "../src/frontend.ts";
+
+const runInNewContext = (code: string, context: Record<string, unknown>) => runView(code, {
+  ...context,
+  require: (name: string) => {
+    assert.equal(name, "@native-sdk/core/text");
+    return textLibrary;
+  },
+});
 
 const contract: ViewContract = {
   model: "Model", types: { structs: [{ name: "Model", fields: [

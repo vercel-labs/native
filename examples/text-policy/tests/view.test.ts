@@ -81,6 +81,52 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await focus("Subject"); await key("tab"); assert.equal(field("Note").focused, true);
     await key("shift+tab"); assert.equal(field("Subject").focused, true);
     await click("New desk"); assert.notEqual(field("Note").id, noteId); expectText("chat", "Hello"); assert.equal(s.model.submits, 0);
+    // Real pointer events derive click counts from journaled timestamps.
+    // Probe a plain caret to aim inside the word without pinning font widths.
+    const pointer = async (name: string, phase: "down" | "drag" | "up", x: number, y: number, shift = false) => {
+      s = await app.pointer(field(name), phase, { x, y }, { x: 0, y: 0 }, { shift }); save();
+    };
+    const pauseClicks = async () => { for (let i = 0; i < 33; i++) s = await app.frame(); };
+    const aim = async (name: string, model: string, start: number, end: number, line = 0) => {
+      await pauseClicks();
+      const bounds = field(name).bounds, y = bounds.y + 16 + line * 20;
+      for (let x = bounds.x + 12; x < bounds.x + bounds.width - 8; x += 8) {
+        await pointer(name, "down", x, y); await pointer(name, "up", x, y);
+        const caret = value(model).focus;
+        if (caret >= start && caret < end) return { x, y };
+      }
+      assert.fail(`No plain caret inside ${name} range ${start}..${end}`);
+    };
+    const clickPoint = async (name: string, point: { x: number; y: number }, shift = false) => {
+      await pointer(name, "down", point.x, point.y, shift); await pointer(name, "up", point.x, point.y, shift);
+    };
+    const selection = (name: string, anchor: number, focus: number) => {
+      assert.equal(value(name).anchor, anchor); assert.equal(value(name).focus, focus);
+    };
+    await set("Subject", "one café!!!  last");
+    const word = await aim("Subject", "subject", 4, 9);
+    await clickPoint("Subject", word); selection("subject", 4, 9);
+    await clickPoint("Subject", word); selection("subject", 0, 18);
+    await set("Note", "one café three\r\nfour last");
+    const lastWord = await aim("Note", "draft", 10, 15);
+    const middle = await aim("Note", "draft", 4, 9);
+    await pointer("Note", "down", middle.x, middle.y); selection("draft", 4, 9);
+    await pointer("Note", "drag", lastWord.x, lastWord.y); selection("draft", 4, 15);
+    await pointer("Note", "drag", field("Note").bounds.x + 12, middle.y); selection("draft", 9, 0);
+    await pointer("Note", "drag", middle.x, middle.y); selection("draft", 4, 9);
+    await pointer("Note", "up", middle.x, middle.y);
+    await clickPoint("Note", middle); selection("draft", 0, 15);
+    await key("backspace"); expectText("draft", "\r\nfour last");
+    await set("Note", "one café three\r\nfour last");
+    const first = await aim("Note", "draft", 0, 3);
+    await select("Note", 5, 5);
+    await clickPoint("Note", first, true); selection("draft", 9, 0);
+    await click("Refresh"); selection("draft", 9, 0);
+    await click("Hide note"); await click("Hide note");
+    await click("Lock editors"); const pointerLocked = s.model;
+    for (let i = 0; i < 3; i++) await clickPoint("Note", first);
+    assert.deepEqual(s.model, pointerLocked);
+    await click("Lock editors"); await click("New desk");
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

@@ -169,7 +169,7 @@ if (args["view-markup"]) {
     .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([entry, source]) => ({ label: entry.slice(0, -".native".length), entry, source, sources: windowSources }));
   const view = compileViewBundle(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources }, windows);
-  fs.appendFileSync(path.join(args.out, "core_facade.ts"), view);
+  fs.appendFileSync(path.join(args.out, "core_facade.ts"), resolveSpecifiers(view, "core_facade.ts"));
   const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
   profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
   if (windows.length) profile.exports.push({ export: "native_window_view", symbol: `${profile.abi.prefix}native_window_view`, params: ["bytes"], returns: "bytes" });

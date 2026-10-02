@@ -2,12 +2,29 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyTextInputEvent,
+  textWordSelectionAtOffset,
+  textLineSelectionAtOffset,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("pointer selection shares UTF-8 word classes and excludes hard line terminators", () => {
+  const words = encoder.encode("café  snake_case!!! 日本");
+  for (const at of [0, 3, 4]) assert.deepEqual(textWordSelectionAtOffset(words, at), { anchor: 0, focus: 5 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 6), { anchor: 5, focus: 7 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 15), { anchor: 7, focus: 17 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 18), { anchor: 17, focus: 20 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 999), { anchor: 21, focus: 27 });
+  const lines = encoder.encode("one\r\ncafé\n\nlast\r");
+  assert.deepEqual(textLineSelectionAtOffset(lines, 1), { anchor: 0, focus: 3 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 8), { anchor: 5, focus: 10 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 11), { anchor: 11, focus: 11 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 999), { anchor: 12, focus: 17 });
+  assert.deepEqual(textWordSelectionAtOffset(new Uint8Array(), 0), { anchor: 0, focus: 0 });
+});
 
 function state(text: string, anchor: number, focus = anchor): TextEditState {
   return {
