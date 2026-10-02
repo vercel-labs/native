@@ -6677,7 +6677,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // focused terminal needs the modifiers even more: its emulator
         // translates the natural macOS gestures to shell bindings, and
         // negotiated key protocols must see every other combined chord.
-        if (NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
+        // Enter's modifiers choose newline versus submission. Cocoa's
+        // insertNewline: selector discards them; preserve the physical
+        // gesture unless an IME owns Return to commit marked text.
+        BOOL rawEnter = ![self hasMarkedText] && [NativeSdkShortcutKeyForEvent(event) isEqualToString:@"enter"];
+        if (rawEnter || NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
             [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
             return;
         }

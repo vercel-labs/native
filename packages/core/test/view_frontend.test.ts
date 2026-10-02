@@ -19,7 +19,7 @@ const source = readFileSync(new URL("../../../tests/native-driver/src/app.native
 const evaluate = (markup: string) => {
   const generated = compileView(markup, contract);
   const js = ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS });
-  const model = { count: 7, tickCount: 3, ticking: true, stampedMs: -1 };
+  const model = { count: 7, tickCount: 3, ticking: true, stampedMs: -1, status: new TextEncoder().encode("Café\nnotes") };
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, total: (m: typeof model) => m.count + m.tickCount,
     nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, contract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
@@ -144,7 +144,7 @@ test("literal Unicode, entities, keyed nodes and conditional splicing survive vi
 
 test("unsupported or malformed markup fails with source location before compilation", () => {
   const cases = [
-    ['<textarea/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
+    ['<dialog/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
     ['<constructor/>', /unsupported element/],
     ['<text>{missing}</text>', /unknown binding/], ['<text>{count.constructor}</text>', /unsupported field/], ['<text>{count; process.exit()}</text>', /unsupported expression/],
     ['<switch checked="{count}"/>', /expected boolean/], ['<button on-press="loaded"/>', /scalar Msg payload/],
@@ -522,4 +522,19 @@ test("resizable markup keeps stacking children, initial sizing and disabled stat
     '<resizable resize-duration="100"/>', '<resizable>Mixed<text>child</text></resizable>']) {
     assert.throws(() => compileView(markup, contract), /compiled TypeScript view:/, markup);
   }
+});
+
+
+test("textarea preserves multiline values, input/submit channels and bound Enter policy", () => {
+  const { view } = evaluate('<textarea width="420" height="180" text="{status}" placeholder="Write" label="Note" submit-on-enter="{ticking}" disabled="{ticking}" on-submit="increment"/>');
+  const node = view().nodes[0];
+  assert.equal(node.kind, "textarea"); assert.equal(node.width, 420); assert.equal(node.height, 180);
+  assert.equal(node.text, "Café\nnotes");
+  const compiled = compileView('<textarea text="{url}" on-input="url_edit" on-submit="refresh"/>', feedContract);
+  assert.match(compiled, new RegExp(`input: ${feedContract.msg.arms.findIndex(arm => arm.name === "url_edit")}`));
+  assert.equal(node.submitOnEnter, true); assert.equal(node.disabled, true); assert.equal(node.placeholder, "Write");
+  assert.deepEqual(node.submit, [1, contract.msg.arms.findIndex(arm => arm.name === "increment")]);
+  for (const markup of ['<input submit-on-enter="true"/>', '<textarea submit-on-enter="1"/>',
+    '<textarea on-toggle="increment"/>', '<textarea><text>Child</text></textarea>'])
+    assert.throws(() => compileView(markup, contract), /compiled TypeScript view:/);
 });

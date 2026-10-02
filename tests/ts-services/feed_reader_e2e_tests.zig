@@ -613,7 +613,9 @@ test "compiled primary and window view copies survive alternating scriptc arena 
     const split_widget = canvas.Widget{ .kind = .split, .value = 0.3, .interaction_policy = core.nativeSplitPolicy };
     const scroll_widget = canvas.Widget{ .kind = .scroll_view, .interaction_policy = core.nativeScrollPolicy, .runtime_flags = .{ .compiled_scroll_policy = true } };
     const resizable_widget = canvas.Widget{ .kind = .resizable, .frame = geometry.RectF.init(0, 0, 120, 44), .interaction_policy = core.nativeResizablePolicy };
+    const text_widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy };
     for (0..16) |_| {
+        try std.testing.expectEqualDeep(canvas.TextInputEvent{ .insert_text = "\n" }, canvas.widgetKeyboardNewlineTextEditEvent(text_widget, .{ .phase = .key_down, .key = "Enter" }).?);
         try std.testing.expectEqual(@as(f32, 150.5), canvas.widgetCompiledResizableWidth(resizable_widget, 0, 120, 30.5).?);
         try std.testing.expectEqual(@as(f32, 80.5), canvas.widgetCompiledScrollResult(scroll_widget, .{ .operation = 2, .current = 30.5, .previous_source = 30.5, .retained = 80.5 }).?.dx);
         try std.testing.expectEqual(@as(f32, 0.8), canvas.widgetCompiledSplitValue(split_widget, .{ .operation = 2, .value = 0.3, .previous_source = 0.3, .retained = 0.8 }).?);
@@ -2074,4 +2076,36 @@ test "compiled resizable capture and retained rebuilds preserve independent fram
         try std.testing.expect((try harness.runtime.views[0].applyCanvasWidgetResizableDelta(999, 30)) == null);
     }
     try std.testing.expectEqualDeep(widths[0], widths[1]);
+}
+
+test "compiled text keyboard intent matches native keys modifiers phases and authoritative edits" {
+    const keys = [_][]const u8{ "unknown", "Enter", "RETURN", "Backspace", "Delete", "ArrowLeft", "arrowright", "Home", "End", "A" };
+    for ([_]canvas.WidgetKind{ .input, .search_field, .textarea }) |kind| {
+        for ([_]bool{ false, true }) |submit| {
+            const reference = canvas.Widget{ .kind = kind, .submit_on_enter = submit };
+            const compiled = canvas.Widget{ .kind = kind, .submit_on_enter = submit, .interaction_policy = core.nativeTextPolicy };
+            for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up, .text_input }) |phase| {
+                for (0..16) |bits| {
+                    for (keys) |key| {
+                        for ([_][]const u8{ "", "é\n" }) |text| {
+                            const event = canvas.WidgetKeyboardEvent{ .phase = phase, .key = key, .text = text, .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
+                            try std.testing.expectEqualDeep(canvas.widgetKeyboardNewlineTextEditEvent(reference, event), canvas.widgetKeyboardNewlineTextEditEvent(compiled, event));
+                            try std.testing.expectEqualDeep(canvas.widgetKeyboardTextEditEventForWidget(reference, event), canvas.widgetKeyboardTextEditEventForWidget(compiled, event));
+                            try std.testing.expectEqual(canvas.widgetKeyboardTextSubmit(reference, event), canvas.widgetKeyboardTextSubmit(compiled, event));
+                        }
+                    }
+                }
+            }
+            const stamped = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "Enter", .edit = .{ .insert_text = "trusted\r\n" } };
+            try std.testing.expectEqualDeep(canvas.widgetKeyboardTextEditEventForWidget(reference, stamped), canvas.widgetKeyboardTextEditEventForWidget(compiled, stamped));
+        }
+    }
+    // Exercise non-macOS modifier folding through the actual scriptc export.
+    var output: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), core.nativeTextPolicy(&.{ 1, 1, 0, 10, 0, 0, 3, 0 }, &output));
+    try std.testing.expectEqualDeep([2]u8{ 11, 0 }, output);
+    try std.testing.expectEqual(@as(usize, 2), core.nativeTextPolicy(&.{ 1, 1, 0, 8, 0, 0, 3, 0 }, &output));
+    try std.testing.expectEqualDeep([2]u8{ 0, 0 }, output);
+    try std.testing.expectEqual(@as(usize, 2), core.nativeTextPolicy(&.{ 2, 1, 0, 2, 0, 0, 1, 0 }, &output));
+    try std.testing.expectEqualDeep([2]u8{ 15, 0 }, output);
 }

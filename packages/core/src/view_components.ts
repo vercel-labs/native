@@ -3,7 +3,7 @@
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
 type NscViewNode = {
-  end: number; kind: string; text: string; placeholder?: string; wrap?: boolean;
+  end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
@@ -24,6 +24,55 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
   if (nodes.length >= 1024) throw new Error("compiled view exceeds 1024 nodes");
   nodes.push(node);
   node.end = nodes.length;
+}
+
+/** Text keyboard intent. Eight bytes: operation (0 newline, 1 edit, 2 submit),
+ * multiline, phase (0 down, 1 up, 2 text), modifier bits (shift/control/alt/super),
+ * macOS, submit-on-enter, normalized key, text-present. The two-byte result is
+ * intent plus extend-selection: 0 none, 1 borrowed text, 2 newline, 3/4 deletion,
+ * 5/6 previous/next, 7/8 start/end, 9/10 previous/next word, 11/12 word deletion,
+ * 13 line-start deletion, 14 select-all, 15 submit, 16 document-start deletion.
+ * Keys are 0 unknown, 1 Enter, 2 Return, 3 Backspace, 4 Delete, 5/6 Left/Right,
+ * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
+ */
+export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
+      request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
+    throw new Error("invalid text policy request");
+  const operation = request[0]!, multiline = request[1] === 1, phase = request[2]!, key = request[6]!;
+  const shift = (request[3]! & 1) !== 0, control = (request[3]! & 2) !== 0;
+  const alt = (request[3]! & 4) !== 0, meta = (request[3]! & 8) !== 0;
+  const command = control || meta, navigation = command || alt;
+  let intent = 0;
+  if (operation === 0) {
+    if (multiline && phase === 0 && request[7] === 0 && !navigation &&
+        (key === 1 || key === 2) && !(request[5] === 1 && !shift)) intent = 2;
+  } else if (operation === 2) {
+    if (phase === 0 && key === 1) {
+      if (multiline ? (command && !alt && !shift || request[5] === 1 && !navigation && !shift) : !navigation)
+        intent = 15;
+    }
+  } else if (phase === 2) {
+    if (request[7] === 1 && !command) intent = 1;
+  } else if (phase === 0) {
+    if (command && !alt && !shift && key === 9) intent = 14;
+    else if (meta && !alt && (key === 5 || key === 6)) intent = key === 5 ? 7 : 8;
+    else if (!meta && alt !== control && (key === 5 || key === 6)) intent = key === 5 ? 9 : 10;
+    else if (!shift && (!meta || request[4] === 0 && control) && alt !== control && (key === 3 || key === 4))
+      intent = key === 3 ? 11 : 12;
+    else if (request[4] === 1 && meta && !control && !alt && key === 3) intent = multiline ? 13 : 16;
+    else if (!navigation) {
+      if (key === 3) intent = 3;
+      else if (key === 4) intent = 4;
+      else if (key === 5) intent = 5;
+      else if (key === 6) intent = 6;
+      else if (key === 7) intent = 7;
+      else if (key === 8) intent = 8;
+    }
+  }
+  const result = new Uint8Array(2);
+  result[0] = intent; result[1] = shift ? 1 : 0;
+  return result;
 }
 
 function nscvInteger(value: number): number {

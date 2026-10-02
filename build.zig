@@ -734,6 +734,7 @@ pub fn build(b: *std.Build) void {
             .{ .file = "widget_focus_test.m", .step = "test-macos-widget-focus", .description = "Verify native accessibility publication preserves keyboard focus without assistive feedback" },
             .{ .file = "scroll_driver_test.m", .step = "test-macos-scroll-drivers", .description = "Verify native scroll resize reports settle after driver reconciliation" },
             .{ .file = "pointer_motion_test.m", .step = "test-macos-pointer-motion", .description = "Verify coalesced native pointer drags preserve geometry deltas" },
+            .{ .file = "text_keyboard_test.m", .step = "test-macos-text-keyboard", .description = "Verify native Enter modifiers survive AppKit text interpretation" },
         }) |probe| {
             const probe_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
             for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
@@ -1059,6 +1060,25 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&resizable_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&resizable_policy_driver_run.step);
         test_step.dependOn(&resizable_policy_driver_run.step);
+
+        const text_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        text_policy_reference_run.setCwd(b.path("examples/text-policy"));
+        text_policy_reference_run.has_side_effects = true;
+        text_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        text_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/text-policy-view-reference"));
+        _ = text_policy_reference_run.captureStdOut(.{});
+        _ = text_policy_reference_run.captureStdErr(.{});
+        const text_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        text_policy_driver_run.setCwd(b.path("examples/text-policy"));
+        text_policy_driver_run.has_side_effects = true;
+        text_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        text_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/text-policy-view-reference"));
+        _ = text_policy_driver_run.captureStdOut(.{});
+        _ = text_policy_driver_run.captureStdErr(.{});
+        text_policy_driver_run.step.dependOn(&text_policy_reference_run.step);
+        native_driver_step.dependOn(&text_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&text_policy_driver_run.step);
+        test_step.dependOn(&text_policy_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -2232,6 +2252,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

@@ -1,0 +1,40 @@
+<column key="{desk}" gap="12" padding="16">
+  <row gap="8" cross="center">
+    <text grow="1" size="heading">Writing Desk</text>
+    <button size="sm" on-press="refresh">Refresh</button>
+    <button size="sm" on-press="lock">Lock editors</button>
+    <button size="sm" variant="ghost" on-press="new_desk">New desk</button>
+  </row>
+  <text foreground="text_muted">Write a note, or send a quick message.</text>
+  <input width="420" label="Subject" text="{subject.text}" disabled="{locked}" on-input="subject_edit" on-submit="publish"/>
+  <row gap="16" cross="start">
+    <column gap="8" width="420">
+      <text size="heading">Note</text>
+      <if test="{noteVisible}">
+        <textarea key="note" width="420" height="180" label="Note" placeholder="Write a note" text="{draft.text}" disabled="{locked}" on-input="draft_edit" on-submit="publish"/>
+      </if>
+      <text foreground="text_muted">Enter adds a line. Cmd+Enter publishes.</text>
+      <row gap="8">
+        <button size="sm" disabled="{locked}" on-press="publish">Publish note</button>
+        <button size="sm" on-press="hide">Hide note</button>
+      </row>
+    </column>
+    <column gap="8" width="420">
+      <text size="heading">Message</text>
+      <textarea width="420" height="120" label="Message" placeholder="Write a message" text="{chat.text}" submit-on-enter="{sendOnEnter}" disabled="{locked}" on-input="chat_edit" on-submit="send"/>
+      <text foreground="text_muted">Shift+Enter adds a line. Cmd+Enter sends.</text>
+      <row gap="8">
+        <button size="sm" disabled="{locked}" on-press="send">Send message</button>
+        <button size="sm" on-press="enter_mode">Toggle Enter to send</button>
+        <checkbox checked="{sendOnEnter}" disabled="true">Enter sends</checkbox>
+      </row>
+    </column>
+  </row>
+  <panel grow="1" label="Last sent">
+    <column gap="8" padding="12">
+      <text size="heading">Last sent</text>
+      <text wrap="true">{submitted}</text>
+    </column>
+  </panel>
+  <status-bar>Desk {desk} · {submits} sent · {refreshes} refreshes</status-bar>
+</column>

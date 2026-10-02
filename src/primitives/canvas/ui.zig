@@ -3902,19 +3902,10 @@ fn isTextEntryWidget(widget: Widget) bool {
 }
 
 fn isSubmitKeyboard(widget: Widget, keyboard: canvas.WidgetKeyboardEvent) bool {
+    if (canvas.isWidgetTextEntry(widget)) return canvas.widgetKeyboardTextSubmit(widget, keyboard);
     if (widget.state.disabled or keyboard.phase != .key_down) return false;
     if (!std.ascii.eqlIgnoreCase(keyboard.key, "enter")) return false;
     return switch (widget.kind) {
-        // Single-line entry: plain Enter submits.
-        .text_field, .search_field, .input, .combobox => !keyboard.modifiers.hasNavigationModifier(),
-        // Multi-line entry: Enter edits (newline), so submit rides the
-        // primary chord — cmd+Enter on macOS, ctrl+Enter elsewhere.
-        // Shift/alt variants stay free for apps.
-        .textarea => if (widget.submit_on_enter)
-            (!keyboard.modifiers.hasNavigationModifier() and !keyboard.modifiers.shift) or
-                (keyboard.modifiers.hasCommandModifier() and !keyboard.modifiers.alt and !keyboard.modifiers.shift)
-        else
-            keyboard.modifiers.hasCommandModifier() and !keyboard.modifiers.alt and !keyboard.modifiers.shift,
         // List rows: plain Enter is the row's primary action when the
         // app binds `on_submit` (play the track, open the record); the
         // select activation keeps Space. `msgForKeyboard` resolves the

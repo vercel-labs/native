@@ -156,6 +156,7 @@ pub const WidgetKeyboardEvent = struct {
 /// `on_input` dispatch so retained text and the model hear the same edit.
 pub fn widgetKeyboardNewlineTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
     if (widget.kind != .textarea) return null;
+    if (widget.interaction_policy != null) return compiledTextKeyboardEdit(widget, event, 0);
     if (event.phase != .key_down or event.text.len != 0) return null;
     if (event.modifiers.control or event.modifiers.alt or event.modifiers.super) return null;
     if (!std.ascii.eqlIgnoreCase(event.key, "enter") and !std.ascii.eqlIgnoreCase(event.key, "return")) return null;
@@ -608,9 +609,69 @@ fn widgetKeyboardLineDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(bui
 /// Command+Backspace target is always offset 0; a textarea keeps the hard-line
 /// boundary carried by `.delete_to_line_start`.
 pub fn widgetKeyboardTextEditEventForWidget(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (event.edit) |edit| {
+        if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
+        return edit;
+    }
+    if ((widget.kind == .textarea or widgetKindSingleLineTextEntry(widget.kind)) and widget.interaction_policy != null)
+        return compiledTextKeyboardEdit(widget, event, 1);
     const edit = event.textEditEvent() orelse return null;
     if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
     return edit;
+}
+
+/// Native normalizes host keys and supplies platform facts. Compiled policy
+/// returns only intent; insert bytes stay borrowed from this dispatch.
+fn compiledTextKeyboardResult(widget: Widget, event: WidgetKeyboardEvent, operation: u8) [2]u8 {
+    const keys = [_][]const u8{ "", "enter", "return", "backspace", "delete", "arrowleft", "arrowright", "home", "end", "a" };
+    var key: u8 = 0;
+    for (keys[1..], 1..) |name, index| {
+        if (std.ascii.eqlIgnoreCase(event.key, name)) {
+            key = @intCast(index);
+            break;
+        }
+    }
+    const modifiers = event.modifiers;
+    const request = [8]u8{ operation, @intFromBool(widget.kind == .textarea), @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(modifiers.shift)) | (@as(u8, @intFromBool(modifiers.control)) << 1) |
+        (@as(u8, @intFromBool(modifiers.alt)) << 2) | (@as(u8, @intFromBool(modifiers.super)) << 3), @intFromBool(builtin.os.tag == .macos), @intFromBool(widget.submit_on_enter), key, @intFromBool(event.text.len != 0) };
+    var output: [2]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != 2 or output[0] > 16 or output[1] > 1)
+        @panic("invalid compiled text policy result");
+    return output;
+}
+
+fn compiledTextKeyboardEdit(widget: Widget, event: WidgetKeyboardEvent, operation: u8) ?TextInputEvent {
+    const result = compiledTextKeyboardResult(widget, event, operation);
+    const extend = result[1] == 1;
+    return switch (result[0]) {
+        0 => null,
+        1 => .{ .insert_text = event.text },
+        2 => .{ .insert_text = "\n" },
+        3 => .delete_backward,
+        4 => .delete_forward,
+        5 => .{ .move_caret = .{ .direction = .previous, .extend = extend } },
+        6 => .{ .move_caret = .{ .direction = .next, .extend = extend } },
+        7 => .{ .move_caret = .{ .direction = .start, .extend = extend } },
+        8 => .{ .move_caret = .{ .direction = .end, .extend = extend } },
+        9 => .{ .move_caret = .{ .direction = .previous_word, .extend = extend } },
+        10 => .{ .move_caret = .{ .direction = .next_word, .extend = extend } },
+        11 => .delete_word_backward,
+        12 => .delete_word_forward,
+        13 => .delete_to_line_start,
+        14 => .{ .set_selection = .{ .anchor = 0, .focus = std.math.maxInt(usize) } },
+        16 => .delete_to_start,
+        else => @panic("invalid compiled text edit intent"),
+    };
+}
+
+pub fn widgetKeyboardTextSubmit(widget: Widget, event: WidgetKeyboardEvent) bool {
+    if (!isWidgetTextEntry(widget)) return false;
+    if (widget.state.disabled or event.phase != .key_down) return false;
+    if (widget.interaction_policy != null) return compiledTextKeyboardResult(widget, event, 2)[0] == 15;
+    if (!std.ascii.eqlIgnoreCase(event.key, "enter")) return false;
+    if (widget.kind != .textarea) return !event.modifiers.hasNavigationModifier();
+    return (widget.submit_on_enter and !event.modifiers.hasNavigationModifier() and !event.modifiers.shift) or
+        (event.modifiers.hasCommandModifier() and !event.modifiers.alt and !event.modifiers.shift);
 }
 
 fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {

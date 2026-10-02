@@ -10,10 +10,11 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split, resizable },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
+    submitOnEnter: bool = false,
     key: ?[]const u8 = null,
     keyInt: ?i64 = null,
     keySlot: usize = 0,
@@ -124,7 +125,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.change != null and value.kind != .radio and value.kind != .slider) return error.InvalidView;
     if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
-    const text_entry = value.kind == .input or value.kind == .search_field;
+    const text_entry = value.kind == .input or value.kind == .search_field or value.kind == .textarea;
+    if (value.submitOnEnter and value.kind != .textarea) return error.InvalidView;
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
     if (value.wrap != null and value.kind != .text) return error.InvalidView;
@@ -150,6 +152,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .text = value.text,
         .placeholder = value.placeholder,
         .wrap = value.wrap,
+        .submit_on_enter = value.submitOnEnter,
         .gap = value.gap,
         .padding = value.padding,
         .grow = value.grow,
@@ -191,6 +194,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor_alignment = value.anchorAlignment,
         .anchor_offset = value.anchorOffset,
     }, children.items);
+    if (comptime @hasDecl(core, "nativeTextPolicy")) {
+        if (text_entry) result.widget.interaction_policy = core.nativeTextPolicy;
+    }
     if (comptime @hasDecl(core, "nativeRadioPolicy")) {
         if (value.kind == .radio or value.kind == .radio_group) result.widget.interaction_policy = core.nativeRadioPolicy;
     }
@@ -472,4 +478,21 @@ test "compiled resizable panels preserve initial minimum sizing and reject flow 
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"resizable\",\"text\":\"\",\"resize\":0}]}",
         }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
     } else return error.SkipZigTest;
+}
+
+test "compiled textareas preserve multiline Enter policy and text keyboard callback" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const result = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"Café\\nnotes\",\"placeholder\":\"Write\",\"width\":420,\"height\":180,\"submitOnEnter\":true}]}");
+        try std.testing.expectEqual(sdk.canvas.WidgetKind.textarea, result.widget.kind);
+        try std.testing.expectEqualStrings("Café\nnotes", result.widget.text);
+        try std.testing.expect(result.widget.submit_on_enter);
+        try std.testing.expect(result.widget.interaction_policy != null);
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"submitOnEnter\":true}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"textarea\",\"text\":\"\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+    }
 }
