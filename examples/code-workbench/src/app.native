@@ -4,7 +4,7 @@
     <button size="sm" on-press="refresh">Refresh</button>
     <button size="sm" on-press="new_workbench">New workbench</button>
   </row>
-  <text foreground="text_muted">Tab follows each draft's indentation. Shift+Tab moves focus.</text>
+  <text foreground="text_muted">Tab follows indentation. Shift+Tab moves focus. Copy/Cut/Paste transfer source bytes.</text>
   <row gap="8" cross="center">
     <text foreground="text_muted">Added lines</text>
     <input text="{addedSpec.text}" width="140" label="Added lines" placeholder="Added: 2-4" on-input="edit_added"/>

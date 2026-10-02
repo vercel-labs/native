@@ -2,7 +2,7 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
-import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, textClipboardRange as nscvClipboardRange, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -49,6 +49,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 9) return nscvTextCompositionHistory(request);
   if (request[0] === 10) return nscvTextHistoryTimeline(request);
   if (request[0] === 11) return nscvCodeIndentation(request);
+  if (request[0] === 12) return nscvTextClipboard(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -85,6 +86,27 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
+  return result;
+}
+
+/** Clipboard selection: tag 12, selection-present and two reserved bytes,
+ * LE u32 source length, exact LE u64 anchor/focus, then source bytes. Native
+ * keeps focus/eligibility and clipboard transport. The 12-byte result holds
+ * LE u32 flags (1 Copy/Cut range, 2 Select All), start and end; it is copied
+ * before the compiler arena resets. Huge offsets clamp without f64 rounding.
+ */
+function nscvTextClipboard(request: Uint8Array): Uint8Array {
+  const budget = 512 * 1024;
+  if (request.length < 24 || request.length > 24 + budget || request[1]! > 1 ||
+      request[2] !== 0 || request[3] !== 0) throw new Error("invalid text clipboard request");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const length = data.getUint32(4, true);
+  if (length > budget || request.length !== 24 + length) throw new Error("invalid text clipboard budget");
+  const offset = (at: number): number => data.getUint32(at + 4, true) !== 0 ? length : Math.min(data.getUint32(at, true), length);
+  const range = nscvClipboardRange(request.subarray(24), request[1] === 1 ? nscvSelection(offset(8), offset(16)) : null);
+  const result = new Uint8Array(12), out = new DataView(result.buffer);
+  out.setUint32(0, (range !== null ? 1 : 0) | (length > 0 ? 2 : 0), true);
+  if (range !== null) { out.setUint32(4, range.start, true); out.setUint32(8, range.end, true); }
   return result;
 }
 

@@ -18,6 +18,9 @@ Added lines and Removed lines accept one-based lists and ranges such as
 green/red washes and `+`/`-` markers. Invalid or overlapping lists keep the
 last applied diff. Clear diff removes it. Markers stay outside source,
 selection and clipboard bytes; changing annotations preserves Undo/Redo.
+Copy and Cut use the selected source bytes, including Unicode and line breaks.
+Paste into the other draft keeps those bytes; Cut with no selection preserves
+both the source and clipboard. Undo restores a cut as an ordinary editor edit.
 
 Use spaces and Use tabs replace the TypeScript source. Refresh keeps local
 edits, selection and widget identities. Hide TypeScript preserves the

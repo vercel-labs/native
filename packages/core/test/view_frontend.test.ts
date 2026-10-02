@@ -80,6 +80,27 @@ test("compiled indentation requests preserve the shared text library's file conv
   assert.throws(() => exports.native_text_policy!(new Uint8Array([11])), /indentation request/);
 });
 
+test("clipboard requests preserve source ranges, exact huge offsets and validation", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const source = new TextEncoder().encode("aé🙂\r\nz");
+  const request = new Uint8Array(24 + source.length), data = new DataView(request.buffer);
+  request[0] = 12; request[1] = 1; data.setUint32(4, source.length, true); request.set(source, 24);
+  data.setBigUint64(8, 6n, true); data.setBigUint64(16, 2n, true);
+  const result = () => {
+    const bytes = exports.native_text_policy!(request), out = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return [out.getUint32(0, true), out.getUint32(4, true), out.getUint32(8, true)];
+  };
+  assert.deepEqual(result(), [3, 1, 3]);
+  data.setBigUint64(8, 0xffffffffffffffffn, true); data.setBigUint64(16, 0n, true);
+  assert.deepEqual(result(), [3, 0, source.length]);
+  data.setBigUint64(16, 9007199254740992n, true); assert.deepEqual(result(), [2, 0, 0]);
+  request[1] = 0; assert.deepEqual(result(), [2, 0, 0]);
+  request[2] = 1; assert.throws(result, /clipboard request/); request[2] = 0;
+  data.setUint32(4, source.length + 1, true); assert.throws(result, /clipboard budget/);
+  assert.throws(() => exports.native_text_policy!(new Uint8Array([12])), /clipboard request/);
+});
+
 test("compiled code diff specs support literal and byte bindings and reject invalid annotations", () => {
   const { model, view } = evaluate('<code source="{status}" editable="true" wrap="false" added-lines="{status}" removed-lines="128, 127" line-numbers="true"/>');
   model.status = new TextEncoder().encode("2-4, 7, 3");

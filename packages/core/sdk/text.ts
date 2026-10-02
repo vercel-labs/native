@@ -241,6 +241,17 @@ function selectionRange(s: TextSelection, textLen: number): TextRange {
   return rangeNormalized({ start: s.anchor, end: s.focus }, textLen);
 }
 
+/** Source-byte range for Copy/Cut. Clamp and order the selection, then snap
+ * its endpoints to UTF-8 boundaries. Missing or collapsed selections return
+ * null. The current selection supplies the range; line numbers and diff
+ * markers never enter the source bytes.
+ */
+export function textClipboardRange(text: Uint8Array, selection: TextSelection | null): TextRange | null {
+  if (selection === null) return null;
+  const range = snapTextRange(text, selectionRange(selection, text.length));
+  return range.start === range.end ? null : range;
+}
+
 function isUtf8ContinuationByte(byte: number): boolean {
   return (byte & 0xc0) === 0x80;
 }

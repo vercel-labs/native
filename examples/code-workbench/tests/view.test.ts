@@ -104,6 +104,21 @@ test("code drafts preserve file indentation, selection, independent history, sou
     await click("Refresh"); text("typescript", long + "    ");
     await click("New workbench"); assert.notEqual(field().id, firstId); assert.notEqual(field("Python draft").id, secondId);
     text("python", "def greet():\n\treturn '日本'\n");
+    // Native clipboard shortcuts transfer source bytes, never gutter or diff markers.
+    await click("Apply diff");
+    const source = bytes(value("typescript").text);
+    await select("TypeScript draft", Buffer.byteLength(source), 0); await focus(); await key("cmd+c");
+    await select("Python draft", 0, Buffer.byteLength(bytes(value("python").text))); await focus("Python draft"); await key("cmd+v");
+    text("python", source); assert.deepEqual(s.model.added, [2, 3]);
+    const cafeStart = Buffer.byteLength(source.slice(0, source.indexOf("café")));
+    await select("TypeScript draft", cafeStart + Buffer.byteLength("café"), cafeStart); await focus(); await key("cmd+x");
+    text("typescript", source.replace("café", ""));
+    await key("cmd+z"); text("typescript", source);
+    await focus("Python draft"); await key("end"); await key("cmd+v");
+    text("python", source + "café");
+    await select("TypeScript draft", 0, 0); await focus(); await key("cmd+x"); text("typescript", source);
+    await focus("Python draft"); await key("end"); await key("cmd+v"); text("python", source + "cafécafé");
+    await click("Refresh"); text("typescript", source); text("python", source + "cafécafé");
     const replay = await app.verifyReplay();
     assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);

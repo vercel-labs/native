@@ -7,12 +7,25 @@ import {
   sanitizedSingleLineTextInputEvent,
   codeIndentationInsertion,
   parseCodeLineNumberSpec,
+  textClipboardRange,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("clipboard ranges use source UTF-8 bytes and ignore selection direction", () => {
+  const text = encoder.encode("aé🙂\r\nz"), before = text.slice();
+  assert.equal(textClipboardRange(text, null), null);
+  assert.equal(textClipboardRange(text, { anchor: 2, focus: 1 }), null);
+  assert.deepEqual(textClipboardRange(text, { anchor: 6, focus: 2 }), { start: 1, end: 3 });
+  assert.deepEqual(textClipboardRange(text, { anchor: 999, focus: 3 }), { start: 3, end: text.length });
+  assert.deepEqual(textClipboardRange(text, { anchor: 7, focus: 9 }), { start: 7, end: 9 });
+  assert.equal(textClipboardRange(text, { anchor: 999, focus: 998 }), null);
+  assert.equal(textClipboardRange(new Uint8Array(), { anchor: 0, focus: 4 }), null);
+  assert.deepEqual(text, before);
+});
 
 test("code diff line specs retain author order, deduplicate ranges and preserve bytes", () => {
   for (const [spec, expected] of [
