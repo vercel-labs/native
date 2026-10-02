@@ -1293,6 +1293,21 @@ fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEv
 pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
+    if (widget.interaction_policy) |policy| {
+        const result = compiledKeyboardControlResult(widget, keyboard, policy);
+        if (result[0] != 4) return switch (result[0]) {
+            0 => null,
+            1, 2, 3 => .{
+                .kind = switch (result[0]) {
+                    1 => .press,
+                    2 => .toggle,
+                    else => .select,
+                },
+                .actions = .{ .press = result[1] & 1 != 0, .toggle = result[1] & 2 != 0, .select = result[1] & 4 != 0 },
+            },
+            else => unreachable,
+        };
+    }
     // Tree rows are ROLE-driven (any pressable row becomes one by
     // carrying `role = .treeitem`), so their keymap resolves before the
     // kind switch.
@@ -1371,12 +1386,119 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
     };
 }
 
+/// Stable kind/key projections for shared operation 15. The compiled policy
+/// chooses activation and tree/radio precedence; native retains eligibility
+/// and the existing numeric/scroll planners. Copy both result bytes before
+/// another compiler call resets its arena.
+fn compiledKeyboardControlResult(widget: Widget, keyboard: WidgetKeyboardEvent, policy: *const fn ([]const u8, []u8) usize) [2]u8 {
+    const kind = compiledControlKind(widget.kind);
+    const keys = [_][]const u8{ "enter", "space", "arrowup", "arrowdown", "arrowleft", "arrowright", "home", "end" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, code| {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, name)) {
+            key = @intCast(code);
+            break;
+        }
+    }
+    const request = [_]u8{
+        15,
+        kind,
+        key,
+        @as(u8, if (widget.semantics.role == .treeitem) 1 else 0) |
+            @as(u8, if (keyboard.focus_moved) 2 else 0) |
+            @as(u8, if (keyboard.radio_group_selection) 4 else 0) |
+            @as(u8, if (widget.command.len > 0) 8 else 0) |
+            @as(u8, if (widget.semantics.focusable) 16 else 0) |
+            @as(u8, if (widget.semantics.actions.press) 32 else 0) |
+            @as(u8, if (widget.layout.virtualized) 64 else 0),
+        if (widget.state.expanded) |expanded| (if (expanded) @as(u8, 2) else 1) else 0,
+    };
+    var output: [2]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > 4 or
+        output[1] != switch (output[0]) {
+            1 => @as(u8, 1),
+            2 => 2,
+            3 => if (widget.command.len > 0) @as(u8, 5) else 4,
+            else => 0,
+        })
+        @panic("invalid compiled keyboard control result");
+    return output;
+}
+
+/// Stable kind projection shared by keyboard and semantic control policies.
+fn compiledControlKind(kind: WidgetKind) u8 {
+    return switch (kind) {
+        .button => 1,
+        .icon_button => 2,
+        .select => 3,
+        .combobox => 4,
+        .accordion => 5,
+        .checkbox => 6,
+        .switch_control => 7,
+        .toggle => 8,
+        .toggle_button => 9,
+        .radio => 10,
+        .list_item => 11,
+        .menu_item => 12,
+        .data_cell => 13,
+        .segmented_control => 14,
+        .slider => 15,
+        .split_divider => 16,
+        .grid => 17,
+        .scroll_view => 18,
+        .list => 19,
+        .data_grid => 20,
+        .table => 21,
+        else => 0,
+    };
+}
+
 pub fn widgetSemanticControlIntent(widget: Widget, action: WidgetSemanticAction) ?WidgetControlIntent {
     return widgetSemanticControlIntentWithActions(widget, action, semanticActions(widget));
 }
 
 pub fn widgetSemanticControlIntentWithActions(widget: Widget, action: WidgetSemanticAction, actions: WidgetActions) ?WidgetControlIntent {
     if (widget.state.disabled or widget.semantics.hidden) return null;
+    if (widget.interaction_policy) |policy| {
+        const request = [_]u8{
+            16,
+            compiledControlKind(widget.kind),
+            switch (action) {
+                .press => 0,
+                .toggle => 1,
+                .select => 2,
+                .increment => 3,
+                .decrement => 4,
+            },
+            @as(u8, if (actions.press) 1 else 0) | @as(u8, if (actions.toggle) 2 else 0) |
+                @as(u8, if (actions.select) 4 else 0) | @as(u8, if (actions.increment) 8 else 0) |
+                @as(u8, if (actions.decrement) 16 else 0),
+            if (widget.semantics.role == .treeitem) 1 else 0,
+        };
+        var output: [2]u8 = undefined;
+        if (policy(&request, &output) != output.len or output[0] > 4 or
+            output[1] != switch (output[0]) {
+                1 => @as(u8, 1),
+                2 => 2,
+                3 => if (actions.press) @as(u8, 5) else 4,
+                else => 0,
+            } or
+            (output[0] == 4 and action != .increment and action != .decrement))
+            @panic("invalid compiled semantic control result");
+        return switch (output[0]) {
+            0 => null,
+            1, 2, 3 => .{
+                .kind = switch (output[0]) {
+                    1 => .press,
+                    2 => .toggle,
+                    else => .select,
+                },
+                .actions = .{ .press = output[1] & 1 != 0, .toggle = output[1] & 2 != 0, .select = output[1] & 4 != 0 },
+            },
+            4 => widgetSemanticStepControlIntent(widget, if (action == .increment) .increment else .decrement, actions),
+            else => unreachable,
+        };
+    }
     return switch (action) {
         .press => if (actions.press)
             widgetSemanticPressControlIntent(widget, actions)

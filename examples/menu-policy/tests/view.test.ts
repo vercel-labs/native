@@ -100,6 +100,22 @@ test("menu entry, traversal, committed choice, dismissal, identities and replay 
     s = await app.click(button(s, "Choose queue")); assert.equal(item(s, "Review café").id, reviewId); save();
     s = await app.key(view, "arrowup"); focused("Review café");
     s = await app.key(view, "escape"); closed("pickerOpen", "Choose queue");
+    // Closed arrows open the picker; mounted arrows move focus without
+    // toggling it closed. Shift remains an activation modifier.
+    s = await app.action(button(s, "Choose queue"), "focus"); save();
+    for (const chord of ["return", "ctrl+enter", "alt+space", "super+arrowdown"]) {
+      s = await app.key(view, chord); assert.equal(s.model.pickerOpen, false); save();
+    }
+    s = await app.key(view, "shift+arrowdown"); assert.equal(s.model.pickerOpen, true); save();
+    s = await app.key(view, "arrowdown"); focused("Review café");
+    s = await app.key(view, "shift+enter"); assert.equal(s.model.selected, 2); closed("pickerOpen", "Choose queue");
+    s = await app.key(view, "arrowup"); assert.equal(s.model.pickerOpen, true); save();
+    s = await app.key(view, "arrowup"); focused("Review café");
+    s = await app.key(view, "shift+space"); closed("pickerOpen", "Choose queue");
+    s = await app.action(button(s, "Open actions"), "focus"); save();
+    s = await app.key(view, "shift+enter"); assert.equal(s.model.actionsOpen, true); save();
+    s = await app.key(view, "arrowdown"); focused("Duplicate");
+    s = await app.key(view, "shift+space"); assert.equal(s.model.presses, 3); closed("actionsOpen", "Open actions");
     const replay = await app.verifyReplay();
     assert.deepEqual(replay.snapshot.model, s.model);
     assert.deepEqual(replay.snapshot.widgets, s.widgets); snapshots.push(replay.snapshot);
