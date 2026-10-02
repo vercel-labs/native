@@ -791,6 +791,56 @@ pub fn widgetCompiledTextEdit(widget: Widget, state: text_model.TextEditState, e
     return result;
 }
 
+pub const TextReconcilePolicyState = struct {
+    source_unchanged: bool,
+    source_matches_runtime: bool,
+    previous_source_selection: ?text_model.TextSelection,
+    retained_selection: ?text_model.TextSelection,
+};
+
+pub const TextReconcilePolicyResult = struct {
+    retain_text: bool,
+    retain_state: bool,
+    retain_selection_composition: bool,
+    retain_affinity: bool,
+};
+
+/// Native supplies source fingerprints and retained identity/state. The
+/// compiled policy decides which editor state survives the source rebuild.
+pub fn widgetCompiledTextReconcile(widget: Widget, state: TextReconcilePolicyState) ?TextReconcilePolicyResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [40]u8 = @splat(0);
+    request[0] = 5;
+    request[1] = @intFromBool(state.source_unchanged);
+    request[2] = @intFromBool(state.source_matches_runtime);
+    request[4] = @as(u8, @intFromBool(widget.text_selection != null)) |
+        (@as(u8, @intFromBool(widget.text_composition != null)) << 1);
+    if (widget.text_selection) |selection| {
+        request[4] |= @as(u8, @intFromBool(selection.affinity == .downstream)) << 2;
+        std.mem.writeInt(u64, request[8..16], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[16..24], @intCast(selection.focus), .little);
+    }
+    if (state.retained_selection) |selection| {
+        request[5] = 1 | (@as(u8, @intFromBool(selection.affinity == .downstream)) << 1);
+        std.mem.writeInt(u64, request[24..32], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[32..40], @intCast(selection.focus), .little);
+    }
+    if (state.previous_source_selection) |selection| {
+        request[6] = 1 | (@as(u8, @intFromBool(selection.affinity == .downstream)) << 1);
+    }
+    var output: [1]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > 15) @panic("invalid compiled text reconcile result");
+    const flags = output[0];
+    if (flags != 0 and flags & 2 == 0) @panic("invalid compiled text reconcile retention");
+    return .{
+        .retain_text = flags & 1 != 0,
+        .retain_state = flags & 2 != 0,
+        .retain_selection_composition = flags & 4 != 0,
+        .retain_affinity = flags & 8 != 0,
+    };
+}
+
 pub fn widgetKeyboardTextSubmit(widget: Widget, event: WidgetKeyboardEvent) bool {
     if (!isWidgetTextEntry(widget)) return false;
     if (widget.state.disabled or event.phase != .key_down) return false;

@@ -155,7 +155,37 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await set("Subject", "é\r\n🙂"); expectText("subject", "é🙂");
     await click("Refresh"); await click("Hide note"); await click("Hide note");
     expectText("draft", "日本 café  "); expectText("subject", "é🙂"); expectText("chat", " draft");
+    // Scratchpad has no on-input handler: its authored source stays fixed
+    // while native retains local edits, selection, composition and history.
+    const scratchId = field("Scratchpad").id;
+    const source = s.model.scratchSource;
+    await set("Scratchpad", "Local café\r\n🙂 draft");
+    assert.deepEqual(s.model.scratchSource, source);
+    await select("Scratchpad", 6, 6);
+    s = await app.composeText(field("Scratchpad"), "日本"); save();
+    assert.equal(field("Scratchpad").text, "Local 日本café\r\n🙂 draft");
+    await click("Refresh"); assert.equal(field("Scratchpad").id, scratchId);
+    assert.equal(field("Scratchpad").text, "Local 日本café\r\n🙂 draft");
+    s = await app.commitComposition(field("Scratchpad")); save();
+    await focus("Scratchpad"); await key("cmd+z"); assert.equal(field("Scratchpad").text, "Local café\r\n🙂 draft");
+    await key("cmd+shift+z"); assert.equal(field("Scratchpad").text, "Local 日本café\r\n🙂 draft");
+    await click("Replace scratch"); assert.equal(field("Scratchpad").id, scratchId);
+    assert.equal(field("Scratchpad").text, "Fresh 日本\nAnother local draft.");
+    await focus("Scratchpad"); await key("cmd+z");
+    assert.equal(field("Scratchpad").text, "Fresh 日本\nAnother local draft.");
+    await set("Scratchpad", "Second local draft"); await click("Refresh");
+    assert.equal(field("Scratchpad").text, "Second local draft");
+    await click("Replace scratch"); assert.equal(field("Scratchpad").text, "Scratch café\nA local draft.");
+    await set("Scratchpad", "Local changes"); await click("Lock editors");
+    assert.equal(field("Scratchpad").enabled, false);
+    assert.equal(field("Scratchpad").text, "Scratch café\nA local draft.");
+    await click("Lock editors");
+    await focus("Note"); await click("Restore note");
+    expectText("draft", "Restored café\nA fresh draft from the app.");
+    await focus("Note"); await key("cmd+z"); expectText("draft", "Restored café\nA fresh draft from the app.");
     await click("New desk");
+    assert.notEqual(field("Scratchpad").id, scratchId);
+    assert.equal(field("Scratchpad").text, "Scratch café\nA local draft.");
     const replay = await app.verifyReplay(); assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);
   } finally { await app.close(); }

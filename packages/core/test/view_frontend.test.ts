@@ -570,3 +570,27 @@ test("retained text reducer preserves CRLF caret stops and refuses whole over-ca
   request[1] = 0; data.setUint32(8, 512 * 1024 + 1, true);
   assert.throws(() => exports.native_text_policy!(request), /invalid text reducer budget/);
 });
+
+test("text rebuild policy distinguishes replacements, echoes and exact 64-bit selections", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<textarea/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  const request = new Uint8Array(40), data = new DataView(request.buffer);
+  request[0] = 5; request[1] = 1; // unchanged uncontrolled source
+  const policy = () => Array.from(exports.native_text_policy!(request));
+  assert.deepEqual(policy(), [7]);
+  request[1] = 0; assert.deepEqual(policy(), [0]); // replacement
+  request[2] = 1; assert.deepEqual(policy(), [6]); // source echoes local bytes
+  request[4] = 1; request[5] = 3;
+  data.setBigUint64(8, 9007199254740992n, true); data.setBigUint64(24, 9007199254740992n, true);
+  data.setBigUint64(16, 2n, true); data.setBigUint64(32, 2n, true);
+  assert.deepEqual(policy(), [10]); // legacy offsets-only selection echo
+  data.setBigUint64(24, 9007199254740993n, true); assert.deepEqual(policy(), [2]);
+  data.setBigUint64(24, 9007199254740992n, true);
+  request[4] = 5; assert.deepEqual(policy(), [2]); // first explicit downstream
+  request[6] = 3; assert.deepEqual(policy(), [10]); // unchanged source affinity
+  request[4] = 1; assert.deepEqual(policy(), [2]); // explicit upstream change
+  request[4] = 2; assert.deepEqual(policy(), [2]); // source composition without selection
+  request[3] = 1; assert.throws(policy, /invalid text reconcile request/);
+  request[3] = 0; request[6] = 4; assert.throws(policy, /invalid text reconcile request/);
+  assert.throws(() => exports.native_text_policy!(request.subarray(0, 39)), /invalid text reconcile request/);
+});

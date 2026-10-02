@@ -2391,3 +2391,152 @@ test "compiled retained reducer preserves undo redo across shared storage budget
         try std.testing.expectEqual(filler.len + 1, retained.findById(2).?.widget.text.len);
     }
 }
+
+test "compiled text rebuild policy matches native source selection composition and affinity reconciliation" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const Fixture = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-text-reconcile", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const first = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer first.destroy(std.testing.allocator);
+    const second = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer second.destroy(std.testing.allocator);
+    const harnesses = [_]*native_sdk.TestHarness(){ first, second };
+    var fixtures: [2]Fixture = .{ .{}, .{} };
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(fixtures[backend].app());
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+    }
+    const selections = [_]?canvas.TextSelection{
+        null,
+        .{ .anchor = 0, .focus = 0 },
+        .{ .anchor = 1, .focus = 3 },
+        .{ .anchor = 1, .focus = 3, .affinity = .downstream },
+        .{ .anchor = 8, .focus = 2, .affinity = .downstream },
+        .{ .anchor = std.math.maxInt(usize) - 1, .focus = 1 },
+        .{ .anchor = std.math.maxInt(usize), .focus = 1, .affinity = .downstream },
+    };
+    const previous_selections = [_]?canvas.TextSelection{ null, .{ .anchor = 1, .focus = 3 }, .{ .anchor = 1, .focus = 3, .affinity = .downstream } };
+    var scenario: canvas.ObjectId = 10;
+    for ([_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea }) |kind| {
+        for ([_][]const u8{ "aé\r\n🙂z", "local café\nnext", "replacement" }) |source| {
+            for (previous_selections) |previous_selection| {
+                for (selections) |source_selection| {
+                    for (selections) |retained_selection| {
+                        for (0..3) |composition_mode| {
+                            var actuals: [2]canvas.Widget = undefined;
+                            for (harnesses, 0..) |harness, backend| {
+                                const initial = canvas.Widget{ .id = scenario, .kind = kind, .frame = geometry.RectF.init(12, 16, 180, 84), .text = "aé\r\n🙂z", .text_selection = previous_selection };
+                                var initial_nodes: [2]canvas.WidgetLayoutNode = undefined;
+                                const initial_layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{initial} }, geometry.RectF.init(0, 0, 260, 160), &initial_nodes);
+                                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", initial_layout);
+                                // Supply retained runtime state independently of the
+                                // previous source tree, as local input/IME would do.
+                                const retained = &harness.runtime.views[0].widget_layout_nodes[1].widget;
+                                retained.text = "local café\nnext";
+                                retained.text_selection = retained_selection;
+                                retained.text_composition = if (composition_mode == 1) .{ .start = 1, .end = 3 } else null;
+                                retained.value = 2;
+                                var next = initial;
+                                next.text = source;
+                                next.text_selection = source_selection;
+                                next.text_composition = if (composition_mode == 2) .{ .start = 0, .end = 1 } else null;
+                                next.interaction_policy = if (backend == 1) core.nativeTextPolicy else null;
+                                var next_nodes: [2]canvas.WidgetLayoutNode = undefined;
+                                const next_layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{next} }, geometry.RectF.init(0, 0, 260, 160), &next_nodes);
+                                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", next_layout);
+                                actuals[backend] = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(scenario).?.widget;
+                            }
+                            try std.testing.expectEqualStrings(actuals[0].text, actuals[1].text);
+                            try std.testing.expectEqualDeep(actuals[0].text_selection, actuals[1].text_selection);
+                            try std.testing.expectEqualDeep(actuals[0].text_composition, actuals[1].text_composition);
+                            try std.testing.expectEqual(actuals[0].value, actuals[1].value);
+                            try std.testing.expectEqual(actuals[0].value_x, actuals[1].value_x);
+                            scenario += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled text rebuild decisions preserve exact offsets across alternating view arenas" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const widget = canvas.Widget{ .kind = .textarea, .interaction_policy = core.nativeTextPolicy, .text_selection = .{ .anchor = std.math.maxInt(usize) - 1, .focus = 2 } };
+    const state = canvas.TextReconcilePolicyState{
+        .source_unchanged = false,
+        .source_matches_runtime = true,
+        .previous_source_selection = null,
+        .retained_selection = .{ .anchor = std.math.maxInt(usize), .focus = 2, .affinity = .downstream },
+    };
+    const result = canvas.widgetCompiledTextReconcile(widget, state).?;
+    try std.testing.expect(result.retain_state);
+    try std.testing.expect(!result.retain_text and !result.retain_affinity and !result.retain_selection_composition);
+    const view_bytes = core.nativeView(std.testing.allocator);
+    defer std.testing.allocator.free(view_bytes);
+    const pointer = canvas.widgetCompiledTextPointerSelection(.{ .kind = .input, .text = "one two", .interaction_policy = core.nativeTextPolicy }, 1, 2, 0, .{}).?;
+    try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 3 }, pointer.selection);
+    try std.testing.expect(result.retain_state and !result.retain_affinity);
+    var echo = widget;
+    echo.text_selection = state.retained_selection;
+    echo.text_selection.?.affinity = .upstream;
+    try std.testing.expect(canvas.widgetCompiledTextReconcile(echo, state).?.retain_affinity);
+    try std.testing.expect(canvas.widgetCompiledTextReconcile(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, state) == null);
+    try std.testing.expect(canvas.widgetCompiledTextReconcile(.{ .kind = .textarea }, state) == null);
+}
+
+test "compiled text reconciliation retains the full budget and respects disabled or fresh entries" {
+    const h = try Harness.create(null, "/feed.xml");
+    defer h.destroy();
+    try h.settleBoot();
+    const Fixture = struct {
+        fn app(self: *@This()) native_sdk.App {
+            return .{ .context = self, .name = "compiled-text-reconcile-budget", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+    const source = try std.testing.allocator.alloc(u8, canvas.max_widget_text_bytes_per_view);
+    defer std.testing.allocator.free(source);
+    const local = try std.testing.allocator.alloc(u8, source.len);
+    defer std.testing.allocator.free(local);
+    @memset(source, 'a');
+    @memset(local, 'b');
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        var fixture: Fixture = .{};
+        try harness.start(fixture.app());
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 260, 160) });
+        var widget = canvas.Widget{ .id = 2, .kind = .textarea, .frame = geometry.RectF.init(12, 16, 180, 84), .text = source, .interaction_policy = if (compiled) core.nativeTextPolicy else null };
+        var nodes: [2]canvas.WidgetLayoutNode = undefined;
+        var layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{widget} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        harness.runtime.views[0].widget_layout_nodes[1].widget.text = local;
+        harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = local.len, .focus = local.len };
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqualStrings(local, retained.findById(2).?.widget.text);
+        try std.testing.expectEqual(local.len, retained.findById(2).?.widget.text_selection.?.focus);
+        widget.state.disabled = true;
+        layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{widget} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqualStrings(source, retained.findById(2).?.widget.text);
+        try std.testing.expect(retained.findById(2).?.widget.text_selection == null);
+        widget.state.disabled = false;
+        widget.id = 3;
+        layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{widget} }, geometry.RectF.init(0, 0, 260, 160), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqualStrings(source, retained.findById(3).?.widget.text);
+        try std.testing.expect(retained.findById(3).?.widget.text_selection == null);
+    }
+}

@@ -13,6 +13,8 @@ export interface Model {
   readonly subject: Editor;
   readonly draft: Editor;
   readonly chat: Editor;
+  readonly scratchSource: Uint8Array;
+  readonly scratchAlternate: boolean;
   readonly submitted: Uint8Array;
   readonly submits: number;
   readonly refreshes: number;
@@ -30,17 +32,20 @@ export type Msg =
   | { readonly kind: "enter_mode" }
   | { readonly kind: "lock" }
   | { readonly kind: "hide" }
+  | { readonly kind: "restore_note" }
+  | { readonly kind: "scratch_source" }
   | { readonly kind: "new_desk" };
 
 function editor(text: Uint8Array): Editor {
   return { text: text, anchor: 0, focus: 0, compStart: -1, compEnd: -1 };
 }
-export const viewUnbound = ["hidden"] as const;
+export const viewUnbound = ["hidden", "scratchAlternate"] as const;
 export function noteVisible(model: Model): boolean { return !model.hidden; }
 export function initialModel(): Model {
   return { desk: 0, subject: editor(utf8Bytes("Field notes")),
     draft: editor(utf8Bytes("Café observations\nA quiet place to write.")),
-    chat: editor(utf8Bytes("Hello")), submitted: utf8Bytes("Nothing sent yet"),
+    chat: editor(utf8Bytes("Hello")), scratchSource: utf8Bytes("Scratch café\nA local draft."), scratchAlternate: false,
+    submitted: utf8Bytes("Nothing sent yet"),
     submits: 0, refreshes: 0, sendOnEnter: true, locked: false, hidden: false };
 }
 function edit(value: Editor, event: TextInputEvent): Editor {
@@ -65,6 +70,9 @@ export function update(model: Model, msg: Msg): Model {
     case "enter_mode": return { ...model, sendOnEnter: !model.sendOnEnter };
     case "lock": return { ...model, locked: !model.locked };
     case "hide": return { ...model, hidden: !model.hidden };
+    case "restore_note": return { ...model, draft: editor(utf8Bytes("Restored café\nA fresh draft from the app.")) };
+    case "scratch_source": return { ...model, scratchAlternate: !model.scratchAlternate,
+      scratchSource: model.scratchAlternate ? utf8Bytes("Scratch café\nA local draft.") : utf8Bytes("Fresh 日本\nAnother local draft.") };
     case "new_desk": return { ...initialModel(), desk: model.desk < 1000000 ? model.desk + 1 : 0 };
   }
 }

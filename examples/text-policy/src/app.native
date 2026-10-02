@@ -17,6 +17,7 @@
       <row gap="8">
         <button size="sm" disabled="{locked}" on-press="publish">Publish note</button>
         <button size="sm" on-press="hide">Hide note</button>
+        <button size="sm" disabled="{locked}" on-press="restore_note">Restore note</button>
       </row>
     </column>
     <column gap="8" width="420">
@@ -28,6 +29,9 @@
         <button size="sm" on-press="enter_mode">Toggle Enter to send</button>
         <checkbox checked="{sendOnEnter}" disabled="true">Enter sends</checkbox>
       </row>
+      <text size="heading">Scratchpad</text>
+      <textarea key="scratch" width="420" height="72" label="Scratchpad" text="{scratchSource}" disabled="{locked}"/>
+      <button size="sm" disabled="{locked}" on-press="scratch_source">Replace scratch</button>
     </column>
   </row>
   <panel grow="1" label="Last sent">

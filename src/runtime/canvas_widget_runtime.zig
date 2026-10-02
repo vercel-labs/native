@@ -944,10 +944,16 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
         const next_source_text = canvasWidgetSourceTextFingerprint(copy.widget.text);
         const source_unchanged = entry.source_text_len == next_source_text.len and entry.source_text_hash == next_source_text.hash;
         const source_matches_runtime_text = std.mem.eql(u8, entry.text, copy.widget.text);
-        if (!source_unchanged and !source_matches_runtime_text) {
+        const reconcile = canvas.widgetCompiledTextReconcile(copy.widget, .{
+            .source_unchanged = source_unchanged,
+            .source_matches_runtime = source_matches_runtime_text,
+            .previous_source_selection = entry.source_text_selection,
+            .retained_selection = entry.text_selection,
+        }) orelse referenceTextReconcilePolicy(copy.widget, entry, source_unchanged, source_matches_runtime_text);
+        if (!reconcile.retain_state) {
             return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
         }
-        if (source_unchanged) copy.widget.text = entry.text;
+        if (reconcile.retain_text) copy.widget.text = entry.text;
         // The retained scroll offset rides `value` for every editable
         // text kind: the textarea's vertical offset and the single-line
         // field's horizontal one both survive rebuilds through this
@@ -964,35 +970,32 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
                 copy.widget.code_content_width_size_bits = entry.code_content_width_size_bits;
             }
         }
-        if (copy.widget.text_selection == null and copy.widget.text_composition == null) {
+        if (reconcile.retain_selection_composition) {
             copy.widget.text_selection = entry.text_selection;
             copy.widget.text_composition = entry.text_composition;
-        } else if (copy.widget.text_selection) |*source_selection| {
-            // Caret affinity is runtime geometry at a byte offset. Core
-            // and C-ABI controlled models historically echo only
-            // anchor/focus, so the bridge materializes `.upstream` on
-            // every rebuild. When those offsets faithfully echo the
-            // retained selection, keep the retained visual-line owner;
-            // changing either offset remains the source-authoritative
-            // way to move the selection.
-            if (entry.text_selection) |retained_selection| {
-                if (source_selection.anchor == retained_selection.anchor and
-                    source_selection.focus == retained_selection.focus)
-                {
-                    const source_affinity_changed = if (entry.source_text_selection) |previous_source_selection|
-                        source_selection.affinity != previous_source_selection.affinity
-                    else
-                        // The legacy shape can only materialize upstream;
-                        // a first downstream value is therefore explicit.
-                        source_selection.affinity != .upstream;
-                    if (!source_affinity_changed) {
-                        source_selection.affinity = retained_selection.affinity;
-                    }
-                }
-            }
+        } else if (reconcile.retain_affinity) {
+            copy.widget.text_selection.?.affinity = entry.text_selection.?.affinity;
         }
     }
     return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
+}
+
+fn referenceTextReconcilePolicy(widget: canvas.Widget, entry: *const CanvasWidgetTextReconcileEntry, source_unchanged: bool, source_matches_runtime: bool) canvas.TextReconcilePolicyResult {
+    var retain_affinity = false;
+    if (widget.text_selection) |source| {
+        if (entry.text_selection) |retained| {
+            // Byte-identical legacy source echoes carry upstream affinity;
+            // preserve the runtime's painted stop unless the source changed it.
+            const affinity_changed = if (entry.source_text_selection) |previous| source.affinity != previous.affinity else source.affinity != .upstream;
+            retain_affinity = source.anchor == retained.anchor and source.focus == retained.focus and !affinity_changed;
+        }
+    }
+    return .{
+        .retain_text = source_unchanged,
+        .retain_state = source_unchanged or source_matches_runtime,
+        .retain_selection_composition = widget.text_selection == null and widget.text_composition == null,
+        .retain_affinity = retain_affinity,
+    };
 }
 
 fn canvasWidgetLayoutNodeWithCaretSafeSelection(node: canvas.WidgetLayoutNode) canvas.WidgetLayoutNode {

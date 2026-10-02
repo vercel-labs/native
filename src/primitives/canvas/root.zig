@@ -700,6 +700,9 @@ pub const textLineStartOffset = text_model.textLineStartOffset;
 pub const textLineEndOffset = text_model.textLineEndOffset;
 pub const widgetCompiledTextPointerSelection = event_model.widgetCompiledTextPointerSelection;
 pub const widgetCompiledTextEdit = event_model.widgetCompiledTextEdit;
+pub const TextReconcilePolicyState = event_model.TextReconcilePolicyState;
+pub const TextReconcilePolicyResult = event_model.TextReconcilePolicyResult;
+pub const widgetCompiledTextReconcile = event_model.widgetCompiledTextReconcile;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 

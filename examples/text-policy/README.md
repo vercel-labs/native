@@ -22,3 +22,8 @@ from the standing anchor; dragging back into the anchor run restores that run.
 The editors keep UTF-8 byte boundaries and treat CRLF as one caret stop.
 Undo and redo preserve selections; successive IME previews replace the active
 composition, and committing a composition records one undoable edit.
+
+Scratchpad keeps its edits locally: Refresh preserves the draft and active
+composition, while Replace scratch supplies a new starting value. Restore
+note replaces the app-owned note. Locking editors uses their authored values;
+New desk starts every editor afresh.

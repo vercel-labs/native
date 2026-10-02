@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
 export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request[0] === 4) return nscvTextEdit(request);
+  if (request[0] === 5) return nscvTextReconcile(request);
   if (request.length !== 8 || request[0]! > 2 || request[1]! > 1 || request[2]! > 2 ||
       request[3]! > 15 || request[4]! > 1 || request[5]! > 1 || request[6]! > 9 || request[7]! > 1)
     throw new Error("invalid text policy request");
@@ -163,6 +164,37 @@ function nscvTextEdit(request: Uint8Array): Uint8Array {
   out.setUint32(16, next.composition !== null ? next.composition.start : 0, true);
   out.setUint32(20, next.composition !== null ? next.composition.end : 0, true);
   if (!retained) result.set(next.text, 24);
+  return result;
+}
+
+/** Rebuild policy: tag 5, source-unchanged, source-matches-retained, reserved;
+ * source flags (selection/composition/downstream), retained selection flags
+ * (present/downstream), previous source selection flags, reserved. Four LE
+ * u64 offsets follow: source anchor/focus, retained anchor/focus. Compare
+ * their u32 halves exactly, including offsets beyond JS's safe integers.
+ * Result bits retain text, retain native scroll/cache state, retain selection
+ * and composition, and retain affinity. Native owns bytes and caret geometry.
+ */
+function nscvTextReconcile(request: Uint8Array): Uint8Array {
+  if (request.length !== 40 || request[1]! > 1 || request[2]! > 1 || request[3] !== 0 ||
+      request[4]! > 7 || request[5]! > 3 || request[6]! > 3 || request[7] !== 0)
+    throw new Error("invalid text reconcile request");
+  const result = new Uint8Array(1);
+  if (request[1] === 0 && request[2] === 0) return result;
+  let flags = 2 | (request[1] === 1 ? 1 : 0);
+  const sourceSelection = (request[4]! & 1) !== 0;
+  if (!sourceSelection && (request[4]! & 2) === 0) flags |= 4;
+  else if (sourceSelection && (request[5]! & 1) !== 0) {
+    const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+    const echoed = data.getUint32(8, true) === data.getUint32(24, true) &&
+      data.getUint32(12, true) === data.getUint32(28, true) &&
+      data.getUint32(16, true) === data.getUint32(32, true) &&
+      data.getUint32(20, true) === data.getUint32(36, true);
+    const downstream = (request[4]! & 4) !== 0;
+    const affinityChanged = (request[6]! & 1) !== 0 ? downstream !== ((request[6]! & 2) !== 0) : downstream;
+    if (echoed && !affinityChanged) flags |= 8;
+  }
+  result[0] = flags;
   return result;
 }
 
