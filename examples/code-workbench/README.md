@@ -21,6 +21,9 @@ selection and clipboard bytes; changing annotations preserves Undo/Redo.
 Copy and Cut use the selected source bytes, including Unicode and line breaks.
 Paste into the other draft keeps those bytes; Cut with no selection preserves
 both the source and clipboard. Undo restores a cut as an ordinary editor edit.
+Use primary+C/X/V for Copy/Cut/Paste and primary+Z/Shift+Z for Undo/Redo
+(Command on macOS, Ctrl on other hosts). Shift/Alt clipboard variants remain
+available to the app; they do not change the clipboard or editor history.
 
 Use spaces and Use tabs replace the TypeScript source. Refresh keeps local
 edits, selection and widget identities. Hide TypeScript preserves the

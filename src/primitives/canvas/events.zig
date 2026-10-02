@@ -469,6 +469,52 @@ pub fn widgetKeyboardClipboardAction(event: WidgetKeyboardEvent) ?WidgetClipboar
     return null;
 }
 
+/// Compiled editors derive the chord; static text and terminal callers keep
+/// their native recognition path and platform-specific clipboard handling.
+pub fn widgetKeyboardClipboardActionForWidget(widget: Widget, event: WidgetKeyboardEvent) ?WidgetClipboardAction {
+    const action = compiledEditorShortcut(widget, event, 0) orelse return widgetKeyboardClipboardAction(event);
+    return switch (action) {
+        0 => null,
+        1 => .copy,
+        2 => .cut,
+        3 => .paste,
+        else => @panic("invalid compiled clipboard shortcut"),
+    };
+}
+
+pub const WidgetTextHistoryAction = enum { undo, redo };
+
+/// Recognize the chord only; native callers retain eligibility, composition
+/// refusal, serial lookup and storage for the selected history direction.
+pub fn widgetKeyboardTextHistoryAction(widget: Widget, event: WidgetKeyboardEvent) ?WidgetTextHistoryAction {
+    if (compiledEditorShortcut(widget, event, 1)) |action| return switch (action) {
+        0 => null,
+        1 => .undo,
+        2 => .redo,
+        else => @panic("invalid compiled history shortcut"),
+    };
+    if (event.phase != .key_down or !event.modifiers.super or event.modifiers.alt or !std.ascii.eqlIgnoreCase(event.key, "z")) return null;
+    return if (event.modifiers.shift) .redo else .undo;
+}
+
+fn compiledEditorShortcut(widget: Widget, event: WidgetKeyboardEvent, mode: u8) ?u8 {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const keys = [_][]const u8{ "c", "x", "v", "z" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, index| if (std.ascii.eqlIgnoreCase(event.key, name)) {
+        key = @intCast(index);
+        break;
+    };
+    const m = event.modifiers;
+    const request = [5]u8{ 13, mode, @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(m.shift)) |
+        (@as(u8, @intFromBool(m.control)) << 1) | (@as(u8, @intFromBool(m.alt)) << 2) | (@as(u8, @intFromBool(m.super)) << 3), key };
+    var output: [1]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > (if (mode == 0) @as(u8, 3) else @as(u8, 2)))
+        @panic("invalid compiled editor shortcut result");
+    return output[0];
+}
+
 pub const WidgetControlIntentKind = enum {
     press,
     toggle,

@@ -119,6 +119,21 @@ test("code drafts preserve file indentation, selection, independent history, sou
     await select("TypeScript draft", 0, 0); await focus(); await key("cmd+x"); text("typescript", source);
     await focus("Python draft"); await key("end"); await key("cmd+v"); text("python", source + "cafécafé");
     await click("Refresh"); text("typescript", source); text("python", source + "cafécafé");
+    // Chord filtering must not consume clipboard or history for app variants.
+    await select("TypeScript draft", cafeStart + Buffer.byteLength("café"), cafeStart); await focus();
+    for (const chord of ["cmd+shift+c", "cmd+alt+c", "cmd+shift+x", "cmd+alt+x", "cmd+shift+v", "cmd+alt+v"]) {
+      await key(chord); text("typescript", source);
+    }
+    await focus("Python draft"); await key("end"); await key("cmd+v");
+    text("python", source + "cafécafécafé");
+    await focus(); await key("cmd+x"); text("typescript", source.replace("café", ""));
+    await key("cmd+alt+z"); text("typescript", source.replace("café", ""));
+    await key("ctrl+z"); text("typescript", source.replace("café", ""));
+    await key("cmd+z"); text("typescript", source);
+    await key("cmd+alt+shift+z"); text("typescript", source);
+    await key("cmd+y"); text("typescript", source);
+    await key("cmd+shift+z"); text("typescript", source.replace("café", ""));
+    await key("cmd+z"); text("typescript", source);
     const replay = await app.verifyReplay();
     assert.deepEqual(replay.snapshot.model, s.model); assert.deepEqual(replay.snapshot.widgets, s.widgets);
     snapshots.push(replay.snapshot); compare(snapshots);

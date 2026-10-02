@@ -426,19 +426,13 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             target: canvas.WidgetFocusTarget,
             keyboard: canvas.WidgetKeyboardEvent,
         ) ?CanvasWidgetTextHistoryShortcutResult {
-            if (keyboard.phase != .key_down or
-                !keyboard.modifiers.super or
-                keyboard.modifiers.alt or
-                !std.ascii.eqlIgnoreCase(keyboard.key, "z"))
-            {
-                return null;
-            }
             const node_index = self.canvasWidgetNodeIndexById(target.id) orelse return null;
             const widget = self.widget_layout_nodes[node_index].widget;
             if (!canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled or widget.text_composition != null) return null;
+            const action = canvas.widgetKeyboardTextHistoryAction(widget, keyboard) orelse return null;
             clearCanvasWidgetTextVerticalGoal(self);
 
-            const redo = keyboard.modifiers.shift;
+            const redo = action == .redo;
             const current_hash = if (widget.interaction_policy != null) textHistoryHash(widget.text) else null;
             const compiled_timeline = if (current_hash) |hash|
                 compiledCanvasWidgetTextHistoryTimeline(self, target.id, widget, widget.text.len, hash)
