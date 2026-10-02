@@ -129,24 +129,25 @@ test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, ident
     await click("Lock editors"); await click("New desk");
     // The retained editor and model use the same portable reducer. Verify
     // exact byte stops, history replay, and composition replacements together.
+    // `cmd` is automation's portable primary modifier; `ctrl` is raw Control.
     await set("Note", "é\r\n🙂z"); await focus("Note");
     await select("Note", 1, 3); selection("draft", 0, 2);
     await key("arrowright"); selection("draft", 2, 2);
     await key("arrowright"); selection("draft", 4, 4);
     await key("shift+arrowright"); selection("draft", 4, 8);
     await key("backspace"); expectText("draft", "é\r\nz");
-    await key(`${primary}+z`); expectText("draft", "é\r\n🙂z"); selection("draft", 4, 8);
-    await key(`${primary}+shift+z`); expectText("draft", "é\r\nz");
+    await key("cmd+z"); expectText("draft", "é\r\n🙂z"); selection("draft", 4, 8);
+    await key("cmd+shift+z"); expectText("draft", "é\r\nz");
     await set("Note", "one café  last"); await focus("Note"); await key("end");
     await key("alt+backspace"); expectText("draft", "one café  ");
     await key("alt+backspace"); expectText("draft", "one ");
-    await key(`${primary}+z`); expectText("draft", "one café  ");
+    await key("cmd+z"); expectText("draft", "one café  ");
     await select("Note", 0, 3);
     s = await app.composeText(field("Note"), "日"); save(); expectText("draft", "日 café  ");
     s = await app.composeText(field("Note"), "日本"); save(); expectText("draft", "日本 café  ");
     s = await app.commitComposition(field("Note")); save(); assert.equal(value("draft").compStart, -1);
-    await key(`${primary}+z`); expectText("draft", "one café  ");
-    await key(`${primary}+shift+z`); expectText("draft", "日本 café  ");
+    await key("cmd+z"); expectText("draft", "one café  ");
+    await key("cmd+shift+z"); expectText("draft", "日本 café  ");
     await set("Message", "other draft"); await select("Message", 0, 5);
     s = await app.composeText(field("Message"), "é🙂"); save(); expectText("chat", "é🙂 draft");
     s = await app.cancelComposition(field("Message")); save(); expectText("chat", " draft");
