@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request[0] === 4) return nscvTextEdit(request);
   if (request[0] === 5) return nscvTextReconcile(request);
@@ -89,6 +90,42 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
   return result;
+}
+
+/** Shared control intent: tag 15, kind (0 composed, 1 button, 2 icon button,
+ * 3 select, 4 combo, 5 accordion, 6 checkbox, 7 switch, 8 toggle, 9 toggle
+ * button, 10 radio, 11 list item, 12 menu item, 13 cell, 14 segment,
+ * 15 slider, 16 divider, 17 grid, 18 scroll, 19 list, 20 data grid, 21 table),
+ * key (0 other, 1 Enter, 2 Space, 3 Up, 4 Down, 5 Left, 6 Right, 7 Home,
+ * 8 End), flags (tree row/focus moved/radio selection/command/focusable/
+ * declared press/virtualized), expanded (0 absent, 1 false, 2 true).
+ * Native grants eligible key-downs and supplies focus stamps. Result is
+ * 0 none, 1 press, 2 toggle, 3 select, 4 specialized planner; second byte
+ * carries press/toggle/select action bits. Shift remains eligible.
+ */
+function nscvKeyboardControl(request: Uint8Array): Uint8Array {
+  if (request.length !== 5 || request[1]! > 21 || request[2]! > 8 ||
+      request[3]! > 127 || request[4]! > 2) throw new Error("invalid keyboard control request");
+  const kind = request[1]!, key = request[2]!, flags = request[3]!, expanded = request[4]!;
+  const activation = key === 1 || key === 2, navigation = key >= 3;
+  let intent = 0, actions = 0;
+  if ((flags & 1) !== 0) {
+    if (activation || navigation && (flags & 2) !== 0) intent = 3;
+    else if (expanded === 2 && key === 5 || expanded === 1 && key === 6) intent = 2;
+  }
+  if (intent === 0 && kind === 10 && (flags & 4) !== 0 && navigation) intent = 3;
+  if (intent === 0) {
+    if (kind === 1 || kind === 2) intent = activation ? 1 : 0;
+    else if (kind === 3 || kind === 4) intent = activation || (key === 3 || key === 4) && expanded !== 2 ? 1 : 0;
+    else if (kind >= 5 && kind <= 9) intent = activation ? 2 : 0;
+    else if (kind >= 10 && kind <= 14) intent = activation ? 3 : 0;
+    else if (kind >= 15) intent = kind !== 17 || (flags & 64) !== 0 ? 4 : 0;
+    else if ((flags & 48) === 48 && activation) intent = 1;
+  }
+  if (intent === 1) actions = 1;
+  else if (intent === 2) actions = 2;
+  else if (intent === 3) actions = 4 | ((flags & 8) !== 0 ? 1 : 0);
+  const result = new Uint8Array(2); result[0] = intent; result[1] = actions; return result;
 }
 
 /** Editor shortcuts: tag 13, mode (0 clipboard, 1 history), phase
@@ -609,6 +646,7 @@ function nscvTimelineItem(nodes: NscViewNode[], options: NscTimelineItem): void 
  * selection clearing, and authored-order roving focus without reading Model.
  */
 export function native_radio_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid radio policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -671,6 +709,7 @@ export function native_radio_policy(request: Uint8Array): Uint8Array {
  * Native owns visibility, applied selection, and focus presentation.
  */
 export function native_tabs_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tabs policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -740,6 +779,7 @@ function nscvResizeDuration(value: number): number {
  * including bare items. Arrows do not wrap or activate the landed row.
  */
 export function native_list_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid list policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -790,6 +830,7 @@ export function native_list_policy(request: Uint8Array): Uint8Array {
  * without a selected row never acquire a checkmark on activation.
  */
 export function native_menu_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid menu policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -855,6 +896,7 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
  * without wrapping; Home/End preserve native same-parent edges.
  */
 export function native_toggle_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length === 0) throw new Error("invalid toggle policy request");
   const operation = request[0]!;
   if (operation === 8 || operation === 9 || operation === 10) {
@@ -898,6 +940,7 @@ export function native_toggle_policy(request: Uint8Array): Uint8Array {
  * disclosure animation, geometry, and concealed-content eligibility.
  */
 export function native_accordion_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length !== 2 || (request[0] !== 8 && request[0] !== 9) || request[1]! > 15) {
     throw new Error("invalid accordion state request");
   }
@@ -918,6 +961,7 @@ export function native_accordion_policy(request: Uint8Array): Uint8Array {
  * preserves retained state. Native owns geometry and input eligibility.
  */
 export function native_slider_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length !== 14 || request[0]! > 7 || request[1]! > 3) {
     throw new Error("invalid slider policy request");
   }
@@ -949,6 +993,7 @@ export function native_slider_policy(request: Uint8Array): Uint8Array {
  * eligibility and mutation. Each arithmetic stage preserves native f32.
  */
 export function native_split_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length !== 26 || request[0]! > 8 || request[1]! > 7) throw new Error("invalid split policy request");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const operation = request[0]!, flags = request[1]!;
@@ -992,6 +1037,7 @@ export function native_split_policy(request: Uint8Array): Uint8Array {
  * eligibility and mutation; neighboring and descendant frames stay put.
  */
 export function native_resizable_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length !== 13 || request[0]! > 1) throw new Error("invalid resizable policy request");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const height = wire.getFloat32(1, true), current = wire.getFloat32(5, true), delta = wire.getFloat32(9, true);
@@ -1014,6 +1060,7 @@ export function native_resizable_policy(request: Uint8Array): Uint8Array {
  * slots for width/height. OS offsets and wheel/kinetic physics remain native.
  */
 export function native_scroll_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   if (request.length !== 26 || request[0]! < 128 || request[0]! > 142 || request[1]! > 31) {
     throw new Error("invalid scroll policy request");
   }
@@ -1064,6 +1111,7 @@ export function native_scroll_policy(request: Uint8Array): Uint8Array {
  * the presence of child rows remain model-owned.
  */
 export function native_tree_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 15) return nscvKeyboardControl(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tree policy request");
   const operation = request[0]!, subject = read(1), count = read(3);

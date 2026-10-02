@@ -3716,3 +3716,120 @@ test "compiled combobox boundaries preserve opening and mounted menu focus prece
         try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
     }
 }
+
+test "compiled keyboard controls match native kind role and stamped focus precedence" {
+    const policies = [_]*const fn ([]const u8, []u8) usize{
+        core.nativeTextPolicy,   core.nativeRadioPolicy,     core.nativeTabsPolicy,
+        core.nativeTreePolicy,   core.nativeListPolicy,      core.nativeMenuPolicy,
+        core.nativeTogglePolicy, core.nativeAccordionPolicy, core.nativeSliderPolicy,
+        core.nativeSplitPolicy,  core.nativeResizablePolicy, core.nativeScrollPolicy,
+    };
+    const keys = [_][]const u8{ "", "Enter", "SPACE", "return", "esc", "ArrowUp", "arrowdown", "arrowleft", "ArrowRight", "Home", "END", "tab" };
+    // All kind declarations catch composed-control fallback and exclusions.
+    for (std.enums.values(canvas.WidgetKind)) |kind| {
+        for (0..128) |flags| {
+            for ([_]?bool{ null, false, true }) |expanded| {
+                for (keys) |key| {
+                    var widget = canvas.Widget{ .kind = kind, .value = 0.5 };
+                    widget.semantics.role = if (flags & 1 != 0) .treeitem else .none;
+                    widget.command = if (flags & 8 != 0) "activate" else "";
+                    widget.semantics.focusable = flags & 16 != 0;
+                    widget.semantics.actions.press = flags & 32 != 0;
+                    widget.layout.virtualized = flags & 64 != 0;
+                    widget.state.expanded = expanded;
+                    const event = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = key, .focus_moved = flags & 2 != 0, .radio_group_selection = flags & 4 != 0, .modifiers = .{ .shift = true } };
+                    const expected = canvas.widgetKeyboardControlIntent(widget, event);
+                    // Use the genuine callback for numeric/scroll planning;
+                    // shared activation requests exercise every export in turn.
+                    widget.interaction_policy = switch (kind) {
+                        .slider => core.nativeSliderPolicy,
+                        .split_divider => core.nativeSplitPolicy,
+                        else => policies[(flags + @intFromEnum(kind)) % policies.len],
+                    };
+                    try std.testing.expectEqualDeep(expected, canvas.widgetKeyboardControlIntent(widget, event));
+                }
+            }
+        }
+    }
+    const Never = struct {
+        fn policy(_: []const u8, _: []u8) usize {
+            @panic("ineligible keyboard control called compiled policy");
+        }
+    };
+    for ([_]canvas.WidgetKeyboardPhase{ .key_down, .key_up, .text_input }) |phase| {
+        for (0..16) |bits| {
+            for ([_]bool{ false, true }) |disabled| {
+                if (phase == .key_down and bits & 14 == 0 and !disabled) continue;
+                const event = canvas.WidgetKeyboardEvent{ .phase = phase, .key = "enter", .modifiers = .{ .shift = bits & 1 != 0, .control = bits & 2 != 0, .alt = bits & 4 != 0, .super = bits & 8 != 0 } };
+                try std.testing.expectEqual(@as(?canvas.WidgetControlIntent, null), canvas.widgetKeyboardControlIntent(.{ .kind = .button, .state = .{ .disabled = disabled }, .interaction_policy = Never.policy }, event));
+            }
+        }
+    }
+    // Control results remain values after view and other policy arena resets.
+    const retained = canvas.widgetKeyboardControlIntent(.{ .kind = .button, .interaction_policy = core.nativeTextPolicy }, .{ .phase = .key_down, .key = "space" });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    _ = core.initialModel();
+    _ = core.nativeView(arena.allocator());
+    var output: [2]u8 = undefined;
+    _ = core.nativeTreePolicy(&.{ 15, 0, 6, 1, 1 }, &output);
+    try std.testing.expectEqualDeep(@as(?canvas.WidgetControlIntent, .{ .kind = .press, .actions = .{ .press = true } }), retained);
+}
+
+test "runtime grants stamped radio navigation and toggle activation to compiled controls" {
+    const Spy = struct {
+        var calls: usize = 0;
+        var suppress = true;
+        var radio_stamp = false;
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, value: native_sdk.Event) anyerror!void {
+            if (value == .canvas_widget_keyboard) radio_stamp = value.canvas_widget_keyboard.keyboard.radio_group_selection;
+        }
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 15) {
+                calls += 1;
+                if (suppress) {
+                    output[0] = 0;
+                    output[1] = 0;
+                    return 2;
+                }
+            }
+            return core.nativeTogglePolicy(request, output);
+        }
+    };
+    Spy.calls = 0;
+    Spy.suppress = true;
+    Spy.radio_stamp = false;
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-keyboard-controls", .source = native_sdk.WebViewSource.html("<h1>Hello</h1>"), .event_fn = Spy.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 300, 200) });
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &.{
+        .{ .id = 2, .kind = .checkbox, .frame = geometry.RectF.init(12, 12, 180, 36), .interaction_policy = Spy.policy },
+        .{ .id = 3, .kind = .radio_group, .frame = geometry.RectF.init(12, 60, 200, 100), .interaction_policy = core.nativeRadioPolicy, .children = &.{
+            .{ .id = 4, .kind = .radio, .frame = geometry.RectF.init(0, 0, 180, 36), .interaction_policy = core.nativeRadioPolicy, .state = .{ .selected = true }, .value = 1 },
+            .{ .id = 5, .kind = .radio, .frame = geometry.RectF.init(0, 45, 180, 36), .interaction_policy = core.nativeRadioPolicy },
+        } },
+    } }, geometry.RectF.init(0, 0, 300, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_focused_id = 2;
+    const activation = native_sdk.platform.Event{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "space", .modifiers = .{ .shift = true } } };
+    try harness.runtime.dispatchPlatformEvent(app, activation);
+    try std.testing.expect(Spy.calls > 0);
+    try std.testing.expect(!(try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.state.selected);
+    Spy.suppress = false;
+    try harness.runtime.dispatchPlatformEvent(app, activation);
+    try std.testing.expect((try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(2).?.widget.state.selected);
+    view.canvas_widget_focused_id = 4;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try std.testing.expect(Spy.radio_stamp);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 5), view.canvas_widget_focused_id);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(!retained.findById(4).?.widget.state.selected);
+    try std.testing.expect(retained.findById(5).?.widget.state.selected);
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+}

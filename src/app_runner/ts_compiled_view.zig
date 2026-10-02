@@ -212,7 +212,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor_offset = value.anchorOffset,
     }, children.items);
     if (comptime @hasDecl(core, "nativeTextPolicy")) {
-        if (text_entry) result.widget.interaction_policy = core.nativeTextPolicy;
+        // Every primitive can carry composed press semantics. Specialized
+        // callbacks below also accept the shared keyboard-control tag.
+        result.widget.interaction_policy = core.nativeTextPolicy;
     }
     if (comptime @hasDecl(core, "nativeRadioPolicy")) {
         if (value.kind == .radio or value.kind == .radio_group) result.widget.interaction_policy = core.nativeRadioPolicy;

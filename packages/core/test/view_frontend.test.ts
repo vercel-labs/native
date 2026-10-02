@@ -852,3 +852,31 @@ test("history timelines select nearest editor boundaries and refuse stale forks"
   assert.throws(() => exports.native_text_policy!(invalid), /invalid text history timeline count/);
   assert.throws(() => plan([64]), /invalid text history timeline entry/);
 });
+
+
+test("shared keyboard controls validate requests across every specialized callback", () => {
+  const exports: Record<string, (request: Uint8Array) => Uint8Array> = {};
+  runInNewContext(ts.transpile(compileView('<button on-press="increment">Go</button>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder });
+  for (const name of ["text", "radio", "tabs", "tree", "list", "menu", "toggle", "accordion", "slider", "split", "resizable", "scroll"]) {
+    const policy = exports[`native_${name}_policy`]!;
+    const intent = (kind: number, key: number, flags = 0, expanded = 0) => [...policy(Uint8Array.of(15, kind, key, flags, expanded))];
+    assert.deepEqual(intent(1, 1), [1, 1]);
+    assert.deepEqual(intent(0, 2, 48), [1, 1]);
+    assert.deepEqual(intent(0, 2, 16), [0, 0]);
+    assert.deepEqual(intent(9, 2), [2, 2]);
+    assert.deepEqual(intent(12, 1), [3, 4]);
+    assert.deepEqual(intent(12, 1, 8), [3, 5]);
+    assert.deepEqual(intent(3, 4), [1, 1]);
+    assert.deepEqual(intent(4, 3, 0, 2), [0, 0]);
+    assert.deepEqual(intent(1, 1, 1), [3, 4]);
+    assert.deepEqual(intent(1, 5, 1, 2), [2, 2]);
+    assert.deepEqual(intent(1, 6, 3, 1), [3, 4]);
+    assert.deepEqual(intent(10, 7, 4), [3, 4]);
+    assert.deepEqual(intent(10, 7), [0, 0]);
+    assert.deepEqual(intent(15, 1, 48), [4, 0]);
+    assert.deepEqual(intent(17, 1, 48), [0, 0]);
+    assert.deepEqual(intent(17, 1, 64), [4, 0]);
+    for (const request of [[15], [15, 0, 0, 0, 0, 0], [15, 22, 0, 0, 0], [15, 0, 9, 0, 0], [15, 0, 0, 128, 0], [15, 0, 0, 0, 3]])
+      assert.throws(() => policy(new Uint8Array(request)), /keyboard control request/);
+  }
+});
