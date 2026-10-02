@@ -1,5 +1,5 @@
 import { utf8Bytes } from "@native-sdk/core";
-import { applyTextInputEvent, type TextInputEvent } from "@native-sdk/core/text";
+import { applyTextInputEvent, parseCodeLineNumberSpec, type TextInputEvent } from "@native-sdk/core/text";
 
 export interface Draft {
   readonly text: Uint8Array;
@@ -15,10 +15,21 @@ export interface Model {
   readonly refreshes: number;
   readonly numbered: boolean;
   readonly hidden: boolean;
+  readonly addedSpec: Draft;
+  readonly removedSpec: Draft;
+  readonly addedLines: Uint8Array;
+  readonly removedLines: Uint8Array;
+  readonly added: readonly number[];
+  readonly removed: readonly number[];
+  readonly diffError: boolean;
 }
 export type Msg =
   | { readonly kind: "edit_typescript"; readonly edit: TextInputEvent }
   | { readonly kind: "edit_python"; readonly edit: TextInputEvent }
+  | { readonly kind: "edit_added"; readonly edit: TextInputEvent }
+  | { readonly kind: "edit_removed"; readonly edit: TextInputEvent }
+  | { readonly kind: "apply_diff" }
+  | { readonly kind: "clear_diff" }
   | { readonly kind: "spaces" }
   | { readonly kind: "tabs" }
   | { readonly kind: "refresh" }
@@ -29,13 +40,20 @@ export type Msg =
 function draft(text: Uint8Array): Draft {
   return { text, anchor: 0, focus: 0, compStart: -1, compEnd: -1 };
 }
-export const viewUnbound = ["hidden"] as const;
+export const viewUnbound = ["hidden", "added", "removed", "diffError"] as const;
 export function typescriptVisible(model: Model): boolean { return !model.hidden; }
+export function diffStatus(model: Model): Uint8Array {
+  if (model.diffError) return utf8Bytes("Use disjoint line lists from 1–128.");
+  return utf8Bytes(`${model.added.length} added · ${model.removed.length} removed`);
+}
 export function initialModel(): Model {
   return { workbench: 0,
     typescript: draft(utf8Bytes("function greet() {\n    return 'café';\n}\n")),
     python: draft(utf8Bytes("def greet():\n\treturn '日本'\n")),
-    refreshes: 0, numbered: true, hidden: false };
+    refreshes: 0, numbered: true, hidden: false,
+    addedSpec: draft(utf8Bytes("2-3")), removedSpec: draft(utf8Bytes("1")),
+    addedLines: new Uint8Array(0), removedLines: new Uint8Array(0),
+    added: [], removed: [], diffError: false };
 }
 function edit(value: Draft, event: TextInputEvent): Draft {
   const next = applyTextInputEvent({ text: value.text, selection: { anchor: value.anchor, focus: value.focus },
@@ -51,6 +69,18 @@ export function update(model: Model, msg: Msg): Model {
   switch (msg.kind) {
     case "edit_typescript": return { ...model, typescript: edit(model.typescript, msg.edit) };
     case "edit_python": return { ...model, python: edit(model.python, msg.edit) };
+    case "edit_added": return { ...model, addedSpec: edit(model.addedSpec, msg.edit) };
+    case "edit_removed": return { ...model, removedSpec: edit(model.removedSpec, msg.edit) };
+    case "apply_diff": {
+      const added = parseCodeLineNumberSpec(model.addedSpec.text);
+      const removed = parseCodeLineNumberSpec(model.removedSpec.text);
+      if (added === null || removed === null) return { ...model, diffError: true };
+      for (const line of added) if (removed.includes(line)) return { ...model, diffError: true };
+      return { ...model, addedLines: model.addedSpec.text, removedLines: model.removedSpec.text,
+        added, removed, diffError: false };
+    }
+    case "clear_diff": return { ...model, addedLines: new Uint8Array(0), removedLines: new Uint8Array(0),
+      added: [], removed: [], diffError: false };
     case "spaces": return { ...model, typescript: draft(utf8Bytes("function greet() {\n    return 'café';\n}\n")) };
     case "tabs": return { ...model, typescript: draft(utf8Bytes("function greet() {\n\treturn 'café';\n}\n")) };
     case "refresh": return { ...model, refreshes: model.refreshes < 1000000 ? model.refreshes + 1 : model.refreshes };

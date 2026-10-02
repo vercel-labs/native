@@ -5,11 +5,20 @@
     <button size="sm" on-press="new_workbench">New workbench</button>
   </row>
   <text foreground="text_muted">Tab follows each draft's indentation. Shift+Tab moves focus.</text>
+  <row gap="8" cross="center">
+    <text foreground="text_muted">Added lines</text>
+    <input text="{addedSpec.text}" width="140" label="Added lines" placeholder="Added: 2-4" on-input="edit_added"/>
+    <text foreground="text_muted">Removed lines</text>
+    <input text="{removedSpec.text}" width="140" label="Removed lines" placeholder="Removed: 1" on-input="edit_removed"/>
+    <button size="sm" on-press="apply_diff">Apply diff</button>
+    <button size="sm" on-press="clear_diff">Clear diff</button>
+    <text foreground="text_muted">{diffStatus}</text>
+  </row>
   <row gap="16" grow="1">
     <column gap="8" width="420">
       <text size="heading">TypeScript</text>
       <if test="{typescriptVisible}">
-        <code key="typescript" source="{typescript.text}" language="typescript" editable="true" wrap="false" line-numbers="{numbered}" width="420" height="260" label="TypeScript draft" on-input="edit_typescript"/>
+        <code key="typescript" source="{typescript.text}" language="typescript" editable="true" wrap="false" line-numbers="{numbered}" added-lines="{addedLines}" removed-lines="{removedLines}" width="420" height="260" label="TypeScript draft" on-input="edit_typescript"/>
       </if>
       <row gap="8">
         <button size="sm" on-press="spaces">Use spaces</button>

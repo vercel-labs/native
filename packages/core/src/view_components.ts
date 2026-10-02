@@ -2,7 +2,7 @@
  * These functions emit only primitive view records. Native owns measurement,
  * rendering, hit testing, and delivery of the declared message envelopes.
  */
-import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
+import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -18,6 +18,7 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   codeLanguage?: string; codeLineDigits?: number;
+  codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
   press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number;
@@ -106,7 +107,7 @@ function nscvCodeIndentation(request: Uint8Array): Uint8Array {
  * Count its terminal caret line and omit the gutter beyond 10,000 source
  * lines, matching the retained native code component's line budget.
  */
-function nscvCodeEditor(node: NscViewNode, numbered: boolean): void {
+function nscvCodeEditor(node: NscViewNode, numbered: boolean, addedSpec: Uint8Array, removedSpec: Uint8Array): void {
   let lines = 1;
   for (let i = 0; i < node.text.length; i += 1) if (node.text.charCodeAt(i) === 10) lines += 1;
   const terminal = node.text.length > 0 && node.text.charCodeAt(node.text.length - 1) === 10;
@@ -117,6 +118,14 @@ function nscvCodeEditor(node: NscViewNode, numbered: boolean): void {
     while (remaining >= 10) { remaining = Math.floor(remaining / 10); digits += 1; }
   }
   node.codeLineDigits = digits;
+  const added = nscvCodeLines(addedSpec), removed = nscvCodeLines(removedSpec);
+  if (added === null || removed === null) throw new Error("invalid code diff line specification");
+  for (const line of added) {
+    if (removed.includes(line)) throw new Error("code diff added and removed lines overlap");
+  }
+  if (added.length !== 0 || removed.length !== 0) {
+    node.codeAddedLines = added; node.codeRemovedLines = removed;
+  }
 }
 
 /** Tagged pointer request: 3, multiline, click count (2/3), mode

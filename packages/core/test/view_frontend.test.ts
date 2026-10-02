@@ -80,6 +80,24 @@ test("compiled indentation requests preserve the shared text library's file conv
   assert.throws(() => exports.native_text_policy!(new Uint8Array([11])), /indentation request/);
 });
 
+test("compiled code diff specs support literal and byte bindings and reject invalid annotations", () => {
+  const { model, view } = evaluate('<code source="{status}" editable="true" wrap="false" added-lines="{status}" removed-lines="128, 127" line-numbers="true"/>');
+  model.status = new TextEncoder().encode("2-4, 7, 3");
+  let node = view().nodes[0];
+  assert.deepEqual(node.codeAddedLines, [2, 3, 4, 7]); assert.deepEqual(node.codeRemovedLines, [128, 127]);
+  assert.equal(node.text, "2-4, 7, 3"); assert.equal(node.codeLineDigits, 1);
+  model.status = new TextEncoder().encode(" +1__2 ");
+  assert.deepEqual(view().nodes[0].codeAddedLines, [12]);
+  for (const spec of ["0", "129", "1-129", "1,,2", "128", "126-128"]) {
+    model.status = new TextEncoder().encode(spec);
+    assert.throws(view, /code diff/, spec);
+  }
+  const empty = evaluate('<code source="{status}" editable="true" wrap="false" added-lines=" \n" removed-lines=""/>').view().nodes[0];
+  assert.equal(empty.codeAddedLines, undefined); assert.equal(empty.codeRemovedLines, undefined);
+  assert.throws(() => compileView('<code source="{status}" editable="true" wrap="false" added-lines="{count}"/>', contract), /added-lines requires one text binding/);
+  assert.throws(() => compileView('<textarea added-lines="1"/>', contract), /unsupported attribute added-lines/);
+});
+
 test("mixer sliders route applied float values separately from static change messages", () => {
   const file = new URL("../../../examples/slider-policy/src/core.ts", import.meta.url).pathname;
   const checked = checkFile(file, { contractEntry: "core_facade.ts" });
