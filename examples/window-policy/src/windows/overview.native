@@ -1,0 +1,7 @@
+<column gap="16" padding="24">
+  <text size="heading">Overview</text>
+  <text foreground="text_muted">One workspace, a shared count.</text>
+  <text size="heading">{count}</text>
+  <button on-press="bump">Add one</button>
+  <button variant="secondary" on-press="close">Close panels</button>
+</column>

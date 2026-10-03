@@ -52,11 +52,122 @@ export function native_status_policy(request: Uint8Array): Uint8Array {
   result[0] = 1; return result;
 }
 
+/** Portable stock-theme decisions. Native retains owned token registers, OS
+ * appearance facts and surface scale. Results are copied without resetting
+ * the dispatch arena: a theme helper may still own borrowed accent bytes.
+ * Operations: 0 exact #rrggbb parsing; 1 pack/scheme/accent resolution;
+ * 2 complete-token precedence and appearance/rebuild coordination.
+ */
+export function native_theme_policy(request: Uint8Array): Uint8Array {
+  const result = new Uint8Array(4);
+  if (request[0] === 0) {
+    if (request.length !== 8 || request[1] !== 35) return result;
+    for (let channel = 0; channel < 3; channel++) {
+      const hi = themeHexNibble(request[2 + channel * 2]!);
+      const lo = themeHexNibble(request[3 + channel * 2]!);
+      if (hi < 0 || lo < 0) return new Uint8Array(4);
+      result[channel + 1] = hi * 16 + lo;
+    }
+    result[0] = 1;
+    return result;
+  }
+  if (request[0] === 1) {
+    if (request.length !== 8 || request[1]! > 2 || request[2]! < 1 || request[2]! > 2 || request[3]! > 2) {
+      throw new Error("invalid stock theme request");
+    }
+    for (let i = 4; i < 8; i++) if (request[i]! > 1) throw new Error("invalid theme appearance flag");
+    result[0] = request[1] === 0 ? request[2]! : request[1]!;
+    result[1] = request[3] === 0 ? request[4]! : request[3]! - 1;
+    result[2] = request[5] === 1 ? 0 : request[6] === 1 ? 1 : request[7] === 1 ? 2 : 0;
+    return result;
+  }
+  if (request[0] === 2) {
+    if (request.length !== 5 || request[4]! > 2) throw new Error("invalid theme control request");
+    for (let i = 1; i < 4; i++) if (request[i]! > 1) throw new Error("invalid theme control flag");
+    result[0] = request[1] === 1 ? 1 : request[2] === 1 ? 2 : 0;
+    result[1] = result[0] === 0 && (request[3] === 0 || request[4] === 0) ? 1 : 0;
+    result[2] = request[1] === 1 || request[3] === 1 || result[1] === 1 ? 1 : 0;
+    return result;
+  }
+  throw new Error("unknown theme policy operation");
+}
+
+function themeHexNibble(byte: number): number {
+  if (byte >= 48 && byte <= 57) return byte - 48;
+  if (byte >= 65 && byte <= 70) return byte - 65 + 10;
+  if (byte >= 97 && byte <= 102) return byte - 97 + 10;
+  return -1;
+}
+
+/** Window set reconciliation over ordered native-owned slots. Operation 0
+ * selects the first stale slot; the caller removes it (swapping the last slot)
+ * and asks again before creating anything. Operation 1 handles one descriptor
+ * against the current table, so failed OS creates never reserve an identity.
+ * Labels are opaque bytes. Existing labels only update the owned close message;
+ * their creation-time canvas, title, geometry and close policy stay fixed.
+ */
+export function native_window_policy(request: Uint8Array): Uint8Array {
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  let at = 0;
+  const byte = (): number => {
+    if (at >= request.length) throw new Error("truncated window policy request");
+    return request[at++]!;
+  };
+  const label = (): Uint8Array => {
+    if (at + 4 > request.length) throw new Error("truncated window policy label");
+    const length = data.getUint32(at, true); at += 4;
+    if (length > request.length - at) throw new Error("truncated window policy label");
+    const value = request.subarray(at, at + length); at += length; return value;
+  };
+  const equal = (a: Uint8Array, b: Uint8Array): boolean => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  };
+  const operation = byte();
+  if (operation > 1) throw new Error("invalid window policy operation");
+  const declared: Uint8Array[] = [];
+  let main: Uint8Array = new Uint8Array(0), name: Uint8Array = new Uint8Array(0), canvas: Uint8Array = new Uint8Array(0);
+  if (operation === 0) {
+    const count = byte();
+    if (count > 4) throw new Error("invalid window declaration count");
+    for (let i = 0; i < count; i++) declared.push(label());
+  } else { main = label(); name = label(); canvas = label(); }
+  const count = byte();
+  if (count > 4) throw new Error("invalid live window count");
+  const names: Uint8Array[] = [], canvases: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) { names.push(label()); canvases.push(label()); }
+  if (at !== request.length) throw new Error("trailing window policy bytes");
+  const result = new Uint8Array(2); result[1] = 255;
+  if (operation === 0) {
+    for (let i = 0; i < count; i++) {
+      let keep = false;
+      for (const candidate of declared) if (equal(candidate, names[i]!)) keep = true;
+      if (!keep) { result[1] = i; break; }
+    }
+    return result;
+  }
+  // Lookup precedes admission: duplicate descriptors update the same slot
+  // even when the table is full or their later creation fields are invalid.
+  for (let i = 0; i < count; i++) if (equal(name, names[i]!)) {
+    result[0] = 1; result[1] = i; return result;
+  }
+  if (count === 4) { result[0] = 2; return result; }
+  if (name.length === 0 || name.length > 64 || canvas.length === 0 || canvas.length > 64) {
+    result[0] = 3; return result;
+  }
+  let collision = equal(canvas, main);
+  for (const value of canvases) if (equal(canvas, value)) collision = true;
+  if (collision) result[0] = 4;
+  return result;
+}
+
 /** Portable decisions over native-owned timer tables.
  * Operations 0/1 reconcile subscriptions; 2 arms a delay, 3 looks up its key,
  * and 4 routes a one-shot completion and retires its slot. The cycle owns both
  * arenas; callers copy results without resetting bytes between records.
  */
+
 export function native_timer_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 2 || request[0] === 3) return delayDeclaration(request);
   if (request[0] === 4) {
@@ -245,4 +356,66 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
     if (equal) return slot;
   }
   return -1;
+}
+
+/** Named buffered effects over native-owned slots. Admission returns both the
+ * predecessor to drop and the first free slot: dropping precedes capacity
+ * refusal, and a dropped predecessor stays occupied until its terminal drains.
+ * Completion selects a route/payload and retires one slot. This pure callback
+ * neither mutates its borrowed input nor resets the dispatch frame.
+ */
+export function native_effect_policy(request: Uint8Array): Uint8Array {
+  if (request.length < 2 || request[0]! > 2) throw new Error("invalid effect policy request");
+  if (request[0] === 2) {
+    if (request.length !== 69 || request[1]! >= 16 || request[2]! > 3 || request[3]! > 1 || request[4]! > 1)
+      throw new Error("invalid effect completion request");
+    for (let at = 5; at < request.length; at += 4)
+      if (request[at]! > 1 || request[at + 1]! > 1) throw new Error("invalid effect completion slot");
+    const slot = request[1]!, at = 5 + slot * 4;
+    if (request[at] !== 1) throw new Error("effect completion slot is not tracked");
+    const result = new Uint8Array(4);
+    result[0] = slot;
+    if (request[at + 1] === 1) {
+      result[1] = request[at + 3]!;
+      return result; // Swallow; the inert stand-in uses the error arm.
+    }
+    const cut = request[2] === 3 && request[4] === 1;
+    const success = request[3] === 1 && !cut;
+    result[1] = request[at + (success ? 2 : 3)]!;
+    result[2] = success ? request[2]! + 1 : 5;
+    result[3] = success ? 0 : request[3] === 1 && cut ? 2 : 1;
+    return result;
+  }
+  const arm = request[0] === 0, length = request[1]!;
+  let at = 2 + length;
+  if (at + (arm ? 3 : 0) > request.length) throw new Error("truncated effect declaration");
+  let blocked = 0, ok = 0, err = 0;
+  if (arm) {
+    blocked = request[at]!; ok = request[at + 1]!; err = request[at + 2]!;
+    if (blocked > 1) throw new Error("invalid effect admission fact");
+    at += 3;
+  }
+  let matching = -1, free = -1;
+  for (let slot = 0; slot < 16; slot++) {
+    if (at + 3 > request.length) throw new Error("truncated effect policy table");
+    const used = request[at]!, dropped = request[at + 1]!, size = request[at + 2]!;
+    if (used > 1 || dropped > 1 || at + 5 + size > request.length) throw new Error("invalid effect policy slot");
+    let equal = used === 1 && dropped === 0 && size === length;
+    for (let i = 0; i < size; i++) if (request[at + 3 + i] !== request[2 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (used === 0 && free < 0) free = slot;
+    at += 5 + size;
+  }
+  if (at !== request.length) throw new Error("trailing effect policy bytes");
+  if (!arm) {
+    const result = new Uint8Array(1);
+    result[0] = matching < 0 ? 255 : matching;
+    return result;
+  }
+  const result = new Uint8Array(5);
+  result[0] = blocked === 0 ? 1 : 0;
+  result[1] = blocked === 1 || free < 0 ? 255 : free;
+  result[2] = blocked === 1 || length === 0 || matching < 0 ? 255 : matching;
+  result[3] = ok; result[4] = err;
+  return result;
 }

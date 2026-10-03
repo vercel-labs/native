@@ -138,6 +138,20 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// results are copied and finishCycle retains arena reset ownership.
         pub const native_db_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_db_policy");
 
+        /// Pure named-effect coordination. Borrow inputs, copy outputs; the
+        /// host retains command-cycle and completion-frame reset ownership.
+        pub const native_effect_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_effect_policy");
+        /// Stream decisions borrow input and copy output within the dispatch cycle.
+        pub const native_stream_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_stream_policy");
+
+        /// Pure window reconciliation. Borrow inputs and copy outputs;
+        /// view/cycle consumers retain ownership of the compiler frame.
+        pub const native_window_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_policy");
+
+        /// Stock-theme decisions. Borrowed requests and copied results retain
+        /// dispatch lifetime; finishCycle owns the frame reset.
+        pub const native_theme_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_theme_policy");
+
         /// Pure status-item reconciliation. Borrowed requests and copied
         /// results retain the cycle arena until finishCycle.
         pub const native_status_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_status_policy");

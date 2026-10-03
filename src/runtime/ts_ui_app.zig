@@ -417,6 +417,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             // is equally visible on direct compiler output and the
             // external-core mirror. The app owns only the pack; UiApp's
             // stock-token path keeps following the OS appearance.
+            if (comptime @hasDecl(core, "nativeThemePolicy")) {
+                if (options.theme_policy != null) @panic("TsUiApp owns theme_policy - remove custom theme policy wiring");
+                stamped.theme_policy = core.nativeThemePolicy;
+            }
             if (comptime @hasDecl(Model, "themePack")) {
                 if (comptime @hasDecl(Model, "themeState")) {
                     @compileError("TsUiApp: export either themePack or themeState, not both");
@@ -469,6 +473,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 comptime validateWindowsHelper();
                 stamped.windows_fn = windowsAdapter;
+                if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                    if (options.window_policy != null) @panic("TsUiApp wires window_policy from the compiled core");
+                    stamped.window_policy = core.nativeWindowPolicy;
+                }
             }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
@@ -581,6 +589,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         }
 
         fn parseThemeAccent(value: []const u8) ?canvas.Color {
+            if (comptime @hasDecl(core, "nativeThemePolicy")) {
+                const request = core.rt.frameAllocator().alloc(u8, value.len + 1) catch @panic("out of memory preparing theme accent");
+                request[0] = 0;
+                @memcpy(request[1..], value);
+                var result: [4]u8 = undefined;
+                if (core.nativeThemePolicy(request, &result) != result.len or result[0] > 1) @panic("invalid compiled theme accent result");
+                return if (result[0] == 1) canvas.Color.rgb8(result[1], result[2], result[3]) else null;
+            }
             if (value.len != 7 or value[0] != '#') return null;
             const r = themeHexByte(value[1], value[2]) orelse return null;
             const g = themeHexByte(value[3], value[4]) orelse return null;

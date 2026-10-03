@@ -1,6 +1,8 @@
+import { native_status_policy } from "../src/runtime_policy.ts";
+import { native_theme_policy } from "../src/runtime_policy.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { native_timer_policy, native_db_policy, native_status_policy } from "../src/runtime_policy.ts";
+import { native_timer_policy, native_db_policy, native_effect_policy } from "../src/runtime_policy.ts";
 
 interface Slot { used: boolean; key: Uint8Array; every: number; tag: number }
 const empty = (): Slot[] => Array.from({ length: 16 }, () => ({ used: false, key: new Uint8Array(0), every: 0, tag: 0 }));
@@ -188,6 +190,162 @@ test("database decisions reject damaged records and preserve copied result owner
   assert.throws(() => native_db_policy(dbRequest(dbEmpty(), [key("")])), /key list/);
   const request = requests[2]!, out = native_db_policy(request), copy = out.slice(); request.fill(0);
   native_db_policy(requests[0]!); assert.deepEqual(out, copy);
+});
+
+interface EffectSlot { used: boolean; dropped: boolean; key: Uint8Array; ok: number; err: number }
+const effectEmpty = (): EffectSlot[] => Array.from({ length: 16 }, (_, i) => ({ used: false, dropped: false, key: key(""), ok: i * 16, err: 255 - i * 16 }));
+function effectRequest(slots: EffectSlot[], name: Uint8Array, blocked?: boolean): Uint8Array {
+  const bytes = new Uint8Array(2 + name.length + (blocked === undefined ? 0 : 3) + slots.reduce((n, s) => n + 5 + s.key.length, 0));
+  bytes[0] = blocked === undefined ? 1 : 0; bytes[1] = name.length; bytes.set(name, 2);
+  let at = 2 + name.length;
+  if (blocked !== undefined) { bytes[at++] = +blocked; bytes[at++] = 127; bytes[at++] = 255; }
+  for (const s of slots) { bytes[at++] = +s.used; bytes[at++] = +s.dropped; bytes[at++] = s.key.length; bytes.set(s.key, at); at += s.key.length; bytes[at++] = s.ok; bytes[at++] = s.err; }
+  return bytes;
+}
+function effectCompletion(slots: EffectSlot[], slot: number, kind: number, ok: number, cut: number): Uint8Array {
+  const bytes = new Uint8Array(69); bytes.set([2, slot, kind, ok, cut]);
+  slots.forEach((s, i) => bytes.set([+s.used, +s.dropped, s.ok, s.err], 5 + i * 4));
+  return bytes;
+}
+
+test("named effects retain dropped slots, match first live keys and allocate independent empty keys", () => {
+  const slots = effectEmpty();
+  const names = [key(""), key("read"), key("café"), new Uint8Array([0, 255]), new Uint8Array(255).fill(255)];
+  for (let occupied = 0; occupied <= 16; occupied++) for (let drops = 0; drops < 4; drops++) {
+    slots.forEach((s, i) => { s.used = i < occupied; s.dropped = (i + drops) % 3 === 0; s.key = names[i % names.length]!; });
+    for (const name of names) {
+      const match = slots.findIndex(s => s.used && !s.dropped && Buffer.from(s.key).equals(name));
+      const free = slots.findIndex(s => !s.used);
+      assert.deepEqual([...native_effect_policy(effectRequest(slots, name))], [match < 0 ? 255 : match]);
+      for (const blocked of [false, true]) assert.deepEqual([...native_effect_policy(effectRequest(slots, name, blocked))], [
+        +!blocked, blocked || free < 0 ? 255 : free, blocked || name.length === 0 || match < 0 ? 255 : match, 127, 255,
+      ]);
+    }
+  }
+  for (let hole = 0; hole < 16; hole++) {
+    slots.forEach((s, i) => { s.used = i !== hole; s.dropped = false; s.key = key("same"); });
+    assert.equal(native_effect_policy(effectRequest(slots, key("same"), false))[1], hole);
+  }
+  slots.forEach(s => { s.used = true; s.dropped = false; s.key = key("same"); });
+  assert.deepEqual([...native_effect_policy(effectRequest(slots, key("same"), false))], [1, 255, 0, 127, 255]);
+});
+
+test("named completions preserve route, payload shape, truncation and silent-drop retirement", () => {
+  const slots = effectEmpty(); slots.forEach(s => { s.used = true; });
+  for (let slot = 0; slot < 16; slot++) for (let kind = 0; kind < 4; kind++) for (const ok of [0, 1]) for (const cut of [0, 1]) for (const dropped of [false, true]) {
+    slots[slot]!.dropped = dropped;
+    const s = slots[slot]!, success = ok === 1 && !(kind === 3 && cut === 1);
+    assert.deepEqual([...native_effect_policy(effectCompletion(slots, slot, kind, ok, cut))], [slot,
+      dropped || !success ? s.err : s.ok, dropped ? 0 : success ? kind + 1 : 5,
+      dropped || success ? 0 : ok === 1 && kind === 3 && cut === 1 ? 2 : 1,
+    ]);
+  }
+});
+
+test("named policy rejects malformed tables and returns owned results without mutating inputs", () => {
+  const slots = effectEmpty(); slots[0]!.used = true; slots[0]!.key = key("read");
+  for (const req of [effectRequest(slots, key("read")), effectRequest(slots, key("read"), false), effectCompletion(slots, 0, 3, 1, 1)]) {
+    for (let n = 0; n < req.length; n++) assert.throws(() => native_effect_policy(req.subarray(0, n)));
+    assert.throws(() => native_effect_policy(new Uint8Array([...req, 0])));
+    const before = req.slice(), out = native_effect_policy(req), result = out.slice();
+    assert.deepEqual(req, before); req.fill(0); native_effect_policy(effectRequest(slots, key("new"), true)); assert.deepEqual(out, result);
+  }
+  for (const [slot, kind, ok, cut] of [[16, 0, 1, 0], [0, 4, 1, 0], [0, 0, 2, 0], [0, 0, 1, 2], [1, 0, 1, 0]]) assert.throws(() => native_effect_policy(effectCompletion(slots, slot!, kind!, ok!, cut!)));
+  const bad = effectRequest(slots, key(""), false); bad[2] = 2; assert.throws(() => native_effect_policy(bad), /admission/);
+  bad[2] = 0; bad[5] = 2; assert.throws(() => native_effect_policy(bad), /slot/);
+  bad[5] = 1; bad[6] = 2; assert.throws(() => native_effect_policy(bad), /slot/);
+});
+
+function windowRequest(operation: number, live: readonly (readonly [Uint8Array, Uint8Array])[], declared: readonly Uint8Array[] = [], name = key("new"), canvas = key("new-canvas")): Uint8Array {
+  const out: number[] = [operation];
+  const label = (bytes: Uint8Array) => { const size = new Uint8Array(4); new DataView(size.buffer).setUint32(0, bytes.length, true); out.push(...size, ...bytes); };
+  if (operation === 0) { out.push(declared.length); declared.forEach(label); }
+  else { label(key("main")); label(name); label(canvas); }
+  out.push(live.length); live.forEach(([a, b]) => { label(a); label(b); });
+  return new Uint8Array(out);
+}
+
+import { native_window_policy } from "../src/runtime_policy.ts";
+test("window plans preserve opaque keys, first-match lookup and admission order", () => {
+  const names = [key(""), key("new"), key("other"), key("café"), new Uint8Array([0, 255]), new Uint8Array(64).fill(255), new Uint8Array(65).fill(255)];
+  const canvases = [key(""), key("main"), key("new-canvas"), key("occupied"), new Uint8Array([0, 255]), new Uint8Array(64).fill(255), new Uint8Array(65).fill(255)];
+  for (let count = 0; count <= 4; count++) {
+    const live = Array.from({ length: count }, (_, i) => [names[1 + i % 4]!, key("occupied")] as const);
+    for (const name of names) for (const canvas of canvases) {
+      const index = live.findIndex(([label]) => Buffer.from(label).equals(name));
+      const expected = index >= 0 ? [1, index] : count === 4 ? [2, 255] :
+        name.length === 0 || name.length > 64 || canvas.length === 0 || canvas.length > 64 ? [3, 255] :
+        Buffer.from(canvas).equals(key("main")) || live.some(([, value]) => Buffer.from(value).equals(canvas)) ? [4, 255] : [0, 255];
+      assert.deepEqual([...native_window_policy(windowRequest(1, live, [], name, canvas))], expected);
+    }
+  }
+  const duplicate = [[key("same"), key("first")], [key("same"), key("last")]] as const;
+  assert.deepEqual([...native_window_policy(windowRequest(1, duplicate, [], key("same"), key("")))], [1, 0]);
+});
+
+test("window retirement follows current slot order including swap-removal", () => {
+  const live = Array.from({ length: 4 }, (_, i) => [key(String(i)), key(`canvas-${i}`)] as const);
+  for (let mask = 0; mask < 16; mask++) {
+    const declared = live.filter((_, i) => mask & (1 << i)).map(([name]) => name);
+    const slots = [...live]; const removed: number[] = [];
+    for (;;) {
+      const expected = slots.findIndex(([name]) => !declared.some(value => Buffer.from(value).equals(name)));
+      const decision = native_window_policy(windowRequest(0, slots, declared));
+      assert.deepEqual([...decision], [0, expected < 0 ? 255 : expected]);
+      if (expected < 0) break;
+      removed.push(Number(new TextDecoder().decode(slots[expected]![0])));
+      slots[expected] = slots[slots.length - 1]!; slots.pop();
+    }
+    assert.equal(removed.length, 4 - declared.length);
+  }
+});
+
+test("window requests refuse malformed counts, labels, operations and trailing bytes", () => {
+  for (const valid of [windowRequest(0, [[key("x"), key("canvas")]], [key("x")]), windowRequest(1, [])]) {
+    for (let length = 0; length < valid.length; length++) assert.throws(() => native_window_policy(valid.subarray(0, length)), /window/);
+    assert.throws(() => native_window_policy(new Uint8Array([...valid, 0])), /trailing/);
+  }
+  assert.throws(() => native_window_policy(new Uint8Array([2])), /operation/);
+  assert.throws(() => native_window_policy(new Uint8Array([0, 5])), /count/);
+  assert.throws(() => native_window_policy(new Uint8Array([0, 0, 5])), /count/);
+});
+
+test("theme policy parses every byte at every accent position with exact native hex semantics", () => {
+  const hex = (b: number): number => b >= 48 && b <= 57 ? b - 48 : b >= 65 && b <= 70 ? b - 55 : b >= 97 && b <= 102 ? b - 87 : -1;
+  const base = new Uint8Array([0, ...key("#12aBcF")]);
+  for (let position = 1; position < 8; position++) for (let byte = 0; byte < 256; byte++) {
+    const input = base.slice(); input[position] = byte;
+    const digits = [...input.slice(2)].map(hex);
+    const expected = input[1] === 35 && digits.every(n => n >= 0)
+      ? [1, digits[0]! * 16 + digits[1]!, digits[2]! * 16 + digits[3]!, digits[4]! * 16 + digits[5]!]
+      : [0, 0, 0, 0];
+    assert.deepEqual([...native_theme_policy(input)], expected);
+  }
+  for (const text of ["", "#fff", "#1234567", " #123456", "#123456\n", "#12é45", "#12\0b45"]) {
+    assert.deepEqual([...native_theme_policy(new Uint8Array([0, ...key(text)]))], [0, 0, 0, 0]);
+  }
+  const backing = new Uint8Array(18); backing.set(base, 5);
+  assert.deepEqual([...native_theme_policy(backing.subarray(5, 13))], [1, 18, 171, 207]);
+});
+
+test("theme policy retains native pack, scheme and high-contrast accent precedence", () => {
+  for (let model = 0; model < 3; model++) for (let fallback = 1; fallback < 3; fallback++)
+  for (let scheme = 0; scheme < 3; scheme++) for (let os = 0; os < 2; os++)
+  for (let contrast = 0; contrast < 2; contrast++) for (let accent = 0; accent < 2; accent++) for (let manifest = 0; manifest < 2; manifest++) {
+    assert.deepEqual([...native_theme_policy(new Uint8Array([1, model, fallback, scheme, os, contrast, accent, manifest]))],
+      [model || fallback, scheme === 0 ? os : scheme - 1, contrast ? 0 : accent ? 1 : manifest ? 2 : 0, 0]);
+  }
+});
+
+test("theme policy preserves complete-token precedence and rebuild coordination", () => {
+  for (let fn = 0; fn < 2; fn++) for (let fixed = 0; fixed < 2; fixed++) for (let helper = 0; helper < 2; helper++) for (let scheme = 0; scheme < 3; scheme++) {
+    const follows = !fn && !fixed && (!helper || scheme === 0);
+    assert.deepEqual([...native_theme_policy(new Uint8Array([2, fn, fixed, helper, scheme]))],
+      [fn ? 1 : fixed ? 2 : 0, +follows, +(!!fn || !!helper || follows), 0]);
+  }
+  for (const bytes of [[], [3], [1], [2], [1, 3, 1, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, 1, 0, 2, 0, 0, 0], [2, 2, 0, 0, 0], [2, 0, 0, 0, 3]]) {
+    assert.throws(() => native_theme_policy(new Uint8Array(bytes)), /theme policy|theme .*request|theme .*flag/);
+  }
 });
 
 interface StatusSlot { active: boolean; id: number }

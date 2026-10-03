@@ -273,6 +273,10 @@ pub const conditional_exports = [_][]const u8{
     "native_text_policy",
     "native_timer_policy",
     "native_db_policy",
+    "native_effect_policy",
+    "native_stream_policy",
+    "native_window_policy",
+    "native_theme_policy",
     "native_status_policy",
 };
 
@@ -2469,6 +2473,21 @@ test "V11: the optional native view extension is unique and follows channels" {
     const db = try replaced(arena, timer, "\"native_timer_policy\"]", "\"native_timer_policy\", \"native_db_policy\"]");
     const db_valid = try readValid(arena, db);
     try testing.expect(abiHasExport(db_valid.abi, "native_db_policy"));
+    const effect = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_effect_policy\"]");
+    const effect_valid = try readValid(arena, effect);
+    try testing.expect(abiHasExport(effect_valid.abi, "native_effect_policy"));
+    const effect_duplicate = try replaced(arena, effect, "\"native_effect_policy\"]", "\"native_effect_policy\", \"native_effect_policy\"]");
+    try expectRefusal(effect_duplicate, "abi.exports[39]", "out of canonical order");
+    const window = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_window_policy\"]");
+    const window_policy_valid = try readValid(arena, window);
+    try testing.expect(abiHasExport(window_policy_valid.abi, "native_window_policy"));
+    const window_policy_duplicate = try replaced(arena, window, "\"native_window_policy\"]", "\"native_window_policy\", \"native_window_policy\"]");
+    try expectRefusal(window_policy_duplicate, "abi.exports[39]", "out of canonical order");
+    const theme = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_theme_policy\"]");
+    const theme_valid = try readValid(arena, theme);
+    try testing.expect(abiHasExport(theme_valid.abi, "native_theme_policy"));
+    const theme_duplicate = try replaced(arena, theme, "\"native_theme_policy\"]", "\"native_theme_policy\", \"native_theme_policy\"]");
+    try expectRefusal(theme_duplicate, "abi.exports[39]", "out of canonical order");
     const status = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_status_policy\"]");
     const status_valid = try readValid(arena, status);
     try testing.expect(abiHasExport(status_valid.abi, "native_status_policy"));

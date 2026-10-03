@@ -529,6 +529,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// this to app.zon's `theme_accent` field through
             /// `app_runner.manifestThemeAccent()`.
             theme_accent: ?canvas.Color = null,
+            /// Optional portable stock-theme policy. Inputs carry explicit
+            /// presence/appearance facts; copied results retain dispatch lifetime.
+            theme_policy: ?*const fn ([]const u8, []u8) usize = null,
             /// App font faces registered once, on the installing frame,
             /// BEFORE the first view build — so the very first layout
             /// already measures (and the first paint inks) with them.
@@ -822,6 +825,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// no close Msg. Reconcile failures degrade to logged warnings
             /// — a failed create never takes the render loop down.
             windows_fn: ?*const fn (model: *const ModelT, scratch: *WindowsScratch) []const WindowDescriptor = null,
+            /// Optional portable reconciliation over native-owned window
+            /// facts. The callback copies its output; rebuild/view consumers
+            /// retain ownership of the compiler frame and descriptor storage.
+            window_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
@@ -1596,7 +1603,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .exit => {
                         if (record.payload.len > 0) try self.effects.feedOutput(record.key, record.payload);
                         if (record.stderr_tail.len > 0) try self.effects.feedStderr(record.key, record.stderr_tail);
-                        try self.effects.feedExitReason(record.key, record.code, record.exit_reason);
+                        try self.effects.feedExitWithMetadata(record.key, record.code, record.exit_reason, .{
+                            .output_truncated = record.output_truncated,
+                            .stderr_truncated = record.stderr_truncated,
+                            .dropped_lines = record.dropped,
+                        });
                     },
                     .response => try self.effects.feedResponseOutcomeWithMetadata(
                         record.key,
@@ -1904,6 +1915,39 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             runtime.video_height = video.height;
         }
 
+        const ThemeControl = struct { mode: u8, follows_system: bool, derives: bool };
+
+        fn themeControl(self: *const Self, scheme: ThemeColorScheme) ThemeControl {
+            const full_tokens = self.options.tokens_fn != null or self.options.tokens != null;
+            if (self.options.theme_policy) |policy| {
+                const request = [_]u8{ 2, @intFromBool(self.options.tokens_fn != null), @intFromBool(self.options.tokens != null), @intFromBool(self.options.theme_state_fn != null), themeSchemeByte(scheme) };
+                var result: [4]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 2 or result[1] > 1 or result[2] > 1) @panic("invalid compiled theme control result");
+                return .{ .mode = result[0], .follows_system = result[1] == 1, .derives = result[2] == 1 };
+            }
+            const follows = !full_tokens and (self.options.theme_state_fn == null or scheme == .system);
+            return .{
+                .mode = if (self.options.tokens_fn != null) 1 else if (self.options.tokens != null) 2 else 0,
+                .follows_system = follows,
+                .derives = self.options.tokens_fn != null or self.options.theme_state_fn != null or follows,
+            };
+        }
+
+        fn themeSchemeByte(scheme: ThemeColorScheme) u8 {
+            return switch (scheme) {
+                .system => 0,
+                .light => 1,
+                .dark => 2,
+            };
+        }
+
+        fn themePackByte(pack: canvas.ThemePack) u8 {
+            return switch (pack) {
+                .house => 1,
+                .geist => 2,
+            };
+        }
+
         /// The design tokens for the next rebuild: the model-derived
         /// `tokens_fn`, explicit static `tokens`, or — the default — the
         /// stock theme derived from the SYSTEM appearance the runtime
@@ -1913,41 +1957,57 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// appearance, the runtime owns the device scale — so static
         /// tokens snap hairlines against the real surface density too.
         pub fn effectiveTokens(self: *const Self) canvas.DesignTokens {
-            if (self.options.tokens_fn) |tokens_fn| {
-                var tokens = tokens_fn(&self.model);
-                tokens.pixel_snap.scale = self.pixel_snap_scale;
-                return tokens;
-            }
-            if (self.options.tokens) |static_tokens| {
-                var tokens = static_tokens;
+            const control = self.themeControl(.system);
+            if (control.mode != 0) {
+                var tokens = switch (control.mode) {
+                    1 => self.options.tokens_fn.?(&self.model),
+                    2 => self.options.tokens.?,
+                    else => unreachable,
+                };
                 tokens.pixel_snap.scale = self.pixel_snap_scale;
                 return tokens;
             }
             const state = self.currentThemeState();
-            const color_scheme: canvas.ColorScheme = switch (state.color_scheme) {
-                .system => switch (self.system_appearance.color_scheme) {
+            // Preserve lazy legacy helper evaluation when a model pack exists.
+            const fallback_pack = if (state.pack == null and self.options.theme_fn != null) self.options.theme_fn.?(&self.model) else self.options.theme;
+            var pack: canvas.ThemePack = undefined;
+            var color_scheme: canvas.ColorScheme = undefined;
+            var accent: ?canvas.Color = undefined;
+            if (self.options.theme_policy) |policy| {
+                const request = [_]u8{
+                    1,                                   if (state.pack) |value| themePackByte(value) else 0,        themePackByte(fallback_pack),
+                    themeSchemeByte(state.color_scheme), @intFromBool(self.system_appearance.color_scheme == .dark), @intFromBool(self.system_appearance.high_contrast),
+                    @intFromBool(state.accent != null),  @intFromBool(self.options.theme_accent != null),
+                };
+                var result: [4]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] < 1 or result[0] > 2 or result[1] > 1 or result[2] > 2) @panic("invalid compiled stock theme result");
+                pack = if (result[0] == 1) .house else .geist;
+                color_scheme = if (result[1] == 0) .light else .dark;
+                accent = switch (result[2]) {
+                    0 => null,
+                    1 => state.accent.?,
+                    2 => self.options.theme_accent.?,
+                    else => unreachable,
+                };
+            } else {
+                pack = state.pack orelse fallback_pack;
+                color_scheme = switch (state.color_scheme) {
+                    .system => switch (self.system_appearance.color_scheme) {
+                        .light => .light,
+                        .dark => .dark,
+                    },
                     .light => .light,
                     .dark => .dark,
-                },
-                .light => .light,
-                .dark => .dark,
-            };
+                };
+                accent = if (self.system_appearance.high_contrast) null else state.accent orelse self.options.theme_accent;
+            }
             var tokens = canvas.DesignTokens.theme(.{
                 .color_scheme = color_scheme,
                 .contrast = if (self.system_appearance.high_contrast) .high else .standard,
                 .reduce_motion = self.system_appearance.reduce_motion,
-                .pack = state.pack orelse if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
+                .pack = pack,
             });
-            if (state.accent orelse self.options.theme_accent) |accent| {
-                // The manifest accent layers over the resolved pack —
-                // except under high contrast, where the pack's own loud
-                // register wins untouched (accessibility beats brand).
-                // The bundle takes the resolved scheme: the dark ring
-                // derives desaturated (canvas.accentFocusRing).
-                if (!self.system_appearance.high_contrast) {
-                    tokens = tokens.withOverrides(canvas.accentOverrides(accent, color_scheme));
-                }
-            }
+            if (accent) |value| tokens = tokens.withOverrides(canvas.accentOverrides(value, color_scheme));
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             return tokens;
         }
@@ -1964,7 +2024,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // Complete-token paths outrank the stock-theme helper entirely.
             // Do not even validate an unused model accent: the app has
             // explicitly claimed the whole DesignTokens register.
-            if (self.options.tokens_fn != null or self.options.tokens != null) {
+            if (self.themeControl(.system).mode != 0) {
                 self.theme_state = .{};
                 self.theme_state_known = true;
                 return;
@@ -1998,15 +2058,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// true only when the app claims neither token override, so an
         /// appearance flip must re-derive and re-render.
         fn followsSystemAppearance(self: *const Self) bool {
-            if (self.options.tokens_fn != null or self.options.tokens != null) return false;
-            if (self.options.theme_state_fn == null) return true;
-            return self.currentThemeState().color_scheme == .system;
+            // Preserve the reference helper's lazy evaluation and call count.
+            const scheme = if (self.options.tokens_fn == null and self.options.tokens == null and self.options.theme_state_fn != null)
+                self.currentThemeState().color_scheme
+            else
+                ThemeColorScheme.system;
+            return self.themeControl(scheme).follows_system;
         }
 
         /// Whether tokens are derived per rebuild (model-owned or
         /// system-followed) rather than a fixed set.
         fn derivesTokens(self: *const Self) bool {
-            return self.options.tokens_fn != null or self.options.theme_state_fn != null or self.followsSystemAppearance();
+            return self.themeControl(.system).derives;
         }
 
         /// Whether a rebuild must push its tokens into the runtime's
@@ -2813,6 +2876,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 declared = declared[0..max_ui_windows];
             }
 
+            if (self.options.window_policy != null) {
+                self.applyCompiledWindows(runtime, declared) catch |err| {
+                    ui_app_log.warn("window reconciliation failed: {s}", .{@errorName(err)});
+                };
+                return;
+            }
+
             // Close first: a label leaving the declared set frees its
             // slot (and its runtime window label) before creations run.
             var index: usize = 0;
@@ -2831,6 +2901,77 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     continue;
                 }
                 self.createWindowSlot(runtime, descriptor);
+            }
+        }
+
+        fn writeWindowPolicyLabel(writer: *std.Io.Writer, label: []const u8) !void {
+            if (label.len > std.math.maxInt(u32)) return error.WindowPolicyLabelTooLong;
+            try writer.writeInt(u32, @intCast(label.len), .little);
+            try writer.writeAll(label);
+        }
+
+        /// Each decision sees the current ordered slots, including the swap
+        /// after a close and only successful OS creates. Copy the complete
+        /// request before entering scriptc; keep all descriptor bytes alive.
+        fn windowPolicyDecision(self: *Self, declared: []const WindowDescriptor, descriptor: ?WindowDescriptor) ![2]u8 {
+            comptime {
+                std.debug.assert(max_ui_windows == 4);
+                std.debug.assert(platform.max_window_label_bytes == 64);
+                std.debug.assert(app_manifest.max_view_label_bytes == 64);
+            }
+            var request = std.Io.Writer.Allocating.init(self.backing);
+            defer request.deinit();
+            const writer = &request.writer;
+            try writer.writeByte(@intFromBool(descriptor != null));
+            if (descriptor) |value| {
+                try writeWindowPolicyLabel(writer, self.options.canvas_label);
+                try writeWindowPolicyLabel(writer, value.label);
+                try writeWindowPolicyLabel(writer, value.canvas_label);
+            } else {
+                try writer.writeByte(@intCast(declared.len));
+                for (declared) |value| try writeWindowPolicyLabel(writer, value.label);
+            }
+            try writer.writeByte(@intCast(self.window_slot_count));
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                try writeWindowPolicyLabel(writer, slot.label());
+                try writeWindowPolicyLabel(writer, slot.canvasLabel());
+            }
+            var result: [2]u8 = undefined;
+            if (self.options.window_policy.?(request.written(), &result) != result.len or
+                result[0] > 4 or (result[1] != 255 and result[1] >= self.window_slot_count))
+                @panic("invalid compiled window policy result");
+            if (descriptor == null) {
+                if (result[0] != 0) @panic("invalid compiled window retirement result");
+            } else if ((result[0] == 1) == (result[1] == 255)) {
+                @panic("invalid compiled window declaration result");
+            }
+            return result;
+        }
+
+        fn applyCompiledWindows(self: *Self, runtime: *Runtime, declared: []const WindowDescriptor) !void {
+            while (true) {
+                const plan = try self.windowPolicyDecision(declared, null);
+                if (plan[1] == 255) break;
+                self.closeWindowSlot(runtime, plan[1]);
+            }
+            for (declared) |descriptor| {
+                const plan = try self.windowPolicyDecision(&.{}, descriptor);
+                switch (plan[0]) {
+                    0 => {
+                        // Bound native copies even if a custom callback violates
+                        // the ABI. Lookup/collision decisions belong to policy.
+                        if (self.window_slot_count >= max_ui_windows or
+                            descriptor.label.len == 0 or descriptor.label.len > platform.max_window_label_bytes or
+                            descriptor.canvas_label.len == 0 or descriptor.canvas_label.len > app_manifest.max_view_label_bytes)
+                            @panic("invalid compiled window creation result");
+                        self.openWindowSlot(runtime, descriptor);
+                    },
+                    1 => self.setWindowSlotOnClose(&self.window_slots[plan[1]], descriptor.on_close),
+                    2 => ui_app_log.warn("declared window '{s}' ignored: more than {d} secondary windows (canvas_limits.max_ui_app_windows)", .{ descriptor.label, max_ui_windows }),
+                    3 => ui_app_log.warn("declared window '{s}' ignored: window and canvas labels must be non-empty and fit the platform label budgets", .{descriptor.label}),
+                    4 => ui_app_log.warn("declared window '{s}' ignored: canvas label '{s}' is already bound - every window's canvas label must be unique", .{ descriptor.label, descriptor.canvas_label }),
+                    else => unreachable,
+                }
             }
         }
 
@@ -2884,6 +3025,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return;
             }
 
+            self.openWindowSlot(runtime, descriptor);
+        }
+
+        /// Native capability boundary: create the shell, then retain its
+        /// labels, close message, tree arenas and GPU state only on success.
+        fn openWindowSlot(self: *Self, runtime: *Runtime, descriptor: WindowDescriptor) void {
             const shell_views = [_]app_manifest.ShellView{self.secondaryShellView(descriptor)};
             const info = runtime.createSourcelessShellWindow(.{
                 .label = descriptor.label,

@@ -387,6 +387,8 @@ pub const NullPlatform = struct {
     shortcut_count: usize = 0,
     window_sources: [max_windows]?WebViewSource = [_]?WebViewSource{null} ** max_windows,
     windows: [max_windows]WindowInfo = undefined,
+    window_label_storage: [max_windows][max_window_label_bytes]u8 = undefined,
+    window_title_storage: [max_windows][max_window_title_bytes]u8 = undefined,
     /// Captured `WindowOptions.resizable` per created window, indexed
     /// like `windows` — `WindowInfo` does not carry it, and tests need
     /// to assert the flag survives to the platform seam (the macOS host
@@ -446,6 +448,8 @@ pub const NullPlatform = struct {
     /// real hosts' close delegates, hiding instead of closing under
     /// `.hide`.
     window_close_policy: [max_windows]types.WindowClosePolicy = [_]types.WindowClosePolicy{.quit} ** max_windows,
+    /// Test seam: refuse one OS create without retaining a window identity.
+    fail_next_create_window: bool = false,
     /// Test seam: make the NEXT `close_window_fn` call fail with
     /// `error.CloseFailed` (the real hosts' refusal), consuming the
     /// flag — the injection runtime rollback tests use to assert
@@ -1115,6 +1119,8 @@ pub const NullPlatform = struct {
                 .open = true,
                 .focused = true,
             };
+            self.windows[0].label = try copyInto(&self.window_label_storage[0], self.windows[0].label);
+            self.windows[0].title = try copyInto(&self.window_title_storage[0], self.windows[0].title);
             self.window_count = 1;
             break :blk 0;
         } else return error.WindowNotFound;
@@ -1145,6 +1151,10 @@ pub const NullPlatform = struct {
 
     fn createWindow(context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_create_window) {
+            self.fail_next_create_window = false;
+            return error.CreateFailed;
+        }
         // A CLOSED window releases its label and id for re-creation —
         // mirroring the real hosts, where a closed NSWindow is gone from
         // the host dictionaries. Model-driven windows reopen under one
@@ -1169,8 +1179,8 @@ pub const NullPlatform = struct {
         }
         const info: WindowInfo = .{
             .id = options.id,
-            .label = options.label,
-            .title = options.resolvedTitle(self.app_info.app_name),
+            .label = try copyInto(&self.window_label_storage[self.window_count], options.label),
+            .title = try copyInto(&self.window_title_storage[self.window_count], options.resolvedTitle(self.app_info.app_name)),
             .frame = options.default_frame,
             .scale_factor = self.surface_value.scale_factor,
             .open = true,
@@ -3024,6 +3034,11 @@ pub const NullPlatform = struct {
         var cursor = index;
         while (cursor + 1 < self.window_count) : (cursor += 1) {
             self.windows[cursor] = self.windows[cursor + 1];
+            self.window_label_storage[cursor] = self.window_label_storage[cursor + 1];
+            self.window_title_storage[cursor] = self.window_title_storage[cursor + 1];
+            self.windows[cursor].label = self.window_label_storage[cursor][0..self.windows[cursor].label.len];
+            self.windows[cursor].title = self.window_title_storage[cursor][0..self.windows[cursor].title.len];
+            self.window_sources[cursor] = self.window_sources[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
             self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
             self.window_placement[cursor] = self.window_placement[cursor + 1];

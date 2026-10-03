@@ -844,6 +844,42 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&subscription_driver_run.step);
         ts_core_e2e_step.dependOn(&subscription_driver_run.step);
         test_step.dependOn(&subscription_driver_run.step);
+        const effect_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        effect_reference_run.setCwd(b.path("examples/effect-policy"));
+        effect_reference_run.has_side_effects = true;
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_reference_run.captureStdOut(.{});
+        _ = effect_reference_run.captureStdErr(.{});
+        const effect_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        effect_driver_run.setCwd(b.path("examples/effect-policy"));
+        effect_driver_run.has_side_effects = true;
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_driver_run.captureStdOut(.{});
+        _ = effect_driver_run.captureStdErr(.{});
+        effect_driver_run.step.dependOn(&effect_reference_run.step);
+        native_driver_step.dependOn(&effect_driver_run.step);
+        ts_core_e2e_step.dependOn(&effect_driver_run.step);
+        test_step.dependOn(&effect_driver_run.step);
+        const stream_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        stream_reference_run.setCwd(b.path("examples/stream-policy"));
+        stream_reference_run.has_side_effects = true;
+        stream_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        stream_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/stream-policy-reference"));
+        _ = stream_reference_run.captureStdOut(.{});
+        _ = stream_reference_run.captureStdErr(.{});
+        const stream_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        stream_driver_run.setCwd(b.path("examples/stream-policy"));
+        stream_driver_run.has_side_effects = true;
+        stream_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        stream_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/stream-policy-reference"));
+        _ = stream_driver_run.captureStdOut(.{});
+        _ = stream_driver_run.captureStdErr(.{});
+        stream_driver_run.step.dependOn(&stream_reference_run.step);
+        native_driver_step.dependOn(&stream_driver_run.step);
+        ts_core_e2e_step.dependOn(&stream_driver_run.step);
+        test_step.dependOn(&stream_driver_run.step);
         const pipeline_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         pipeline_reference_run.setCwd(b.path("examples/pipeline"));
         pipeline_reference_run.has_side_effects = true;
@@ -1079,6 +1115,24 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&resizable_policy_driver_run.step);
         test_step.dependOn(&resizable_policy_driver_run.step);
 
+        const window_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        window_policy_reference_run.setCwd(b.path("examples/window-policy"));
+        window_policy_reference_run.has_side_effects = true;
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_reference_run.captureStdOut(.{});
+        _ = window_policy_reference_run.captureStdErr(.{});
+        const window_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        window_policy_driver_run.setCwd(b.path("examples/window-policy"));
+        window_policy_driver_run.has_side_effects = true;
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_driver_run.captureStdOut(.{});
+        _ = window_policy_driver_run.captureStdErr(.{});
+        window_policy_driver_run.step.dependOn(&window_policy_reference_run.step);
+        native_driver_step.dependOn(&window_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&window_policy_driver_run.step);
+        test_step.dependOn(&window_policy_driver_run.step);
         const status_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         status_reference_run.setCwd(b.path("examples/status-policy"));
         status_reference_run.has_side_effects = true;
@@ -1116,6 +1170,25 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&relational_driver_run.step);
         ts_core_e2e_step.dependOn(&relational_driver_run.step);
         test_step.dependOn(&relational_driver_run.step);
+
+        const theme_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        theme_policy_reference_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_reference_run.has_side_effects = true;
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_reference_run.captureStdOut(.{});
+        _ = theme_policy_reference_run.captureStdErr(.{});
+        const theme_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        theme_policy_driver_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_driver_run.has_side_effects = true;
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_driver_run.captureStdOut(.{});
+        _ = theme_policy_driver_run.captureStdErr(.{});
+        theme_policy_driver_run.step.dependOn(&theme_policy_reference_run.step);
+        native_driver_step.dependOn(&theme_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&theme_policy_driver_run.step);
+        test_step.dependOn(&theme_policy_driver_run.step);
 
         const text_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         text_policy_reference_run.setCwd(b.path("examples/text-policy"));
@@ -2292,6 +2365,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-status-policy", "Run menu desk example tests", "examples/status-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effect-policy", "Run named effect policy example tests", "examples/effect-policy", .managed),
         ui_inbox_example_step,
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
@@ -2326,6 +2400,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-slider-policy", "Run portable slider policy example tests", "examples/slider-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-window-policy", "Run TypeScript window reconciliation example tests", "examples/window-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
@@ -4673,6 +4748,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/view_frontend.ts"));
     stage_run.addFileInput(b.path("packages/core/src/view_components.ts"));
     stage_run.addFileInput(b.path("packages/core/src/runtime_policy.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);
     stage_run.addArg("--sdk");

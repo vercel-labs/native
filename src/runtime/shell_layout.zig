@@ -21,6 +21,13 @@ pub const RuntimeShellLayout = struct {
         return self.views[0..self.view_count];
     }
 
+    pub fn rebindStorage(self: *RuntimeShellLayout) void {
+        for (self.views[0..self.view_count], 0..) |*view, index| {
+            view.label = self.label_storage[index][0..view.label.len];
+            if (view.parent) |parent| view.parent = self.parent_storage[index][0..parent.len];
+        }
+    }
+
     pub fn copyViews(self: *RuntimeShellLayout, source: []const app_manifest.ShellView) !void {
         if (source.len > self.views.len) return error.ViewLimitReached;
         for (source, 0..) |view, index| {
