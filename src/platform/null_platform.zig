@@ -323,6 +323,10 @@ const NullStatusItem = struct {
     open_command_len: usize = 0,
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
+    item_label_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    item_command_storage: [max_tray_items][max_tray_item_command_bytes]u8 = undefined,
+    item_detail_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    item_key_storage: [max_tray_items][types.max_menu_key_bytes]u8 = undefined,
     segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
     segment_option_label_storage: [max_tray_items * max_tray_segment_options][max_tray_segment_label_bytes]u8 = undefined,
     segment_option_command_storage: [max_tray_items * max_tray_segment_options][max_tray_item_command_bytes]u8 = undefined,
@@ -1805,6 +1809,10 @@ pub const NullPlatform = struct {
         if (items.len > status_item.items.len) return error.InvalidTrayOptions;
         for (items, 0..) |item, index| {
             status_item.items[index] = item;
+            status_item.items[index].label = try copyInto(&status_item.item_label_storage[index], item.label);
+            status_item.items[index].command = try copyInto(&status_item.item_command_storage[index], item.command);
+            status_item.items[index].detail = try copyInto(&status_item.item_detail_storage[index], item.detail);
+            status_item.items[index].key = try copyInto(&status_item.item_key_storage[index], item.key);
             if (item.segmented) |segmented| {
                 const start = index * max_tray_segment_options;
                 for (segmented.options, 0..) |option, option_index| {

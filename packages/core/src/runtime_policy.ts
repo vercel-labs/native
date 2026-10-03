@@ -1,3 +1,57 @@
+/** Status-item reconciliation over eight native-owned slots. Operations 0/1
+ * return retirement masks or ordered admission decisions. Operation 2 compares
+ * three opaque eight-byte hashes independently; no hash crosses as a number.
+ * Native applies OS results before the next admission, owns capability failures
+ * and retains frame lifetime until all borrowed commands have been consumed.
+ */
+export function native_status_policy(request: Uint8Array): Uint8Array {
+  const result = new Uint8Array(2); result[1] = 255;
+  if (request[0] === 2) {
+    if (request.length !== 49) throw new Error("invalid status patch request");
+    for (let field = 0; field < 3; field++) {
+      let changed = false;
+      for (let byte = 0; byte < 8; byte++) {
+        if (request[1 + field * 8 + byte] !== request[25 + field * 8 + byte]) changed = true;
+      }
+      if (changed) result[0] = result[0]! | (1 << field);
+    }
+    return result;
+  }
+  if (request.length < 44 || (request[0] !== 0 && request[0] !== 1)) throw new Error("invalid status policy request");
+  const operation = request[0]!, index = request[1]!, count = request[2]!, appliedCount = request[3]!;
+  if (count > 8 || appliedCount > 8 || request.length !== 44 + count * 4 || (operation === 1 && index >= count)) {
+    throw new Error("invalid status declaration table");
+  }
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const ids: number[] = [];
+  for (let i = 0; i < count; i++) ids.push(data.getUint32(4 + i * 4, true));
+  const active: boolean[] = [], stored: number[] = [];
+  for (let slot = 0; slot < 8; slot++) {
+    const at = 4 + count * 4 + slot * 5;
+    if (request[at]! > 1) throw new Error("invalid status slot");
+    active.push(request[at] === 1); stored.push(data.getUint32(at + 1, true));
+  }
+  if (operation === 0) {
+    for (let slot = 0; slot < 8; slot++) {
+      let keep = false;
+      for (const id of ids) if (id === stored[slot]) keep = true;
+      if (active[slot] && !keep) result[0] = result[0]! | (1 << slot);
+    }
+    return result;
+  }
+  const id = ids[index]!;
+  if (id === 0) return result;
+  for (let i = 0; i < index; i++) if (ids[i] === id) return result;
+  // Retained lookup precedes the count guard and first-free admission.
+  for (let slot = 0; slot < 8; slot++) if (active[slot] && stored[slot] === id) {
+    result[0] = 3; result[1] = slot; return result;
+  }
+  if (appliedCount < 8) for (let slot = 0; slot < 8; slot++) if (!active[slot]) {
+    result[0] = 2; result[1] = slot; return result;
+  }
+  result[0] = 1; return result;
+}
+
 /** Portable decisions over native-owned timer tables.
  * Operations 0/1 reconcile subscriptions; 2 arms a delay, 3 looks up its key,
  * and 4 routes a one-shot completion and retires its slot. The cycle owns both

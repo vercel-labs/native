@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, tray, frame, window_close, host_result, db_result, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -22,6 +22,8 @@ const Request = struct {
     db_bytes: []const u8 = &.{},
     view: []const u8 = "",
     window: u64 = 1,
+    status_item: u32 = 1,
+    item: u32 = 1,
     widget: []const u8 = "0",
     text_action: enum { set_text, set_selection, set_composition, commit_composition, cancel_composition } = .set_text,
     text: []const u8 = "",
@@ -142,6 +144,25 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .focused = window.focused,
                     .hidden = window.hidden,
                 });
+            }
+            try json.endArray();
+            try json.objectField("statusItems");
+            try json.beginArray();
+            for (&self.harness.null_platform.status_items) |*item| {
+                if (!item.active) continue;
+                json.options.emit_strings_as_arrays = true;
+                try json.write(.{
+                    .id = item.id,
+                    .visible = item.visible,
+                    .iconPath = item.icon_path[0..item.icon_path_len],
+                    .tooltip = item.tooltip[0..item.tooltip_len],
+                    .activationCommand = item.activation_command[0..item.activation_command_len],
+                    .alternateActivationCommand = item.alternate_activation_command[0..item.alternate_activation_command_len],
+                    .openCommand = item.open_command[0..item.open_command_len],
+                    .presentation = item.presentation,
+                    .items = item.items[0..item.item_count],
+                });
+                json.options.emit_strings_as_arrays = false;
             }
             try json.endArray();
             try json.objectField("widgets");
@@ -332,6 +353,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .paths = request.paths,
                 } }),
                 .menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .menu_command = .{ .name = request.command, .window_id = request.window } }),
+                .tray => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .tray_action = .{ .status_item_id = request.status_item, .item_id = request.item } }),
                 .window_close => {
                     const event = value.harness.null_platform.userCloseWindow(request.window) orelse return error.WindowNotFound;
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), event);

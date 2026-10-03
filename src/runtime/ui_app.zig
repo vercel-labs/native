@@ -787,6 +787,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// macOS-proven (`NSStatusItem`); platforms without a
             /// status-bar service log a warning and continue.
             status_item: ?StatusItemOptions = null,
+            /// Optional portable reconciliation. Requests borrow native facts;
+            /// results are copied without resetting the current dispatch frame.
+            status_policy: ?*const fn ([]const u8, []u8) usize = null,
             /// Model-derived status-item title and menu (e.g. an
             /// open-count badge in the menu bar, a latest-items
             /// dropdown), the `web_panes` pattern: consulted on install
@@ -3902,14 +3905,50 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return self.status_items_scratch.status_items[0..1];
         }
 
+        fn statusItemPolicyDecision(self: *Self, desired: []const StatusItemDescriptor, index: ?usize) [2]u8 {
+            comptime std.debug.assert(platform.max_status_items == 8);
+            var request: [4 + 8 * 4 + 8 * 5]u8 = undefined;
+            request[0] = @intFromBool(index != null);
+            request[1] = if (index) |i| @intCast(i) else 255;
+            request[2] = @intCast(desired.len);
+            request[3] = @intCast(self.applied_status_item_count);
+            var at: usize = 4;
+            for (desired) |descriptor| {
+                std.mem.writeInt(u32, request[at..][0..4], descriptor.id, .little);
+                at += 4;
+            }
+            for (self.applied_status_items) |applied| {
+                request[at] = @intFromBool(applied.active);
+                std.mem.writeInt(u32, request[at + 1 ..][0..4], applied.id, .little);
+                at += 5;
+            }
+            var result: [2]u8 = undefined;
+            if (self.options.status_policy.?(request[0..at], &result) != result.len) @panic("invalid compiled status policy result");
+            if (index != null and (result[0] > 3 or (result[0] >= 2 and result[1] >= platform.max_status_items))) @panic("invalid compiled status admission");
+            return result;
+        }
+
+        fn statusItemPatchDecision(self: *Self, applied: *const AppliedStatusItem, shell: u64, presentation: u64, menu: u64) u8 {
+            var request: [49]u8 = undefined;
+            request[0] = 2;
+            const hashes = [_]u64{ shell, presentation, menu, applied.shell_hash, applied.presentation_hash, applied.menu_hash };
+            for (hashes, 0..) |hash, index| std.mem.writeInt(u64, request[1 + index * 8 ..][0..8], hash, .little);
+            var result: [2]u8 = undefined;
+            if (self.options.status_policy.?(&request, &result) != result.len or result[0] > 7) @panic("invalid compiled status patch result");
+            return result[0];
+        }
+
         fn reconcileStatusItems(self: *Self, runtime: *Runtime, declared: []const StatusItemDescriptor) void {
             if (declared.len > platform.max_status_items) {
                 ui_app_log.warn("status item collection has {d} entries; at most {d} are supported", .{ declared.len, platform.max_status_items });
             }
             const desired = declared[0..@min(declared.len, platform.max_status_items)];
 
-            for (&self.applied_status_items) |*applied| {
-                if (!applied.active or statusItemDeclared(desired, applied.id)) continue;
+            const compiled = self.options.status_policy != null;
+            const retirement = if (compiled) self.statusItemPolicyDecision(desired, null)[0] else 0;
+            for (&self.applied_status_items, 0..) |*applied, slot| {
+                const remove = if (compiled) retirement & (@as(u8, 1) << @intCast(slot)) != 0 else applied.active and !statusItemDeclared(desired, applied.id);
+                if (!remove) continue;
                 runtime.removeStatusItem(applied.id) catch |err| {
                     ui_app_log.warn("status item #{d} remove failed: {s}", .{ applied.id, @errorName(err) });
                     continue;
@@ -3919,8 +3958,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
 
             for (desired, 0..) |raw_descriptor, index| {
-                if (raw_descriptor.id == 0 or statusItemIdAppearedEarlier(desired, index, raw_descriptor.id)) {
+                // Requery the owned table after every successful or failed OS
+                // operation. Failed removals retain slots; failed creates do not.
+                const plan = if (compiled) self.statusItemPolicyDecision(desired, index) else [2]u8{ 0, 255 };
+                const invalid = if (compiled) plan[0] == 0 else raw_descriptor.id == 0 or statusItemIdAppearedEarlier(desired, index, raw_descriptor.id);
+                if (invalid) {
                     ui_app_log.warn("status item declaration ignored: identifiers must be unique and non-zero (got {d})", .{raw_descriptor.id});
+                    continue;
+                }
+                if (compiled and plan[0] == 1) {
+                    ui_app_log.warn("status item #{d} ignored: status-item capacity is full", .{raw_descriptor.id});
                     continue;
                 }
                 var descriptor = raw_descriptor;
@@ -3937,11 +3984,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 const presentation_hash = hashTrayPresentation(descriptor.state.presentation);
                 const menu_hash = hashTrayMenu(descriptor.state.items);
 
-                const applied = self.findAppliedStatusItem(descriptor.id) orelse self.emptyAppliedStatusItem() orelse {
+                const applied = if (compiled) &self.applied_status_items[plan[1]] else self.findAppliedStatusItem(descriptor.id) orelse self.emptyAppliedStatusItem() orelse {
                     ui_app_log.warn("status item #{d} ignored: status-item capacity is full", .{descriptor.id});
                     continue;
                 };
-                if (!applied.active) {
+                const creating = if (compiled) plan[0] == 2 else !applied.active;
+                if (creating) {
                     runtime.createStatusItem(descriptor.id, .{
                         .title = descriptor.state.presentation.title,
                         .icon_path = shell.icon_path,
@@ -3967,7 +4015,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     continue;
                 }
 
-                if (shell_hash != applied.shell_hash) {
+                const changes = if (compiled) self.statusItemPatchDecision(applied, shell_hash, presentation_hash, menu_hash) else @as(u8, @intFromBool(shell_hash != applied.shell_hash)) |
+                    (@as(u8, @intFromBool(presentation_hash != applied.presentation_hash)) << 1) |
+                    (@as(u8, @intFromBool(menu_hash != applied.menu_hash)) << 2);
+                if (changes & 1 != 0) {
                     applied.shell_hash = shell_hash;
                     if (!applied.shell_unsupported) {
                         runtime.updateStatusItemShell(descriptor.id, shell) catch |err| {
@@ -3976,7 +4027,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         };
                     }
                 }
-                if (presentation_hash != applied.presentation_hash) {
+                if (changes & 2 != 0) {
                     applied.presentation_hash = presentation_hash;
                     if (!applied.presentation_unsupported) {
                         runtime.updateStatusItemPresentation(descriptor.id, descriptor.state.presentation) catch |err| {
@@ -3985,7 +4036,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         };
                     }
                 }
-                if (menu_hash != applied.menu_hash) {
+                if (changes & 4 != 0) {
                     applied.menu_hash = menu_hash;
                     runtime.updateStatusItemMenu(descriptor.id, descriptor.state.items) catch |err| {
                         ui_app_log.warn("status item #{d} menu update failed: {s}", .{ descriptor.id, @errorName(err) });

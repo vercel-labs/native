@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.status-policy",
+  "name": "status-policy",
+  "display_name": "Menu Desk",
+  "description": "Independent menu-bar items coordinated from one TypeScript model.",
+  "version": "0.1.0",
+  "icons": [],
+  "platforms": [
+    "macos"
+  ],
+  "permissions": [
+    "view",
+    "command"
+  ],
+  "capabilities": [
+    "native_views",
+    "gpu_surfaces",
+    "tray"
+  ],
+  "shell": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Menu Desk",
+        "width": 760,
+        "height": 500,
+        "views": [
+          {
+            "label": "main-canvas",
+            "kind": "gpu_surface",
+            "fill": true,
+            "role": "Menu desk canvas",
+            "accessibility_label": "Menu Desk",
+            "gpu_backend": "metal",
+            "gpu_pixel_format": "bgra8_unorm",
+            "gpu_present_mode": "timer",
+            "gpu_alpha_mode": "opaque",
+            "gpu_color_space": "srgb",
+            "gpu_vsync": true
+          }
+        ]
+      }
+    ]
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": [
+        "zero://app",
+        "zero://inline"
+      ],
+      "external_links": {
+        "action": "deny"
+      }
+    }
+  },
+  "web_engine": "system",
+  "cef": {
+    "dir": "third_party/cef/macos",
+    "auto_install": false
+  }
+}

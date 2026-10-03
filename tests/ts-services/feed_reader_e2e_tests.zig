@@ -4405,3 +4405,212 @@ test "compiled database plans preserve first matching keys exact fingerprints re
         core.rt.frameReset();
     }
 }
+
+fn statusPolicyRequest(buffer: []u8, ids: []const u32, index: ?usize, used: u8, full_count: ?u8) []const u8 {
+    buffer[0] = @intFromBool(index != null);
+    buffer[1] = if (index) |i| @intCast(i) else 255;
+    buffer[2] = @intCast(ids.len);
+    buffer[3] = full_count orelse @as(u8, @intCast(@popCount(used)));
+    var at: usize = 4;
+    for (ids) |id| {
+        std.mem.writeInt(u32, buffer[at..][0..4], id, .little);
+        at += 4;
+    }
+    for (0..8) |slot| {
+        buffer[at] = @intFromBool(used & (@as(u8, 1) << @intCast(slot)) != 0);
+        std.mem.writeInt(u32, buffer[at + 1 ..][0..4], @intCast(slot + 1), .little);
+        at += 5;
+    }
+    return buffer[0..at];
+}
+
+test "compiled status policy preserves admission retirement exact hash bytes and cycle ownership" {
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    var buffer: [76]u8 = undefined;
+    var output: [2]u8 = undefined;
+    const ids = [_]u32{ 0, 1, 0xffff_ffff, 1, 0x8000_0000, 6, 7, 8 };
+    for (0..256) |mask| {
+        const used: u8 = @intCast(mask);
+        var expected_retired: u8 = 0;
+        for (0..8) |slot| {
+            var declared = false;
+            for (ids) |id| if (id == slot + 1) {
+                declared = true;
+            };
+            if (used & (@as(u8, 1) << @intCast(slot)) != 0 and !declared) expected_retired |= @as(u8, 1) << @intCast(slot);
+        }
+        try std.testing.expectEqual(output.len, core.nativeStatusPolicy(statusPolicyRequest(&buffer, &ids, null, used, null), &output));
+        try std.testing.expectEqualSlices(u8, &.{ expected_retired, 255 }, &output);
+        for (ids, 0..) |id, index| {
+            var invalid = id == 0;
+            for (ids[0..index]) |earlier| if (earlier == id) {
+                invalid = true;
+            };
+            var matching: ?u8 = null;
+            var free: ?u8 = null;
+            for (0..8) |slot| {
+                const active = used & (@as(u8, 1) << @intCast(slot)) != 0;
+                if (active and id == slot + 1 and matching == null) matching = @intCast(slot);
+                if (!active and free == null) free = @intCast(slot);
+            }
+            const expected: [2]u8 = if (invalid) .{ 0, 255 } else if (matching) |slot| .{ 3, slot } else if (free) |slot| .{ 2, slot } else .{ 1, 255 };
+            try std.testing.expectEqual(output.len, core.nativeStatusPolicy(statusPolicyRequest(&buffer, &ids, index, used, null), &output));
+            try std.testing.expectEqualSlices(u8, &expected, &output);
+        }
+    }
+    // Every hole and the independent native count guard; lookup comes first.
+    for (0..8) |hole| {
+        const used = @as(u8, 255) & ~(@as(u8, 1) << @intCast(hole));
+        try std.testing.expectEqual(output.len, core.nativeStatusPolicy(statusPolicyRequest(&buffer, &.{99}, 0, used, null), &output));
+        try std.testing.expectEqualSlices(u8, &.{ 2, @intCast(hole) }, &output);
+        try std.testing.expectEqual(output.len, core.nativeStatusPolicy(statusPolicyRequest(&buffer, &.{99}, 0, used, 8), &output));
+        try std.testing.expectEqualSlices(u8, &.{ 1, 255 }, &output);
+        const matched: u32 = if (hole == 0) 2 else 1;
+        try std.testing.expectEqual(output.len, core.nativeStatusPolicy(statusPolicyRequest(&buffer, &.{matched}, 0, used, 8), &output));
+        try std.testing.expectEqualSlices(u8, &.{ 3, @intCast(matched - 1) }, &output);
+    }
+    var patch: [49]u8 = undefined;
+    patch[0] = 2;
+    for (0..24) |byte| {
+        patch[1 + byte] = @intCast(255 - byte);
+        patch[25 + byte] = patch[1 + byte];
+    }
+    for (0..8) |mask| for (0..8) |byte| {
+        var request = patch;
+        for (0..3) |field| if (mask & (@as(usize, 1) << @intCast(field)) != 0) {
+            request[1 + field * 8 + byte] ^= 1;
+        };
+        try std.testing.expectEqual(output.len, core.nativeStatusPolicy(&request, &output));
+        try std.testing.expectEqualSlices(u8, &.{ @intCast(mask), 255 }, &output);
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    };
+    const frozen = output;
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &frozen, &output);
+}
+
+const StatusParityModel = struct { revision: u32 = 0, present: bool = true };
+const StatusParityMsg = union(enum) { bump, remove, restore };
+const StatusParityApp = native_sdk.UiApp(StatusParityModel, StatusParityMsg);
+fn statusParityUpdate(model: *StatusParityModel, msg: StatusParityMsg) void {
+    switch (msg) {
+        .bump => model.revision += 1,
+        .remove => model.present = false,
+        .restore => model.present = true,
+    }
+}
+fn statusParityView(ui: *StatusParityApp.Ui, model: *const StatusParityModel) StatusParityApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Version {d}", .{model.revision}));
+}
+fn statusParityItems(model: *const StatusParityModel, scratch: *StatusParityApp.StatusItemsScratch) []const StatusParityApp.StatusItemDescriptor {
+    if (!model.present) return &.{};
+    const title = std.fmt.bufPrint(&scratch.title_buffers[0], "Version {d}", .{model.revision}) catch unreachable;
+    scratch.items[0] = .{ .id = 1, .label = title, .command = "app.bump" };
+    scratch.status_items[0] = .{ .id = 0xffff_ffff, .state = .{ .title = title, .tooltip = title, .items = scratch.items[0..1] } };
+    return scratch.status_items[0..1];
+}
+const StatusParityService = struct {
+    var original: native_sdk.platform.PlatformServices = undefined;
+    var counts = [_]usize{0} ** 5;
+    var create_fails: bool = false;
+    var remove_fails: bool = false;
+    var patch_fails: bool = false;
+    fn create(_: ?*anyopaque, id: u32, options: native_sdk.platform.TrayOptions) anyerror!void {
+        counts[0] += 1;
+        if (create_fails) return error.CreateFailed;
+        try original.createStatusItem(id, options);
+    }
+    fn remove(_: ?*anyopaque, id: u32) anyerror!void {
+        counts[1] += 1;
+        if (remove_fails) return error.RemoveFailed;
+        try original.removeStatusItem(id);
+    }
+    fn shell(_: ?*anyopaque, id: u32, options: native_sdk.platform.TrayShell) anyerror!void {
+        counts[2] += 1;
+        if (patch_fails) return error.UnsupportedService;
+        try original.updateStatusItemShell(id, options);
+    }
+    fn presentation(_: ?*anyopaque, id: u32, options: native_sdk.platform.TrayPresentation) anyerror!void {
+        counts[3] += 1;
+        if (patch_fails) return error.UnsupportedService;
+        try original.updateStatusItemPresentation(id, options);
+    }
+    fn menu(_: ?*anyopaque, id: u32, items: []const native_sdk.platform.TrayMenuItem) anyerror!void {
+        counts[4] += 1;
+        if (patch_fails) return error.UpdateFailed;
+        try original.updateStatusItemMenu(id, items);
+    }
+};
+
+test "compiled status reconciliation matches native OS failure ordering and retained ownership" {
+    var reference: [5]usize = undefined;
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        StatusParityService.original = harness.runtime.options.platform.services;
+        StatusParityService.counts = @splat(0);
+        StatusParityService.create_fails = true;
+        StatusParityService.remove_fails = false;
+        StatusParityService.patch_fails = false;
+        harness.runtime.options.platform.services.create_tray_fn = StatusParityService.create;
+        harness.runtime.options.platform.services.remove_tray_fn = StatusParityService.remove;
+        harness.runtime.options.platform.services.update_tray_shell_fn = StatusParityService.shell;
+        harness.runtime.options.platform.services.update_tray_presentation_fn = StatusParityService.presentation;
+        harness.runtime.options.platform.services.update_tray_menu_fn = StatusParityService.menu;
+        const state = try std.testing.allocator.create(StatusParityApp);
+        defer std.testing.allocator.destroy(state);
+        state.* = StatusParityApp.init(std.heap.page_allocator, .{}, .{
+            .name = "status-parity",
+            .scene = app_scene,
+            .canvas_label = canvas_label,
+            .view = statusParityView,
+            .update = statusParityUpdate,
+            .status_items_fn = statusParityItems,
+            .status_policy = if (compiled) core.nativeStatusPolicy else null,
+        });
+        defer state.deinit();
+        try harness.start(state.app());
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(640, 480),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+        StatusParityService.create_fails = false;
+        try state.dispatch(&harness.runtime, 1, .bump);
+        try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+        try std.testing.expectEqualStrings("Version 1", harness.null_platform.statusItemTitle(0xffff_ffff));
+        StatusParityService.patch_fails = true;
+        try state.dispatch(&harness.runtime, 1, .bump);
+        try std.testing.expect(state.applied_status_items[0].shell_unsupported and state.applied_status_items[0].presentation_unsupported);
+        try state.dispatch(&harness.runtime, 1, .bump);
+        try std.testing.expectEqual(@as(usize, 1), StatusParityService.counts[2]);
+        try std.testing.expectEqual(@as(usize, 1), StatusParityService.counts[3]);
+        try std.testing.expectEqual(@as(usize, 2), StatusParityService.counts[4]);
+        // Hashes advance even when OS patches fail. An unchanged rebuild
+        // must not retry the same menu; sticky capabilities stay suppressed.
+        try state.dispatch(&harness.runtime, 1, .restore);
+        try std.testing.expectEqual(@as(usize, 2), StatusParityService.counts[4]);
+        try std.testing.expectEqualStrings("Version 1", harness.null_platform.statusItemMenu(0xffff_ffff)[0].label);
+        StatusParityService.remove_fails = true;
+        try state.dispatch(&harness.runtime, 1, .remove);
+        try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+        StatusParityService.remove_fails = false;
+        try state.dispatch(&harness.runtime, 1, .bump);
+        try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+        StatusParityService.patch_fails = false;
+        try state.dispatch(&harness.runtime, 1, .restore);
+        try std.testing.expectEqualStrings("Version 4", harness.null_platform.statusItemTitle(0xffff_ffff));
+        try std.testing.expectEqualStrings("Version 4", harness.null_platform.statusItemMenu(0xffff_ffff)[0].label);
+        try std.testing.expect(!state.applied_status_items[0].shell_unsupported and !state.applied_status_items[0].presentation_unsupported);
+        if (compiled) try std.testing.expectEqualSlices(usize, &reference, &StatusParityService.counts) else reference = StatusParityService.counts;
+    }
+}

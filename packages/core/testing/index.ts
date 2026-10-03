@@ -31,6 +31,20 @@ export interface NativeWindow {
   readonly focused: boolean;
   readonly hidden: boolean;
 }
+export interface NativeStatusItem {
+  readonly id: number;
+  readonly visible: boolean;
+  /** Complete native shell bytes; arbitrary bytes remain lossless. */
+  readonly iconPath: readonly number[];
+  readonly tooltip: readonly number[];
+  readonly activationCommand: readonly number[];
+  readonly alternateActivationCommand: readonly number[];
+  readonly openCommand: readonly number[];
+  /** Native presentation and rich menu records, including all optional data.
+   * Byte fields are number arrays and native field names are preserved. */
+  readonly presentation: Readonly<Record<string, JsonValue>>;
+  readonly items: readonly Readonly<Record<string, JsonValue>>[];
+}
 export interface NativeSnapshot {
   readonly viewBackend: "zig" | "typescript";
   /** Committed native model projection. Bytes are number arrays; tagged unions
@@ -38,6 +52,7 @@ export interface NativeSnapshot {
   readonly model: Readonly<Record<string, JsonValue>>;
   readonly fingerprint: string;
   readonly windows: readonly NativeWindow[];
+  readonly statusItems: readonly NativeStatusItem[];
   readonly widgets: readonly NativeWidget[];
   readonly effects: {
     readonly recorded: number;
@@ -245,6 +260,11 @@ export class NativeApp implements AsyncDisposable {
     return this.#snapshot({ op: "automation", command: `widget-action ${token(widget.view)} ${identity(widget.id)} ${token(action)}` });
   }
   menu(command: string, window = 1): Promise<NativeSnapshot> { return this.#snapshot({ op: "menu", command, window }); }
+  /** OS tray row selection; identifiers are scoped to one status item. */
+  statusItemAction(statusItem: number, item: number): Promise<NativeSnapshot> {
+    for (const id of [statusItem, item]) if (!Number.isSafeInteger(id) || id <= 0 || id > 4294967295) throw new Error("Invalid status item or row identity");
+    return this.#snapshot({ op: "tray", status_item: statusItem, item });
+  }
   /** Native user-close notification; routes the window's close command. */
   closeWindow(window: NativeWindow): Promise<NativeSnapshot> {
     if (!Number.isSafeInteger(window.id) || window.id <= 0) throw new Error("Invalid window identity");

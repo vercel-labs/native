@@ -7941,3 +7941,205 @@ test "a primary drag released outside the view retires containment and its proof
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
     try std.testing.expect(!harness.runtime.views[0].canvas_widget_hover_pointer_live);
 }
+
+const StatusPolicyModel = struct { revision: u32 = 0, present: bool = true };
+const StatusPolicyMsg = union(enum) { bump, remove, restore };
+const StatusPolicyApp = ui_app_model.UiApp(StatusPolicyModel, StatusPolicyMsg);
+fn statusPolicyUpdate(model: *StatusPolicyModel, msg: StatusPolicyMsg) void {
+    switch (msg) {
+        .bump => model.revision += 1,
+        .remove => model.present = false,
+        .restore => model.present = true,
+    }
+}
+fn statusPolicyView(ui: *StatusPolicyApp.Ui, model: *const StatusPolicyModel) StatusPolicyApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Revision {d}", .{model.revision}));
+}
+fn statusPolicyItems(model: *const StatusPolicyModel, scratch: *StatusPolicyApp.StatusItemsScratch) []const StatusPolicyApp.StatusItemDescriptor {
+    if (!model.present) return &.{};
+    const title = std.fmt.bufPrint(&scratch.title_buffers[0], "Revision {d}", .{model.revision}) catch unreachable;
+    scratch.items[0] = .{ .id = 1, .label = title, .command = "app.bump" };
+    scratch.status_items[0] = .{ .id = 100, .state = .{ .title = title, .tooltip = title, .items = scratch.items[0..1] } };
+    return scratch.status_items[0..1];
+}
+const StatusPolicyProbe = struct {
+    var calls = [_]usize{0} ** 3;
+    var ignore: bool = false;
+    var retire: u8 = 0;
+    var patch: u8 = 0;
+    fn decide(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        output[1] = 255;
+        if (request[0] == 0) {
+            output[0] = retire;
+            return 2;
+        }
+        if (request[0] == 2) {
+            output[0] = patch;
+            return 2;
+        }
+        if (ignore) {
+            output[0] = 0;
+            return 2;
+        }
+        const slot: u8 = 6;
+        const at = 4 + @as(usize, request[2]) * 4 + slot * 5;
+        output[0] = if (request[at] == 1) 3 else 2;
+        output[1] = slot;
+        return 2;
+    }
+};
+fn startStatusPolicyApp(harness: anytype, policy: ?*const fn ([]const u8, []u8) usize) !*StatusPolicyApp {
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(StatusPolicyApp);
+    state.* = StatusPolicyApp.init(std.heap.page_allocator, .{}, .{
+        .name = "status-policy-test",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = statusPolicyUpdate,
+        .view = statusPolicyView,
+        .status_items_fn = statusPolicyItems,
+        .status_policy = policy,
+    });
+    errdefer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try harness.start(state.app());
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    return state;
+}
+
+test "status host consumes authoritative admission slot patch and retirement decisions" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    StatusPolicyProbe.calls = @splat(0);
+    StatusPolicyProbe.ignore = false;
+    StatusPolicyProbe.retire = 0;
+    StatusPolicyProbe.patch = 0;
+    const state = try startStatusPolicyApp(harness, StatusPolicyProbe.decide);
+    defer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try std.testing.expect(state.applied_status_items[6].active);
+    try std.testing.expect(!state.applied_status_items[0].active);
+    try state.dispatch(&harness.runtime, 1, .bump);
+    // Deliberately suppress changed hashes: native must honor the returned plan.
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.trayShellUpdateCount());
+    StatusPolicyProbe.patch = 2;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqualStrings("Revision 2", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemTooltip(100));
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemMenu(100)[0].label);
+    StatusPolicyProbe.patch = 5;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqualStrings("Revision 3", harness.null_platform.statusItemTooltip(100));
+    try std.testing.expectEqualStrings("Revision 3", harness.null_platform.statusItemMenu(100)[0].label);
+    try std.testing.expectEqualStrings("Revision 2", harness.null_platform.statusItemTitle(100));
+    try state.dispatch(&harness.runtime, 1, .remove);
+    try std.testing.expect(harness.null_platform.statusItemExists(100)); // Policy retains an absent declaration.
+    StatusPolicyProbe.retire = 1 << 6;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expect(!harness.null_platform.statusItemExists(100));
+    StatusPolicyProbe.retire = 0;
+    StatusPolicyProbe.ignore = true;
+    try state.dispatch(&harness.runtime, 1, .restore);
+    try std.testing.expect(!harness.null_platform.statusItemExists(100)); // Valid id intentionally refused.
+    try std.testing.expect(StatusPolicyProbe.calls[0] > 0 and StatusPolicyProbe.calls[1] > 0 and StatusPolicyProbe.calls[2] > 0);
+}
+
+const StatusFailureProbe = struct {
+    var original: zero_platform.PlatformServices = undefined;
+    var creates: usize = 0;
+    var removes: usize = 0;
+    var shells: usize = 0;
+    var presentations: usize = 0;
+    var menus: usize = 0;
+    var fail_create: bool = false;
+    var fail_remove: bool = false;
+    var fail_patch: bool = false;
+    fn create(_: ?*anyopaque, id: u32, options: zero_platform.TrayOptions) anyerror!void {
+        creates += 1;
+        if (fail_create) return error.CreateFailed;
+        try original.createStatusItem(id, options);
+    }
+    fn remove(_: ?*anyopaque, id: u32) anyerror!void {
+        removes += 1;
+        if (fail_remove) return error.RemoveFailed;
+        try original.removeStatusItem(id);
+    }
+    fn shell(_: ?*anyopaque, id: u32, options: zero_platform.TrayShell) anyerror!void {
+        shells += 1;
+        if (fail_patch) return error.UnsupportedService;
+        try original.updateStatusItemShell(id, options);
+    }
+    fn presentation(_: ?*anyopaque, id: u32, options: zero_platform.TrayPresentation) anyerror!void {
+        presentations += 1;
+        if (fail_patch) return error.UnsupportedService;
+        try original.updateStatusItemPresentation(id, options);
+    }
+    fn menu(_: ?*anyopaque, id: u32, items: []const zero_platform.TrayMenuItem) anyerror!void {
+        menus += 1;
+        if (fail_patch) return error.UpdateFailed;
+        try original.updateStatusItemMenu(id, items);
+    }
+};
+
+test "status capability failures retain slots retry creates and preserve sticky update behavior" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    StatusFailureProbe.original = harness.runtime.options.platform.services;
+    StatusFailureProbe.creates = 0;
+    StatusFailureProbe.removes = 0;
+    StatusFailureProbe.shells = 0;
+    StatusFailureProbe.presentations = 0;
+    StatusFailureProbe.menus = 0;
+    StatusFailureProbe.fail_create = true;
+    StatusFailureProbe.fail_remove = false;
+    StatusFailureProbe.fail_patch = false;
+    harness.runtime.options.platform.services.create_tray_fn = StatusFailureProbe.create;
+    harness.runtime.options.platform.services.remove_tray_fn = StatusFailureProbe.remove;
+    harness.runtime.options.platform.services.update_tray_shell_fn = StatusFailureProbe.shell;
+    harness.runtime.options.platform.services.update_tray_presentation_fn = StatusFailureProbe.presentation;
+    harness.runtime.options.platform.services.update_tray_menu_fn = StatusFailureProbe.menu;
+    const state = try startStatusPolicyApp(harness, null);
+    defer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+    StatusFailureProbe.fail_create = false;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+    try std.testing.expect(harness.null_platform.statusItemExists(100));
+    StatusFailureProbe.fail_patch = true;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expect(state.applied_status_items[0].shell_unsupported and state.applied_status_items[0].presentation_unsupported);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.shells);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.presentations);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.menus);
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.shells);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.presentations);
+    try std.testing.expectEqual(@as(usize, 2), StatusFailureProbe.menus); // Changed menus still try independently.
+    StatusFailureProbe.fail_remove = true;
+    try state.dispatch(&harness.runtime, 1, .remove);
+    try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+    try std.testing.expect(harness.null_platform.statusItemExists(100));
+    StatusFailureProbe.fail_remove = false;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+    try std.testing.expectEqual(@as(usize, 2), StatusFailureProbe.removes);
+    StatusFailureProbe.fail_patch = false;
+    try state.dispatch(&harness.runtime, 1, .restore);
+    try std.testing.expect(!state.applied_status_items[0].shell_unsupported and !state.applied_status_items[0].presentation_unsupported);
+}

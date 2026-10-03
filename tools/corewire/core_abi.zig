@@ -138,6 +138,10 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// results are copied and finishCycle retains arena reset ownership.
         pub const native_db_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_db_policy");
 
+        /// Pure status-item reconciliation. Borrowed requests and copied
+        /// results retain the cycle arena until finishCycle.
+        pub const native_status_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_status_policy");
+
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");
         pub const dispatch_bytes = Symbol(fn (tag: u8, ptr: [*]const u8, len: usize, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_bytes");

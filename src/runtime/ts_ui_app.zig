@@ -434,6 +434,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 comptime validateThemeStateHelper();
                 stamped.theme_state_fn = themeStateAdapter;
             }
+            if (comptime @hasDecl(core, "nativeStatusPolicy")) {
+                if (options.status_policy != null) @panic("TsUiApp owns status_policy - remove custom status policy wiring");
+                stamped.status_policy = core.nativeStatusPolicy;
+            }
             // A statusItem helper is the TS app's model-derived shell
             // declaration. UiApp installs it on the first frame and
             // independently patches shell/presentation/menu after each

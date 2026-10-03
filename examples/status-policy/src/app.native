@@ -1,0 +1,27 @@
+<column padding="28" gap="18">
+  <row cross="center" gap="12">
+    <column grow="1" gap="6">
+      <text>WORKSPACE / MENU BAR</text>
+      <text>Menu Desk</text>
+      <text>Keep independent items in sync with one shared workspace.</text>
+    </column>
+    <button variant="primary" on-press="bump">Add session</button>
+  </row>
+  <row gap="16">
+    <panel grow="1" padding="18">
+      <column gap="8"><text>SHARED COUNT</text><text>{count}</text></column>
+    </panel>
+    <panel grow="1" padding="18">
+      <column gap="8"><text>MENU OPENS</text><text>{opens}</text></column>
+    </panel>
+  </row>
+  <panel padding="18">
+    <column gap="16">
+      <row gap="10"><button on-press="reverse">Reverse order</button><button on-press="compact">Switch item set</button><button on-press="presence">Remove / restore</button></row>
+      <row gap="10"><button on-press="visibility">Hide / show session</button><button on-press="style">Change style</button><button on-press="route">Switch menu route</button></row>
+    </column>
+  </panel>
+  <text>{last}</text>
+  <row gap="10" grow="1" cross="end"><text grow="1">Items keep their identities while menus and styles change.</text><button size="sm" variant="ghost" on-press="stamp">Stamp</button></row>
+  <if test="{stampedMs >= 0}"><text>Last stamp: {stampedMs}ms</text></if>
+</column>
