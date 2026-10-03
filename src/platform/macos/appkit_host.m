@@ -4514,6 +4514,17 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!bitmap) return nil;
     CGContextSetAllowsAntialiasing(bitmap, true);
     CGContextSetShouldAntialias(bitmap, true);
+    /* Font smoothing is macOS's stem darkening for text, and it is OFF by
+     * default on a transparent backing. Every glyph this host draws lands in
+     * a CGBitmapContext like this one, so leaving it off renders ALL text
+     * systematically thin - measured at 35% fewer fully-solid stem pixels
+     * (2341 vs 3164 at 13pt/scale 2) with the bundled JetBrains Mono NL.
+     * Measure with phux-cockpit's scripts/measure-glyph-smoothing.m before
+     * changing this; the deficit is invisible in the CPU reference renderer,
+     * which never touches CoreText, so no reference screenshot can catch a
+     * regression here. Allows- must precede Should-: the former gates it. */
+    CGContextSetAllowsFontSmoothing(bitmap, true);
+    CGContextSetShouldSmoothFonts(bitmap, true);
     CGContextTranslateCTM(bitmap, 0, (CGFloat)rasterHeight);
     CGContextScaleCTM(bitmap, scale, -scale);
     CGContextTranslateCTM(bitmap, -minX / scale, -minY / scale);
@@ -5190,6 +5201,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!bitmap) return nil;
     CGContextSetAllowsAntialiasing(bitmap, true);
     CGContextSetShouldAntialias(bitmap, true);
+    /* Stem darkening for text; see the raster path above for why and for how
+     * to measure it. This is the CACHED command raster, so a glyph rasterized
+     * thin here stays thin for the life of the cache entry. */
+    CGContextSetAllowsFontSmoothing(bitmap, true);
+    CGContextSetShouldSmoothFonts(bitmap, true);
     CGContextTranslateCTM(bitmap, 0, (CGFloat)rasterHeight);
     CGContextScaleCTM(bitmap, scale, -scale);
     CGContextTranslateCTM(bitmap, -minX / scale, -minY / scale);
@@ -5403,6 +5419,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     CGContextSetAllowsAntialiasing(context, true);
     CGContextSetShouldAntialias(context, true);
+    /* Stem darkening for text; see the raster path above for why and for how
+     * to measure it. This is the MAIN per-present surface pass - the one that
+     * draws the terminal cell grid - so it is the site the faint-text report
+     * was actually about. */
+    CGContextSetAllowsFontSmoothing(context, true);
+    CGContextSetShouldSmoothFonts(context, true);
     CGContextTranslateCTM(context, 0, (CGFloat)pixelHeight);
     CGContextScaleCTM(context, scale, -scale);
 
