@@ -4405,3 +4405,104 @@ test "compiled database plans preserve first matching keys exact fingerprints re
         core.rt.frameReset();
     }
 }
+
+test "compiled theme policy preserves exact accent bytes and dispatch ownership" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const command = core.bootCommand();
+    const owned = try std.testing.allocator.dupe(u8, command);
+    defer std.testing.allocator.free(owned);
+    const base = [_]u8{ 0, '#', '1', '2', 'a', 'B', 'c', 'F' };
+    for (1..8) |position| for (0..256) |byte| {
+        var request = base;
+        request[position] = @intCast(byte);
+        var result: [4]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeThemePolicy(&request, &result));
+        const parsed = if (request[1] == '#') std.fmt.parseInt(u24, request[2..8], 16) catch null else null;
+        // parseInt accepts signs and underscores: explicit character checks
+        // retain the native adapter's narrower exactly-six-digit contract.
+        var valid = request[1] == '#';
+        for (request[2..8]) |digit| valid = valid and ((digit >= '0' and digit <= '9') or (digit >= 'a' and digit <= 'f') or (digit >= 'A' and digit <= 'F'));
+        if (valid) {
+            const rgb = parsed.?;
+            try std.testing.expectEqualSlices(u8, &.{ 1, @truncate(rgb >> 16), @truncate(rgb >> 8), @truncate(rgb) }, &result);
+        } else try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &result);
+        // Theme calls may run while commands/helper bytes are still borrowed.
+        try std.testing.expectEqualSlices(u8, owned, command);
+    };
+    var result: [4]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeThemePolicy(&base, &result));
+    const frozen = result;
+    var other: [4]u8 = undefined;
+    try std.testing.expectEqual(other.len, core.nativeThemePolicy(&.{ 0, '#', 'f', 'f', '0', '0', '0', '0' }, &other));
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &frozen, &result);
+}
+
+const ThemeFixtureModel = struct { count: u32 = 0 };
+const ThemeFixtureMsg = enum { tap };
+const ThemeFixture = native_sdk.UiApp(ThemeFixtureModel, ThemeFixtureMsg);
+const ThemeFixtureFunctions = struct {
+    fn update(_: *ThemeFixtureModel, _: ThemeFixtureMsg) void {}
+    fn view(ui: *ThemeFixture.Ui, _: *const ThemeFixtureModel) ThemeFixture.Ui.Node {
+        return ui.text(.{}, "Theme");
+    }
+    fn custom(_: *const ThemeFixtureModel) canvas.DesignTokens {
+        return canvas.DesignTokens.theme(.{ .color_scheme = .light, .pack = .house });
+    }
+};
+
+test "compiled theme policy matches every complete native token register" {
+    defer core.rt.frameReset();
+    const compiled = try std.testing.allocator.create(ThemeFixture);
+    defer std.testing.allocator.destroy(compiled);
+    const reference = try std.testing.allocator.create(ThemeFixture);
+    defer std.testing.allocator.destroy(reference);
+    var options = ThemeFixture.Options{ .name = "theme-fixture", .scene = .{}, .canvas_label = "canvas", .view = ThemeFixtureFunctions.view, .update = ThemeFixtureFunctions.update };
+    reference.* = ThemeFixture.init(std.heap.page_allocator, .{}, options);
+    defer reference.deinit();
+    options.theme_policy = core.nativeThemePolicy;
+    compiled.* = ThemeFixture.init(std.heap.page_allocator, .{}, options);
+    defer compiled.deinit();
+    var comparisons: usize = 0;
+    for (0..3) |model_pack| for (0..2) |fallback_pack| for (0..3) |scheme| for (0..2) |os| for (0..2) |contrast| for (0..2) |motion| for (0..2) |model_accent| for (0..2) |manifest_accent| {
+        const state: ThemeFixture.ThemeState = .{
+            .pack = switch (model_pack) {
+                0 => null,
+                1 => .house,
+                else => .geist,
+            },
+            .color_scheme = switch (scheme) {
+                0 => .system,
+                1 => .light,
+                else => .dark,
+            },
+            .accent = if (model_accent == 1) canvas.Color.rgb8(0, 120, 111) else null,
+        };
+        const appearance: native_sdk.platform.Appearance = .{ .color_scheme = if (os == 0) .light else .dark, .high_contrast = contrast == 1, .reduce_motion = motion == 1 };
+        for ([_]*ThemeFixture{ reference, compiled }) |app| {
+            app.theme_state = state;
+            app.theme_state_known = true;
+            app.options.theme = if (fallback_pack == 0) .house else .geist;
+            app.options.theme_accent = if (manifest_accent == 1) canvas.Color.rgba8(88, 101, 242, 127) else null;
+            app.system_appearance = appearance;
+            app.pixel_snap_scale = 2;
+        }
+        try std.testing.expectEqualDeep(reference.effectiveTokens(), compiled.effectiveTokens());
+        core.rt.frameReset();
+        comparisons += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 576), comparisons);
+    for (0..2) |function| for (0..2) |fixed| for (0..2) |helper| for (0..3) |scheme| {
+        const follows = function == 0 and fixed == 0 and (helper == 0 or scheme == 0);
+        var result: [4]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeThemePolicy(&.{ 2, @intCast(function), @intCast(fixed), @intCast(helper), @intCast(scheme) }, &result));
+        try std.testing.expectEqualSlices(u8, &.{ if (function == 1) 1 else if (fixed == 1) 2 else 0, @intFromBool(follows), @intFromBool(function == 1 or helper == 1 or follows), 0 }, &result);
+        for ([_]*ThemeFixture{ reference, compiled }) |app| {
+            app.options.tokens_fn = if (function == 1) ThemeFixtureFunctions.custom else null;
+            app.options.tokens = if (fixed == 1) canvas.DesignTokens.theme(.{ .color_scheme = .dark }) else null;
+        }
+        try std.testing.expectEqualDeep(reference.effectiveTokens(), compiled.effectiveTokens());
+        core.rt.frameReset();
+    };
+}

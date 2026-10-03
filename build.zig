@@ -1098,6 +1098,25 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&relational_driver_run.step);
         test_step.dependOn(&relational_driver_run.step);
 
+        const theme_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        theme_policy_reference_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_reference_run.has_side_effects = true;
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_reference_run.captureStdOut(.{});
+        _ = theme_policy_reference_run.captureStdErr(.{});
+        const theme_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        theme_policy_driver_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_driver_run.has_side_effects = true;
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_driver_run.captureStdOut(.{});
+        _ = theme_policy_driver_run.captureStdErr(.{});
+        theme_policy_driver_run.step.dependOn(&theme_policy_reference_run.step);
+        native_driver_step.dependOn(&theme_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&theme_policy_driver_run.step);
+        test_step.dependOn(&theme_policy_driver_run.step);
+
         const text_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         text_policy_reference_run.setCwd(b.path("examples/text-policy"));
         text_policy_reference_run.has_side_effects = true;

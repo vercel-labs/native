@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { native_timer_policy, native_db_policy } from "../src/runtime_policy.ts";
+import { native_timer_policy, native_db_policy, native_theme_policy } from "../src/runtime_policy.ts";
 
 interface Slot { used: boolean; key: Uint8Array; every: number; tag: number }
 const empty = (): Slot[] => Array.from({ length: 16 }, () => ({ used: false, key: new Uint8Array(0), every: 0, tag: 0 }));
@@ -188,4 +188,43 @@ test("database decisions reject damaged records and preserve copied result owner
   assert.throws(() => native_db_policy(dbRequest(dbEmpty(), [key("")])), /key list/);
   const request = requests[2]!, out = native_db_policy(request), copy = out.slice(); request.fill(0);
   native_db_policy(requests[0]!); assert.deepEqual(out, copy);
+});
+
+
+test("theme policy parses every byte at every accent position with exact native hex semantics", () => {
+  const hex = (b: number): number => b >= 48 && b <= 57 ? b - 48 : b >= 65 && b <= 70 ? b - 55 : b >= 97 && b <= 102 ? b - 87 : -1;
+  const base = new Uint8Array([0, ...key("#12aBcF")]);
+  for (let position = 1; position < 8; position++) for (let byte = 0; byte < 256; byte++) {
+    const input = base.slice(); input[position] = byte;
+    const digits = [...input.slice(2)].map(hex);
+    const expected = input[1] === 35 && digits.every(n => n >= 0)
+      ? [1, digits[0]! * 16 + digits[1]!, digits[2]! * 16 + digits[3]!, digits[4]! * 16 + digits[5]!]
+      : [0, 0, 0, 0];
+    assert.deepEqual([...native_theme_policy(input)], expected);
+  }
+  for (const text of ["", "#fff", "#1234567", " #123456", "#123456\n", "#12é45", "#12\0b45"]) {
+    assert.deepEqual([...native_theme_policy(new Uint8Array([0, ...key(text)]))], [0, 0, 0, 0]);
+  }
+  const backing = new Uint8Array(18); backing.set(base, 5);
+  assert.deepEqual([...native_theme_policy(backing.subarray(5, 13))], [1, 18, 171, 207]);
+});
+
+test("theme policy retains native pack, scheme and high-contrast accent precedence", () => {
+  for (let model = 0; model < 3; model++) for (let fallback = 1; fallback < 3; fallback++)
+  for (let scheme = 0; scheme < 3; scheme++) for (let os = 0; os < 2; os++)
+  for (let contrast = 0; contrast < 2; contrast++) for (let accent = 0; accent < 2; accent++) for (let manifest = 0; manifest < 2; manifest++) {
+    assert.deepEqual([...native_theme_policy(new Uint8Array([1, model, fallback, scheme, os, contrast, accent, manifest]))],
+      [model || fallback, scheme === 0 ? os : scheme - 1, contrast ? 0 : accent ? 1 : manifest ? 2 : 0, 0]);
+  }
+});
+
+test("theme policy preserves complete-token precedence and rebuild coordination", () => {
+  for (let fn = 0; fn < 2; fn++) for (let fixed = 0; fixed < 2; fixed++) for (let helper = 0; helper < 2; helper++) for (let scheme = 0; scheme < 3; scheme++) {
+    const follows = !fn && !fixed && (!helper || scheme === 0);
+    assert.deepEqual([...native_theme_policy(new Uint8Array([2, fn, fixed, helper, scheme]))],
+      [fn ? 1 : fixed ? 2 : 0, +follows, +(!!fn || !!helper || follows), 0]);
+  }
+  for (const bytes of [[], [3], [1], [2], [1, 3, 1, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, 1, 0, 2, 0, 0, 0], [2, 2, 0, 0, 0], [2, 0, 0, 0, 3]]) {
+    assert.throws(() => native_theme_policy(new Uint8Array(bytes)), /theme policy|theme .*request|theme .*flag/);
+  }
 });

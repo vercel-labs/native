@@ -1,3 +1,50 @@
+/** Portable stock-theme decisions. Native retains owned token registers, OS
+ * appearance facts and surface scale. Results are copied without resetting
+ * the dispatch arena: a theme helper may still own borrowed accent bytes.
+ * Operations: 0 exact #rrggbb parsing; 1 pack/scheme/accent resolution;
+ * 2 complete-token precedence and appearance/rebuild coordination.
+ */
+export function native_theme_policy(request: Uint8Array): Uint8Array {
+  const result = new Uint8Array(4);
+  if (request[0] === 0) {
+    if (request.length !== 8 || request[1] !== 35) return result;
+    for (let channel = 0; channel < 3; channel++) {
+      const hi = themeHexNibble(request[2 + channel * 2]!);
+      const lo = themeHexNibble(request[3 + channel * 2]!);
+      if (hi < 0 || lo < 0) return new Uint8Array(4);
+      result[channel + 1] = hi * 16 + lo;
+    }
+    result[0] = 1;
+    return result;
+  }
+  if (request[0] === 1) {
+    if (request.length !== 8 || request[1]! > 2 || request[2]! < 1 || request[2]! > 2 || request[3]! > 2) {
+      throw new Error("invalid stock theme request");
+    }
+    for (let i = 4; i < 8; i++) if (request[i]! > 1) throw new Error("invalid theme appearance flag");
+    result[0] = request[1] === 0 ? request[2]! : request[1]!;
+    result[1] = request[3] === 0 ? request[4]! : request[3]! - 1;
+    result[2] = request[5] === 1 ? 0 : request[6] === 1 ? 1 : request[7] === 1 ? 2 : 0;
+    return result;
+  }
+  if (request[0] === 2) {
+    if (request.length !== 5 || request[4]! > 2) throw new Error("invalid theme control request");
+    for (let i = 1; i < 4; i++) if (request[i]! > 1) throw new Error("invalid theme control flag");
+    result[0] = request[1] === 1 ? 1 : request[2] === 1 ? 2 : 0;
+    result[1] = result[0] === 0 && (request[3] === 0 || request[4] === 0) ? 1 : 0;
+    result[2] = request[1] === 1 || request[3] === 1 || result[1] === 1 ? 1 : 0;
+    return result;
+  }
+  throw new Error("unknown theme policy operation");
+}
+
+function themeHexNibble(byte: number): number {
+  if (byte >= 48 && byte <= 57) return byte - 48;
+  if (byte >= 65 && byte <= 70) return byte - 65 + 10;
+  if (byte >= 97 && byte <= 102) return byte - 97 + 10;
+  return -1;
+}
+
 /** Portable decisions over native-owned timer tables.
  * Operations 0/1 reconcile subscriptions; 2 arms a delay, 3 looks up its key,
  * and 4 routes a one-shot completion and retires its slot. The cycle owns both
