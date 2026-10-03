@@ -141,6 +141,8 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// Pure named-effect coordination. Borrow inputs, copy outputs; the
         /// host retains command-cycle and completion-frame reset ownership.
         pub const native_effect_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_effect_policy");
+        /// Stream decisions borrow input and copy output within the dispatch cycle.
+        pub const native_stream_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_stream_policy");
 
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");

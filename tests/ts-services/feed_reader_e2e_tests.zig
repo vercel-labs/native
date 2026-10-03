@@ -4422,6 +4422,13 @@ test "compiled named effect plans preserve drop occupancy slot order routes and 
     request[4] = 255;
     var plan: [5]u8 = undefined;
     try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..85], &plan));
+    const frozen_plan = plan;
+    var stream_plan: [5]u8 = undefined;
+    try std.testing.expectEqual(stream_plan.len, core.nativeStreamPolicy(&.{ 2, 1, 0, 0, 0, 127 }, &stream_plan));
+    const frozen_stream = stream_plan;
+    try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..85], &plan));
+    try std.testing.expectEqualSlices(u8, &frozen_plan, &plan);
+    try std.testing.expectEqualSlices(u8, &frozen_stream, &stream_plan);
     try std.testing.expectEqualSlices(u8, copy, borrowed);
     core.rt.frameReset();
     var comparisons: usize = 0;
@@ -4502,4 +4509,80 @@ test "compiled named effect plans preserve drop occupancy slot order routes and 
         routes += 1;
     };
     try std.testing.expectEqual(@as(usize, 512), routes);
+}
+
+test "compiled stream plans preserve admission routes loss and dispatch arena ownership" {
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    try std.testing.expect(borrowed.len > 0);
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    var result: [5]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeStreamPolicy(&.{ 2, 1, 0, 0, 0, 127 }, &result));
+    try std.testing.expectEqualSlices(u8, copy, borrowed);
+    core.rt.frameReset();
+    var comparisons: usize = 0;
+    for ([_]u8{ 0, 127, 255 }) |tag| for ([_]u8{ 0, 1 }) |a| for ([_]u8{ 0, 1 }) |b| for ([_]u8{ 0, 1 }) |c| for ([_]u8{ 0, 1 }) |d| {
+        try std.testing.expectEqual(result.len, core.nativeStreamPolicy(&.{ 2, a, b, c, d, tag }, &result));
+        const line = result;
+        const damage = b == 1 or (a == 1 and (c == 1 or d == 1));
+        try std.testing.expectEqualSlices(u8, &.{ tag, 0, @intFromBool(damage), 0, 0 }, &line);
+        const spawn_success = b == 1 and (a == 0 or c == 0);
+        try std.testing.expectEqual(result.len, core.nativeStreamPolicy(&.{ 3, a, b, c, tag, 255 - tag }, &result));
+        const spawn_shape: u8 = if (spawn_success) (if (a == 1) 2 else 1) else 0;
+        try std.testing.expectEqualSlices(u8, &.{ if (spawn_success) tag else 255 - tag, spawn_shape, 0, 1, @intFromBool(!spawn_success and b == 1) }, &result);
+        try std.testing.expectEqual(result.len, core.nativeStreamPolicy(&.{ 4, a, b, c, d, tag, 255 - tag }, &result));
+        const fetch_damage = a == 1 or b == 1 or c == 1;
+        const fetch_success = d == 1 and !fetch_damage;
+        try std.testing.expectEqualSlices(u8, &.{ if (fetch_success) tag else 255 - tag, @intFromBool(fetch_success), @intFromBool(fetch_damage), 1, @intFromBool(d == 1 and fetch_damage) }, &result);
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &.{ tag, 0, @intFromBool(damage), 0, 0 }, &line);
+        comparisons += 3;
+    };
+    const long_key = [_]u8{255} ** 255;
+    const names = [_][]const u8{ "", "source", "caf\xc3\xa9", "\x00\xff", &long_key };
+    var request: [4400]u8 = undefined;
+    for (0..17) |occupied| for (names) |name| for ([_]u8{ 0, 1 }) |fetch| for ([_]u8{ 0, 1 }) |file| for ([_]u8{ 0, 1 }) |effect| {
+        request[0..5].* = .{ 0, fetch, file, effect, @intCast(name.len) };
+        @memcpy(request[5..][0..name.len], name);
+        var at: usize = 5 + name.len;
+        var matching: ?usize = null;
+        for (0..16) |slot| {
+            const used = slot < occupied;
+            const stored = names[slot % names.len];
+            request[at] = @intFromBool(used);
+            request[at + 1] = @intCast(stored.len);
+            at += 2;
+            @memcpy(request[at..][0..stored.len], stored);
+            at += stored.len;
+            if (used and matching == null and std.mem.eql(u8, stored, name)) matching = slot;
+        }
+        var admission: [1]u8 = undefined;
+        try std.testing.expectEqual(admission.len, core.nativeStreamPolicy(request[0..at], &admission));
+        const blocked = name.len > 0 and (matching != null or file == 1 or (fetch == 1 and effect == 1));
+        const expected: u8 = if (blocked or occupied == 16) 255 else @intCast(occupied);
+        try std.testing.expectEqual(expected, admission[0]);
+        // The borrowed request remains usable after a second policy call.
+        std.mem.copyForwards(u8, request[2..], request[5..at]);
+        request[0..2].* = .{ 1, @intCast(name.len) };
+        var lookup: [1]u8 = undefined;
+        try std.testing.expectEqual(lookup.len, core.nativeStreamPolicy(request[0 .. at - 3], &lookup));
+        try std.testing.expectEqual(if (matching) |slot| @as(u8, @intCast(slot)) else @as(u8, 255), lookup[0]);
+        core.rt.frameReset();
+        try std.testing.expectEqual(expected, admission[0]);
+        comparisons += 2;
+    };
+    for (0..16) |hole| {
+        @memset(request[0..38], 0);
+        request[4] = 1;
+        request[5] = 'x';
+        for (0..16) |slot| request[6 + slot * 2] = @intFromBool(slot != hole);
+        var admission: [1]u8 = undefined;
+        try std.testing.expectEqual(admission.len, core.nativeStreamPolicy(request[0..38], &admission));
+        try std.testing.expectEqual(@as(u8, @intCast(hole)), admission[0]);
+        core.rt.frameReset();
+        comparisons += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1520), comparisons);
 }
