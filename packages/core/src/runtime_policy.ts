@@ -1,8 +1,72 @@
+/** Window set reconciliation over ordered native-owned slots. Operation 0
+ * selects the first stale slot; the caller removes it (swapping the last slot)
+ * and asks again before creating anything. Operation 1 handles one descriptor
+ * against the current table, so failed OS creates never reserve an identity.
+ * Labels are opaque bytes. Existing labels only update the owned close message;
+ * their creation-time canvas, title, geometry and close policy stay fixed.
+ */
+export function native_window_policy(request: Uint8Array): Uint8Array {
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  let at = 0;
+  const byte = (): number => {
+    if (at >= request.length) throw new Error("truncated window policy request");
+    return request[at++]!;
+  };
+  const label = (): Uint8Array => {
+    if (at + 4 > request.length) throw new Error("truncated window policy label");
+    const length = data.getUint32(at, true); at += 4;
+    if (length > request.length - at) throw new Error("truncated window policy label");
+    const value = request.subarray(at, at + length); at += length; return value;
+  };
+  const equal = (a: Uint8Array, b: Uint8Array): boolean => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  };
+  const operation = byte();
+  if (operation > 1) throw new Error("invalid window policy operation");
+  const declared: Uint8Array[] = [];
+  let main: Uint8Array = new Uint8Array(0), name: Uint8Array = new Uint8Array(0), canvas: Uint8Array = new Uint8Array(0);
+  if (operation === 0) {
+    const count = byte();
+    if (count > 4) throw new Error("invalid window declaration count");
+    for (let i = 0; i < count; i++) declared.push(label());
+  } else { main = label(); name = label(); canvas = label(); }
+  const count = byte();
+  if (count > 4) throw new Error("invalid live window count");
+  const names: Uint8Array[] = [], canvases: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) { names.push(label()); canvases.push(label()); }
+  if (at !== request.length) throw new Error("trailing window policy bytes");
+  const result = new Uint8Array(2); result[1] = 255;
+  if (operation === 0) {
+    for (let i = 0; i < count; i++) {
+      let keep = false;
+      for (const candidate of declared) if (equal(candidate, names[i]!)) keep = true;
+      if (!keep) { result[1] = i; break; }
+    }
+    return result;
+  }
+  // Lookup precedes admission: duplicate descriptors update the same slot
+  // even when the table is full or their later creation fields are invalid.
+  for (let i = 0; i < count; i++) if (equal(name, names[i]!)) {
+    result[0] = 1; result[1] = i; return result;
+  }
+  if (count === 4) { result[0] = 2; return result; }
+  if (name.length === 0 || name.length > 64 || canvas.length === 0 || canvas.length > 64) {
+    result[0] = 3; return result;
+  }
+  let collision = equal(canvas, main);
+  for (const value of canvases) if (equal(canvas, value)) collision = true;
+  if (collision) result[0] = 4;
+  return result;
+}
+
 /** Portable decisions over native-owned timer tables.
  * Operations 0/1 reconcile subscriptions; 2 arms a delay, 3 looks up its key,
  * and 4 routes a one-shot completion and retires its slot. The cycle owns both
  * arenas; callers copy results without resetting bytes between records.
  */
+
 export function native_timer_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 2 || request[0] === 3) return delayDeclaration(request);
   if (request[0] === 4) {

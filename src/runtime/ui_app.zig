@@ -819,6 +819,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// no close Msg. Reconcile failures degrade to logged warnings
             /// — a failed create never takes the render loop down.
             windows_fn: ?*const fn (model: *const ModelT, scratch: *WindowsScratch) []const WindowDescriptor = null,
+            /// Optional portable reconciliation over native-owned window
+            /// facts. The callback copies its output; rebuild/view consumers
+            /// retain ownership of the compiler frame and descriptor storage.
+            window_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
@@ -2810,6 +2814,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 declared = declared[0..max_ui_windows];
             }
 
+            if (self.options.window_policy != null) {
+                self.applyCompiledWindows(runtime, declared) catch |err| {
+                    ui_app_log.warn("window reconciliation failed: {s}", .{@errorName(err)});
+                };
+                return;
+            }
+
             // Close first: a label leaving the declared set frees its
             // slot (and its runtime window label) before creations run.
             var index: usize = 0;
@@ -2828,6 +2839,77 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     continue;
                 }
                 self.createWindowSlot(runtime, descriptor);
+            }
+        }
+
+        fn writeWindowPolicyLabel(writer: *std.Io.Writer, label: []const u8) !void {
+            if (label.len > std.math.maxInt(u32)) return error.WindowPolicyLabelTooLong;
+            try writer.writeInt(u32, @intCast(label.len), .little);
+            try writer.writeAll(label);
+        }
+
+        /// Each decision sees the current ordered slots, including the swap
+        /// after a close and only successful OS creates. Copy the complete
+        /// request before entering scriptc; keep all descriptor bytes alive.
+        fn windowPolicyDecision(self: *Self, declared: []const WindowDescriptor, descriptor: ?WindowDescriptor) ![2]u8 {
+            comptime {
+                std.debug.assert(max_ui_windows == 4);
+                std.debug.assert(platform.max_window_label_bytes == 64);
+                std.debug.assert(app_manifest.max_view_label_bytes == 64);
+            }
+            var request = std.Io.Writer.Allocating.init(self.backing);
+            defer request.deinit();
+            const writer = &request.writer;
+            try writer.writeByte(@intFromBool(descriptor != null));
+            if (descriptor) |value| {
+                try writeWindowPolicyLabel(writer, self.options.canvas_label);
+                try writeWindowPolicyLabel(writer, value.label);
+                try writeWindowPolicyLabel(writer, value.canvas_label);
+            } else {
+                try writer.writeByte(@intCast(declared.len));
+                for (declared) |value| try writeWindowPolicyLabel(writer, value.label);
+            }
+            try writer.writeByte(@intCast(self.window_slot_count));
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                try writeWindowPolicyLabel(writer, slot.label());
+                try writeWindowPolicyLabel(writer, slot.canvasLabel());
+            }
+            var result: [2]u8 = undefined;
+            if (self.options.window_policy.?(request.written(), &result) != result.len or
+                result[0] > 4 or (result[1] != 255 and result[1] >= self.window_slot_count))
+                @panic("invalid compiled window policy result");
+            if (descriptor == null) {
+                if (result[0] != 0) @panic("invalid compiled window retirement result");
+            } else if ((result[0] == 1) == (result[1] == 255)) {
+                @panic("invalid compiled window declaration result");
+            }
+            return result;
+        }
+
+        fn applyCompiledWindows(self: *Self, runtime: *Runtime, declared: []const WindowDescriptor) !void {
+            while (true) {
+                const plan = try self.windowPolicyDecision(declared, null);
+                if (plan[1] == 255) break;
+                self.closeWindowSlot(runtime, plan[1]);
+            }
+            for (declared) |descriptor| {
+                const plan = try self.windowPolicyDecision(&.{}, descriptor);
+                switch (plan[0]) {
+                    0 => {
+                        // Bound native copies even if a custom callback violates
+                        // the ABI. Lookup/collision decisions belong to policy.
+                        if (self.window_slot_count >= max_ui_windows or
+                            descriptor.label.len == 0 or descriptor.label.len > platform.max_window_label_bytes or
+                            descriptor.canvas_label.len == 0 or descriptor.canvas_label.len > app_manifest.max_view_label_bytes)
+                            @panic("invalid compiled window creation result");
+                        self.openWindowSlot(runtime, descriptor);
+                    },
+                    1 => self.setWindowSlotOnClose(&self.window_slots[plan[1]], descriptor.on_close),
+                    2 => ui_app_log.warn("declared window '{s}' ignored: more than {d} secondary windows (canvas_limits.max_ui_app_windows)", .{ descriptor.label, max_ui_windows }),
+                    3 => ui_app_log.warn("declared window '{s}' ignored: window and canvas labels must be non-empty and fit the platform label budgets", .{descriptor.label}),
+                    4 => ui_app_log.warn("declared window '{s}' ignored: canvas label '{s}' is already bound - every window's canvas label must be unique", .{ descriptor.label, descriptor.canvas_label }),
+                    else => unreachable,
+                }
             }
         }
 
@@ -2881,6 +2963,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return;
             }
 
+            self.openWindowSlot(runtime, descriptor);
+        }
+
+        /// Native capability boundary: create the shell, then retain its
+        /// labels, close message, tree arenas and GPU state only on success.
+        fn openWindowSlot(self: *Self, runtime: *Runtime, descriptor: WindowDescriptor) void {
             const shell_views = [_]app_manifest.ShellView{self.secondaryShellView(descriptor)};
             const info = runtime.createSourcelessShellWindow(.{
                 .label = descriptor.label,

@@ -102,6 +102,10 @@ const Fixture = struct {
     app: core.App,
 
     fn create() !Fixture {
+        return createWithPolicy(null);
+    }
+
+    fn createWithPolicy(policy: ?*const fn ([]const u8, []u8) usize) !Fixture {
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
         errdefer harness.destroy(std.testing.allocator);
         harness.null_platform.gpu_surfaces = true;
@@ -112,6 +116,7 @@ const Fixture = struct {
             .update = panelUpdate,
             .view = panelView,
             .windows_fn = panelWindows,
+            .window_policy = policy,
             .window_view = panelWindowView,
         });
         const app = app_state.app();
@@ -1644,4 +1649,88 @@ test "closing the pin-owning window releases its snapshot and pin" {
         .item_id = 1,
     } });
     try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.sends);
+}
+
+// These intentionally choose outcomes independently of the reference key
+// lookup, proving the native consumer applies the policy's decisions.
+const WindowPolicyProbe = struct {
+    var refuse_create = false;
+    var retire_once = false;
+    var has_window = false;
+    var calls: usize = 0;
+
+    fn decide(request: []const u8, output: []u8) usize {
+        calls += 1;
+        output[0] = 0;
+        output[1] = 255;
+        if (request[0] == 0) {
+            if (retire_once and has_window) {
+                output[1] = 0;
+                retire_once = false;
+                has_window = false;
+            }
+        } else if (refuse_create) {
+            output[0] = 2;
+        } else if (has_window) {
+            output[0] = 1;
+            output[1] = 0;
+        } else {
+            has_window = true;
+        }
+        return 2;
+    }
+};
+
+test "window consumer follows policy admission retirement and existing-slot decisions" {
+    WindowPolicyProbe.refuse_create = true;
+    WindowPolicyProbe.retire_once = false;
+    WindowPolicyProbe.has_window = false;
+    WindowPolicyProbe.calls = 0;
+    const fixture = try Fixture.createWithPolicy(WindowPolicyProbe.decide);
+    defer fixture.destroy();
+    try fixture.clickSettingsButton();
+    try std.testing.expect(fixture.app_state.model.settings_open);
+    try std.testing.expect(fixture.settingsWindowInfo() == null);
+    WindowPolicyProbe.refuse_create = false;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    const first = fixture.settingsWindowInfo().?.id;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(first, fixture.settingsWindowInfo().?.id);
+    WindowPolicyProbe.retire_once = true;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo().?.id != first);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.user_closes);
+    try std.testing.expect(WindowPolicyProbe.calls >= 9);
+}
+
+test "failed native create leaves the next policy decision's window table empty" {
+    const AdmissionProbe = struct {
+        fn decide(request: []const u8, output: []u8) usize {
+            output[0] = 0;
+            output[1] = 255;
+            if (request[0] == 1) {
+                var at: usize = 1;
+                for (0..3) |_| {
+                    const length = std.mem.readInt(u32, request[at..][0..4], .little);
+                    at += 4 + length;
+                }
+                if (request[at] != 0) {
+                    output[0] = 1;
+                    output[1] = 0;
+                }
+            }
+            return 2;
+        }
+    };
+    const fixture = try Fixture.createWithPolicy(AdmissionProbe.decide);
+    defer fixture.destroy();
+    fixture.app_state.model.settings_open = true;
+    fixture.harness.null_platform.fail_next_create_window = true;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo() == null);
+    try std.testing.expectEqual(@as(usize, 0), fixture.app_state.window_slot_count);
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo() != null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.user_closes);
 }

@@ -189,3 +189,57 @@ test("database decisions reject damaged records and preserve copied result owner
   const request = requests[2]!, out = native_db_policy(request), copy = out.slice(); request.fill(0);
   native_db_policy(requests[0]!); assert.deepEqual(out, copy);
 });
+
+function windowRequest(operation: number, live: readonly (readonly [Uint8Array, Uint8Array])[], declared: readonly Uint8Array[] = [], name = key("new"), canvas = key("new-canvas")): Uint8Array {
+  const out: number[] = [operation];
+  const label = (bytes: Uint8Array) => { const size = new Uint8Array(4); new DataView(size.buffer).setUint32(0, bytes.length, true); out.push(...size, ...bytes); };
+  if (operation === 0) { out.push(declared.length); declared.forEach(label); }
+  else { label(key("main")); label(name); label(canvas); }
+  out.push(live.length); live.forEach(([a, b]) => { label(a); label(b); });
+  return new Uint8Array(out);
+}
+
+import { native_window_policy } from "../src/runtime_policy.ts";
+test("window plans preserve opaque keys, first-match lookup and admission order", () => {
+  const names = [key(""), key("new"), key("other"), key("café"), new Uint8Array([0, 255]), new Uint8Array(64).fill(255), new Uint8Array(65).fill(255)];
+  const canvases = [key(""), key("main"), key("new-canvas"), key("occupied"), new Uint8Array([0, 255]), new Uint8Array(64).fill(255), new Uint8Array(65).fill(255)];
+  for (let count = 0; count <= 4; count++) {
+    const live = Array.from({ length: count }, (_, i) => [names[1 + i % 4]!, key("occupied")] as const);
+    for (const name of names) for (const canvas of canvases) {
+      const index = live.findIndex(([label]) => Buffer.from(label).equals(name));
+      const expected = index >= 0 ? [1, index] : count === 4 ? [2, 255] :
+        name.length === 0 || name.length > 64 || canvas.length === 0 || canvas.length > 64 ? [3, 255] :
+        Buffer.from(canvas).equals(key("main")) || live.some(([, value]) => Buffer.from(value).equals(canvas)) ? [4, 255] : [0, 255];
+      assert.deepEqual([...native_window_policy(windowRequest(1, live, [], name, canvas))], expected);
+    }
+  }
+  const duplicate = [[key("same"), key("first")], [key("same"), key("last")]] as const;
+  assert.deepEqual([...native_window_policy(windowRequest(1, duplicate, [], key("same"), key("")))], [1, 0]);
+});
+
+test("window retirement follows current slot order including swap-removal", () => {
+  const live = Array.from({ length: 4 }, (_, i) => [key(String(i)), key(`canvas-${i}`)] as const);
+  for (let mask = 0; mask < 16; mask++) {
+    const declared = live.filter((_, i) => mask & (1 << i)).map(([name]) => name);
+    const slots = [...live]; const removed: number[] = [];
+    for (;;) {
+      const expected = slots.findIndex(([name]) => !declared.some(value => Buffer.from(value).equals(name)));
+      const decision = native_window_policy(windowRequest(0, slots, declared));
+      assert.deepEqual([...decision], [0, expected < 0 ? 255 : expected]);
+      if (expected < 0) break;
+      removed.push(Number(new TextDecoder().decode(slots[expected]![0])));
+      slots[expected] = slots[slots.length - 1]!; slots.pop();
+    }
+    assert.equal(removed.length, 4 - declared.length);
+  }
+});
+
+test("window requests refuse malformed counts, labels, operations and trailing bytes", () => {
+  for (const valid of [windowRequest(0, [[key("x"), key("canvas")]], [key("x")]), windowRequest(1, [])]) {
+    for (let length = 0; length < valid.length; length++) assert.throws(() => native_window_policy(valid.subarray(0, length)), /window/);
+    assert.throws(() => native_window_policy(new Uint8Array([...valid, 0])), /trailing/);
+  }
+  assert.throws(() => native_window_policy(new Uint8Array([2])), /operation/);
+  assert.throws(() => native_window_policy(new Uint8Array([0, 5])), /count/);
+  assert.throws(() => native_window_policy(new Uint8Array([0, 0, 5])), /count/);
+});

@@ -1079,6 +1079,25 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&resizable_policy_driver_run.step);
         test_step.dependOn(&resizable_policy_driver_run.step);
 
+        const window_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        window_policy_reference_run.setCwd(b.path("examples/window-policy"));
+        window_policy_reference_run.has_side_effects = true;
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_reference_run.captureStdOut(.{});
+        _ = window_policy_reference_run.captureStdErr(.{});
+        const window_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        window_policy_driver_run.setCwd(b.path("examples/window-policy"));
+        window_policy_driver_run.has_side_effects = true;
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_driver_run.captureStdOut(.{});
+        _ = window_policy_driver_run.captureStdErr(.{});
+        window_policy_driver_run.step.dependOn(&window_policy_reference_run.step);
+        native_driver_step.dependOn(&window_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&window_policy_driver_run.step);
+        test_step.dependOn(&window_policy_driver_run.step);
+
         const relational_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         relational_reference_run.setCwd(b.path("examples/relational-notes"));
         relational_reference_run.has_side_effects = true;
@@ -2306,6 +2325,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-slider-policy", "Run portable slider policy example tests", "examples/slider-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-window-policy", "Run TypeScript window reconciliation example tests", "examples/window-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
