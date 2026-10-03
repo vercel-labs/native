@@ -446,6 +446,9 @@ pub const RuntimeView = struct {
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
     widget_layout_root_bounds: ?geometry.RectF = null,
+    /// Optional compiled traversal for this retained view. A function
+    /// pointer survives window compaction without retaining arena data.
+    canvas_widget_tab_focus_policy: ?*const fn ([]const u8, []u8) usize = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the

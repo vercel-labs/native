@@ -332,7 +332,7 @@ const Emitter = struct {
             try reserved.appendSlice(self.arena, &.{ "nativeResizablePolicy", "request", "output", "ptr", "len" });
         }
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_text_policy")) {
-            try reserved.appendSlice(self.arena, &.{ "nativeTextPolicy", "nativePressHoldPolicy", "request", "output", "ptr", "len" });
+            try reserved.appendSlice(self.arena, &.{ "nativeTextPolicy", "nativePressHoldPolicy", "nativeTabFocusPolicy", "request", "output", "ptr", "len" });
         }
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_timer_policy")) {
             try reserved.appendSlice(self.arena, &.{ "nativeTimerPolicy", "request", "output", "ptr", "len" });
@@ -1445,6 +1445,16 @@ const Emitter = struct {
                 \\    var len: usize = 0;
                 \\    abi.native_text_policy(request.ptr, request.len, &ptr, &len);
                 \\    if (len > output.len) @panic("invalid compiled press hold policy result");
+                \\    @memcpy(output[0..len], ptr[0..len]);
+                \\    return len;
+                \\}
+                \\
+                \\/// Copy the focus plan; the owning cycle resets the frame.
+                \\pub fn nativeTabFocusPolicy(request: []const u8, output: []u8) usize {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_text_policy(request.ptr, request.len, &ptr, &len);
+                \\    if (len > output.len) @panic("invalid compiled Tab focus policy result");
                 \\    @memcpy(output[0..len], ptr[0..len]);
                 \\    return len;
                 \\}

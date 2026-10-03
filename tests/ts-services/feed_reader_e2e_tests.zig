@@ -382,6 +382,7 @@ test "boot parses the built-in sample through the real service child and the mar
     const h = try Harness.create(null, "/feed.xml");
     defer h.destroy();
     try h.settleBoot();
+    try std.testing.expect(h.harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
 
     const model = Bridge.model();
     try std.testing.expectEqual(@as(usize, 3), model.items.len);
@@ -5131,4 +5132,107 @@ test "compiled status reconciliation matches native OS failure ordering and reta
         try std.testing.expect(!state.applied_status_items[0].shell_unsupported and !state.applied_status_items[0].presentation_unsupported);
         if (compiled) try std.testing.expectEqualSlices(usize, &reference, &StatusParityService.counts) else reference = StatusParityService.counts;
     }
+}
+
+test "compiled Tab traversal matches complete native retained targets" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "compiled-tab-focus", .source = native_sdk.WebViewSource.html("<h1>Focus</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    const identity_base: canvas.ObjectId = 0xfedc_ba98_7654_3200;
+    var comparisons: usize = 0;
+    for (0..128) |variant| {
+        const inner_children = [_]canvas.Widget{
+            .{ .id = identity_base + 6, .kind = .radio, .frame = geometry.RectF.init(8, 8, 100, 28), .value = if (variant & 1 != 0) 1 else 0, .state = .{ .disabled = variant & 2 != 0 } },
+            .{ .id = identity_base + 7, .kind = .radio, .frame = geometry.RectF.init(8, 40, 100, 28), .value = if (variant & 1 == 0) 1 else 0 },
+        };
+        const group_children = [_]canvas.Widget{
+            .{ .id = identity_base + 3, .kind = .radio, .frame = geometry.RectF.init(8, 8, 100, 28), .value = if (variant & 4 != 0) 1 else 0, .state = .{ .disabled = variant & 8 != 0 } },
+            .{ .id = identity_base + 4, .kind = .button, .frame = geometry.RectF.init(120, 8, 100, 28), .semantics = .{ .hidden = variant & 16 != 0 } },
+            .{ .id = identity_base + 5, .kind = .radio_group, .frame = geometry.RectF.init(8, 50, 220, 90), .children = &inner_children },
+            .{ .id = identity_base + 8, .kind = .radio, .frame = geometry.RectF.init(if (variant & 32 != 0) @as(f32, 500) else 8, 150, 100, 28), .value = if (variant & 4 == 0) 1 else 0 },
+        };
+        const children = [_]canvas.Widget{
+            .{ .id = identity_base + 1, .kind = .button, .frame = geometry.RectF.init(8, 8, 100, 28) },
+            .{ .id = identity_base + 2, .kind = .radio_group, .frame = geometry.RectF.init(8, 50, 250, 210), .layout = .{ .clip_content = variant & 32 != 0 }, .children = &group_children },
+            .{ .id = identity_base + 9, .kind = .button, .frame = geometry.RectF.init(8, 280, 100, 28), .state = .{ .disabled = variant & 64 != 0 } },
+        };
+        var nodes: [10]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = identity_base, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        if (variant & 32 != 0) {
+            try std.testing.expect(layout.logicalFocusTargetAtIndex(8) != null);
+            try std.testing.expect(layout.focusTargetById(identity_base + 8) == null);
+        }
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        for (0..12) |current| {
+            const id: ?canvas.ObjectId = if (current == 11) null else identity_base + current;
+            for ([_]canvas.WidgetFocusDirection{ .forward, .backward }) |direction| {
+                view.canvas_widget_tab_focus_policy = null;
+                const expected = view.canvasWidgetRovingTabTarget(id, direction);
+                view.canvas_widget_tab_focus_policy = core.nativeTabFocusPolicy;
+                const actual = view.canvasWidgetRovingTabTarget(id, direction);
+                try std.testing.expectEqualDeep(expected, actual);
+                comparisons += 1;
+            }
+        }
+    }
+    // Interactive-surface wraps include the current target. With a single
+    // radio composite, exhaustion returns its entry instead of escaping.
+    for (0..4) |variant| {
+        const radios = [_]canvas.Widget{
+            .{ .id = identity_base + 3, .kind = .radio, .frame = geometry.RectF.init(8, 8, 100, 28) },
+            .{ .id = identity_base + 4, .kind = .radio, .frame = geometry.RectF.init(8, 40, 100, 28), .value = 1 },
+        };
+        const group = [_]canvas.Widget{.{ .id = identity_base + 2, .kind = .radio_group, .frame = geometry.RectF.init(8, 8, 220, 110), .children = &radios }};
+        const body = [_]canvas.Widget{
+            .{ .id = identity_base + 1, .kind = if (variant & 1 != 0) .popover else .dropdown_menu, .frame = geometry.RectF.init(16, 16, 300, 200), .children = &group },
+            .{ .id = identity_base + 5, .kind = .button, .frame = geometry.RectF.init(350, 20, 100, 28), .semantics = .{ .hidden = variant & 2 != 0 } },
+        };
+        var nodes: [6]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = identity_base, .kind = .stack, .children = &body }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        for (0..7) |current| for ([_]canvas.WidgetFocusDirection{ .forward, .backward }) |direction| {
+            const id: ?canvas.ObjectId = if (current == 6) null else identity_base + current;
+            view.canvas_widget_tab_focus_policy = null;
+            const expected = view.canvasWidgetRovingTabTarget(id, direction);
+            view.canvas_widget_tab_focus_policy = core.nativeTabFocusPolicy;
+            try std.testing.expectEqualDeep(expected, view.canvasWidgetRovingTabTarget(id, direction));
+            comparisons += 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 3128), comparisons);
+    // Removing the first view compacts the second retained view. Its
+    // callback and complete copied targets must survive that ownership move.
+    const expected = view.canvasWidgetRovingTabTarget(null, .forward);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "second", view.widgetLayoutTree());
+    harness.runtime.views[1].canvas_widget_tab_focus_policy = core.nativeTabFocusPolicy;
+    try harness.runtime.closeView(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
+    try std.testing.expect(harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
+    try std.testing.expectEqualDeep(expected, harness.runtime.views[0].canvasWidgetRovingTabTarget(null, .forward));
+}
+
+test "compiled Tab plans preserve dispatch arena ownership and copied results" {
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    var output: [2]u8 = undefined;
+    const request = [_]u8{ 20, 0, 1, 0, 255, 255, 3, 0, 0, 255, 255, 255, 255 };
+    for (0..16) |_| {
+        try std.testing.expectEqual(output.len, core.nativeTabFocusPolicy(&request, &output));
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, &output, .little));
+    }
+    core.rt.frameReset();
+    _ = core.initialModel();
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, &output, .little));
 }

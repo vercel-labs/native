@@ -23,6 +23,13 @@ test("menu entry, traversal, committed choice, dismissal, identities and replay 
     const snapshots = [s], view = button(s, "Choose queue").view;
     const save = () => snapshots.push(s);
     const focused = (name: string) => { assert.equal(item(s, name).focused, true); save(); };
+    s = await app.action(button(s, "Reset"), "focus"); save();
+    for (const name of ["Choose queue", "Open actions", "Choose environment", "Reverse", "Hide review", "Empty", "Reset"]) {
+      s = await app.key(view, "tab"); assert.equal(button(s, name).focused, true); save();
+    }
+    for (const name of ["Empty", "Hide review", "Reverse", "Choose environment", "Open actions", "Choose queue", "Reset"]) {
+      s = await app.key(view, "shift+tab"); assert.equal(button(s, name).focused, true); save();
+    }
     const closed = (field: string, trigger: string) => {
       assert.equal(s.model[field], false);
       assert.equal(s.widgets.some(w => w.role === "menuitem"), false);

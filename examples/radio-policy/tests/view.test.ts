@@ -19,6 +19,18 @@ test("radio selection, nested scopes, arrows, edges, Tab, identity and replay ma
     if (backend) assert.equal(s.viewBackend, backend);
     const snapshots = [s], view = radio(s, "Standard").view;
     const expressId = radio(s, "Express").id;
+    const cycle = async (selected: string, nested: string) => {
+      s = await app.action(button(s, "Reset"), "focus"); snapshots.push(s);
+      for (const name of [selected, nested, "Reverse", "Hide priority", "Reset"]) {
+        s = await app.key(view, "tab");
+        assert.equal(findWidget(s, { role: name === selected || name === nested ? "radio" : "button", name }).focused, true); snapshots.push(s);
+      }
+      for (const name of ["Hide priority", "Reverse", nested, selected, "Reset"]) {
+        s = await app.key(view, "shift+tab");
+        assert.equal(findWidget(s, { role: name === selected || name === nested ? "radio" : "button", name }).focused, true); snapshots.push(s);
+      }
+    };
+    await cycle("Priority café", "Paper");
     const check = (name: string, selected: number, changes: number) => {
       assert.equal(s.model.selected, selected);
       assert.equal(s.model.changes, changes);
@@ -65,6 +77,7 @@ test("radio selection, nested scopes, arrows, edges, Tab, identity and replay ma
     s = await app.key(view, "end"); check("Priority café", 2, 9);
     s = await app.click(button(s, "Hide priority"));
     assert.equal(s.widgets.some(w => w.role === "radio" && w.name === "Priority café"), false); snapshots.push(s);
+    await cycle("Express", "Reusable");
     await app.action(button(s, "Reset"), "focus");
     s = await app.key(view, "tab");
     assert.equal(radio(s, "Express").focused, true); snapshots.push(s);

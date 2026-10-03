@@ -832,6 +832,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Optional portable hold coordination; native retains timer
             /// capabilities, armed identities and owned handler tables.
             press_hold_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
+            /// Portable Tab order over retained-tree facts. Native keeps
+            /// identities, measured eligibility, reveal and OS focus.
+            tab_focus_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
@@ -5404,8 +5407,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// still mark the pair stale, while a pre-adoption rejection
         /// must not. The view's adoption counter is the witness.
         fn publishWidgetLayoutTracked(self: *Self, runtime: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree, current_flag: *bool) anyerror!void {
-            _ = self;
             const adoptions_before = canvasWidgetLayoutAdoptions(runtime, window_id, label);
+            defer {
+                // Adoption precedes fallible host synchronization. Stamp
+                // the policy even when those later operations fail, while
+                // leaving a rejected publication's retained policy intact.
+                if (canvasWidgetLayoutAdoptions(runtime, window_id, label) != adoptions_before) {
+                    for (runtime.views[0..runtime.view_count]) |*view| {
+                        if (view.window_id == window_id and std.mem.eql(u8, view.label, label)) {
+                            view.canvas_widget_tab_focus_policy = self.options.tab_focus_policy;
+                            break;
+                        }
+                    }
+                }
+            }
             _ = runtime.setCanvasWidgetLayout(window_id, label, layout) catch |err| {
                 if (canvasWidgetLayoutAdoptions(runtime, window_id, label) != adoptions_before) current_flag.* = false;
                 return err;

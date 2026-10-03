@@ -1014,3 +1014,58 @@ test("shared step intents preserve raw boundary actions, axis facts and callback
       assert.throws(() => policy(request), /step control request/);
   }
 });
+
+
+test("Tab traversal preserves wrapping, nested radio stops, logical entries and scope traps", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const none = 65535;
+  type Node = { flags: number; parent: number; depth: number; surface: number };
+  const node = (flags: number, parent = none, depth = 0, surface = none): Node => ({ flags, parent, depth, surface });
+  const request = (nodes: Node[], current = none, backward = false) => {
+    const bytes = new Uint8Array(6 + nodes.length * 7), data = new DataView(bytes.buffer);
+    bytes[0] = 20; bytes[1] = +backward; data.setUint16(2, nodes.length, true); data.setUint16(4, current, true);
+    nodes.forEach((n, i) => { const at = 6 + i * 7; bytes[at] = n.flags; data.setUint16(at + 1, n.depth, true); data.setUint16(at + 3, n.parent, true); data.setUint16(at + 5, n.surface, true); });
+    return bytes;
+  };
+  const choose = (nodes: Node[], current = none, backward = false) => new DataView(policy(request(nodes, current, backward)).buffer).getUint16(0, true);
+  const flat = [node(3), node(0), node(3)];
+  assert.equal(choose(flat), 0); assert.equal(choose(flat, none, true), 2);
+  assert.equal(choose(flat, 0), 2); assert.equal(choose(flat, 2), 0); assert.equal(choose(flat, 0, true), 2);
+  assert.equal(choose([node(3)], 0), none);
+  assert.equal(choose([node(3, none, 0, 0)], 0), 0);
+  assert.equal(choose([node(3, none, 0, 0)], 0, true), 0);
+  assert.equal(choose([]), none);
+  const full = Array.from({ length: 1024 }, () => node(3));
+  assert.equal(choose(full, 1023), 0); assert.equal(choose(full, 0, true), 1023);
+
+  // Outer entry is after the inner scope, but its authored stop stays first.
+  const nested = [node(0), node(8, 0, 1), node(7, 1, 2), node(8, 1, 2), node(23, 3, 3), node(23, 1, 2), node(3, 0, 1)];
+  assert.equal(choose(nested), 5); assert.equal(choose(nested, 5), 4);
+  assert.equal(choose(nested, 4), 6); assert.equal(choose(nested, 6, true), 4);
+  assert.equal(choose(nested, 4, true), 5);
+  nested[5]!.flags = 22; // Selected entry is logical but clipped.
+  assert.equal(choose(nested), 5); assert.equal(choose(nested, 5), 4);
+  nested[5]!.flags = 20; // Selected entry is disabled: use the first logical radio.
+  assert.equal(choose(nested), 2);
+  nested[2]!.flags = 6; // No visible outer stop: skip it, keep the inner group.
+  assert.equal(choose(nested), 4);
+
+  const trapped = [node(0), node(0, 0, 1, 1), node(8, 1, 2, 1), node(7, 2, 3, 1), node(23, 2, 3, 1)];
+  assert.equal(choose(trapped, 4), 4); assert.equal(choose(trapped, 4, true), 4);
+  const owned = policy(request(flat));
+  policy(request(nested)); assert.deepEqual([...owned], [0, 0]);
+  const valid = request(nested);
+  for (let n = 0; n < valid.length; n++) assert.throws(() => policy(valid.subarray(0, n)), /policy|Tab focus/);
+  for (const mutation of [
+    (b: Uint8Array) => { b[1] = 2; },
+    (b: Uint8Array) => { b[2] = 1; b[3] = 4; },
+    (b: Uint8Array) => { b[4] = 254; b[5] = 0; },
+    (b: Uint8Array) => { b[6] = 32; },
+    (b: Uint8Array) => { b[6] = 12; },
+    (b: Uint8Array) => { b[9] = 0; b[10] = 0; },
+    (b: Uint8Array) => { b[11] = 254; b[12] = 0; },
+  ]) { const bad = valid.slice(); mutation(bad); assert.throws(() => policy(bad), /Tab focus/); }
+  assert.throws(() => policy(new Uint8Array([...valid, 0])), /Tab focus/);
+});

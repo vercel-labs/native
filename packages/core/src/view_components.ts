@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 20) return nscvTabFocus(request);
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
@@ -115,6 +116,100 @@ function nscvPressHold(request: Uint8Array): Uint8Array {
     if (operation === 1 && fired) result[0] = result[0]! | 8;
   }
   return result;
+}
+
+/** Sequential/roving Tab focus. Header: tag 20, backward, count/current u16.
+ * Each seven-byte node supplies visible/logical eligibility, radio/group and
+ * selection bits, depth, parent and interactive-surface indices (all u16).
+ * 65535 means absent. Identities and measured geometry remain native-owned.
+ */
+function nscvTabFocus(request: Uint8Array): Uint8Array {
+  if (request.length < 6 || request[1]! > 1) throw new Error("invalid Tab focus request");
+  const count = request[2]! | request[3]! << 8;
+  const current = request[4]! | request[5]! << 8;
+  if (count > 1024 || request.length !== 6 + 7 * count || current !== 65535 && current >= count)
+    throw new Error("invalid Tab focus table");
+  const flags: number[] = [], depths: number[] = [], parents: number[] = [], surfaces: number[] = [];
+  const groups: number[] = [], stops: number[] = [], entries: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 6 + i * 7;
+    const bits = request[at]!, depth = request[at + 1]! | request[at + 2]! << 8;
+    const parent = request[at + 3]! | request[at + 4]! << 8;
+    const surface = request[at + 5]! | request[at + 6]! << 8;
+    if (bits > 31 || (bits & 12) === 12 || parent !== 65535 && parent >= i || surface !== 65535 && surface >= count)
+      throw new Error("invalid Tab focus node");
+    flags.push(bits); depths.push(depth); parents.push(parent); surfaces.push(surface);
+    groups.push(65535); stops.push(65535); entries.push(65535);
+    if ((bits & 4) !== 0) {
+      let ancestor = parent;
+      while (ancestor !== 65535) {
+        if ((flags[ancestor]! & 8) !== 0) { groups[i] = ancestor; break; }
+        ancestor = parents[ancestor]!;
+      }
+    }
+  }
+  for (let group = 0; group < count; group++) {
+    if ((flags[group]! & 8) === 0) continue;
+    let selected = false;
+    for (let i = group + 1; i < count && depths[i]! > depths[group]!; i++) {
+      if (groups[i] !== group) continue;
+      const bits = flags[i]!;
+      if (stops[group] === 65535 && (bits & 1) !== 0) stops[group] = i;
+      if ((bits & 2) === 0) continue;
+      if (entries[group] === 65535) entries[group] = i;
+      if (!selected && (bits & 16) !== 0) { entries[group] = i; selected = true; }
+    }
+  }
+  const scope = current === 65535 ? 65535 : groups[current]!;
+  let walk = scope !== 65535 && stops[scope] !== 65535 ? stops[scope]! : current;
+  let chosen = 65535;
+  for (let attempts = 0; attempts <= count; attempts++) {
+    const target = nscvTabNext(flags, parents, surfaces, walk, request[1] === 1);
+    if (target === 65535) break;
+    const targetScope = groups[target]!;
+    if (targetScope !== 65535) {
+      if (stops[targetScope] === 65535 || target !== stops[targetScope] || targetScope === scope) {
+        walk = target;
+        if (attempts === count && scope !== 65535) chosen = entries[scope]!;
+        continue;
+      }
+      chosen = entries[targetScope] === 65535 ? target : entries[targetScope]!;
+    } else chosen = target;
+    break;
+  }
+  const result = new Uint8Array(2);
+  result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+function nscvTabDescendant(parents: readonly number[], node: number, surface: number): boolean {
+  let cursor = node;
+  while (cursor !== 65535) {
+    if (cursor === surface) return true;
+    cursor = parents[cursor]!;
+  }
+  return false;
+}
+
+function nscvTabScan(flags: readonly number[], parents: readonly number[], start: number, stop: number, backward: boolean, surface: number): number {
+  for (let i = start; backward ? i > stop : i < stop; i += backward ? -1 : 1) {
+    if ((flags[i]! & 1) !== 0 && (surface === 65535 || nscvTabDescendant(parents, i, surface))) return i;
+  }
+  return 65535;
+}
+
+function nscvTabNext(flags: readonly number[], parents: readonly number[], surfaces: readonly number[], current: number, backward: boolean): number {
+  const count = flags.length;
+  if (current === 65535) return nscvTabScan(flags, parents, backward ? count - 1 : 0, backward ? -1 : count, backward, 65535);
+  const surface = surfaces[current]!;
+  if (surface !== 65535) {
+    const first = nscvTabScan(flags, parents, backward ? current - 1 : current + 1, backward ? -1 : count, backward, surface);
+    if (first !== 65535) return first;
+    const wrap = nscvTabScan(flags, parents, backward ? count - 1 : surface, backward ? current - 1 : current + 1, backward, surface);
+    if (wrap !== 65535) return wrap;
+  }
+  const first = nscvTabScan(flags, parents, backward ? current - 1 : current + 1, backward ? -1 : count, backward, 65535);
+  return first !== 65535 ? first : nscvTabScan(flags, parents, backward ? count - 1 : 0, current, backward, 65535);
 }
 
 /** Shared control intent: tag 15, kind (0 composed, 1 button, 2 icon button,

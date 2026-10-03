@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const validation = @import("validation.zig");
@@ -1040,6 +1041,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             current_id: ?canvas.ObjectId,
             direction: canvas.WidgetFocusDirection,
         ) ?canvas.WidgetFocusTarget {
+            if (direction == .forward or direction == .backward) {
+                if (self.canvas_widget_tab_focus_policy) |policy| return compiledCanvasWidgetTabTarget(self, policy, current_id, direction);
+            }
             const layout = self.widgetLayoutTree();
             const current_scope = if (current_id) |id|
                 if (self.canvasWidgetNodeIndexById(id)) |index|
@@ -1090,6 +1094,48 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // radio group wraps onto the group's one entry stop.
             if (current_scope) |scope| return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, scope);
             return null;
+        }
+
+        fn compiledCanvasWidgetTabTarget(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            current_id: ?canvas.ObjectId,
+            direction: canvas.WidgetFocusDirection,
+        ) ?canvas.WidgetFocusTarget {
+            const layout = self.widgetLayoutTree();
+            var request: [6 + max_canvas_widget_nodes_per_view * 7]u8 = undefined;
+            const absent = std.math.maxInt(u16);
+            const current_index = if (current_id) |id| self.canvasWidgetNodeIndexById(id) else null;
+            request[0] = 20;
+            request[1] = @intFromBool(direction == .backward);
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], if (current_index) |index| @intCast(index) else absent, .little);
+            for (layout.nodes, 0..) |node, index| {
+                const at = 6 + index * 7;
+                const visible = layout.focusTargetById(node.widget.id) != null;
+                const logical = layout.logicalFocusTargetAtIndex(index) != null;
+                request[at] = @as(u8, @intFromBool(visible)) |
+                    (@as(u8, @intFromBool(logical)) << 1) |
+                    (@as(u8, @intFromBool(node.widget.kind == .radio)) << 2) |
+                    (@as(u8, @intFromBool(node.widget.kind == .radio_group)) << 3) |
+                    (@as(u8, @intFromBool(canvas_widget_runtime.canvasWidgetSelectableSelected(node.widget))) << 4);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], @intCast(node.depth), .little);
+                std.mem.writeInt(u16, request[at + 3 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else absent, .little);
+                const surface = canvasWidgetSurfaceIndexForTargetInScope(self, index, .interactive);
+                std.mem.writeInt(u16, request[at + 5 ..][0..2], if (surface) |owner| @intCast(owner) else absent, .little);
+            }
+            var result: [2]u8 = undefined;
+            if (policy(request[0 .. 6 + layout.nodes.len * 7], &result) != result.len) @panic("invalid compiled Tab focus result");
+            const selected = std.mem.readInt(u16, &result, .little);
+            if (selected == absent) return null;
+            if (selected >= layout.nodes.len) @panic("invalid compiled Tab focus index");
+            // A group's logical entry may need native scroll reveal;
+            // every other target must already satisfy visible focus gates.
+            const target = if (layout.nodes[selected].widget.kind == .radio)
+                layout.logicalFocusTargetAtIndex(selected)
+            else
+                layout.focusTargetById(layout.nodes[selected].widget.id);
+            return target orelse @panic("ineligible compiled Tab focus target");
         }
 
         pub fn canvasWidgetFocusTargetInScope(
