@@ -844,6 +844,24 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&subscription_driver_run.step);
         ts_core_e2e_step.dependOn(&subscription_driver_run.step);
         test_step.dependOn(&subscription_driver_run.step);
+        const effect_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        effect_reference_run.setCwd(b.path("examples/effect-policy"));
+        effect_reference_run.has_side_effects = true;
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_reference_run.captureStdOut(.{});
+        _ = effect_reference_run.captureStdErr(.{});
+        const effect_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        effect_driver_run.setCwd(b.path("examples/effect-policy"));
+        effect_driver_run.has_side_effects = true;
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_driver_run.captureStdOut(.{});
+        _ = effect_driver_run.captureStdErr(.{});
+        effect_driver_run.step.dependOn(&effect_reference_run.step);
+        native_driver_step.dependOn(&effect_driver_run.step);
+        ts_core_e2e_step.dependOn(&effect_driver_run.step);
+        test_step.dependOn(&effect_driver_run.step);
         const pipeline_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         pipeline_reference_run.setCwd(b.path("examples/pipeline"));
         pipeline_reference_run.has_side_effects = true;
@@ -2272,6 +2290,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effect-policy", "Run named effect policy example tests", "examples/effect-policy", .managed),
         ui_inbox_example_step,
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { native_timer_policy, native_db_policy } from "../src/runtime_policy.ts";
+import { native_timer_policy, native_db_policy, native_effect_policy } from "../src/runtime_policy.ts";
 
 interface Slot { used: boolean; key: Uint8Array; every: number; tag: number }
 const empty = (): Slot[] => Array.from({ length: 16 }, () => ({ used: false, key: new Uint8Array(0), every: 0, tag: 0 }));
@@ -188,4 +188,68 @@ test("database decisions reject damaged records and preserve copied result owner
   assert.throws(() => native_db_policy(dbRequest(dbEmpty(), [key("")])), /key list/);
   const request = requests[2]!, out = native_db_policy(request), copy = out.slice(); request.fill(0);
   native_db_policy(requests[0]!); assert.deepEqual(out, copy);
+});
+
+interface EffectSlot { used: boolean; dropped: boolean; key: Uint8Array; ok: number; err: number }
+const effectEmpty = (): EffectSlot[] => Array.from({ length: 16 }, (_, i) => ({ used: false, dropped: false, key: key(""), ok: i * 16, err: 255 - i * 16 }));
+function effectRequest(slots: EffectSlot[], name: Uint8Array, blocked?: boolean): Uint8Array {
+  const bytes = new Uint8Array(2 + name.length + (blocked === undefined ? 0 : 3) + slots.reduce((n, s) => n + 5 + s.key.length, 0));
+  bytes[0] = blocked === undefined ? 1 : 0; bytes[1] = name.length; bytes.set(name, 2);
+  let at = 2 + name.length;
+  if (blocked !== undefined) { bytes[at++] = +blocked; bytes[at++] = 127; bytes[at++] = 255; }
+  for (const s of slots) { bytes[at++] = +s.used; bytes[at++] = +s.dropped; bytes[at++] = s.key.length; bytes.set(s.key, at); at += s.key.length; bytes[at++] = s.ok; bytes[at++] = s.err; }
+  return bytes;
+}
+function effectCompletion(slots: EffectSlot[], slot: number, kind: number, ok: number, cut: number): Uint8Array {
+  const bytes = new Uint8Array(69); bytes.set([2, slot, kind, ok, cut]);
+  slots.forEach((s, i) => bytes.set([+s.used, +s.dropped, s.ok, s.err], 5 + i * 4));
+  return bytes;
+}
+
+test("named effects retain dropped slots, match first live keys and allocate independent empty keys", () => {
+  const slots = effectEmpty();
+  const names = [key(""), key("read"), key("café"), new Uint8Array([0, 255]), new Uint8Array(255).fill(255)];
+  for (let occupied = 0; occupied <= 16; occupied++) for (let drops = 0; drops < 4; drops++) {
+    slots.forEach((s, i) => { s.used = i < occupied; s.dropped = (i + drops) % 3 === 0; s.key = names[i % names.length]!; });
+    for (const name of names) {
+      const match = slots.findIndex(s => s.used && !s.dropped && Buffer.from(s.key).equals(name));
+      const free = slots.findIndex(s => !s.used);
+      assert.deepEqual([...native_effect_policy(effectRequest(slots, name))], [match < 0 ? 255 : match]);
+      for (const blocked of [false, true]) assert.deepEqual([...native_effect_policy(effectRequest(slots, name, blocked))], [
+        +!blocked, blocked || free < 0 ? 255 : free, blocked || name.length === 0 || match < 0 ? 255 : match, 127, 255,
+      ]);
+    }
+  }
+  for (let hole = 0; hole < 16; hole++) {
+    slots.forEach((s, i) => { s.used = i !== hole; s.dropped = false; s.key = key("same"); });
+    assert.equal(native_effect_policy(effectRequest(slots, key("same"), false))[1], hole);
+  }
+  slots.forEach(s => { s.used = true; s.dropped = false; s.key = key("same"); });
+  assert.deepEqual([...native_effect_policy(effectRequest(slots, key("same"), false))], [1, 255, 0, 127, 255]);
+});
+
+test("named completions preserve route, payload shape, truncation and silent-drop retirement", () => {
+  const slots = effectEmpty(); slots.forEach(s => { s.used = true; });
+  for (let slot = 0; slot < 16; slot++) for (let kind = 0; kind < 4; kind++) for (const ok of [0, 1]) for (const cut of [0, 1]) for (const dropped of [false, true]) {
+    slots[slot]!.dropped = dropped;
+    const s = slots[slot]!, success = ok === 1 && !(kind === 3 && cut === 1);
+    assert.deepEqual([...native_effect_policy(effectCompletion(slots, slot, kind, ok, cut))], [slot,
+      dropped || !success ? s.err : s.ok, dropped ? 0 : success ? kind + 1 : 5,
+      dropped || success ? 0 : ok === 1 && kind === 3 && cut === 1 ? 2 : 1,
+    ]);
+  }
+});
+
+test("named policy rejects malformed tables and returns owned results without mutating inputs", () => {
+  const slots = effectEmpty(); slots[0]!.used = true; slots[0]!.key = key("read");
+  for (const req of [effectRequest(slots, key("read")), effectRequest(slots, key("read"), false), effectCompletion(slots, 0, 3, 1, 1)]) {
+    for (let n = 0; n < req.length; n++) assert.throws(() => native_effect_policy(req.subarray(0, n)));
+    assert.throws(() => native_effect_policy(new Uint8Array([...req, 0])));
+    const before = req.slice(), out = native_effect_policy(req), result = out.slice();
+    assert.deepEqual(req, before); req.fill(0); native_effect_policy(effectRequest(slots, key("new"), true)); assert.deepEqual(out, result);
+  }
+  for (const [slot, kind, ok, cut] of [[16, 0, 1, 0], [0, 4, 1, 0], [0, 0, 2, 0], [0, 0, 1, 2], [1, 0, 1, 0]]) assert.throws(() => native_effect_policy(effectCompletion(slots, slot!, kind!, ok!, cut!)));
+  const bad = effectRequest(slots, key(""), false); bad[2] = 2; assert.throws(() => native_effect_policy(bad), /admission/);
+  bad[2] = 0; bad[5] = 2; assert.throws(() => native_effect_policy(bad), /slot/);
+  bad[5] = 1; bad[6] = 2; assert.throws(() => native_effect_policy(bad), /slot/);
 });

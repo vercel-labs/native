@@ -476,6 +476,7 @@ pub fn TsCoreHost(comptime core: type) type {
         const update_returns_cmd = @typeInfo(@TypeOf(core.update)).@"fn".return_type.? != *const Model;
         const init_returns_cmd = @typeInfo(@TypeOf(core.initialModel)).@"fn".return_type.? != *const Model;
         const has_subscriptions = @hasDecl(core, "subscriptions");
+        pub const environment_messages = if (@hasDecl(core, "envMsgs")) core.envMsgs else .{};
 
         /// One in-flight routed request: the wire key names it for
         /// replace/cancel, the tags route its terminal, and the table
@@ -1722,22 +1723,32 @@ pub fn TsCoreHost(comptime core: type) type {
         /// flight either (a dropped entry holds its slot only until
         /// its `.cancelled` terminal drains).
         fn allocEffectEntry(fx: *Fx, head: RoutedHead) ?u64 {
-            if (head.key.len > 0) {
-                if (fileStreamOccupiesKey(head.key)) {
-                    fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
-                    return null;
-                }
-                if (findEffect(head.key)) |existing| dropEffectEntry(fx, existing);
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head) else blk: {
+                const blocked = head.key.len > 0 and fileStreamOccupiesKey(head.key);
+                break :blk EffectPlan{
+                    .admitted = !blocked,
+                    .slot = if (blocked) null else freeEffectIndex(),
+                    .drop = if (blocked or head.key.len == 0) null else findEffect(head.key),
+                    .ok_tag = head.ok_tag,
+                    .err_tag = head.err_tag,
+                };
+            };
+            if (!plan.admitted) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(plan.err_tag, "rejected"));
+                return null;
             }
-            const index = freeEffectIndex() orelse
+            // A dropped predecessor remains occupied until its terminal drains.
+            // Preserve the reference order even when no free slot is available.
+            if (plan.drop) |existing| dropEffectEntry(fx, existing);
+            const index = plan.slot orelse
                 @panic("ts core host: more than 16 named engine ops in flight - the op table mirrors the engine's max_effects slots");
             const entry = &effects_table[index];
             entry.used = true;
             entry.dropped = false;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
-            entry.ok_tag = head.ok_tag;
-            entry.err_tag = head.err_tag;
+            entry.ok_tag = plan.ok_tag;
+            entry.err_tag = plan.err_tag;
             return index;
         }
 
@@ -1753,6 +1764,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// A dropped entry's key is dead to lookup: reissuing it is a
         /// fresh effect, and cancel aimed at it finds nothing.
         fn findEffect(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledEffectLookup(key);
             for (&effects_table, 0..) |*entry, index| {
                 if (entry.used and !entry.dropped and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -1764,6 +1776,67 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (!entry.used) return index;
             }
             return null;
+        }
+
+        const EffectPlan = struct { admitted: bool, slot: ?usize, drop: ?usize, ok_tag: u8, err_tag: u8 };
+        const max_effect_policy_bytes = 5 + max_wire_key_bytes + 16 * (5 + max_wire_key_bytes);
+
+        fn writeEffectTable(request: []u8, start: usize) usize {
+            var at = start;
+            for (&effects_table) |*entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.dropped);
+                request[at + 2] = @intCast(entry.key_len);
+                @memcpy(request[at + 3 ..][0..entry.key_len], entry.wireKey());
+                at += 3 + entry.key_len;
+                request[at] = entry.ok_tag;
+                request[at + 1] = entry.err_tag;
+                at += 2;
+            }
+            return at;
+        }
+
+        fn compiledEffectDeclaration(head: RoutedHead) EffectPlan {
+            var request: [max_effect_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intCast(head.key.len);
+            @memcpy(request[2..][0..head.key.len], head.key);
+            const at = 2 + head.key.len;
+            request[at] = @intFromBool(head.key.len > 0 and fileStreamOccupiesKey(head.key));
+            request[at + 1] = head.ok_tag;
+            request[at + 2] = head.err_tag;
+            const end = writeEffectTable(&request, at + 3);
+            var result: [5]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..end], &result) != result.len or result[0] > 1)
+                @panic("ts core host: invalid compiled effect declaration result");
+            const slot: ?usize = if (result[1] == 255) null else result[1];
+            const drop: ?usize = if (result[2] == 255) null else result[2];
+            if (slot) |index| {
+                if (index >= effects_table.len or effects_table[index].used)
+                    @panic("ts core host: invalid compiled effect allocation slot");
+            }
+            if (drop) |index| {
+                if (index >= effects_table.len or !effects_table[index].used or effects_table[index].dropped)
+                    @panic("ts core host: invalid compiled effect predecessor slot");
+            }
+            if (result[0] == 0 and (slot != null or drop != null))
+                @panic("ts core host: rejected effect declaration contains live slots");
+            return .{ .admitted = result[0] == 1, .slot = slot, .drop = drop, .ok_tag = result[3], .err_tag = result[4] };
+        }
+
+        fn compiledEffectLookup(key: []const u8) ?usize {
+            var request: [max_effect_policy_bytes]u8 = undefined;
+            request[0] = 1;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const end = writeEffectTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..end], &result) != result.len)
+                @panic("ts core host: invalid compiled effect lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= effects_table.len or !effects_table[result[0]].used or effects_table[result[0]].dropped)
+                @panic("ts core host: invalid compiled effect lookup slot");
+            return result[0];
         }
 
         /// Arm (or re-arm) a one-shot delay. A live wire key reuses its
@@ -3169,17 +3242,43 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Retire the named-op entry an engine terminal names and hand
         /// back its routing tags plus whether the entry was dropped —
         /// a dropped entry's terminal must be swallowed, not routed.
-        fn takeEffectEntry(key: u64) struct { ok_tag: u8, err_tag: u8, dropped: bool } {
-            if (key < effect_key_base) {
+        const EffectSuccess = enum(u8) { void_msg, bytes, stat, response };
+        const EffectPayload = enum(u8) { swallow, void_msg, bytes, stat, response, reason };
+        const EffectCompletion = struct { tag: u8, payload: EffectPayload, reason: u8 };
+
+        fn takeEffectEntry(key: u64, success: EffectSuccess, ok: bool, truncated: bool) EffectCompletion {
+            if (key < effect_key_base)
                 @panic("ts core host: an effect terminal arrived outside the bridge's named-op key namespace");
-            }
             const index = key - effect_key_base;
-            if (index >= effects_table.len or !effects_table[index].used) {
+            if (index >= effects_table.len or !effects_table[index].used)
                 @panic("ts core host: an effect terminal arrived for a named op the bridge is not tracking");
-            }
-            const entry = &effects_table[index];
-            entry.used = false;
-            return .{ .ok_tag = entry.ok_tag, .err_tag = entry.err_tag, .dropped = entry.dropped };
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                var request: [69]u8 = undefined;
+                request[0] = 2;
+                request[1] = @intCast(index);
+                request[2] = @intFromEnum(success);
+                request[3] = @intFromBool(ok);
+                request[4] = @intFromBool(truncated);
+                for (&effects_table, 0..) |*entry, slot| {
+                    const at = 5 + slot * 4;
+                    request[at] = @intFromBool(entry.used);
+                    request[at + 1] = @intFromBool(entry.dropped);
+                    request[at + 2] = entry.ok_tag;
+                    request[at + 3] = entry.err_tag;
+                }
+                var result: [4]u8 = undefined;
+                if (core.nativeEffectPolicy(&request, &result) != result.len or result[0] != index or result[2] > 5 or result[3] > 2)
+                    @panic("ts core host: invalid compiled effect completion result");
+                break :blk EffectCompletion{ .tag = result[1], .payload = @enumFromInt(result[2]), .reason = result[3] };
+            } else blk: {
+                const entry = &effects_table[index];
+                if (entry.dropped) break :blk EffectCompletion{ .tag = entry.err_tag, .payload = .swallow, .reason = 0 };
+                const cut = success == .response and truncated;
+                if (ok and !cut) break :blk EffectCompletion{ .tag = entry.ok_tag, .payload = @enumFromInt(@intFromEnum(success) + 1), .reason = 0 };
+                break :blk EffectCompletion{ .tag = entry.err_tag, .payload = .reason, .reason = if (ok and cut) 2 else 1 };
+            };
+            effects_table[index].used = false;
+            return plan;
         }
 
         /// A dropped entry's terminal (the `.cancelled` end of a
@@ -3198,14 +3297,16 @@ pub fn TsCoreHost(comptime core: type) type {
         /// outcome's name as bytes. A dropped entry's terminal routes
         /// nothing — the silent drop.
         fn fileResultMsg(result: runtime_effects.EffectFileResult) Msg {
-            const tags = takeEffectEntry(result.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (result.outcome == .ok) {
-                if (result.op == .read) return msgFromTagBytes(tags.ok_tag, result.bytes);
-                if (result.op == .stat) return msgFromTagFileStat(tags.ok_tag, result);
-                return msgFromTagVoid(tags.ok_tag);
-            }
-            return msgFromTagBytes(tags.err_tag, @tagName(result.outcome));
+            const success: EffectSuccess = if (result.op == .read) .bytes else if (result.op == .stat) .stat else .void_msg;
+            const route = takeEffectEntry(result.key, success, result.outcome == .ok, false);
+            return switch (route.payload) {
+                .swallow => swallowedMsg(route.tag),
+                .void_msg => msgFromTagVoid(route.tag),
+                .bytes => msgFromTagBytes(route.tag, result.bytes),
+                .stat => msgFromTagFileStat(route.tag, result),
+                .reason => msgFromTagBytes(route.tag, @tagName(result.outcome)),
+                .response => @panic("ts core host: file completion received a response payload plan"),
+            };
         }
 
         fn msgFromTagFileStat(tag: u8, result: runtime_effects.EffectFileResult) Msg {
@@ -3237,13 +3338,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// routes the err arm with the reason as bytes. A dropped
         /// entry's terminal routes nothing — the silent drop.
         fn fetchResultMsg(response: runtime_effects.EffectResponse) Msg {
-            const tags = takeEffectEntry(response.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (response.outcome == .ok and !response.truncated) {
-                return msgFromTagNumberBytes("fetch response", "{ status, body }", tags.ok_tag, response.status, response.body);
-            }
-            const reason = if (response.outcome == .ok) "truncated" else @tagName(response.outcome);
-            return msgFromTagBytes(tags.err_tag, reason);
+            const route = takeEffectEntry(response.key, .response, response.outcome == .ok, response.truncated);
+            return switch (route.payload) {
+                .swallow => swallowedMsg(route.tag),
+                .response => msgFromTagNumberBytes("fetch response", "{ status, body }", route.tag, response.status, response.body),
+                .reason => msgFromTagBytes(route.tag, if (route.reason == 2) "truncated" else @tagName(response.outcome)),
+                else => @panic("ts core host: fetch completion received an incompatible payload plan"),
+            };
         }
 
         /// `ClipboardMsgFn` for clip_read (writes are fire-and-forget
@@ -3251,10 +3352,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the outcome name. A dropped entry's terminal routes nothing
         /// — the silent drop.
         fn clipboardResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
-            const tags = takeEffectEntry(result.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (result.outcome == .ok) return msgFromTagBytes(tags.ok_tag, result.text);
-            return msgFromTagBytes(tags.err_tag, @tagName(result.outcome));
+            const route = takeEffectEntry(result.key, .bytes, result.outcome == .ok, false);
+            return switch (route.payload) {
+                .swallow => swallowedMsg(route.tag),
+                .bytes => msgFromTagBytes(route.tag, result.text),
+                .reason => msgFromTagBytes(route.tag, @tagName(result.outcome)),
+                else => @panic("ts core host: clipboard completion received an incompatible payload plan"),
+            };
         }
 
         /// `TimerMsgFn` for one-shot delays: the slot retires on fire
@@ -3291,7 +3395,7 @@ pub fn TsCoreHost(comptime core: type) type {
             const borrowed_subs = core.subscriptions(model_root);
             // A cycle policy may allocate in the compiler frame. Keep the
             // stream in the shim arena, and reset both only in finishCycle.
-            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy") or @hasDecl(core, "nativeDbPolicy")) blk: {
+            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy") or @hasDecl(core, "nativeDbPolicy") or @hasDecl(core, "nativeEffectPolicy")) blk: {
                 const copy = core.rt.frameAlloc(u8, borrowed_subs.len);
                 @memcpy(copy, borrowed_subs);
                 break :blk copy;

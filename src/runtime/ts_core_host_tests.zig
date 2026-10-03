@@ -3536,3 +3536,112 @@ test "database key lookup is owned by the compiled policy and preserves live com
     try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
     try std.testing.expect(db_policy_probe_core.calls[0] >= 2);
 }
+
+// Redirected slots and routes demonstrate that the native consumer applies the
+// policy's copied decisions rather than independently recomputing them.
+const effect_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup_enabled: bool = true;
+    var calls = [_]usize{0} ** 3;
+
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        if (request[0] == 2) {
+            const at = 5 + @as(usize, request[1]) * 4;
+            output[0] = request[1];
+            output[1] = 7; // The loaded bytes arm, including an error outcome.
+            output[2] = if (request[at + 1] == 1) 0 else if (request[3] == 1) 2 else 5;
+            output[3] = if (output[2] == 5) 1 else 0;
+            return 4;
+        }
+        const length: usize = request[1];
+        var at: usize = 2 + length + @as(usize, if (request[0] == 0) 3 else 0);
+        var matching: u8 = 255;
+        var used: [16]bool = undefined;
+        for (0..16) |slot| {
+            used[slot] = request[at] == 1;
+            const key_len: usize = request[at + 2];
+            if (used[slot] and request[at + 1] == 0 and matching == 255 and std.mem.eql(u8, request[at + 3 ..][0..key_len], request[2..][0..length])) matching = @intCast(slot);
+            at += 5 + key_len;
+        }
+        if (request[0] == 1) {
+            output[0] = if (lookup_enabled) matching else 255;
+            return 1;
+        }
+        const blocked = request[2 + length] == 1;
+        var free: u8 = 255;
+        for (0..16) |offset| {
+            const slot = (offset + 5) % 16;
+            if (!used[slot]) {
+                free = @intCast(slot);
+                break;
+            }
+        }
+        @memcpy(output[0..5], &@as([5]u8, .{ @intFromBool(!blocked), if (blocked) 255 else free, if (blocked or length == 0) 255 else matching, 8, 7 }));
+        return 5;
+    }
+};
+
+test "named effect host applies policy admission slots lookup routes and dropped terminal retirement" {
+    const Probe = ts_core_host.TsCoreHost(effect_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    effect_policy_probe_core.lookup_enabled = false;
+    effect_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .load_file);
+    const first = ts_core_host.effect_key_base + 5;
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    Probe.dispatch(fx, .drop_load); // Compiled lookup deliberately suppresses it.
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    effect_policy_probe_core.lookup_enabled = true;
+    Probe.dispatch(fx, .drop_load);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .load_file); // Dropped completion retired the owned slot.
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    try fx.feedFileResult(first, .io_failed, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("io_failed", Probe.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .dup_load);
+    try std.testing.expectEqual(ts_core_host.effect_key_base + 6, fx.pendingFileAt(0).?.key);
+    Probe.drain(fx); // First terminal is swallowed; replacement still owns slot 6.
+    try std.testing.expectEqualStrings("io_failed", Probe.model().status);
+    try fx.feedFileResult(ts_core_host.effect_key_base + 6, .ok, "replacement");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("replacement", Probe.model().status);
+    Probe.dispatch(fx, .load_file);
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    try std.testing.expect(effect_policy_probe_core.calls[0] >= 5);
+    try std.testing.expect(effect_policy_probe_core.calls[1] >= 2);
+    try std.testing.expectEqual(@as(usize, 4), effect_policy_probe_core.calls[2]);
+}
+
+test "named effect admission consumes native file stream occupancy and keeps cancel priority" {
+    const Probe = ts_core_host.TsCoreHost(effect_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    effect_policy_probe_core.lookup_enabled = true;
+    effect_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.dispatch(fx, .save_file);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    // The policy redirects the refusal's error route to loaded.
+    try std.testing.expectEqualStrings("rejected", Probe.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .drop_save);
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), effect_policy_probe_core.calls[0]);
+}

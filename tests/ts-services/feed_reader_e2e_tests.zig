@@ -4405,3 +4405,101 @@ test "compiled database plans preserve first matching keys exact fingerprints re
         core.rt.frameReset();
     }
 }
+
+test "compiled named effect plans preserve drop occupancy slot order routes and copied cycle ownership" {
+    const longest = [_]u8{255} ** 255;
+    const names = [_][]const u8{ "", "read", "caf\xc3\xa9", "\x00\xff", &longest, "absent" };
+    var request: [4608]u8 = undefined;
+    var lookup: [4608]u8 = undefined;
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    try std.testing.expect(borrowed.len > 0);
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    @memset(request[0..85], 0);
+    request[3] = 127;
+    request[4] = 255;
+    var plan: [5]u8 = undefined;
+    try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..85], &plan));
+    try std.testing.expectEqualSlices(u8, copy, borrowed);
+    core.rt.frameReset();
+    var comparisons: usize = 0;
+    for (0..17) |occupied| for (0..4) |drops| for (names) |name| {
+        request[0] = 0;
+        request[1] = @intCast(name.len);
+        @memcpy(request[2..][0..name.len], name);
+        const start = 5 + name.len;
+        var at = start;
+        var matching: u8 = 255;
+        for (0..16) |slot| {
+            const used = slot < occupied;
+            const dropped = (slot + drops) % 3 == 0;
+            const stored = names[slot % 5];
+            request[at] = @intFromBool(used);
+            request[at + 1] = @intFromBool(dropped);
+            request[at + 2] = @intCast(stored.len);
+            @memcpy(request[at + 3 ..][0..stored.len], stored);
+            at += 3 + stored.len;
+            request[at] = @intCast(slot * 16);
+            request[at + 1] = @intCast(255 - slot * 16);
+            at += 2;
+            if (used and !dropped and matching == 255 and std.mem.eql(u8, stored, name)) matching = @intCast(slot);
+        }
+        lookup[0] = 1;
+        lookup[1] = @intCast(name.len);
+        @memcpy(lookup[2..][0..name.len], name);
+        @memcpy(lookup[2 + name.len ..][0 .. at - start], request[start..at]);
+        var found: [1]u8 = undefined;
+        try std.testing.expectEqual(found.len, core.nativeEffectPolicy(lookup[0 .. at - 3], &found));
+        try std.testing.expectEqual(matching, found[0]);
+        for ([_]bool{ false, true }) |blocked| {
+            request[2 + name.len] = @intFromBool(blocked);
+            request[3 + name.len] = 127;
+            request[4 + name.len] = 255;
+            try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..at], &plan));
+            const frozen = plan;
+            try std.testing.expectEqual(found.len, core.nativeEffectPolicy(lookup[0 .. at - 3], &found));
+            core.rt.frameReset();
+            try std.testing.expectEqualSlices(u8, &frozen, &plan);
+            const free: u8 = if (blocked or occupied == 16) 255 else @intCast(occupied);
+            const drop: u8 = if (blocked or name.len == 0) 255 else matching;
+            try std.testing.expectEqualSlices(u8, &.{ @intFromBool(!blocked), free, drop, 127, 255 }, &plan);
+            comparisons += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 816), comparisons);
+    for (0..16) |hole| {
+        @memset(request[0..85], 0);
+        for (0..16) |slot| request[5 + slot * 5] = @intFromBool(slot != hole);
+        try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..85], &plan));
+        try std.testing.expectEqual(@as(u8, @intCast(hole)), plan[1]);
+        core.rt.frameReset();
+    }
+    var completion: [69]u8 = undefined;
+    completion[0] = 2;
+    for (0..16) |slot| {
+        completion[5 + slot * 4] = 1;
+        completion[6 + slot * 4] = 0;
+        completion[7 + slot * 4] = @intCast(slot * 16);
+        completion[8 + slot * 4] = @intCast(255 - slot * 16);
+    }
+    var routes: usize = 0;
+    for (0..16) |slot| for (0..4) |kind| for ([_]bool{ false, true }) |ok| for ([_]bool{ false, true }) |cut| for ([_]bool{ false, true }) |dropped| {
+        completion[1] = @intCast(slot);
+        completion[2] = @intCast(kind);
+        completion[3] = @intFromBool(ok);
+        completion[4] = @intFromBool(cut);
+        completion[6 + slot * 4] = @intFromBool(dropped);
+        var result: [4]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeEffectPolicy(&completion, &result));
+        const frozen = result;
+        try std.testing.expectEqual(plan.len, core.nativeEffectPolicy(request[0..85], &plan));
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &frozen, &result);
+        const success = ok and !(kind == 3 and cut);
+        try std.testing.expectEqualSlices(u8, &.{ @intCast(slot), @intCast(if (dropped or !success) 255 - slot * 16 else slot * 16), @intCast(if (dropped) 0 else if (success) kind + 1 else 5), @as(u8, if (dropped or success) 0 else if (ok and kind == 3 and cut) 2 else 1) }, &result);
+        routes += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 512), routes);
+}

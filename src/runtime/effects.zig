@@ -3042,6 +3042,8 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the fetch's response is drained.
         pub const FetchRequest = struct {
             key: u64,
+            generation: u64 = 0,
+            timeout_ms: u32 = 0,
             method: std.http.Method,
             url: []const u8,
             headers: []const std.http.Header,
@@ -3083,9 +3085,10 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the result is fed and drained.
         pub const FileRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectFileOp,
             path: []const u8,
-            /// The bytes a `writeFile` would write; `""` for reads.
+            /// The bytes a `writeFile` or `appendFile` would write; `""` for reads.
             bytes: []const u8 = "",
         };
 
@@ -3158,6 +3161,7 @@ pub fn Effects(comptime Msg: type) type {
         /// stays valid until the result is fed and drained.
         pub const ClipboardRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectClipboardOp,
             /// The text a `writeClipboard` would write; `""` for reads.
             text: []const u8 = "",
@@ -12757,6 +12761,8 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
+                        .timeout_ms = slot.timeout_ms,
                         .method = slot.method,
                         .url = slot.fetchUrl(),
                         .headers = slot.fetchHeaders(),
@@ -13004,9 +13010,10 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.file_op,
                         .path = slot.filePath(),
-                        .bytes = if (slot.file_op == .write) slot.fetchPayload() else "",
+                        .bytes = if (slot.file_op == .write or slot.file_op == .append) slot.fetchPayload() else "",
                     };
                 }
                 seen += 1;
@@ -13157,6 +13164,7 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.clipboard_op,
                         .text = if (slot.clipboard_op == .write) slot.fetchPayload() else "",
                     };
