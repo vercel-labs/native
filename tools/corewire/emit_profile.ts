@@ -166,6 +166,9 @@ const signatures: Signature[] = [
   { suffix: "native_text_policy", name: "native_text_policy", params: ["bytes"] },
   { suffix: "native_timer_policy", name: "native_timer_policy", params: ["bytes"] },
   { suffix: "native_db_policy", name: "native_db_policy", params: ["bytes"] },
+  { suffix: "native_effect_policy", name: "native_effect_policy", params: ["bytes"] },
+  { suffix: "native_stream_policy", name: "native_stream_policy", params: ["bytes"] },
+  { suffix: "native_window_policy", name: "native_window_policy", params: ["bytes"] },
   { suffix: "native_theme_policy", name: "native_theme_policy", params: ["bytes"] },
 ];
 

@@ -42,7 +42,27 @@ export interface NativeSnapshot {
   readonly effects: {
     readonly recorded: number;
     readonly requests: readonly { readonly key: string; readonly name: string; readonly bytes: readonly number[] }[];
+    readonly spawns: readonly {
+      readonly key: string;
+      readonly argv: readonly (readonly number[])[];
+      readonly stdin: readonly number[];
+      readonly output: "lines" | "collect";
+      readonly maxLineBytes: number;
+    }[];
+    readonly fetches: readonly {
+      readonly key: string;
+      readonly generation: string;
+      readonly method: string;
+      readonly url: readonly number[];
+      readonly headers: readonly { readonly name: readonly number[]; readonly value: readonly number[] }[];
+      readonly body: readonly number[];
+      readonly response: "buffered" | "stream";
+      readonly timeoutMs: number;
+      readonly maxLineBytes: number;
+    }[];
     readonly timers: readonly { readonly key: string; readonly intervalMs: number; readonly mode: "one_shot" | "repeating" }[];
+    readonly files: readonly { readonly key: string; readonly generation: string; readonly op: "read" | "write" | "append" | "stat" | "delete"; readonly path: string; readonly bytes: readonly number[] }[];
+    readonly clipboards: readonly { readonly key: string; readonly generation: string; readonly op: "read" | "write"; readonly text: readonly number[] }[];
     /** Parked fake database operations, including complete live-query facts.
      * Decimal strings preserve native keys and generation counters exactly. */
     readonly databases: readonly {
@@ -62,6 +82,9 @@ export interface NativeReplay {
   readonly snapshot: NativeSnapshot;
 }
 export interface NativeAppOptions {
+  /** Existing fixture directory delivered through the framework app-data env
+   * channel, with native app-scoped file authorization and journaled replay. */
+  readonly appDataDirectory?: string;
   readonly width?: number;
   readonly height?: number;
   readonly wallMs?: number;
@@ -142,7 +165,7 @@ export class NativeApp implements AsyncDisposable {
     if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 2147483647) throw new Error("Invalid native test timeout");
     const app = new NativeApp(executable, timeout);
     try {
-      await app.#snapshot({ op: "start", width: options.width ?? 640, height: options.height ?? 480, wall_ms: options.wallMs ?? 0 });
+      await app.#snapshot({ op: "start", width: options.width ?? 640, height: options.height ?? 480, wall_ms: options.wallMs ?? 0, app_data_directory: options.appDataDirectory ?? "" });
       return app;
     } catch (error) {
       await app.close();
@@ -252,6 +275,38 @@ export class NativeApp implements AsyncDisposable {
   }
   respond(key: string, bytes: Uint8Array, ok = true): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "host_result", key: identity(key), bytes: Array.from(bytes), ok });
+  }
+  /** Feed terminal OS results through the native journal/replay boundary. */
+  fileResult(key: string, op: "read" | "write" | "append" | "stat" | "delete", bytes: Uint8Array = new Uint8Array(0),
+    options: { outcome?: "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "disk_full"; total?: number; mtimeMs?: number; exists?: boolean } = {}): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "file_result", key: identity(key), file_op: op, bytes: [...bytes], file_outcome: options.outcome ?? "ok", file_total: options.total ?? 0, file_mtime_ms: options.mtimeMs ?? 0, file_exists: options.exists ?? false });
+  }
+  fetchResult(key: string, status: number, body: Uint8Array,
+    options: { outcome?: "ok" | "rejected" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "cancelled"; truncated?: boolean } = {}): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "fetch_result", key: identity(key), fetch_status: status, bytes: [...body], fetch_outcome: options.outcome ?? "ok", fetch_truncated: options.truncated ?? false });
+  }
+  clipboardResult(key: string, text: Uint8Array, outcome: "ok" | "failed" | "rejected" | "cancelled" = "ok"): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "clipboard_result", key: identity(key), bytes: [...text], clipboard_outcome: outcome });
+  }
+  /** Journal a native stream line, including explicit data-loss facts. */
+  streamLine(key: string, bytes: Uint8Array, metadata: { truncated?: boolean; droppedBefore?: number } = {}): Promise<NativeSnapshot> {
+    const dropped = metadata.droppedBefore ?? 0;
+    if (!Number.isInteger(dropped) || dropped < 0 || dropped > 0xffffffff) throw new Error("Invalid dropped-line count");
+    return this.#snapshot({ op: "stream_line", key: identity(key), stream_bytes: [...bytes], truncated: metadata.truncated ?? false, dropped_before: dropped });
+  }
+  spawnExit(key: string, code = 0, reason: "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed" = "exited", output = new Uint8Array(0)): Promise<NativeSnapshot> {
+    if (!Number.isInteger(code) || code < -2147483648 || code > 2147483647) throw new Error("Invalid spawn exit code");
+    return this.#snapshot({ op: "spawn_exit", key: identity(key), exit_code: code, exit_reason: reason, stream_bytes: [...output] });
+  }
+  /** Feed bounded chunks into a collect-mode process before its terminal. */
+  spawnOutput(key: string, bytes: Uint8Array): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "spawn_output", key: identity(key), stream_bytes: [...bytes] });
+  }
+  fetchResponse(key: string, status = 200, outcome: "ok" | "rejected" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "cancelled" = "ok", metadata: { truncated?: boolean; droppedBefore?: number } = {}): Promise<NativeSnapshot> {
+    const dropped = metadata.droppedBefore ?? 0;
+    if (!Number.isInteger(status) || status < 0 || status > 65535 || !Number.isInteger(dropped) || dropped < 0 || dropped > 0xffffffff)
+      throw new Error("Invalid fetch response metadata");
+    return this.#snapshot({ op: "fetch_response", key: identity(key), http_status: status, fetch_outcome: outcome, truncated: metadata.truncated ?? false, dropped_before: dropped });
   }
   fireTimer(key: string): Promise<NativeSnapshot> { return this.#snapshot({ op: "timer", key: identity(key) }); }
 

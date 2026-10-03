@@ -3042,6 +3042,8 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the fetch's response is drained.
         pub const FetchRequest = struct {
             key: u64,
+            generation: u64 = 0,
+            timeout_ms: u32 = 0,
             method: std.http.Method,
             url: []const u8,
             headers: []const std.http.Header,
@@ -3083,9 +3085,10 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the result is fed and drained.
         pub const FileRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectFileOp,
             path: []const u8,
-            /// The bytes a `writeFile` would write; `""` for reads.
+            /// The bytes a `writeFile` or `appendFile` would write; `""` for reads.
             bytes: []const u8 = "",
         };
 
@@ -3158,6 +3161,7 @@ pub fn Effects(comptime Msg: type) type {
         /// stays valid until the result is fed and drained.
         pub const ClipboardRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectClipboardOp,
             /// The text a `writeClipboard` would write; `""` for reads.
             text: []const u8 = "",
@@ -12757,6 +12761,8 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
+                        .timeout_ms = slot.timeout_ms,
                         .method = slot.method,
                         .url = slot.fetchUrl(),
                         .headers = slot.fetchHeaders(),
@@ -12852,6 +12858,16 @@ pub fn Effects(comptime Msg: type) type {
         /// feed, which must deliver exactly the reason the recorded
         /// session delivered (`.signaled`, `.cancelled`, ...).
         pub fn feedExitReason(self: *Self, key: u64, code: i32, reason: EffectExitReason) error{EffectNotFound}!void {
+            return self.feedExitWithMetadata(key, code, reason, .{});
+        }
+
+        /// Preserve the complete journaled terminal, including loss that
+        /// cannot be inferred from an already-truncated output/tail payload.
+        pub fn feedExitWithMetadata(self: *Self, key: u64, code: i32, reason: EffectExitReason, metadata: struct {
+            output_truncated: bool = false,
+            stderr_truncated: bool = false,
+            dropped_lines: ?u32 = null,
+        }) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .spawn) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             var entry: Entry = .{
@@ -12861,12 +12877,16 @@ pub fn Effects(comptime Msg: type) type {
                 .key = slot.key,
                 .code = code,
                 .reason = reason,
-                .dropped_lines = slot.dropped_total,
+                .dropped_lines = metadata.dropped_lines orelse slot.dropped_total,
+                .collect_truncated = metadata.output_truncated,
+                .stderr_truncated = metadata.stderr_truncated,
                 .exit_fn = slot.on_exit,
             };
             const exit_fn = slot.on_exit;
             if (slot.output_mode == .collect) {
                 stampCollectExit(slot, &entry);
+                entry.collect_truncated = entry.collect_truncated or metadata.output_truncated;
+                entry.stderr_truncated = entry.stderr_truncated or metadata.stderr_truncated;
                 slot.state.store(.draining, .release);
                 if (!self.enqueue(&entry)) {
                     self.releaseSpawnSlot(slot);
@@ -12896,6 +12916,8 @@ pub fn Effects(comptime Msg: type) type {
                     .code = code,
                     .reason = reason,
                     .dropped_lines = entry.dropped_lines,
+                    .output_truncated = entry.collect_truncated,
+                    .stderr_truncated = entry.stderr_truncated,
                 }, exit_fn);
             }
             self.wakeHost();
@@ -13004,9 +13026,10 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.file_op,
                         .path = slot.filePath(),
-                        .bytes = if (slot.file_op == .write) slot.fetchPayload() else "",
+                        .bytes = if (slot.file_op == .write or slot.file_op == .append) slot.fetchPayload() else "",
                     };
                 }
                 seen += 1;
@@ -13157,6 +13180,7 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.clipboard_op,
                         .text = if (slot.clipboard_op == .write) slot.fetchPayload() else "",
                     };

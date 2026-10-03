@@ -469,6 +469,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 comptime validateWindowsHelper();
                 stamped.windows_fn = windowsAdapter;
+                if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                    if (options.window_policy != null) @panic("TsUiApp wires window_policy from the compiled core");
+                    stamped.window_policy = core.nativeWindowPolicy;
+                }
             }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a

@@ -177,6 +177,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.window_count) : (cursor += 1) {
                 self.windows[cursor] = self.windows[cursor + 1];
+                self.windows[cursor].rebindStorage();
             }
             self.window_count -= 1;
         }
@@ -282,6 +283,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.shell_layout_count) : (cursor += 1) {
                 self.shell_layouts[cursor] = self.shell_layouts[cursor + 1];
+                self.shell_layouts[cursor].rebindStorage();
             }
             self.shell_layout_count -= 1;
         }
