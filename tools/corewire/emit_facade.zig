@@ -53,6 +53,26 @@ pub const Error = error{ Refused, OutOfMemory };
 const max_safe = "9007199254740991";
 const min_safe = "-9007199254740991";
 
+fn appendBalancedGuardExpression(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), guards: []const []const u8) Error!void {
+    std.debug.assert(guards.len > 0);
+    if (guards.len == 1) {
+        try out.appendSlice(arena, guards[0]);
+        return;
+    }
+    const midpoint = guards.len / 2;
+    try out.append(arena, '(');
+    try appendBalancedGuardExpression(arena, out, guards[0..midpoint]);
+    try out.appendSlice(arena, ") && (");
+    try appendBalancedGuardExpression(arena, out, guards[midpoint..]);
+    try out.append(arena, ')');
+}
+
+fn balancedGuardExpression(arena: std.mem.Allocator, guards: []const []const u8) Error![]const u8 {
+    var expression: std.ArrayListUnmanaged(u8) = .empty;
+    try appendBalancedGuardExpression(arena, &expression, guards);
+    return expression.items;
+}
+
 fn integerLowerBound(class: IntegerClass) []const u8 {
     return if (class == .u64) "0" else min_safe;
 }
@@ -1495,13 +1515,12 @@ const FacadeEmitter = struct {
                     // integer-attested axis proves against its own signed or
                     // unsigned range before Math.trunc states wholeness.
                     var fields_text: std.ArrayListUnmanaged(u8) = .empty;
-                    var guards: std.ArrayListUnmanaged(u8) = .empty;
+                    var guards: std.ArrayListUnmanaged([]const u8) = .empty;
                     for (record.fields, 0..) |field, index| {
                         const param = scrollParamFor(field.name) orelse field.name;
                         const value = if (field.type == .i64) blk: {
                             const class = self.slotClass(record.name, field.name) orelse .i64;
-                            if (guards.items.len > 0) try guards.appendSlice(self.arena, " && ");
-                            try guards.appendSlice(self.arena, try std.fmt.allocPrint(self.arena, "{s} >= {s} && {s} <= {s}", .{ param, integerLowerBound(class), param, max_safe }));
+                            try guards.append(self.arena, try std.fmt.allocPrint(self.arena, "{s} >= {s} && {s} <= {s}", .{ param, integerLowerBound(class), param, max_safe }));
                             break :blk try std.fmt.allocPrint(self.arena, "Math.trunc({s})", .{param});
                         } else param;
                         if (index > 0) try fields_text.appendSlice(self.arena, ", ");
@@ -1517,13 +1536,14 @@ const FacadeEmitter = struct {
                     if (guards.items.len == 0) {
                         try self.print("  if (tag === nscfTag_{s}) {s}\n", .{ arm.name, try self.commitLine(object) });
                     } else {
+                        const guard = try balancedGuardExpression(self.arena, guards.items);
                         try self.print(
                             \\  if (tag === nscfTag_{s}) {{
                             \\    if ({s}) return nscfCommit(coreUpdate(nscfCommitted, {s}));
                             \\    nscfTrap("a scroll dispatch value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");
                             \\  }}
                             \\
-                        , .{ arm.name, guards.items, object });
+                        , .{ arm.name, guard, object });
                         self.use(.trap);
                     }
                 },
@@ -1879,7 +1899,8 @@ const FacadeEmitter = struct {
         try self.print("  nscfAssertConsumed(bytes, {s});\n", .{model_decode.offsetText()});
         const construction = try model_decode.constructionText(model);
         if (model_decode.guards.items.len > 0) {
-            try self.print("  if ({s}) return {s};\n  nscfTrap(\"a restored integer value is NaN or outside its attested exact-integer range — the snapshot cannot represent this Model\");\n", .{ model_decode.guards.items, construction });
+            const guard = try balancedGuardExpression(self.arena, model_decode.guards.items);
+            try self.print("  if ({s}) return {s};\n  nscfTrap(\"a restored integer value is NaN or outside its attested exact-integer range — the snapshot cannot represent this Model\");\n", .{ guard, construction });
             self.use(.trap);
         } else {
             try self.print("  return {s};\n", .{construction});
@@ -2229,7 +2250,8 @@ const FacadeEmitter = struct {
             break :blk try std.fmt.allocPrint(self.arena, "{{ kind: \"{s}\",{s}}}", .{ try tsString(self.arena, arm_name), inner });
         };
         if (decode.guards.items.len > 0) {
-            try self.print("    if ({s}) {{\n      return nscfCommit(coreUpdate(nscfCommitted, {s}));\n    }}\n    nscfTrap(\"a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it\");\n", .{ decode.guards.items, object });
+            const guard = try balancedGuardExpression(self.arena, decode.guards.items);
+            try self.print("    if ({s}) {{\n      return nscfCommit(coreUpdate(nscfCommitted, {s}));\n    }}\n    nscfTrap(\"a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it\");\n", .{ guard, object });
             self.use(.trap);
         } else {
             try self.print("    return nscfCommit(coreUpdate(nscfCommitted, {s}));\n", .{object});
@@ -2280,7 +2302,8 @@ const FacadeEmitter = struct {
                 }
                 try self.print("    nscfAssertConsumed(bytes, {s});\n", .{decode.offsetText()});
                 if (decode.guards.items.len > 0) {
-                    try self.print("    if ({s}) {{\n      return {s};\n    }}\n    nscfTrap(\"a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it\");\n", .{ decode.guards.items, construction });
+                    const guard = try balancedGuardExpression(self.arena, decode.guards.items);
+                    try self.print("    if ({s}) {{\n      return {s};\n    }}\n    nscfTrap(\"a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it\");\n", .{ guard, construction });
                 } else {
                     try self.print("    return {s};\n", .{construction});
                 }
@@ -3334,7 +3357,7 @@ const RecordDecode = struct {
     saturating_selection: bool = false,
     local_count: usize = 0,
     cursor_started: bool = false,
-    guards: std.ArrayListUnmanaged(u8) = .empty,
+    guards: std.ArrayListUnmanaged([]const u8) = .empty,
     exprs: std.ArrayListUnmanaged(struct { name: []const u8, text: []const u8 }) = .empty,
 
     const Self = @This();
@@ -3373,17 +3396,17 @@ const RecordDecode = struct {
         try self.advance(try std.fmt.allocPrint(self.arena(), "{d}", .{amount}));
     }
 
-    fn addGuard(self: *Self, guards: *std.ArrayListUnmanaged(u8), local: []const u8, class: IntegerClass) Error!void {
-        if (guards.items.len > 0) try guards.appendSlice(self.arena(), " && ");
-        try guards.appendSlice(self.arena(), try std.fmt.allocPrint(self.arena(), "{s} >= {s} && {s} <= {s}", .{ local, integerLowerBound(class), local, max_safe }));
+    fn addGuard(self: *Self, guards: *std.ArrayListUnmanaged([]const u8), local: []const u8, class: IntegerClass) Error!void {
+        try guards.append(self.arena(), try std.fmt.allocPrint(self.arena(), "{s} >= {s} && {s} <= {s}", .{ local, integerLowerBound(class), local, max_safe }));
     }
 
-    fn guardedStatement(self: *Self, guards: []const u8, statement: []const u8) Error!void {
+    fn guardedStatement(self: *Self, guards: []const []const u8, statement: []const u8) Error!void {
         if (guards.len == 0) {
             try self.line("{s}\n", .{statement});
             return;
         }
-        try self.line("if ({s}) {{\n", .{guards});
+        const guard = try balancedGuardExpression(self.arena(), guards);
+        try self.line("if ({s}) {{\n", .{guard});
         self.indent += 1;
         try self.line("{s}\n", .{statement});
         self.indent -= 1;
@@ -3406,7 +3429,7 @@ const RecordDecode = struct {
         try self.exprs.append(self.arena(), .{ .name = field.name, .text = text });
     }
 
-    fn decodeRecord(self: *Self, record: *const sidecar_mod.Struct, guards: *std.ArrayListUnmanaged(u8)) Error![]const u8 {
+    fn decodeRecord(self: *Self, record: *const sidecar_mod.Struct, guards: *std.ArrayListUnmanaged([]const u8)) Error![]const u8 {
         var parts: std.ArrayListUnmanaged(u8) = .empty;
         for (record.fields, 0..) |field, index| {
             const text = try self.decodeRef(field.type, field.name, record.name, field.name, guards);
@@ -3431,7 +3454,7 @@ const RecordDecode = struct {
         for (entry.arms, 0..) |arm, index| {
             try self.line("{s}if ({s} === {d}) {{\n", .{ if (index == 0) "" else "else ", tag, index });
             self.indent += 1;
-            var arm_guards: std.ArrayListUnmanaged(u8) = .empty;
+            var arm_guards: std.ArrayListUnmanaged([]const u8) = .empty;
             const object = if (arm.payload == .void)
                 try std.fmt.allocPrint(self.arena(), "{{ kind: \"{s}\" }}", .{try tsString(self.arena(), arm.name)})
             else if (em.synthesizedRecordOf(arm.payload, entry.name, arm.name)) |record| blk: {
@@ -3454,7 +3477,7 @@ const RecordDecode = struct {
         return local;
     }
 
-    fn decodeRef(self: *Self, ref: TypeRef, field_name: []const u8, container: []const u8, member: []const u8, guards: *std.ArrayListUnmanaged(u8)) Error![]const u8 {
+    fn decodeRef(self: *Self, ref: TypeRef, field_name: []const u8, container: []const u8, member: []const u8, guards: *std.ArrayListUnmanaged([]const u8)) Error![]const u8 {
         const em = self.emitter;
         return switch (ref) {
             .f64 => blk: {
@@ -3528,7 +3551,7 @@ const RecordDecode = struct {
                 try self.line("let {s}: {s} | null = null;\n", .{ local, try em.spellRef(inner.*) });
                 try self.line("if ({s}) {{\n", .{present});
                 self.indent += 1;
-                var inner_guards: std.ArrayListUnmanaged(u8) = .empty;
+                var inner_guards: std.ArrayListUnmanaged([]const u8) = .empty;
                 const value = try self.decodeRef(inner.*, field_name, container, member, &inner_guards);
                 try self.guardedStatement(inner_guards.items, try std.fmt.allocPrint(self.arena(), "{s} = {s};", .{ local, value }));
                 self.indent -= 1;
@@ -3545,7 +3568,7 @@ const RecordDecode = struct {
                 const index = try self.nextLocal();
                 try self.line("for (let {s} = 0; {s} < {s}; {s}++) {{\n", .{ index, index, len_local, index });
                 self.indent += 1;
-                var elem_guards: std.ArrayListUnmanaged(u8) = .empty;
+                var elem_guards: std.ArrayListUnmanaged([]const u8) = .empty;
                 const value = try self.decodeRef(elem.*, field_name, container, member, &elem_guards);
                 try self.guardedStatement(elem_guards.items, try std.fmt.allocPrint(self.arena(), "{s}.push({s});", .{ local, value }));
                 self.indent -= 1;
@@ -3875,6 +3898,80 @@ test "facade emission is deterministic and carries the adapter surface" {
     try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, nscfStoreScanLimit(cmd.limit));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
+}
+
+test "guard conjunctions have logarithmic depth and linear retained output" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const small = [_][]const u8{ "g0", "g1", "g2", "g3", "g4" };
+    try testing.expectEqualStrings(
+        "((g0) && (g1)) && ((g2) && ((g3) && (g4)))",
+        try balancedGuardExpression(arena, &small),
+    );
+
+    const wide = [_][]const u8{"guard"} ** 512;
+    const expression = try balancedGuardExpression(arena, &wide);
+    var depth: usize = 0;
+    var maximum_depth: usize = 0;
+    for (expression) |byte| {
+        if (byte == '(') {
+            depth += 1;
+            maximum_depth = @max(maximum_depth, depth);
+        } else if (byte == ')') {
+            depth -= 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), depth);
+    try testing.expectEqual(@as(usize, 9), maximum_depth);
+    try testing.expectEqual(@as(usize, 511), std.mem.count(u8, expression, " && "));
+}
+
+test "wide model decode emits bounded integer guards" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fields: std.ArrayListUnmanaged(u8) = .empty;
+    var slots: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..512) |index| {
+        if (index > 0) {
+            try fields.appendSlice(arena, ", ");
+            try slots.appendSlice(arena, ", ");
+        }
+        try fields.appendSlice(arena, try std.fmt.allocPrint(
+            arena,
+            "{{\"name\": \"value{d}\", \"type\": {{\"kind\": \"i64\"}}}}",
+            .{index},
+        ));
+        try slots.appendSlice(arena, try std.fmt.allocPrint(
+            arena,
+            "{{\"slot\": \"Model.value{d}\", \"class\": \"i64\"}}",
+            .{index},
+        ));
+    }
+
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"Model\", \"fields\": [\n        {\"name\": \"count\", \"type\": {\"kind\": \"i64\"}},\n        {\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}\n      ]}",
+        try std.fmt.allocPrint(arena, "{{\"name\": \"Model\", \"fields\": [{s}]}}", .{fields.items}),
+    );
+    source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        source,
+        "{\"slot\": \"Model.count\", \"class\": \"i64\"}",
+        slots.items,
+    );
+    const generated = try facadeFromJson(arena, source);
+
+    // ScriptC recursively emits logical-expression IR, so balance the proof
+    // tree to keep model width from becoming expression depth.
+    try testing.expectEqual(@as(usize, 512), std.mem.count(u8, generated, ">= -9007199254740991 && nscfV"));
+    try testing.expect(std.mem.indexOf(u8, generated, "<= 9007199254740991 && nscfV") == null);
 }
 
 test "migration hooks produce a closed status-prefixed snapshot seam" {
@@ -4529,7 +4626,7 @@ test "scroll-shaped record arms answer the dedicated scroll entry" {
     integer_source = try std.mem.replaceOwned(u8, arena, integer_source, "{\"name\": \"offsetY\", \"type\": {\"kind\": \"f64\"}}", "{\"name\": \"offsetY\", \"type\": {\"kind\": \"i64\"}}");
     integer_source = try std.mem.replaceOwned(u8, arena, integer_source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"ScrollState.offsetX\", \"class\": \"u64\"}, {\"slot\": \"ScrollState.offsetY\", \"class\": \"i64\"}");
     const integer_generated = try facadeFromJson(arena, integer_source);
-    try testing.expect(std.mem.indexOf(u8, integer_generated, "offsetX >= 0 && offsetX <= 9007199254740991 && offsetY >= -9007199254740991 && offsetY <= 9007199254740991") != null);
+    try testing.expect(std.mem.indexOf(u8, integer_generated, "if ((offsetX >= 0 && offsetX <= 9007199254740991) && (offsetY >= -9007199254740991 && offsetY <= 9007199254740991))") != null);
     try testing.expect(std.mem.indexOf(u8, integer_generated, "offsetX: Math.trunc(offsetX), offsetY: Math.trunc(offsetY)") != null);
 
     // The canvas snake_case vocabulary routes through the same ABI entry,
