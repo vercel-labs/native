@@ -9,7 +9,8 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, replay, close },
+    app_data_directory: []const u8 = "",
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -20,6 +21,21 @@ const Request = struct {
     db_kind: sdk.EffectDbResultKind = .done,
     db_outcome: sdk.EffectDbOutcome = .ok,
     db_bytes: []const u8 = &.{},
+    file_op: sdk.EffectFileOp = .read,
+    file_outcome: sdk.EffectFileOutcome = .ok,
+    file_total: u64 = 0,
+    file_mtime_ms: i64 = 0,
+    file_exists: bool = false,
+    fetch_outcome: sdk.EffectFetchOutcome = .ok,
+    fetch_status: u16 = 200,
+    fetch_truncated: bool = false,
+    clipboard_outcome: sdk.EffectClipboardOutcome = .ok,
+    stream_bytes: []const u8 = &.{},
+    truncated: bool = false,
+    dropped_before: u32 = 0,
+    exit_code: i32 = 0,
+    exit_reason: sdk.EffectExitReason = .exited,
+    http_status: u16 = 200,
     view: []const u8 = "",
     window: u64 = 1,
     widget: []const u8 = "0",
@@ -58,8 +74,11 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
         clock: sdk.TestClock = .{},
         size: sdk.geometry.SizeF,
         frame_index: u64 = 0,
+        app_data_directory: []u8 = &.{},
+        app_data_roots: [1][]const u8 = .{""},
+        env_values: []Adapter.EnvValue = &.{},
 
-        fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions) !*@This() {
+        fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions, replaying: bool) !*@This() {
             if (config.width == 0 or config.width > 8192 or config.height == 0 or config.height > 8192) return error.InvalidSurfaceSize;
             // Times cross JavaScript exactly; reject out-of-range input.
             if (config.wall_ms < -9007199254740991 or config.wall_ms > 9007199254740991) return error.InvalidClock;
@@ -70,11 +89,31 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 .harness = undefined,
                 .state = undefined,
             };
+            errdefer gpa.free(self.app_data_directory);
+            errdefer gpa.free(self.env_values);
             self.harness = try sdk.TestHarness().create(gpa, .{ .size = self.size });
             errdefer self.harness.destroy(gpa);
             self.harness.null_platform.gpu_surfaces = true;
             self.harness.null_platform.image_decode = true;
-            self.state = try Adapter.create(gpa, wiring, app_options);
+            var core_wiring = wiring;
+            if (!replaying and config.app_data_directory.len > 0) {
+                if (!std.fs.path.isAbsolute(config.app_data_directory)) return error.InvalidAppDataDirectory;
+                self.app_data_directory = try gpa.dupe(u8, config.app_data_directory);
+                self.app_data_roots[0] = self.app_data_directory;
+                // The fake file executor has the same app-scoped path policy
+                // as a shipping runner. Replay reads only the recorded world.
+                self.harness.runtime.options.file_access = .{ .roots = &self.app_data_roots, .permitted = false, .enforce = true };
+                var msg: ?[]const u8 = null;
+                inline for (Adapter.Host.environment_messages) |entry| {
+                    if (std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_DATA_DIR")) msg = entry.msg;
+                }
+                const route = msg orelse return error.AppDataEnvironmentChannelMissing;
+                self.env_values = try gpa.alloc(Adapter.EnvValue, wiring.env_values.len + 1);
+                @memcpy(self.env_values[0..wiring.env_values.len], wiring.env_values);
+                self.env_values[wiring.env_values.len] = .{ .msg = route, .value = self.app_data_directory };
+                core_wiring.env_values = self.env_values;
+            }
+            self.state = try Adapter.create(gpa, core_wiring, app_options);
             self.state.effects.executor = .fake;
             self.clock.setWallMs(config.wall_ms);
             self.state.effects.clock = self.clock.clock();
@@ -83,6 +122,8 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
 
         fn destroy(self: *@This()) void {
             self.state.destroy();
+            gpa.free(self.env_values);
+            gpa.free(self.app_data_directory);
             self.harness.destroy(gpa);
             gpa.destroy(self);
         }
@@ -185,6 +226,55 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 try json.endObject();
             }
             try json.endArray();
+            try json.objectField("spawns");
+            try json.beginArray();
+            for (0..self.state.effects.pendingSpawnCount()) |index| {
+                const request = self.state.effects.pendingSpawnAt(index).?;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{request.key}));
+                try json.objectField("output");
+                try json.write(request.output);
+                try json.objectField("maxLineBytes");
+                try json.write(request.max_line_bytes);
+                json.options.emit_strings_as_arrays = true;
+                try json.objectField("argv");
+                try json.write(request.argv);
+                try json.objectField("stdin");
+                try json.write(request.stdin);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            }
+            try json.endArray();
+            try json.objectField("fetches");
+            try json.beginArray();
+            for (0..self.state.effects.pendingFetchCount()) |index| {
+                const request = self.state.effects.pendingFetchAt(index).?;
+                var generation_buffer: [32]u8 = undefined;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{request.key}));
+                try json.objectField("generation");
+                try json.write(try std.fmt.bufPrint(&generation_buffer, "{d}", .{request.generation}));
+                try json.objectField("timeoutMs");
+                try json.write(request.timeout_ms);
+                try json.objectField("method");
+                try json.write(request.method);
+                try json.objectField("response");
+                try json.write(request.response);
+                try json.objectField("maxLineBytes");
+                try json.write(request.max_line_bytes);
+                json.options.emit_strings_as_arrays = true;
+                try json.objectField("url");
+                try json.write(request.url);
+                try json.objectField("headers");
+                try json.write(request.headers);
+                try json.objectField("body");
+                try json.write(request.body);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            }
+            try json.endArray();
             try json.objectField("timers");
             try json.beginArray();
             for (0..self.state.effects.pendingTimerCount()) |index| {
@@ -194,6 +284,46 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .intervalMs = timer.interval_ms,
                     .mode = timer.mode,
                 });
+            }
+            try json.endArray();
+            try json.objectField("files");
+            try json.beginArray();
+            for (0..self.state.effects.pendingFileCount()) |index| {
+                const file = self.state.effects.pendingFileAt(index).?;
+                var generation_buffer: [32]u8 = undefined;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{file.key}));
+                try json.objectField("generation");
+                try json.write(try std.fmt.bufPrint(&generation_buffer, "{d}", .{file.generation}));
+                try json.objectField("op");
+                try json.write(file.op);
+                try json.objectField("path");
+                try json.write(file.path);
+                try json.objectField("bytes");
+                json.options.emit_strings_as_arrays = true;
+                try json.write(file.bytes);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            }
+            try json.endArray();
+            try json.objectField("clipboards");
+            try json.beginArray();
+            for (0..self.state.effects.pendingClipboardCount()) |index| {
+                const clipboard = self.state.effects.pendingClipboardAt(index).?;
+                var generation_buffer: [32]u8 = undefined;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{clipboard.key}));
+                try json.objectField("generation");
+                try json.write(try std.fmt.bufPrint(&generation_buffer, "{d}", .{clipboard.generation}));
+                try json.objectField("op");
+                try json.write(clipboard.op);
+                try json.objectField("text");
+                json.options.emit_strings_as_arrays = true;
+                try json.write(clipboard.text);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
             }
             try json.endArray();
             try json.objectField("databases");
@@ -292,7 +422,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
         if (request.op == .start) {
             if (host != null) return error.AlreadyStarted;
             config = request;
-            host = try Host.create(config, options, core_options);
+            host = try Host.create(config, options, core_options, false);
             recorder.begin(.{ .platform_name = "test", .app_name = options.name, .window_width = @floatFromInt(config.width), .window_height = @floatFromInt(config.height) });
             host.?.harness.runtime.options.session_recorder = recorder;
             try host.?.harness.start(host.?.state.app());
@@ -344,6 +474,40 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     try value.state.effects.feedDbResult(try std.fmt.parseInt(u64, request.key, 10), request.db_kind, request.db_outcome, request.db_bytes);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
                 },
+                .file_result => {
+                    try value.state.effects.feedFileResultDetailed(.{
+                        .key = try std.fmt.parseInt(u64, request.key, 10),
+                        .op = request.file_op,
+                        .outcome = request.file_outcome,
+                        .bytes = request.bytes,
+                        .total = request.file_total,
+                        .mtime_ms = request.file_mtime_ms,
+                        .exists = request.file_exists,
+                    });
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .fetch_result => {
+                    try value.state.effects.feedResponseOutcomeWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.fetch_outcome, request.fetch_status, request.bytes, request.fetch_truncated, 0);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .clipboard_result => {
+                    try value.state.effects.feedClipboardResult(try std.fmt.parseInt(u64, request.key, 10), request.clipboard_outcome, request.bytes);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .stream_line => {
+                    try value.state.effects.feedLineWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes, request.truncated, request.dropped_before);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .spawn_exit => {
+                    if (request.stream_bytes.len > 0) try value.state.effects.feedOutput(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes);
+                    try value.state.effects.feedExitReason(try std.fmt.parseInt(u64, request.key, 10), request.exit_code, request.exit_reason);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .spawn_output => try value.state.effects.feedOutput(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes),
+                .fetch_response => {
+                    try value.state.effects.feedResponseOutcomeWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.fetch_outcome, request.http_status, request.stream_bytes, request.truncated, request.dropped_before);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
                 .timer => {
                     const event = try value.state.effects.fakeTimerEvent(try std.fmt.parseInt(u64, request.key, 10), value.frame_index * 16_000_000);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .timer = event });
@@ -356,7 +520,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     defer gpa.free(model_before);
                     value.destroy();
                     host = null;
-                    host = try Host.create(config, options, core_options);
+                    host = try Host.create(config, options, core_options, true);
                     const report = try sdk.runtime.replaySession(&host.?.harness.runtime, host.?.state.app(), journal.bytes.items, .{
                         .verify = true,
                         .require_same_platform = false,

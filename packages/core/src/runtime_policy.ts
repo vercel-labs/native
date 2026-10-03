@@ -256,3 +256,65 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
   }
   return -1;
 }
+
+/** Named buffered effects over native-owned slots. Admission returns both the
+ * predecessor to drop and the first free slot: dropping precedes capacity
+ * refusal, and a dropped predecessor stays occupied until its terminal drains.
+ * Completion selects a route/payload and retires one slot. This pure callback
+ * neither mutates its borrowed input nor resets the dispatch frame.
+ */
+export function native_effect_policy(request: Uint8Array): Uint8Array {
+  if (request.length < 2 || request[0]! > 2) throw new Error("invalid effect policy request");
+  if (request[0] === 2) {
+    if (request.length !== 69 || request[1]! >= 16 || request[2]! > 3 || request[3]! > 1 || request[4]! > 1)
+      throw new Error("invalid effect completion request");
+    for (let at = 5; at < request.length; at += 4)
+      if (request[at]! > 1 || request[at + 1]! > 1) throw new Error("invalid effect completion slot");
+    const slot = request[1]!, at = 5 + slot * 4;
+    if (request[at] !== 1) throw new Error("effect completion slot is not tracked");
+    const result = new Uint8Array(4);
+    result[0] = slot;
+    if (request[at + 1] === 1) {
+      result[1] = request[at + 3]!;
+      return result; // Swallow; the inert stand-in uses the error arm.
+    }
+    const cut = request[2] === 3 && request[4] === 1;
+    const success = request[3] === 1 && !cut;
+    result[1] = request[at + (success ? 2 : 3)]!;
+    result[2] = success ? request[2]! + 1 : 5;
+    result[3] = success ? 0 : request[3] === 1 && cut ? 2 : 1;
+    return result;
+  }
+  const arm = request[0] === 0, length = request[1]!;
+  let at = 2 + length;
+  if (at + (arm ? 3 : 0) > request.length) throw new Error("truncated effect declaration");
+  let blocked = 0, ok = 0, err = 0;
+  if (arm) {
+    blocked = request[at]!; ok = request[at + 1]!; err = request[at + 2]!;
+    if (blocked > 1) throw new Error("invalid effect admission fact");
+    at += 3;
+  }
+  let matching = -1, free = -1;
+  for (let slot = 0; slot < 16; slot++) {
+    if (at + 3 > request.length) throw new Error("truncated effect policy table");
+    const used = request[at]!, dropped = request[at + 1]!, size = request[at + 2]!;
+    if (used > 1 || dropped > 1 || at + 5 + size > request.length) throw new Error("invalid effect policy slot");
+    let equal = used === 1 && dropped === 0 && size === length;
+    for (let i = 0; i < size; i++) if (request[at + 3 + i] !== request[2 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (used === 0 && free < 0) free = slot;
+    at += 5 + size;
+  }
+  if (at !== request.length) throw new Error("trailing effect policy bytes");
+  if (!arm) {
+    const result = new Uint8Array(1);
+    result[0] = matching < 0 ? 255 : matching;
+    return result;
+  }
+  const result = new Uint8Array(5);
+  result[0] = blocked === 0 ? 1 : 0;
+  result[1] = blocked === 1 || free < 0 ? 255 : free;
+  result[2] = blocked === 1 || length === 0 || matching < 0 ? 255 : matching;
+  result[3] = ok; result[4] = err;
+  return result;
+}

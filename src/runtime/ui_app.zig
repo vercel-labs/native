@@ -1597,7 +1597,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .exit => {
                         if (record.payload.len > 0) try self.effects.feedOutput(record.key, record.payload);
                         if (record.stderr_tail.len > 0) try self.effects.feedStderr(record.key, record.stderr_tail);
-                        try self.effects.feedExitReason(record.key, record.code, record.exit_reason);
+                        try self.effects.feedExitWithMetadata(record.key, record.code, record.exit_reason, .{
+                            .output_truncated = record.output_truncated,
+                            .stderr_truncated = record.stderr_truncated,
+                            .dropped_lines = record.dropped,
+                        });
                     },
                     .response => try self.effects.feedResponseOutcomeWithMetadata(
                         record.key,

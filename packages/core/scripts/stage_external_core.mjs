@@ -187,6 +187,8 @@ if (args["view-markup"]) {
   profile.exports.push({ export: "native_text_policy", symbol: `${profile.abi.prefix}native_text_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_timer_policy", symbol: `${profile.abi.prefix}native_timer_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_db_policy", symbol: `${profile.abi.prefix}native_db_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_effect_policy", symbol: `${profile.abi.prefix}native_effect_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_stream_policy", symbol: `${profile.abi.prefix}native_stream_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_window_policy", symbol: `${profile.abi.prefix}native_window_policy`, params: ["bytes"], returns: "bytes" });
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
