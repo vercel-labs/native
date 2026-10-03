@@ -235,6 +235,8 @@ const AppKitAudioCapturePush = *const fn (context: ?*anyopaque, kind: c_int, sou
 extern fn native_sdk_appkit_audio_capture_start(host: *AppKitHost, source: c_int, sample_rate: u32, channels: u8, push_fn: AppKitAudioCapturePush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_audio_capture_stop(host: *AppKitHost, source: c_int) c_int;
 extern fn native_sdk_appkit_audio_capture_supported(host: *AppKitHost, source: c_int) c_int;
+extern fn native_sdk_appkit_audio_output_start(host: *AppKitHost, sample_rate: u32, channels: u8, render_fn: platform_mod.AudioOutputRenderFn, render_context: ?*anyopaque, opened_rate: *u32, opened_channels: *u8) c_int;
+extern fn native_sdk_appkit_audio_output_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
@@ -837,6 +839,8 @@ pub const MacPlatform = struct {
                 .audio_set_volume_fn = audioSetVolume,
                 .audio_capture_start_fn = if (self.web_engine == .system) audioCaptureStart else null,
                 .audio_capture_stop_fn = if (self.web_engine == .system) audioCaptureStop else null,
+                .audio_output_start_fn = audioOutputStart,
+                .audio_output_stop_fn = audioOutputStop,
                 .video_load_fn = videoLoad,
                 .video_load_url_fn = videoLoadUrl,
                 .video_play_fn = videoPlay,
@@ -1830,6 +1834,21 @@ fn audioCaptureStart(context: ?*anyopaque, source: platform_mod.AudioCaptureSour
         stored.* = .{};
         return error.AudioCaptureStartFailed;
     }
+}
+
+fn audioOutputStart(context: ?*anyopaque, format: platform_mod.AudioOutputFormat, renderer: platform_mod.AudioOutputRenderer) anyerror!platform_mod.AudioOutputFormat {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    var opened_rate: u32 = 0;
+    var opened_channels: u8 = 0;
+    if (native_sdk_appkit_audio_output_start(self.host, format.sample_rate, format.channels, renderer.render_fn, renderer.context, &opened_rate, &opened_channels) == 0) {
+        return error.AudioOutputStartFailed;
+    }
+    return .{ .sample_rate = opened_rate, .channels = opened_channels };
+}
+
+fn audioOutputStop(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_audio_output_stop(self.host);
 }
 
 fn audioCaptureStop(context: ?*anyopaque, source: platform_mod.AudioCaptureSource) anyerror!void {

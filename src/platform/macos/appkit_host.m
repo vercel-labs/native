@@ -935,6 +935,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * ScreenCaptureKit respectively. */
 @property(nonatomic, strong) NativeSdkAudioCaptureTarget *microphoneCaptureTarget;
 @property(nonatomic, strong) AVAudioEngine *microphoneCaptureEngine;
+@property(nonatomic, strong) id audioOutput;
 @property(nonatomic, strong) NativeSdkAudioCaptureTarget *systemCaptureTarget;
 @property(nonatomic, strong) NativeSdkScreenAudioCapture *systemCapture;
 /* The app's single video player and its two timers. One player is the
@@ -13167,6 +13168,130 @@ int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, int sou
     if (!host) return 0;
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object audioCaptureStopSource:source];
+}
+
+/* One synthesized output stream: an AVAudioEngine whose source node pulls
+ * interleaved frames from the app's renderer and splits them into the
+ * engine's deinterleaved standard format. The render block captures only
+ * plain C values, so it never retains the host or races Objective-C
+ * ownership on the audio thread. */
+@interface NativeSdkAudioOutput : NSObject
+@property(nonatomic, readonly) double sampleRate;
+@property(nonatomic, readonly) uint32_t channels;
+- (instancetype)initWithSampleRate:(uint32_t)sampleRate channels:(uint8_t)channels renderFn:(native_sdk_appkit_audio_output_render_t)renderFn context:(void *)context;
+- (BOOL)start;
+- (void)stop;
+@end
+
+@implementation NativeSdkAudioOutput {
+    AVAudioEngine *_engine;
+    AVAudioSourceNode *_source;
+    float *_scratch;
+    BOOL _running;
+}
+
+- (instancetype)initWithSampleRate:(uint32_t)sampleRate channels:(uint8_t)channels renderFn:(native_sdk_appkit_audio_output_render_t)renderFn context:(void *)context {
+    self = [super init];
+    if (!self) return nil;
+    if (!renderFn || (channels != 1 && channels != 2)) return nil;
+    _engine = [[AVAudioEngine alloc] init];
+    double rate = (double)sampleRate;
+    if (rate <= 0) rate = [_engine.outputNode outputFormatForBus:0].sampleRate;
+    if (!(rate > 0)) rate = 48000;
+    _sampleRate = rate;
+    _channels = channels;
+    _scratch = (float *)calloc(4096u * channels, sizeof(float));
+    if (!_scratch) return nil;
+    AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate channels:channels];
+    if (!format) return nil;
+    float *scratch = _scratch;
+    uint32_t renderChannels = channels;
+    _source = [[AVAudioSourceNode alloc] initWithFormat:format renderBlock:^OSStatus(BOOL *isSilence, const AudioTimeStamp *timestamp, AVAudioFrameCount frameCount, AudioBufferList *outputData) {
+        (void)timestamp;
+        uint32_t done = 0;
+        while (done < frameCount) {
+            uint32_t chunk = frameCount - done;
+            if (chunk > 4096u) chunk = 4096u;
+            renderFn(context, scratch, chunk, renderChannels, rate);
+            for (UInt32 b = 0; b < outputData->mNumberBuffers; b++) {
+                AudioBuffer *buffer = &outputData->mBuffers[b];
+                float *dst = (float *)buffer->mData;
+                if (!dst) continue;
+                UInt32 bufferChannels = buffer->mNumberChannels ? buffer->mNumberChannels : 1;
+                if (bufferChannels == 1) {
+                    uint32_t channel = b < renderChannels ? (uint32_t)b : renderChannels - 1;
+                    for (uint32_t i = 0; i < chunk; i++) dst[done + i] = scratch[i * renderChannels + channel];
+                } else {
+                    for (uint32_t i = 0; i < chunk; i++) {
+                        for (UInt32 c = 0; c < bufferChannels; c++) {
+                            uint32_t channel = c < renderChannels ? (uint32_t)c : renderChannels - 1;
+                            dst[(done + i) * bufferChannels + c] = scratch[i * renderChannels + channel];
+                        }
+                    }
+                }
+            }
+            done += chunk;
+        }
+        *isSilence = NO;
+        return noErr;
+    }];
+    if (!_source) return nil;
+    [_engine attachNode:_source];
+    [_engine connect:_source to:_engine.mainMixerNode format:format];
+    return self;
+}
+
+- (BOOL)start {
+    [_engine prepare];
+    NSError *error = nil;
+    _running = [_engine startAndReturnError:&error];
+    return _running;
+}
+
+- (void)stop {
+    if (_running) [_engine stop];
+    _running = NO;
+    if (_source) {
+        [_engine detachNode:_source];
+        _source = nil;
+    }
+}
+
+- (void)dealloc {
+    [self stop];
+    free(_scratch);
+    _scratch = NULL;
+}
+
+@end
+
+int native_sdk_appkit_audio_output_start(native_sdk_appkit_host_t *host, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_output_render_t render_fn, void *render_context, uint32_t *opened_rate, uint8_t *opened_channels) {
+    if (!host || !render_fn) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NativeSdkAudioOutput *previous = (NativeSdkAudioOutput *)object.audioOutput;
+    if (previous) {
+        [previous stop];
+        object.audioOutput = nil;
+    }
+    NativeSdkAudioOutput *output = [[NativeSdkAudioOutput alloc] initWithSampleRate:sample_rate channels:channels renderFn:render_fn context:render_context];
+    if (!output || ![output start]) {
+        [output stop];
+        return 0;
+    }
+    object.audioOutput = output;
+    if (opened_rate) *opened_rate = (uint32_t)(output.sampleRate + 0.5);
+    if (opened_channels) *opened_channels = (uint8_t)output.channels;
+    return 1;
+}
+
+int native_sdk_appkit_audio_output_stop(native_sdk_appkit_host_t *host) {
+    if (!host) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NativeSdkAudioOutput *output = (NativeSdkAudioOutput *)object.audioOutput;
+    if (!output) return 1;
+    [output stop];
+    object.audioOutput = nil;
+    return 1;
 }
 
 int native_sdk_appkit_audio_capture_supported(native_sdk_appkit_host_t *host, int source) {

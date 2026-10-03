@@ -1544,6 +1544,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .open_external_url_fn = effectsOpenExternalUrl,
                 .reveal_path_fn = effectsRevealPath,
                 .format_local_time_fn = effectsFormatLocalTime,
+                .open_file_dialog_fn = effectsOpenFileDialog,
+                .save_file_dialog_fn = effectsSaveFileDialog,
             });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
@@ -6560,6 +6562,18 @@ fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
 fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     return runtime.formatLocalTime(timestamp_ms, style, buffer);
+}
+
+fn effectsSaveFileDialog(context: *anyopaque, default_name: []const u8, buffer: []u8) anyerror!?[]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    if (!security.hasPermission(runtime.options.security.permissions, security.permission_dialog)) return error.PermissionDenied;
+    return runtime.showSaveDialog(.{ .default_name = default_name }, buffer);
+}
+
+fn effectsOpenFileDialog(context: *anyopaque, title: []const u8, buffer: []u8) anyerror!platform.OpenDialogResult {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    if (!security.hasPermission(runtime.options.security.permissions, security.permission_dialog)) return error.PermissionDenied;
+    return runtime.showOpenDialog(.{ .title = title }, buffer);
 }
 
 /// The build storage pinned under a presented native context menu:
