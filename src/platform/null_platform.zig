@@ -491,7 +491,12 @@ pub const NullPlatform = struct {
     /// tests assert what a hit-testing platform would consult. One
     /// mirror suffices: the runtime pushes per canvas view and the
     /// tests drive a single canvas.
-    window_drag_regions: [16]types.WindowDragRegion = undefined,
+    /// Sized to `canvas_limits.max_canvas_widget_window_drag_regions_per_view`
+    /// (32): a hidden-inset header with a full tab strip emits one drag
+    /// rect plus one exclusion per press-claiming child, which exceeds
+    /// the old 16-slot mirror and made cockpit-ci rebuilds fail with
+    /// `WindowLimitReached`.
+    window_drag_regions: [32]types.WindowDragRegion = undefined,
     window_drag_region_count: usize = 0,
     window_drag_region_push_count: usize = 0,
     window_count: usize = 0,
