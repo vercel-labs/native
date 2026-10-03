@@ -1284,6 +1284,86 @@ test "runtime publishes canvas widget accessibility snapshots to platform" {
     try std.testing.expectEqual(published_count, platform_state.update_count);
 }
 
+test "public display refresh batch defers accessibility until frame completion" {
+    const DeferredPlatform = struct {
+        update_count: usize = 0,
+
+        fn platformValue(self: *@This()) platform.Platform {
+            return .{
+                .context = self,
+                .name = "deferred-widget-a11y",
+                .surface_value = .{ .id = 1, .size = geometry.SizeF.init(320, 240), .scale_factor = 1 },
+                .run_fn = run,
+                .services = .{
+                    .context = self,
+                    .load_webview_fn = loadWebView,
+                    .create_view_fn = createView,
+                    .update_widget_accessibility_fn = updateWidgetAccessibility,
+                    .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
+                },
+            };
+        }
+
+        fn run(_: *anyopaque, _: platform.EventHandler, _: *anyopaque) anyerror!void {}
+        fn loadWebView(_: ?*anyopaque, _: platform.WebViewSource) anyerror!void {}
+        fn createView(_: ?*anyopaque, _: platform.ViewOptions) anyerror!void {}
+        fn requestGpuSurfaceFrame(_: ?*anyopaque, _: platform.WindowId, _: []const u8) anyerror!void {}
+
+        fn updateWidgetAccessibility(context: ?*anyopaque, _: platform.WidgetAccessibilitySnapshot) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.update_count += 1;
+        }
+    };
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "deferred-widget-a11y", .source = platform.WebViewSource.html("") };
+        }
+    };
+
+    var platform_state: DeferredPlatform = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{ .platform = platform_state.platformValue() });
+    var app_state: TestApp = .{};
+    try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
+    _ = try runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+    });
+
+    var layout_nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{
+        .id = 1,
+        .kind = .button,
+        .frame = geometry.RectF.init(12, 12, 96, 32),
+        .text = "Ready",
+    }, geometry.RectF.init(0, 0, 320, 240), &layout_nodes);
+
+    runtime.beginCanvasWidgetDisplayListRefreshBatch();
+    var batch_active = true;
+    defer if (batch_active) runtime.cancelCanvasWidgetDisplayListRefreshBatch();
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    try runtime.endCanvasWidgetDisplayListRefreshBatch();
+    batch_active = false;
+
+    // A frame is in flight, so end flushes display-list work but deliberately
+    // leaves the platform accessibility publication for the post-present tail.
+    try std.testing.expectEqual(@as(usize, 0), platform_state.update_count);
+    try runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(usize, 1), platform_state.update_count);
+}
+
 test "runtime automation snapshot exposes canvas icon roles" {
     const TestApp = struct {
         fn app(self: *@This()) App {

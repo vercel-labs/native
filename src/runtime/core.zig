@@ -985,9 +985,16 @@ pub const Runtime = struct {
     const refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate;
-    const beginCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.beginCanvasWidgetDisplayListRefreshBatch;
-    const cancelCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.cancelCanvasWidgetDisplayListRefreshBatch;
-    const endCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.endCanvasWidgetDisplayListRefreshBatch;
+    /// Begin a scoped display-list refresh batch whose accessibility
+    /// publication is held until the responding frame's post-present flush.
+    /// Every begin must pair with end, or cancel while unwinding.
+    pub const beginCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.beginCanvasWidgetDisplayListRefreshBatch;
+    /// Abandon a begun batch without publishing its queued refreshes.
+    pub const cancelCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.cancelCanvasWidgetDisplayListRefreshBatch;
+    /// Flush queued display-list work while keeping accessibility deferred
+    /// until the responding frame presents (or synchronously when no frame is
+    /// in flight).
+    pub const endCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.endCanvasWidgetDisplayListRefreshBatch;
     const advanceCanvasWidgetKineticScrollForFrame = CanvasWidgetDisplayMethods.advanceCanvasWidgetKineticScrollForFrame;
     const scheduleCanvasWidgetToggleAnimation = CanvasWidgetDisplayMethods.scheduleCanvasWidgetToggleAnimation;
     const publishCanvasWidgetAccessibility = CanvasWidgetDisplayMethods.publishCanvasWidgetAccessibility;
