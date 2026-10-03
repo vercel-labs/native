@@ -1,0 +1,29 @@
+<column gap="12" padding="24">
+  <row cross="center" gap="12">
+    <column grow="1" gap="4">
+      <text size="heading">Pulse Board</text>
+      <text foreground="text_muted">Independent clocks, one shared timeline.</text>
+    </column>
+    <button variant="secondary" on-press="reset">Reset counts</button>
+  </row>
+  <row gap="20">
+    <panel grow="1" padding="16"><column gap="8"><text foreground="text_muted">PRIMARY</text><text size="heading">{primary}</text></column></panel>
+    <panel grow="1" padding="16"><column gap="8"><text foreground="text_muted">SECONDARY</text><text size="heading">{secondary}</text></column></panel>
+    <panel grow="1" padding="16"><column gap="8"><text foreground="text_muted">REMINDERS</text><text size="heading">{delayed}</text></column></panel>
+  </row>
+  <panel padding="16">
+    <column gap="12">
+      <switch checked="{running}" on-toggle="toggle">Run clocks</switch>
+      <switch checked="{fast}" on-toggle="speed">Fast pulse</switch>
+      <switch checked="{alternate}" on-toggle="route">Route pulse to secondary</switch>
+      <switch checked="{paired}" on-toggle="pair">Companion clock</switch>
+      <row gap="12">
+        <button variant="secondary" on-press="rename">Rename pulse key</button>
+        <button variant="secondary" on-press="reverse">Reverse clock order</button>
+      </row>
+      <text foreground="text_muted">new key: {renamed} · reversed: {reversed}</text>
+    </column>
+  </panel>
+  <row gap="12"><button on-press="delay">Schedule reminder</button><button variant="secondary" on-press="cancel_delay">Cancel reminder</button><button variant="secondary" on-press="read_clock">Read clock</button></row>
+  <status-bar>Clock readings: {clockReadings}</status-bar>
+</column>

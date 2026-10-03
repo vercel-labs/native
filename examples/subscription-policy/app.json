@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.subscription-policy",
+  "name": "subscription-policy",
+  "display_name": "Pulse Board",
+  "description": "Independent clocks with model-declared timer subscriptions.",
+  "version": "0.1.0",
+  "platforms": [
+    "macos"
+  ],
+  "permissions": [
+    "view",
+    "command"
+  ],
+  "capabilities": [
+    "native_views",
+    "gpu_surfaces"
+  ],
+  "shell": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pulse Board",
+        "width": 760,
+        "height": 560,
+        "views": [
+          {
+            "label": "main-canvas",
+            "kind": "gpu_surface",
+            "fill": true,
+            "role": "Clocks canvas",
+            "accessibility_label": "Pulse board",
+            "gpu_backend": "metal",
+            "gpu_pixel_format": "bgra8_unorm",
+            "gpu_present_mode": "timer",
+            "gpu_alpha_mode": "opaque",
+            "gpu_color_space": "srgb",
+            "gpu_vsync": true
+          }
+        ]
+      }
+    ]
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": [
+        "zero://app",
+        "zero://inline"
+      ],
+      "external_links": {
+        "action": "deny"
+      }
+    }
+  },
+  "web_engine": "system",
+  "cef": {
+    "dir": "third_party/cef/macos",
+    "auto_install": false
+  }
+}

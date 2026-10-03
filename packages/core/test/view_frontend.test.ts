@@ -36,7 +36,7 @@ const evaluate = (markup: string) => {
 };
 
 test("the view frontend and portable components typecheck", () => {
-  const program = ts.createProgram(["view_frontend.ts", "view_components.ts"].map(name => new URL(`../src/${name}`, import.meta.url).pathname), {
+  const program = ts.createProgram(["view_frontend.ts", "view_components.ts", "runtime_policy.ts"].map(name => new URL(`../src/${name}`, import.meta.url).pathname), {
     noEmit: true, strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
     types: ["node"], typeRoots: [new URL("../node_modules/@types", import.meta.url).pathname],
   });

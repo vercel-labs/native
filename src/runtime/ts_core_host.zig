@@ -3280,7 +3280,14 @@ pub fn TsCoreHost(comptime core: type) type {
         /// everywhere, so record/replay walk identical tables.
         fn reconcileSubscriptions(fx: *Fx) void {
             if (comptime !has_subscriptions) return;
-            const subs = core.subscriptions(model_root);
+            const borrowed_subs = core.subscriptions(model_root);
+            // A cycle policy may allocate in the compiler frame. Keep the
+            // stream in the shim arena, and reset both only in finishCycle.
+            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy")) blk: {
+                const copy = core.rt.frameAlloc(u8, borrowed_subs.len);
+                @memcpy(copy, borrowed_subs);
+                break :blk copy;
+            } else borrowed_subs;
             var seen_timers = [_]bool{false} ** timers.len;
             var seen_db = [_]bool{false} ** dbs.len;
 
@@ -3307,18 +3314,51 @@ pub fn TsCoreHost(comptime core: type) type {
                         const every_bits = takeBytes(subs, &at, 8);
                         const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
                         const tag = takeByte(subs, &at);
-                        if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
-                            @panic("ts core host: Sub.timer interval must be between 1ms and one year");
-                        }
-                        var slot: ?usize = null;
-                        for (&timers, 0..) |*entry, index| {
-                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
-                        }
-                        if (slot) |index| {
-                            seen_timers[index] = true;
-                            const entry = &timers[index];
-                            if (entry.every_ms != every_ms) {
+                        if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                            const plan = compiledTimerDeclaration(key, every_ms, tag, &seen_timers);
+                            const entry = &timers[plan.slot];
+                            entry.used = true;
+                            entry.key_len = key.len;
+                            @memcpy(entry.key[0..key.len], key);
+                            entry.every_ms = every_ms;
+                            entry.tag = plan.tag;
+                            if (plan.start) fx.startTimer(.{
+                                .key = timer_key_base + plan.slot,
+                                .interval_ms = plan.interval_ms,
+                                .mode = .repeating,
+                                .on_fire = timerFireMsg,
+                            });
+                        } else {
+                            if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
+                                @panic("ts core host: Sub.timer interval must be between 1ms and one year");
+                            }
+                            var slot: ?usize = null;
+                            for (&timers, 0..) |*entry, index| {
+                                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
+                            }
+                            if (slot) |index| {
+                                seen_timers[index] = true;
+                                const entry = &timers[index];
+                                if (entry.every_ms != every_ms) {
+                                    entry.every_ms = every_ms;
+                                    fx.startTimer(.{
+                                        .key = timer_key_base + index,
+                                        .interval_ms = intervalMs(every_ms),
+                                        .mode = .repeating,
+                                        .on_fire = timerFireMsg,
+                                    });
+                                }
+                                entry.tag = tag;
+                            } else {
+                                const index = freeTimerIndex() orelse
+                                    @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
+                                seen_timers[index] = true;
+                                const entry = &timers[index];
+                                entry.used = true;
+                                entry.key_len = key.len;
+                                @memcpy(entry.key[0..key.len], key);
                                 entry.every_ms = every_ms;
+                                entry.tag = tag;
                                 fx.startTimer(.{
                                     .key = timer_key_base + index,
                                     .interval_ms = intervalMs(every_ms),
@@ -3326,23 +3366,6 @@ pub fn TsCoreHost(comptime core: type) type {
                                     .on_fire = timerFireMsg,
                                 });
                             }
-                            entry.tag = tag;
-                        } else {
-                            const index = freeTimerIndex() orelse
-                                @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
-                            seen_timers[index] = true;
-                            const entry = &timers[index];
-                            entry.used = true;
-                            entry.key_len = key.len;
-                            @memcpy(entry.key[0..key.len], key);
-                            entry.every_ms = every_ms;
-                            entry.tag = tag;
-                            fx.startTimer(.{
-                                .key = timer_key_base + index,
-                                .interval_ms = intervalMs(every_ms),
-                                .mode = .repeating,
-                                .on_fire = timerFireMsg,
-                            });
                         }
                     },
                     // live query [op][key][page][done][err][sql bytes]
@@ -3396,12 +3419,75 @@ pub fn TsCoreHost(comptime core: type) type {
                     else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
+            const cancellations: ?u16 = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledTimerCancellations(seen_timers) else null;
             for (&timers, 0..) |*entry, index| {
-                if (entry.used and !seen_timers[index]) {
+                const cancel = if (cancellations) |mask| mask & (@as(u16, 1) << @intCast(index)) != 0 else entry.used and !seen_timers[index];
+                if (cancel) {
                     entry.used = false;
                     fx.cancelTimer(timer_key_base + index);
                 }
             }
+        }
+
+        const TimerPlan = struct { slot: usize, start: bool, tag: u8, interval_ms: u64 };
+
+        /// Native supplies owned table facts; TypeScript resolves slot order,
+        /// key matching, interval changes, routes and the seen set. The callback
+        /// copies the response and leaves both cycle arenas alive.
+        fn compiledTimerDeclaration(key: []const u8, every_ms: f64, tag: u8, seen: *[runtime_effects.max_effect_timers]bool) TimerPlan {
+            comptime std.debug.assert(runtime_effects.max_effect_timers == 16);
+            var request: [13 + max_wire_key_bytes + 16 * (10 + max_wire_key_bytes)]u8 = undefined;
+            request[0] = 0;
+            std.mem.writeInt(u16, request[1..3], timerSeenMask(seen.*), .little);
+            request[3] = @intCast(key.len);
+            @memcpy(request[4..][0..key.len], key);
+            var at: usize = 4 + key.len;
+            std.mem.writeInt(u64, request[at..][0..8], @bitCast(every_ms), .little);
+            request[at + 8] = tag;
+            at += 9;
+            for (&timers) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(length);
+                at += 2;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                std.mem.writeInt(u64, request[at..][0..8], @bitCast(if (entry.used) entry.every_ms else @as(f64, 0)), .little);
+                at += 8;
+            }
+            var result: [14]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len or result[0] >= timers.len or result[1] > 1 or result[3] != 0)
+                @panic("ts core host: invalid compiled timer declaration result");
+            const rounded: f64 = @bitCast(std.mem.readInt(u64, result[4..12], .little));
+            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > 31_536_000_000 or @floor(rounded) != rounded)
+                @panic("ts core host: invalid compiled timer interval result");
+            const mask = std.mem.readInt(u16, result[12..14], .little);
+            for (seen, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            return .{ .slot = result[0], .start = result[1] == 1, .tag = result[2], .interval_ms = @intFromFloat(rounded) };
+        }
+
+        fn timerSeenMask(seen: [runtime_effects.max_effect_timers]bool) u16 {
+            var mask: u16 = 0;
+            for (seen, 0..) |value, index| if (value) {
+                mask |= @as(u16, 1) << @intCast(index);
+            };
+            return mask;
+        }
+
+        fn compiledTimerCancellations(seen: [runtime_effects.max_effect_timers]bool) u16 {
+            var used: u16 = 0;
+            for (&timers, 0..) |*entry, index| if (entry.used) {
+                used |= @as(u16, 1) << @intCast(index);
+            };
+            var request: [5]u8 = undefined;
+            request[0] = 1;
+            std.mem.writeInt(u16, request[1..3], used, .little);
+            std.mem.writeInt(u16, request[3..5], timerSeenMask(seen), .little);
+            var result: [2]u8 = undefined;
+            if (core.nativeTimerPolicy(&request, &result) != result.len) @panic("ts core host: invalid compiled timer cancellation result");
+            const mask = std.mem.readInt(u16, &result, .little);
+            if (mask & ~used != 0) @panic("ts core host: invalid compiled timer cancellation slots");
+            return mask;
         }
 
         /// Parse the inert subscription stream without mutating it and mark

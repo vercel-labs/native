@@ -129,6 +129,11 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const native_resizable_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_resizable_policy");
         pub const native_text_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_text_policy");
 
+        /// Pure timer reconciliation extension. Inputs are borrowed; the host
+        /// copies the result and retains the cycle arena until all subscriptions
+        /// have been consumed. This call never resets the dispatch frame.
+        pub const native_timer_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_timer_policy");
+
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");
         pub const dispatch_bytes = Symbol(fn (tag: u8, ptr: [*]const u8, len: usize, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_bytes");

@@ -3273,3 +3273,60 @@ test "a spawn_failed transport end routes the event arm with the reason" {
     try std.testing.expectEqual(mini_core.PtyReason.spawn_failed, Host.model().pty_reason);
     try std.testing.expectEqual(@as(i64, -1), Host.model().pty_code);
 }
+
+// A deliberately redirected policy proves the host consumes the copied plan
+// rather than repeating slot, interval, route or retirement decisions itself.
+const timer_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var retire: bool = false;
+    var calls: usize = 0;
+
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        calls += 1;
+        if (request[0] == 1) {
+            std.mem.writeInt(u16, output[0..2], if (retire) std.mem.readInt(u16, request[1..3], .little) else 0, .little);
+            return 2;
+        }
+        @memset(output[0..14], 0);
+        output[0] = 5;
+        output[1] = 1;
+        output[2] = 10; // Route to stamped instead of tick.
+        std.mem.writeInt(u64, output[4..12], @bitCast(@as(f64, 7)), .little);
+        std.mem.writeInt(u16, output[12..14], 1 << 5, .little);
+        return 14;
+    }
+};
+
+test "timer host applies policy slot interval route and retirement without resetting the cycle" {
+    const Probe = ts_core_host.TsCoreHost(timer_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    timer_policy_probe_core.calls = 0;
+    timer_policy_probe_core.retire = false;
+    Probe.init(fx);
+    Probe.dispatch(fx, .toggle);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    const redirected = ts_core_host.timer_key_base + 5;
+    try std.testing.expectEqual(redirected, fx.pendingTimerAt(0).?.key);
+    try std.testing.expectEqual(@as(u64, 7), fx.pendingTimerAt(0).?.interval_ms);
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try fx.fireTimer(redirected);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().ticks);
+    try std.testing.expect(Probe.model().stamp_ms >= 0);
+    Probe.dispatch(fx, .toggle);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    timer_policy_probe_core.retire = true;
+    Probe.dispatch(fx, .speed);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expect(timer_policy_probe_core.calls >= 6);
+}

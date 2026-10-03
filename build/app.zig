@@ -1236,6 +1236,7 @@ fn tsCoreStage(
     stage_run.addFileArg(profile);
     stage_run.addFileInput(dep.path("packages/core/src/view_frontend.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/view_components.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/runtime_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");
         stage_run.addFileArg(b.path(appPath(b, app_root, "src/app.native")));

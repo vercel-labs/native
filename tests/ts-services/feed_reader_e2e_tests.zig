@@ -4147,3 +4147,74 @@ test "complete step consumers honor the compiled result instead of falling back 
     try std.testing.expectEqual(@as(f32, 0.3) + @as(f32, 0.05), canvas.widgetKeyboardControlIntent(slider, right).?.value.?);
     try std.testing.expectEqualDeep(geometry.OffsetF.init(0, 24), canvas.widgetScrollKeyboardDelta(scroll, right).?);
 }
+
+test "compiled timer plans preserve native slot order exact f64 changes and copied cycle ownership" {
+    const names = [_][]const u8{ "", "pulse", "caf\xc3\xa9", "\x00\xff" };
+    const intervals = [_]f64{ 1, 1.4999999999999998, 1.5, 2.4999999999999996, 500.5, 31_535_999_999.5, 31_536_000_000 };
+    var request: [512]u8 = undefined;
+    var output: [14]u8 = undefined;
+    var comparisons: usize = 0;
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed_command = core.bootCommand();
+    const command_copy = try std.testing.allocator.dupe(u8, borrowed_command);
+    defer std.testing.allocator.free(command_copy);
+    const declaration = [_]u8{ 1, 0xff, 0xff, 0, 0 };
+    var first_cancel: [2]u8 = undefined;
+    try std.testing.expectEqual(first_cancel.len, core.nativeTimerPolicy(&declaration, &first_cancel));
+    try std.testing.expectEqualSlices(u8, command_copy, borrowed_command);
+    core.rt.frameReset();
+    for (0..17) |occupied| {
+        for (names) |name| {
+            for (intervals) |every| {
+                for ([_]u8{ 0, 127, 255 }) |tag| {
+                    var matching: ?usize = null;
+                    var previous: f64 = 0;
+                    request[0] = 0;
+                    std.mem.writeInt(u16, request[1..3], 0x5555, .little);
+                    request[3] = @intCast(name.len);
+                    @memcpy(request[4..][0..name.len], name);
+                    var at: usize = 4 + name.len;
+                    std.mem.writeInt(u64, request[at..][0..8], @bitCast(every), .little);
+                    request[at + 8] = tag;
+                    at += 9;
+                    for (0..16) |index| {
+                        const used = index < occupied;
+                        const stored = if (used) names[index % names.len] else "";
+                        const interval = if (used) intervals[index % intervals.len] else 0;
+                        request[at] = @intFromBool(used);
+                        request[at + 1] = @intCast(stored.len);
+                        at += 2;
+                        @memcpy(request[at..][0..stored.len], stored);
+                        at += stored.len;
+                        std.mem.writeInt(u64, request[at..][0..8], @bitCast(interval), .little);
+                        at += 8;
+                        if (used and std.mem.eql(u8, stored, name)) {
+                            matching = index;
+                            previous = interval;
+                        }
+                    }
+                    const slot = matching orelse occupied;
+                    @memset(&output, 0xa5);
+                    try std.testing.expectEqual(output.len, core.nativeTimerPolicy(request[0..at], &output));
+                    const frozen = output;
+                    const retirement = [_]u8{ 1, 0xff, 0xff, 0x55, 0x55 };
+                    var cancelled: [2]u8 = undefined;
+                    try std.testing.expectEqual(cancelled.len, core.nativeTimerPolicy(&retirement, &cancelled));
+                    core.rt.frameReset();
+                    try std.testing.expectEqualSlices(u8, &frozen, &output);
+                    try std.testing.expectEqual(@as(u16, 0xaaaa), std.mem.readInt(u16, &cancelled, .little));
+                    try std.testing.expectEqual(@as(u8, @intCast(slot)), output[0]);
+                    try std.testing.expectEqual(@intFromBool(matching == null or previous != every), output[1]);
+                    try std.testing.expectEqual(tag, output[2]);
+                    try std.testing.expectEqual(@as(u8, 0), output[3]);
+                    const rounded: f64 = @bitCast(std.mem.readInt(u64, output[4..12], .little));
+                    try std.testing.expectEqual(@round(every), rounded);
+                    try std.testing.expectEqual(@as(u16, 0x5555) | (@as(u16, 1) << @intCast(slot)), std.mem.readInt(u16, output[12..14], .little));
+                    comparisons += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1428), comparisons);
+}

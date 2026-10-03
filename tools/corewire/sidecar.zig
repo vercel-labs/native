@@ -271,6 +271,7 @@ pub const conditional_exports = [_][]const u8{
     "native_scroll_policy",
     "native_resizable_policy",
     "native_text_policy",
+    "native_timer_policy",
 };
 
 // ------------------------------------------------------------ reading
@@ -2460,6 +2461,11 @@ test "V11: the optional native view extension is unique and follows channels" {
     const text = try replaced(arena, resizable, "\"native_resizable_policy\"]", "\"native_resizable_policy\", \"native_text_policy\"]");
     const text_valid = try readValid(arena, text);
     try testing.expect(abiHasExport(text_valid.abi, "native_text_policy"));
+    const timer = try replaced(arena, text, "\"native_text_policy\"]", "\"native_text_policy\", \"native_timer_policy\"]");
+    const timer_valid = try readValid(arena, timer);
+    try testing.expect(abiHasExport(timer_valid.abi, "native_timer_policy"));
+    const timer_duplicate = try replaced(arena, timer, "\"native_timer_policy\"]", "\"native_timer_policy\", \"native_timer_policy\"]");
+    try expectRefusal(timer_duplicate, "abi.exports[37]", "out of canonical order");
     const text_duplicate = try replaced(arena, text, "\"native_text_policy\"]", "\"native_text_policy\", \"native_text_policy\"]");
     try expectRefusal(text_duplicate, "abi.exports[36]", "out of canonical order");
     const resizable_duplicate = try replaced(arena, resizable, "\"native_resizable_policy\"]", "\"native_resizable_policy\", \"native_resizable_policy\"]");
