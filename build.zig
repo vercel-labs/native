@@ -1,5 +1,10 @@
 const std = @import("std");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
+const test_shards = @import("build/test_shards.zig");
+
+test "complete root test sharding" {
+    std.testing.refAllDecls(test_shards);
+}
 
 fn repositoryScriptcBin(b: *std.Build) []const u8 {
     return b.pathFromRoot(if (b.graph.host.result.os.tag == .windows)
@@ -3821,6 +3826,18 @@ pub fn build(b: *std.Build) void {
         cef_bundle_script.step.dependOn(&cef_bundle_auto.step);
     }
     cef_bundle_step.dependOn(&cef_bundle_script.step);
+
+    // Partition only after every test root has been registered. New suites
+    // automatically enter both the full local test command and a CI shard.
+    const core_test_shards = [_]*std.Build.Step{
+        b.step("test-core-shard-1", "Run complete root test shard 1 of 6"),
+        b.step("test-core-shard-2", "Run complete root test shard 2 of 6"),
+        b.step("test-core-shard-3", "Run complete root test shard 3 of 6"),
+        b.step("test-core-shard-4", "Run complete root test shard 4 of 6"),
+        b.step("test-core-shard-5", "Run complete root test shard 5 of 6"),
+        b.step("test-core-shard-6", "Run complete root test shard 6 of 6"),
+    };
+    test_shards.partition(test_step, &core_test_shards);
 }
 
 fn sqliteCompileFlags() []const []const u8 {
