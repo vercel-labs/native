@@ -121,7 +121,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             chain: []const ui_provenance.UseSite = &.{},
         };
 
-        const max_scope_depth = 16;
+        // Keep this in parity with the contract walker. Entries include every
+        // template argument and implicit slot capture, not just nesting depth.
+        const max_scope_depth = 32;
 
         const Scope = struct {
             model: *const ModelT,

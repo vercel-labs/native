@@ -4415,6 +4415,35 @@ test "chart series values resolve through slice-valued template args" {
     try testing.expect(chart_widget.chart.series[0].fill);
 }
 
+test "an argument-rich app shell composes two shared recipe layers" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<template name="control" args="target label selected">
+        \\  <button selected="{selected}" on-press="add">{label}</button>
+        \\</template>
+        \\<template name="marker" args="selected">
+        \\  <row><if test="{selected}"><text>selected</text></if><slot/></row>
+        \\</template>
+        \\<template name="shell" args="a b c d e f g h i j k">
+        \\  <column>
+        \\    <use template="marker" selected="{a}">
+        \\      <use template="control" target="{b}" label="{c}" selected="{a}" />
+        \\    </use>
+        \\  </column>
+        \\</template>
+        \\<use template="shell" a="true" b="target" c="Tab" d="d" e="e" f="f" g="g" h="h" i="i" j="j" k="k" />
+    ;
+
+    var view = try InboxMarkup.init(arena, source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &Model{}));
+    const button = findByKind(tree.root, .button).?;
+    try testing.expectEqualStrings("Tab", button.text);
+    try testing.expect(button.state.selected);
+}
+
 // ------------------------------------------------------- span paragraphs
 
 pub const SpanMsg = union(enum) { noop };

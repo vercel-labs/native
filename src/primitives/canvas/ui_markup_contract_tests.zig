@@ -538,6 +538,26 @@ const fixtures = [_]Fixture{
         .expect = null,
     },
     .{
+        .name = "an app shell can compose two shared recipe layers",
+        .source =
+        \\<template name="control" args="target label selected">
+        \\  <button selected="{selected}" on-press="add">{label}</button>
+        \\</template>
+        \\<template name="marker" args="selected">
+        \\  <row><if test="{selected}"><text>selected</text></if><slot/></row>
+        \\</template>
+        \\<template name="shell" args="a b c d e f g h i j k">
+        \\  <column>
+        \\    <use template="marker" selected="{a}">
+        \\      <use template="control" target="{b}" label="{c}" selected="{a}" />
+        \\    </use>
+        \\  </column>
+        \\</template>
+        \\<use template="shell" a="true" b="target" c="Tab" d="d" e="e" f="f" g="g" h="h" i="i" j="j" k="k" />
+        ,
+        .expect = null,
+    },
+    .{
         .name = "a slice template arg used as a value rejects",
         .source =
         \\<template name="lane" args="items">

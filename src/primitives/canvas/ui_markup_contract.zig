@@ -619,7 +619,11 @@ pub fn checkDocument(
 
 const CheckErr = error{ OutOfMemory, ContractCheck };
 
-const max_scope_depth = 16;
+// Scope entries count every active loop variable, template argument, and slot
+// capture. A normal app shell with several arguments can therefore exhaust 16
+// entries after only one nested shared-control recipe. Keep the walk bounded
+// while leaving room for two practical composition layers.
+const max_scope_depth = 32;
 const max_use_depth = 128;
 
 /// A resolved binding: its value kind when statically known, and the Zig
