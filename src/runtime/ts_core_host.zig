@@ -1169,10 +1169,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         const after_bits = takeBytes(cmd, &at, 8);
                         const after_ms: f64 = @bitCast(std.mem.readInt(u64, after_bits[0..8], .little));
                         const tag = takeByte(cmd, &at);
-                        if (!(after_ms >= 1) or !(after_ms <= 31_536_000_000.0)) {
-                            // Same bound as Sub.timer: the lower rejects NaN,
-                            // the upper (one year) keeps ns conversion in range.
-                            @panic("ts core host: Cmd.delay interval must be between 1ms and one year");
+                        if (comptime !@hasDecl(core, "nativeTimerPolicy")) {
+                            if (!(after_ms >= 1) or !(after_ms <= 31_536_000_000.0)) {
+                                // Same bound as Sub.timer: the lower rejects NaN,
+                                // the upper (one year) keeps ns conversion in range.
+                                @panic("ts core host: Cmd.delay interval must be between 1ms and one year");
+                            }
                         }
                         armDelay(fx, key, after_ms, tag);
                     },
@@ -1771,28 +1773,31 @@ pub fn TsCoreHost(comptime core: type) type {
             // A delay has no err arm. Preserve an incumbent file stream and
             // fail closed instead of creating a second owner that Cmd.cancel
             // could not address unambiguously.
-            if (fileStreamOccupiesKey(key)) return;
-            const index = blk: {
-                if (key.len > 0) {
-                    if (findDelay(key)) |existing| break :blk existing;
-                }
-                break :blk freeDelayIndex() orelse
-                    @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers");
+            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, fileStreamOccupiesKey(key)) orelse return else blk: {
+                if (fileStreamOccupiesKey(key)) return;
+                const index = if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex();
+                break :blk .{
+                    .slot = index orelse @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers"),
+                    .tag = tag,
+                    .interval_ms = intervalMs(after_ms),
+                };
             };
+            const index = plan.slot;
             const entry = &delays[index];
             entry.used = true;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.tag = tag;
+            entry.tag = plan.tag;
             fx.startTimer(.{
                 .key = delay_key_base + index,
-                .interval_ms = intervalMs(after_ms),
+                .interval_ms = plan.interval_ms,
                 .mode = .one_shot,
                 .on_fire = delayFireMsg,
             });
         }
 
         fn findDelay(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) return compiledDelayLookup(key);
             for (&delays, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -3262,12 +3267,14 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: a delay fired outside the bridge's delay key namespace");
             }
             const index = timer.key - delay_key_base;
-            if (index >= delays.len or !delays[index].used) {
-                @panic("ts core host: a delay fired for a slot the bridge is not tracking");
-            }
-            delays[index].used = false;
+            if (index >= delays.len) @panic("ts core host: a delay fired outside the bridge's delay table");
+            const completion = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayCompletion(@intCast(index)) else blk: {
+                if (!delays[index].used) @panic("ts core host: a delay fired for a slot the bridge is not tracking");
+                break :blk .{ .slot = @as(usize, @intCast(index)), .tag = delays[index].tag };
+            };
+            delays[completion.slot].used = false;
             const ms = @as(f64, @floatFromInt(timer.timestamp_ns)) / std.time.ns_per_ms;
-            return msgFromTagNumber(delays[index].tag, ms);
+            return msgFromTagNumber(completion.tag, ms);
         }
 
         // ----------------------------------------------- subscriptions
@@ -3464,6 +3471,79 @@ pub fn TsCoreHost(comptime core: type) type {
             const mask = std.mem.readInt(u16, result[12..14], .little);
             for (seen, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
             return .{ .slot = result[0], .start = result[1] == 1, .tag = result[2], .interval_ms = @intFromFloat(rounded) };
+        }
+
+        const DelayPlan = struct { slot: usize, tag: u8, interval_ms: u64 };
+        const max_delay_policy_bytes = 12 + max_wire_key_bytes + 16 * (3 + max_wire_key_bytes);
+
+        /// Copy native-owned facts into a borrowed request. No policy call may
+        /// reset the command frame: later records in a batch still borrow it.
+        fn writeDelayTable(request: []u8, start: usize) usize {
+            comptime std.debug.assert(runtime_effects.max_effect_timers == 16);
+            var at = start;
+            for (&delays) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(length);
+                at += 2;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                request[at] = entry.tag;
+                at += 1;
+            }
+            return at;
+        }
+
+        fn compiledDelayDeclaration(key: []const u8, after_ms: f64, tag: u8, blocked: bool) ?DelayPlan {
+            var request: [max_delay_policy_bytes]u8 = undefined;
+            request[0] = 2;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const value_at = 2 + key.len;
+            std.mem.writeInt(u64, request[value_at..][0..8], @bitCast(after_ms), .little);
+            request[value_at + 8] = tag;
+            request[value_at + 9] = @intFromBool(blocked);
+            const at = writeDelayTable(&request, value_at + 10);
+            var result: [10]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len)
+                @panic("ts core host: invalid compiled delay declaration result");
+            if (result[0] == 255) return null;
+            if (result[0] >= delays.len) @panic("ts core host: invalid compiled delay declaration slot");
+            const rounded: f64 = @bitCast(std.mem.readInt(u64, result[2..10], .little));
+            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > 31_536_000_000 or @floor(rounded) != rounded)
+                @panic("ts core host: invalid compiled delay interval result");
+            return .{ .slot = result[0], .tag = result[1], .interval_ms = @intFromFloat(rounded) };
+        }
+
+        fn compiledDelayLookup(key: []const u8) ?usize {
+            var request: [max_delay_policy_bytes]u8 = undefined;
+            request[0] = 3;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const at = writeDelayTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len)
+                @panic("ts core host: invalid compiled delay lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= delays.len or !delays[result[0]].used)
+                @panic("ts core host: invalid compiled delay lookup slot");
+            return result[0];
+        }
+
+        fn compiledDelayCompletion(slot: u8) struct { slot: usize, tag: u8 } {
+            var request: [20]u8 = undefined;
+            request[0] = 4;
+            request[1] = slot;
+            var used: u16 = 0;
+            for (&delays, 0..) |*entry, index| {
+                if (entry.used) used |= @as(u16, 1) << @intCast(index);
+                request[4 + index] = entry.tag;
+            }
+            std.mem.writeInt(u16, request[2..4], used, .little);
+            var result: [2]u8 = undefined;
+            if (core.nativeTimerPolicy(&request, &result) != result.len or result[0] >= delays.len or !delays[result[0]].used)
+                @panic("ts core host: invalid compiled delay completion result");
+            return .{ .slot = result[0], .tag = result[1] };
         }
 
         fn timerSeenMask(seen: [runtime_effects.max_effect_timers]bool) u16 {

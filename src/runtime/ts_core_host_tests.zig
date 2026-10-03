@@ -3330,3 +3330,104 @@ test "timer host applies policy slot interval route and retirement without reset
     try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
     try std.testing.expect(timer_policy_probe_core.calls >= 6);
 }
+
+// Redirecting every delay operation distinguishes policy ownership from a
+// native fallback: a nonmatching cancellation can be suppressed or routed,
+// and fire routing can differ from the stored declaration tag.
+const delay_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub fn update(model: *const Model, msg: Msg) mini_core.UpdateResult {
+        if (msg == .open_save_sink) return .{ .model = model, .cmd = mini_core.cmdWriteFileStream("boom", 12, 8, "notes.bin") };
+        return mini_core.update(model, msg);
+    }
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup_enabled: bool = false;
+    var calls = [_]usize{0} ** 5;
+
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        switch (request[0]) {
+            2 => {
+                const value_at = 2 + @as(usize, request[1]);
+                output[0] = if (request[value_at + 9] == 1) 255 else 6;
+                output[1] = 10;
+                std.mem.writeInt(u64, output[2..10], @bitCast(@as(f64, 17)), .little);
+                return 10;
+            },
+            3 => {
+                var at: usize = 2 + @as(usize, request[1]);
+                for (0..16) |slot| {
+                    if (slot == 6) output[0] = if (lookup_enabled and request[at] == 1) 6 else 255;
+                    at += 3 + @as(usize, request[at + 1]);
+                }
+                return 1;
+            },
+            4 => {
+                output[0] = request[1];
+                output[1] = 9; // tick instead of the stored stamped arm.
+                return 2;
+            },
+            else => unreachable,
+        }
+    }
+};
+
+test "delay host consumes compiled allocation lookup fire route and retirement" {
+    const Probe = ts_core_host.TsCoreHost(delay_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    delay_policy_probe_core.lookup_enabled = false;
+    delay_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .arm_delay);
+    const redirected = ts_core_host.delay_key_base + 6;
+    try std.testing.expectEqual(redirected, fx.pendingTimerAt(0).?.key);
+    try std.testing.expectEqual(@as(u64, 17), fx.pendingTimerAt(0).?.interval_ms);
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    delay_policy_probe_core.lookup_enabled = true;
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    Probe.dispatch(fx, .arm_delay);
+    Probe.dispatch(fx, .arm_delay);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try fx.fireTimer(redirected);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().ticks);
+    try std.testing.expectEqual(@as(f64, -1), Probe.model().stamp_ms);
+    Probe.dispatch(fx, .halt); // The fire retired the bridge slot too.
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[2]);
+    try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[3]);
+    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[4]);
+}
+
+test "delay admission supplies file stream occupancy and preserves cancellation priority" {
+    const Probe = ts_core_host.TsCoreHost(delay_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    delay_policy_probe_core.lookup_enabled = true;
+    delay_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.dispatch(fx, .arm_delay);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[2]);
+    Probe.dispatch(fx, .halt);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
+    // Conversely a live delay occupies its key for file-stream admission.
+    Probe.dispatch(fx, .arm_delay);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(i64, 2), Probe.model().errs);
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+}

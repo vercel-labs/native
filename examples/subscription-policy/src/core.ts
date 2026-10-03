@@ -23,6 +23,10 @@ export type Msg =
   | { readonly kind: "reverse" }
   | { readonly kind: "delay" }
   | { readonly kind: "cancel_delay" }
+  | { readonly kind: "replace_delay" }
+  | { readonly kind: "pair_delays" }
+  | { readonly kind: "anonymous_delays" }
+  | { readonly kind: "cancel_pair" }
   | { readonly kind: "reset" }
   | { readonly kind: "read_clock" }
   | { readonly kind: "clock_read"; readonly at: number }
@@ -49,6 +53,20 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "clock_read": return { ...model, clockReadings: model.clockReadings < 1000000 ? model.clockReadings + 1 : model.clockReadings, at: msg.at };
     case "delay": return [model, Cmd.delay("reminder", 250, "delayed")];
     case "cancel_delay": return [model, Cmd.cancel("reminder")];
+    case "replace_delay": return [model, Cmd.batch([
+      Cmd.delay("reminder", 4000, "delayed"),
+      Cmd.now("clock_read"),
+      Cmd.delay("reminder", 700.5, "secondary_tick"),
+    ])];
+    case "pair_delays": return [model, Cmd.batch([
+      Cmd.delay("left-reminder", 1000.5, "primary_tick"),
+      Cmd.delay("right-reminder", 1500.5, "secondary_tick"),
+    ])];
+    case "anonymous_delays": return [model, Cmd.batch([
+      Cmd.delay("", 1000.5, "delayed"),
+      Cmd.delay("", 1500.5, "delayed"),
+    ])];
+    case "cancel_pair": return [model, Cmd.batch([Cmd.cancel("left-reminder"), Cmd.cancel("right-reminder")])];
     case "reset": return { ...model, primary: 0, secondary: 0, delayed: 0, clockReadings: 0, at: 0 };
     case "primary_tick": return { ...model, primary: model.primary < 1000000 ? model.primary + 1 : model.primary, at: msg.at };
     case "secondary_tick": return { ...model, secondary: model.secondary < 1000000 ? model.secondary + 1 : model.secondary, at: msg.at };

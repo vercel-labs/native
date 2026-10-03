@@ -4218,3 +4218,101 @@ test "compiled timer plans preserve native slot order exact f64 changes and copi
     }
     try std.testing.expectEqual(@as(usize, 1428), comparisons);
 }
+
+test "compiled delay plans preserve first match empty keys rounding routes and cycle ownership" {
+    const names = [_][]const u8{ "", "reminder", "caf\xc3\xa9", "\x00\xff" };
+    const intervals = [_]f64{ 1, 1.4999999999999998, 1.5, 2.4999999999999996, 700.5, 31_535_999_999.5, 31_536_000_000 };
+    var request: [512]u8 = undefined;
+    var comparisons: usize = 0;
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed_command = core.bootCommand();
+    const command_copy = try std.testing.allocator.dupe(u8, borrowed_command);
+    defer std.testing.allocator.free(command_copy);
+    // A live policy allocates without revoking an outstanding command borrow.
+    const first = [_]u8{ 4, 0, 1, 0 } ++ ([_]u8{255} ** 16);
+    var first_result: [2]u8 = undefined;
+    try std.testing.expectEqual(first_result.len, core.nativeTimerPolicy(&first, &first_result));
+    try std.testing.expectEqualSlices(u8, command_copy, borrowed_command);
+    core.rt.frameReset();
+    for (0..17) |occupied| {
+        for (names) |name| {
+            for (intervals) |after| {
+                for ([_]u8{ 0, 127, 255 }) |tag| {
+                    var matching: ?usize = null;
+                    request[0] = 2;
+                    request[1] = @intCast(name.len);
+                    @memcpy(request[2..][0..name.len], name);
+                    var at: usize = 2 + name.len;
+                    std.mem.writeInt(u64, request[at..][0..8], @bitCast(after), .little);
+                    request[at + 8] = tag;
+                    request[at + 9] = 0; // No incumbent file stream.
+                    at += 10;
+                    const table_start = at;
+                    for (0..16) |index| {
+                        const used = index < occupied;
+                        const stored = if (used) names[index % names.len] else "";
+                        request[at] = @intFromBool(used);
+                        request[at + 1] = @intCast(stored.len);
+                        at += 2;
+                        @memcpy(request[at..][0..stored.len], stored);
+                        at += stored.len;
+                        request[at] = @intCast(index * 17);
+                        at += 1;
+                        if (used and matching == null and std.mem.eql(u8, stored, name)) matching = index;
+                    }
+                    const slot = if (name.len > 0) matching orelse occupied else occupied;
+                    // Empty keys with a full table deliberately trap; Node
+                    // exercises that refusal instead of aborting this process.
+                    if (slot >= 16) continue;
+                    var output: [10]u8 = undefined;
+                    try std.testing.expectEqual(output.len, core.nativeTimerPolicy(request[0..at], &output));
+                    const frozen = output;
+                    // Lookup uses the same owned facts, including empty keys.
+                    std.mem.copyForwards(u8, request[2 + name.len ..], request[table_start..at]);
+                    request[0] = 3;
+                    var lookup: [1]u8 = undefined;
+                    try std.testing.expectEqual(lookup.len, core.nativeTimerPolicy(request[0 .. at - 10], &lookup));
+                    try std.testing.expectEqual(if (matching) |i| @as(u8, @intCast(i)) else @as(u8, 255), lookup[0]);
+                    const fire = [_]u8{ 4, @intCast(slot), 0xff, 0xff } ++ ([_]u8{tag} ** 16);
+                    var route: [2]u8 = undefined;
+                    try std.testing.expectEqual(route.len, core.nativeTimerPolicy(&fire, &route));
+                    core.rt.frameReset();
+                    try std.testing.expectEqualSlices(u8, &frozen, &output);
+                    try std.testing.expectEqual(@as(u8, @intCast(slot)), output[0]);
+                    try std.testing.expectEqual(tag, output[1]);
+                    try std.testing.expectEqual(@round(after), @as(f64, @bitCast(std.mem.readInt(u64, output[2..10], .little))));
+                    try std.testing.expectEqualSlices(u8, &.{ @intCast(slot), tag }, &route);
+                    comparisons += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1407), comparisons);
+    // First-free holes exercise every slot independently of retained keys.
+    for (0..16) |hole| {
+        request[0] = 2;
+        request[1] = 0;
+        std.mem.writeInt(u64, request[2..10], @bitCast(@as(f64, 1)), .little);
+        request[10] = 255;
+        request[11] = 0;
+        for (0..16) |index| {
+            request[12 + index * 3] = @intFromBool(index != hole);
+            request[13 + index * 3] = 0;
+            request[14 + index * 3] = 0;
+        }
+        var output: [10]u8 = undefined;
+        try std.testing.expectEqual(output.len, core.nativeTimerPolicy(request[0..60], &output));
+        try std.testing.expectEqual(@as(u8, @intCast(hole)), output[0]);
+        core.rt.frameReset();
+    }
+}
+
+test "compiled delay admission drops an incumbent stream even with a full table" {
+    var request = [_]u8{ 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 1 } ++ ([_]u8{ 1, 0, 0 } ** 16);
+    std.mem.writeInt(u64, request[2..10], @bitCast(@as(f64, 700.5)), .little);
+    var output: [10]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeTimerPolicy(&request, &output));
+    try std.testing.expectEqual(@as(u8, 255), output[0]);
+    core.rt.frameReset();
+}

@@ -13,7 +13,7 @@ const compare = (snapshots: NativeSnapshot[]) => {
 };
 
 test("clocks reconcile keys, exact intervals, routes and order beside reminders, then replay", async () => {
-  const app = await NativeApp.start({ width: 760, height: 560, wallMs: 12345 });
+  const app = await NativeApp.start({ width: 760, height: 620, wallMs: 12345 });
   try {
     let s = await app.snapshot();
     if (backend) assert.equal(s.viewBackend, backend);
@@ -64,5 +64,44 @@ test("clocks reconcile keys, exact intervals, routes and order beside reminders,
     assert.equal(replay.effects, s.effects.recorded);
     assert.deepEqual(replay.snapshot.model, s.model);
     s = replay.snapshot; save(); compare(snapshots);
+  } finally { await app.close(); }
+});
+
+
+test("delays debounce routes, allocate independently, reuse retired slots and replay complete effects", async () => {
+  const app = await NativeApp.start({ width: 760, height: 620, wallMs: 12345 });
+  try {
+    let s = await app.snapshot(); const snapshots = [s];
+    const save = () => snapshots.push(s);
+    const press = async (name: string) => { s = await app.click(findWidget(s, { role: "button", name })); save(); };
+    const delays = () => s.effects.timers.filter(t => t.mode === "one_shot");
+    await press("Schedule reminder"); const reminder = delays()[0]!.key;
+    await press("Schedule reminder"); assert.equal(delays().length, 1); assert.equal(delays()[0]!.key, reminder);
+    await press("Replace reminder"); assert.equal(delays().length, 1); assert.equal(delays()[0]!.key, reminder);
+    assert.equal(delays()[0]!.intervalMs, 701); assert.equal(s.model.clockReadings, 1); assert.equal(s.effects.recorded, 1);
+    await press("Pair reminders"); assert.equal(delays().length, 3);
+    const left = delays().find(t => t.intervalMs === 1001)!.key, right = delays().find(t => t.intervalMs === 1501)!.key;
+    s = await app.fireTimer(reminder); assert.equal(s.model.secondary, 1); assert.equal(s.model.delayed, 0); save();
+    await press("Schedule reminder"); assert.equal(delays().find(t => t.intervalMs === 250)!.key, reminder);
+    await press("Cancel reminder"); assert.equal(delays().length, 2);
+    s = await app.fireTimer(left); assert.equal(s.model.primary, 1); save();
+    s = await app.fireTimer(right); assert.equal(s.model.secondary, 2); assert.equal(delays().length, 0); save();
+    await press("Anonymous reminders"); assert.equal(delays().length, 2); assert.notEqual(delays()[0]!.key, delays()[1]!.key);
+    const anonymous = delays().map(t => t.key);
+    await press("Cancel reminder"); assert.deepEqual(delays().map(t => t.key), anonymous);
+    for (const key of anonymous) { s = await app.fireTimer(key); save(); }
+    assert.equal(s.model.delayed, 2); assert.equal(delays().length, 0);
+    await press("Pair reminders"); await press("Cancel pair"); assert.equal(delays().length, 0);
+    await press("Schedule reminder"); assert.equal(delays()[0]!.key, reminder);
+    s = await app.fireTimer(reminder); assert.equal(s.model.delayed, 3); save();
+    const replay = await app.verifyReplay(); assert.ok(replay.events > 0 && replay.checkpoints > 0);
+    assert.equal(replay.effects, 1); assert.deepEqual(replay.snapshot.model, s.model);
+    s = replay.snapshot; save();
+    const reference = process.env.NATIVE_SDK_TEST_VIEW_REFERENCE;
+    if (reference) {
+      const values = snapshots.map(({ viewBackend, ...value }) => value);
+      if (backend === "zig") writeFileSync(`${reference}.delays.json`, JSON.stringify(values));
+      else assert.deepEqual(values, JSON.parse(readFileSync(`${reference}.delays.json`, "utf8")));
+    }
   } finally { await app.close(); }
 });

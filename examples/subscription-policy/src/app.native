@@ -25,5 +25,6 @@
     </column>
   </panel>
   <row gap="12"><button on-press="delay">Schedule reminder</button><button variant="secondary" on-press="cancel_delay">Cancel reminder</button><button variant="secondary" on-press="read_clock">Read clock</button></row>
+  <row gap="12"><button variant="secondary" on-press="replace_delay">Replace reminder</button><button variant="secondary" on-press="pair_delays">Pair reminders</button><button variant="secondary" on-press="anonymous_delays">Anonymous reminders</button><button variant="secondary" on-press="cancel_pair">Cancel pair</button></row>
   <status-bar>Clock readings: {clockReadings}</status-bar>
 </column>
