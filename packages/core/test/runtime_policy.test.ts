@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { native_timer_policy } from "../src/runtime_policy.ts";
+import { native_timer_policy, native_db_policy } from "../src/runtime_policy.ts";
 
 interface Slot { used: boolean; key: Uint8Array; every: number; tag: number }
 const empty = (): Slot[] => Array.from({ length: 16 }, () => ({ used: false, key: new Uint8Array(0), every: 0, tag: 0 }));
@@ -129,4 +129,63 @@ test("delay admission preserves file streams after validating the declaration", 
   assert.equal(native_timer_policy(delayRequest(slots, key("file"), 700.5, 255, 1))[0], 255);
   assert.throws(() => native_timer_policy(delayRequest(slots, key("file"), NaN, 0, 1)), /interval/);
   assert.throws(() => native_timer_policy(delayRequest(slots, key("file"), 1, 0, 2)), /admission/);
+});
+
+
+type DbSlot = { used: boolean; live: boolean; key: Uint8Array; signature: Uint8Array };
+const dbEmpty = (): DbSlot[] => Array.from({ length: 16 }, () => ({ used: false, live: false, key: key(""), signature: new Uint8Array(8) }));
+function dbRequest(slots: DbSlot[], name: Uint8Array | Uint8Array[], signature?: Uint8Array, seen = 0): Uint8Array {
+  const retention = Array.isArray(name), keys = retention ? name : [name];
+  const prefix = retention ? 5 + keys.reduce((n, k) => n + 1 + k.length, 0) : (signature ? 15 : 2) + keys[0]!.length;
+  const bytes = new Uint8Array(prefix + slots.reduce((n, s) => n + 11 + s.key.length, 0));
+  const view = new DataView(bytes.buffer); let at = prefix;
+  bytes[0] = retention ? 1 : signature ? 2 : 0;
+  if (retention) { view.setUint32(1, prefix - 5, true); let pos = 5; for (const k of keys) { bytes[pos++] = k.length; bytes.set(k, pos); pos += k.length; } }
+  else if (signature) { view.setUint16(1, seen, true); bytes[3] = keys[0]!.length; bytes.set(keys[0]!, 4); bytes.set(signature, 4 + keys[0]!.length); bytes.set([7, 127, 255], 12 + keys[0]!.length); }
+  else { bytes[1] = keys[0]!.length; bytes.set(keys[0]!, 2); }
+  for (const s of slots) { bytes[at] = +s.used; bytes[at + 1] = +s.live; bytes[at + 2] = s.key.length; bytes.set(s.key, at + 3); bytes.set(s.signature, at + 3 + s.key.length); at += 11 + s.key.length; }
+  return bytes;
+}
+
+test("database policy preserves first-match retention, command collisions, slots and exact fingerprint bytes", () => {
+  const names = [key("query"), key("café"), new Uint8Array([0, 255]), new Uint8Array(255).fill(255), key("absent")];
+  for (let occupied = 0; occupied <= 16; occupied++) for (const live of [false, true]) {
+    const slots = dbEmpty(); slots.forEach((s, i) => { s.used = i < occupied; s.live = live; s.key = names[i % 4]!; s.signature.fill(255); });
+    for (const name of names) {
+      const matching = slots.findIndex(s => s.used && Buffer.from(s.key).equals(name));
+      assert.equal(native_db_policy(dbRequest(slots, name))[0], matching < 0 ? 255 : matching);
+      assert.equal(new DataView(native_db_policy(dbRequest(slots, [name])).buffer).getUint16(0, true), matching < 0 || !live ? 0 : 1 << matching);
+      for (let changedByte = -1; changedByte < 8; changedByte++) {
+        const signature = new Uint8Array(8).fill(255); if (changedByte >= 0) signature[changedByte] = 254;
+        const slot = matching >= 0 ? matching : slots.findIndex(s => !s.used);
+        const req = dbRequest(slots, name, signature, 0x8000 & ~(1 << Math.max(slot, 0)));
+        if (slot < 0) { assert.throws(() => native_db_policy(req), /full/); continue; }
+        if (matching >= 0 && !live) { assert.throws(() => native_db_policy(req), /collides/); continue; }
+        const out = native_db_policy(req), start = matching < 0 || changedByte >= 0;
+        assert.deepEqual([...out.subarray(0, 6)], [slot, +start, +(matching >= 0 && start), 7, 127, 255]);
+        assert.equal(new DataView(out.buffer).getUint16(6, true), (0x8000 & ~(1 << slot)) | (1 << slot));
+        assert.throws(() => native_db_policy(dbRequest(slots, name, signature, 1 << slot)), /duplicate/);
+      }
+    }
+    assert.equal(native_db_policy(dbRequest(slots, key("")))[0], 255);
+  }
+  const slots = dbEmpty(); slots[0] = { used: true, live: false, key: key("same"), signature: new Uint8Array(8) }; slots[1] = { ...slots[0], live: true };
+  assert.deepEqual([...native_db_policy(dbRequest(slots, [key("same"), key("same")]))], [0, 0]);
+  for (let hole = 0; hole < 16; hole++) {
+    slots.forEach((s, i) => { s.used = i !== hole; s.key = key("occupied"); });
+    assert.equal(native_db_policy(dbRequest(slots, key("new"), new Uint8Array(8)))[0], hole);
+  }
+});
+
+test("database decisions reject damaged records and preserve copied result ownership", () => {
+  const requests = [dbRequest(dbEmpty(), key("x")), dbRequest(dbEmpty(), [key("x"), key("y")]), dbRequest(dbEmpty(), key("x"), new Uint8Array(8))];
+  for (const request of requests) {
+    for (let n = 0; n < request.length; n++) assert.throws(() => native_db_policy(request.subarray(0, n)));
+    assert.throws(() => native_db_policy(new Uint8Array([...request, 0])), /trailing/);
+    const copy = request.slice(); copy[copy.length - 11] = 2; assert.throws(() => native_db_policy(copy), /slot/);
+  }
+  assert.throws(() => native_db_policy(dbRequest(dbEmpty(), key(""), new Uint8Array(8))), /non-empty/);
+  assert.throws(() => native_db_policy(dbRequest(dbEmpty(), [key("")])), /key list/);
+  const request = requests[2]!, out = native_db_policy(request), copy = out.slice(); request.fill(0);
+  native_db_policy(requests[0]!); assert.deepEqual(out, copy);
 });

@@ -18,6 +18,8 @@ export interface NoteRow {
 }
 
 export interface Model {
+  readonly watching: boolean;
+  readonly alternateKeys: boolean;
   readonly folderId: number;
   readonly nextId: number;
   readonly search: Uint8Array;
@@ -32,6 +34,8 @@ export interface Model {
 
 export type Msg =
   | { readonly kind: "seed" }
+  | { readonly kind: "toggle_live" }
+  | { readonly kind: "restart_live" }
   | { readonly kind: "add_note" }
   | { readonly kind: "folder_one" }
   | { readonly kind: "folder_two" }
@@ -45,6 +49,7 @@ export type Msg =
   | { readonly kind: "db_failed"; readonly reason: Uint8Array };
 
 export const viewUnbound = [
+  "alternateKeys",
   "folderId",
   "nextId",
   "search",
@@ -76,6 +81,8 @@ function appendMatches(left: ReadonlyArray<NoteRow>, right: ReadonlyArray<NoteRo
 
 export function initialModel(): Model {
   return {
+    watching: true,
+    alternateKeys: false,
     folderId: 1,
     nextId: 4,
     search: utf8Bytes("native"),
@@ -97,8 +104,14 @@ export function noteCount(model: Model): number {
   return model.notes.length;
 }
 
+export function livePaused(model: Model): boolean {
+  return !model.watching;
+}
+
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
+    case "toggle_live": return { ...model, watching: !model.watching, status: utf8Bytes(model.watching ? "Live updates paused" : "Live updates resumed") };
+    case "restart_live": return { ...model, alternateKeys: !model.alternateKeys, status: utf8Bytes(model.watching ? "Live queries restarted" : "Live updates paused") };
     case "seed":
       return [
         { ...model, status: utf8Bytes("Committing folders, notes, tags, and FTS rows atomically…") },
@@ -157,13 +170,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 
 export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.watching) return Sub.none;
   return Sub.batch([
-    Sub.qNotesInFolder("folder-notes", { folder: model.folderId }, {
+    Sub.qNotesInFolder(model.alternateKeys ? "folder-notes-b" : "folder-notes", { folder: model.folderId }, {
       page: "notes_page",
       done: "notes_done",
       err: "db_failed",
     }),
-    Sub.qSearchNotes("fts-results", { term: dbText(model.search) }, {
+    Sub.qSearchNotes(model.alternateKeys ? "fts-results-b" : "fts-results", { term: dbText(model.search) }, {
       page: "search_page",
       done: "search_done",
       err: "db_failed",

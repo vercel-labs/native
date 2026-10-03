@@ -13388,6 +13388,32 @@ pub fn Effects(comptime Msg: type) type {
             return count;
         }
 
+        /// The index-th parked fake database operation, in slot order. Live
+        /// query facts borrow engine-owned storage until the next operation.
+        pub fn pendingDbAt(self: *Self, index: usize) ?struct {
+            key: u64,
+            generation: u64,
+            kind: DbSlotKind,
+            sql: []const u8,
+            params: []const EffectDbValue,
+            tables: []const []const u8,
+        } {
+            var seen: usize = 0;
+            for (&self.db_slots) |*slot| {
+                if (!slot.active or !slot.fake) continue;
+                if (seen == index) return .{
+                    .key = slot.key,
+                    .generation = slot.generation,
+                    .kind = slot.kind,
+                    .sql = if (slot.live) |live| live.sql else "",
+                    .params = if (slot.live) |live| live.params else &.{},
+                    .tables = if (slot.live) |live| live.tables else &.{},
+                };
+                seen += 1;
+            }
+            return null;
+        }
+
         /// Number of parked (still-active) fake host requests.
         pub fn pendingHostCount(self: *Self) usize {
             var count: usize = 0;

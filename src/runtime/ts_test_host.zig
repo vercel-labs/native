@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -17,6 +17,9 @@ const Request = struct {
     key: []const u8 = "0",
     ok: bool = true,
     bytes: []const u8 = "",
+    db_kind: sdk.EffectDbResultKind = .done,
+    db_outcome: sdk.EffectDbOutcome = .ok,
+    db_bytes: []const u8 = &.{},
     view: []const u8 = "",
     window: u64 = 1,
     widget: []const u8 = "0",
@@ -193,6 +196,31 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 });
             }
             try json.endArray();
+            try json.objectField("databases");
+            try json.beginArray();
+            for (0..self.state.effects.pendingDbCount()) |index| {
+                const db = self.state.effects.pendingDbAt(index).?;
+                const key = try std.fmt.bufPrint(&id_buffer, "{d}", .{db.key});
+                var generation_buffer: [32]u8 = undefined;
+                const generation = try std.fmt.bufPrint(&generation_buffer, "{d}", .{db.generation});
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(key);
+                try json.objectField("generation");
+                try json.write(generation);
+                try json.objectField("kind");
+                try json.write(db.kind);
+                try json.objectField("sql");
+                try json.write(db.sql);
+                try json.objectField("params");
+                json.options.emit_strings_as_arrays = true;
+                try json.write(db.params);
+                json.options.emit_strings_as_arrays = false;
+                try json.objectField("tables");
+                try json.write(db.tables);
+                try json.endObject();
+            }
+            try json.endArray();
             try json.endObject();
             try json.endObject();
         }
@@ -310,6 +338,10 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 },
                 .host_result => {
                     try value.state.effects.feedHostResult(try std.fmt.parseInt(u64, request.key, 10), request.ok, request.bytes);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .db_result => {
+                    try value.state.effects.feedDbResult(try std.fmt.parseInt(u64, request.key, 10), request.db_kind, request.db_outcome, request.db_bytes);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
                 },
                 .timer => {

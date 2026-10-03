@@ -13,3 +13,8 @@ cd examples/relational-notes
 Edit `src/schema/*.sql` only by adding a new numbered migration. Named queries
 live in `src/queries.sql`; the generated `Cmd.q<Name>`, `Sub.q<Name>`, row interfaces, and
 `decode<Name>Page` functions exist only for the schema the checker accepted.
+
+Pause and resume live updates, switch folders or search terms, and restart the
+query set. Live subscriptions follow the model; cancelling a command does not
+remove a declared subscription. `native test` exercises database effects and
+replay; the framework suite compares complete snapshots across both backends.

@@ -12,6 +12,11 @@
     <button size="sm" variant="ghost" on-press="folder_two">Archive</button>
   </row>
 
+  <row gap="10" cross="center">
+    <switch checked="{watching}" on-toggle="toggle_live">Live updates</switch>
+    <button variant="secondary" size="sm" disabled="{livePaused}" on-press="restart_live">Restart live queries</button>
+  </row>
+
   <split grow="1" value="0.58">
     <panel padding="16" background="surface" radius="lg">
       <column gap="10">

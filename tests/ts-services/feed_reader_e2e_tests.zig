@@ -4316,3 +4316,92 @@ test "compiled delay admission drops an incumbent stream even with a full table"
     try std.testing.expectEqual(@as(u8, 255), output[0]);
     core.rt.frameReset();
 }
+
+test "compiled database plans preserve first matching keys exact fingerprints retention and ABI ownership" {
+    const longest = [_]u8{255} ** 255;
+    const names = [_][]const u8{ "query", "caf\xc3\xa9", "\x00\xff", &longest, "absent" };
+    var request: [4608]u8 = undefined;
+    var lookup: [4608]u8 = undefined;
+    var retention: [4608]u8 = undefined;
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed_command = core.bootCommand();
+    try std.testing.expect(borrowed_command.len > 0);
+    const command_copy = try std.testing.allocator.dupe(u8, borrowed_command);
+    defer std.testing.allocator.free(command_copy);
+    @memset(request[0..181], 0);
+    request[0] = 1;
+    var kept: [2]u8 = undefined;
+    try std.testing.expectEqual(kept.len, core.nativeDbPolicy(request[0..181], &kept));
+    try std.testing.expectEqualSlices(u8, command_copy, borrowed_command);
+    core.rt.frameReset();
+    var comparisons: usize = 0;
+    for (0..17) |occupied| for (names) |name| {
+        var matching: ?usize = null;
+        var at: usize = 15 + name.len;
+        const table_start = at;
+        for (0..16) |index| {
+            const used = index < occupied;
+            const stored = if (used) names[index % 4] else "";
+            request[at] = @intFromBool(used);
+            request[at + 1] = 1;
+            request[at + 2] = @intCast(stored.len);
+            @memcpy(request[at + 3 ..][0..stored.len], stored);
+            std.mem.writeInt(u64, request[at + 3 + stored.len ..][0..8], 0xffff_ffff_ffff_fff0 + @as(u64, @intCast(index)), .little);
+            at += 11 + stored.len;
+            if (used and matching == null and std.mem.eql(u8, stored, name)) matching = index;
+        }
+        lookup[0] = 0;
+        lookup[1] = @intCast(name.len);
+        @memcpy(lookup[2..][0..name.len], name);
+        @memcpy(lookup[2 + name.len ..][0 .. at - table_start], request[table_start..at]);
+        var found: [1]u8 = undefined;
+        try std.testing.expectEqual(found.len, core.nativeDbPolicy(lookup[0 .. at - 13], &found));
+        try std.testing.expectEqual(if (matching) |index| @as(u8, @intCast(index)) else @as(u8, 255), found[0]);
+        retention[0] = 1;
+        std.mem.writeInt(u32, retention[1..5], @intCast(1 + name.len), .little);
+        retention[5] = @intCast(name.len);
+        @memcpy(retention[6..][0..name.len], name);
+        @memcpy(retention[6 + name.len ..][0 .. at - table_start], request[table_start..at]);
+        try std.testing.expectEqual(kept.len, core.nativeDbPolicy(retention[0 .. at - 9], &kept));
+        try std.testing.expectEqual(if (matching) |index| @as(u16, 1) << @intCast(index) else @as(u16, 0), std.mem.readInt(u16, &kept, .little));
+        const slot = matching orelse occupied;
+        if (slot >= 16) {
+            core.rt.frameReset();
+            continue;
+        }
+        for (0..9) |variant| {
+            request[0] = 2;
+            const seen: u16 = 0x8000 & ~(@as(u16, 1) << @intCast(slot));
+            std.mem.writeInt(u16, request[1..3], seen, .little);
+            request[3] = @intCast(name.len);
+            @memcpy(request[4..][0..name.len], name);
+            std.mem.writeInt(u64, request[4 + name.len ..][0..8], 0xffff_ffff_ffff_fff0 + @as(u64, @intCast(matching orelse 0)), .little);
+            if (variant > 0) request[4 + name.len + variant - 1] ^= 1;
+            @memcpy(request[12 + name.len ..][0..3], &@as([3]u8, .{ 7, 127, 255 }));
+            var result: [8]u8 = undefined;
+            try std.testing.expectEqual(result.len, core.nativeDbPolicy(request[0..at], &result));
+            const frozen = result;
+            try std.testing.expectEqual(found.len, core.nativeDbPolicy(lookup[0 .. at - 13], &found));
+            core.rt.frameReset();
+            try std.testing.expectEqualSlices(u8, &frozen, &result);
+            const changed = matching == null or variant > 0;
+            try std.testing.expectEqualSlices(u8, &.{ @intCast(slot), @intFromBool(changed), @intFromBool(matching != null and changed), 7, 127, 255 }, result[0..6]);
+            try std.testing.expectEqual(seen | (@as(u16, 1) << @intCast(slot)), std.mem.readInt(u16, result[6..8], .little));
+            comparisons += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 756), comparisons);
+    // Every first-free hole is selected even when all other slots are used.
+    for (0..16) |hole| {
+        @memset(request[0..192], 0);
+        request[0] = 2;
+        request[3] = 1;
+        request[4] = 'x';
+        for (0..16) |slot| request[16 + slot * 11] = @intFromBool(slot != hole);
+        var result: [8]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeDbPolicy(request[0..192], &result));
+        try std.testing.expectEqual(@as(u8, @intCast(hole)), result[0]);
+        core.rt.frameReset();
+    }
+}

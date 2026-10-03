@@ -3431,3 +3431,108 @@ test "delay admission supplies file stream occupancy and preserves cancellation 
     Probe.dispatch(fx, .halt);
     try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
 }
+
+const db_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var retain: bool = true;
+    var rearm: bool = true;
+    var lookup: bool = true;
+    var calls = [_]usize{0} ** 3;
+
+    pub fn nativeDbPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 37), 255);
+        if (request[0] == 1) {
+            std.mem.writeInt(u16, output[0..2], if (retain) 1 << 6 else 0, .little);
+            return 2;
+        }
+        const table = if (request[0] == 0) 2 + @as(usize, request[1]) else 15 + @as(usize, request[3]);
+        var at: usize = table;
+        for (0..6) |_| at += 11 + @as(usize, request[at + 2]);
+        const used = request[at] == 1;
+        if (request[0] == 0) {
+            output[0] = if (lookup and used) 6 else 255;
+            return 1;
+        }
+        output[0] = 6;
+        output[1] = @intFromBool(!used or rearm);
+        output[2] = @intFromBool(used and rearm);
+        output[3] = 8; // Route pages to failed instead of loaded.
+        output[4] = 12;
+        output[5] = 7; // Route errors to loaded instead of failed.
+        std.mem.writeInt(u16, output[6..8], 1 << 6, .little);
+        return 8;
+    }
+};
+
+test "database host consumes policy slot routes restart retention and copied cycle facts" {
+    const Probe = ts_core_host.TsCoreHost(db_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    db_policy_probe_core.retain = true;
+    db_policy_probe_core.rearm = true;
+    db_policy_probe_core.lookup = true;
+    db_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .toggle); // Native timer and database policies share a cycle.
+    Probe.dispatch(fx, .arm_db_live);
+    const redirected = ts_core_host.db_key_base + 6;
+    try std.testing.expectEqual(redirected, fx.pendingDbAt(0).?.key);
+    try std.testing.expectEqualStrings("SELECT id FROM item", fx.pendingDbAt(0).?.sql);
+    const generation = fx.pendingDbAt(0).?.generation;
+    db_policy_probe_core.rearm = false;
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(generation, fx.pendingDbAt(0).?.generation);
+    db_policy_probe_core.rearm = true;
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expect(generation != fx.pendingDbAt(0).?.generation);
+    try fx.feedDbResult(redirected, .page, .ok, &(@as([8]u8, @splat(0))));
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqual(@as(usize, 8), Probe.model().last_err.len);
+    try fx.feedDbResult(redirected, .done, .busy, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("busy", Probe.model().status);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    Probe.dispatch(fx, .stop_db_live_with_cancel);
+    // The policy deliberately retains an absent declaration; Cmd.cancel is
+    // still unable to strand a live query. Only retention retires that slot.
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    db_policy_probe_core.retain = false;
+    Probe.dispatch(fx, .stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingDbCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expect(db_policy_probe_core.calls[1] >= 6);
+    try std.testing.expect(db_policy_probe_core.calls[2] >= 3);
+}
+
+test "database key lookup is owned by the compiled policy and preserves live command refusal" {
+    const Probe = ts_core_host.TsCoreHost(db_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    db_policy_probe_core.retain = true;
+    db_policy_probe_core.rearm = false;
+    db_policy_probe_core.lookup = true;
+    db_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .arm_db_live);
+    Probe.dispatch(fx, .query_over_db_live);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    db_policy_probe_core.lookup = false;
+    Probe.dispatch(fx, .query_over_db_live);
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingDbCount());
+    try fx.feedDbResult(ts_core_host.db_key_base, .done, .ok, "");
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expect(db_policy_probe_core.calls[0] >= 2);
+}

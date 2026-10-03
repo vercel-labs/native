@@ -43,6 +43,16 @@ export interface NativeSnapshot {
     readonly recorded: number;
     readonly requests: readonly { readonly key: string; readonly name: string; readonly bytes: readonly number[] }[];
     readonly timers: readonly { readonly key: string; readonly intervalMs: number; readonly mode: "one_shot" | "repeating" }[];
+    /** Parked fake database operations, including complete live-query facts.
+     * Decimal strings preserve native keys and generation counters exactly. */
+    readonly databases: readonly {
+      readonly key: string;
+      readonly generation: string;
+      readonly kind: "query" | "exec" | "live";
+      readonly sql: string;
+      readonly params: readonly JsonValue[];
+      readonly tables: readonly string[];
+    }[];
   };
 }
 export interface NativeReplay {
@@ -244,6 +254,13 @@ export class NativeApp implements AsyncDisposable {
     return this.#snapshot({ op: "host_result", key: identity(key), bytes: Array.from(bytes), ok });
   }
   fireTimer(key: string): Promise<NativeSnapshot> { return this.#snapshot({ op: "timer", key: identity(key) }); }
+
+  /** Deliver a canonical row page or terminal through the journaled database
+   * boundary. Malformed pages and mismatched operation kinds fail in native. */
+  databaseResult(key: string, kind: "page" | "done" | "exec", bytes: Uint8Array = new Uint8Array(0),
+    outcome: "ok" | "constraint" | "busy" | "io_failed" | "corrupt" | "misuse" | "rejected" | "cancelled" = "ok"): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "db_result", key: identity(key), db_kind: kind, db_outcome: outcome, db_bytes: [...bytes] });
+  }
 
   /** Finish recording and replay into a freshly initialized native runtime.
    * Verifies every checkpoint, the final fingerprint, and the final model. Terminal: only

@@ -100,3 +100,95 @@ function delayDeclaration(request: Uint8Array): Uint8Array {
   new DataView(result.buffer).setFloat64(2, after - whole >= 0.5 ? whole + 1 : whole, true);
   return result;
 }
+
+/** Live-query reconciliation over a native-owned database table. Operation 0
+ * finds a key, 1 retains declared live keys before allocation, and 2 plans one
+ * declaration. Fingerprints are opaque bytes: preserve the reference host's
+ * equality semantics without rounding its 64-bit hash through a JS number.
+ * Inputs are borrowed; the host copies results and owns the cycle reset.
+ */
+export function native_db_policy(request: Uint8Array): Uint8Array {
+  if (request.length < 2 || request[0]! > 2) throw new Error("invalid database policy request");
+  const op = request[0]!;
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  let keyStart = 2, keyLength = request[1]!, tableStart = keyStart + keyLength;
+  let keysEnd = 0, seen = 0, signatureAt = 0;
+  if (op === 1) {
+    if (request.length < 5) throw new Error("truncated database retention request");
+    keysEnd = 5 + data.getUint32(1, true);
+    if (keysEnd > request.length) throw new Error("truncated database retention request");
+    tableStart = keysEnd;
+    let at = 5;
+    while (at < keysEnd) {
+      const length = request[at]!;
+      if (length === 0 || at + 1 + length > keysEnd) throw new Error("invalid live-query key list");
+      at += 1 + length;
+    }
+  } else if (op === 2) {
+    if (request.length < 4) throw new Error("truncated database declaration request");
+    seen = data.getUint16(1, true);
+    keyLength = request[3]!;
+    keyStart = 4;
+    signatureAt = keyStart + keyLength;
+    tableStart = signatureAt + 11;
+    if (keyLength === 0) throw new Error("a live query requires a non-empty subscription key");
+  }
+  if (tableStart > request.length) throw new Error("truncated database policy request");
+  const offsets = new Uint8Array(64);
+  const positions = new DataView(offsets.buffer);
+  let at = tableStart, free = -1;
+  for (let slot = 0; slot < 16; slot++) {
+    if (at + 3 > request.length) throw new Error("truncated database policy table");
+    const used = request[at]!, live = request[at + 1]!, length = request[at + 2]!;
+    if (used > 1 || live > 1 || at + 11 + length > request.length) throw new Error("invalid database policy slot");
+    positions.setUint32(slot * 4, at, true);
+    if (used === 0 && free < 0) free = slot;
+    at += 11 + length;
+  }
+  if (at !== request.length) throw new Error("trailing database policy bytes");
+  if (op === 1) {
+    let retained = 0;
+    for (let keyAt = 5; keyAt < keysEnd; keyAt += 1 + request[keyAt]!) {
+      const slot = dbPolicyLookup(request, positions, keyAt + 1, request[keyAt]!);
+      if (slot >= 0 && request[positions.getUint32(slot * 4, true) + 1] === 1) retained |= 1 << slot;
+    }
+    const result = new Uint8Array(2);
+    new DataView(result.buffer).setUint16(0, retained, true);
+    return result;
+  }
+  const matching = dbPolicyLookup(request, positions, keyStart, keyLength);
+  if (op === 0) {
+    const result = new Uint8Array(1);
+    result[0] = matching < 0 ? 255 : matching;
+    return result;
+  }
+  const slot = matching >= 0 ? matching : free;
+  if (slot < 0) throw new Error("database slot family is full");
+  const entry = positions.getUint32(slot * 4, true), used = request[entry] === 1;
+  if (used && request[entry + 1] !== 1) throw new Error("a live-query key collides with an in-flight database command");
+  if ((seen & (1 << slot)) !== 0) throw new Error("duplicate live-query subscription key");
+  let changed = !used;
+  const storedSignature = entry + 3 + request[entry + 2]!;
+  for (let i = 0; i < 8; i++) if (request[signatureAt + i] !== request[storedSignature + i]) changed = true;
+  const result = new Uint8Array(8);
+  result[0] = slot;
+  result[1] = changed ? 1 : 0;
+  result[2] = used && changed ? 1 : 0;
+  result[3] = request[signatureAt + 8]!;
+  result[4] = request[signatureAt + 9]!;
+  result[5] = request[signatureAt + 10]!;
+  new DataView(result.buffer).setUint16(6, seen | (1 << slot), true);
+  return result;
+}
+
+function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: number, keyLength: number): number {
+  if (keyLength === 0) return -1;
+  for (let slot = 0; slot < 16; slot++) {
+    const at = positions.getUint32(slot * 4, true);
+    if (request[at] !== 1 || request[at + 2] !== keyLength) continue;
+    let equal = true;
+    for (let i = 0; i < keyLength; i++) if (request[at + 3 + i] !== request[keyStart + i]) equal = false;
+    if (equal) return slot;
+  }
+  return -1;
+}

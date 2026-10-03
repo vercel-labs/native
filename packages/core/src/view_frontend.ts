@@ -53,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscViewNode", "NscTimelineItem", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -497,9 +497,9 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         }
       }
       else if (["main", "cross", "size", "variant", "role", "background", "foreground", "radius"].includes(name)) {
-        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], radius: ["sm", "md", "lg"] };
+        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], radius: ["sm", "md", "lg"] };
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
-        if (name === "size" && value === "heading" && node.name !== "text") fail(node, "heading size requires text");
+        if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
         props.push(`${name}: ${JSON.stringify(value)}`);
       } else if (["on-press", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize"].includes(name)) {
         const channel = name.slice(3);

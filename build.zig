@@ -1079,6 +1079,25 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&resizable_policy_driver_run.step);
         test_step.dependOn(&resizable_policy_driver_run.step);
 
+        const relational_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        relational_reference_run.setCwd(b.path("examples/relational-notes"));
+        relational_reference_run.has_side_effects = true;
+        relational_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        relational_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/relational-notes-view-reference"));
+        _ = relational_reference_run.captureStdOut(.{});
+        _ = relational_reference_run.captureStdErr(.{});
+        const relational_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        relational_driver_run.setCwd(b.path("examples/relational-notes"));
+        relational_driver_run.has_side_effects = true;
+        relational_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        relational_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/relational-notes-view-reference"));
+        _ = relational_driver_run.captureStdOut(.{});
+        _ = relational_driver_run.captureStdErr(.{});
+        relational_driver_run.step.dependOn(&relational_reference_run.step);
+        native_driver_step.dependOn(&relational_driver_run.step);
+        ts_core_e2e_step.dependOn(&relational_driver_run.step);
+        test_step.dependOn(&relational_driver_run.step);
+
         const text_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         text_policy_reference_run.setCwd(b.path("examples/text-policy"));
         text_policy_reference_run.has_side_effects = true;

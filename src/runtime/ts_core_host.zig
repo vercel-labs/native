@@ -2781,6 +2781,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findDb(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeDbPolicy")) return compiledDbLookup(key);
             if (key.len == 0) return null;
             for (&dbs, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
@@ -3290,7 +3291,7 @@ pub fn TsCoreHost(comptime core: type) type {
             const borrowed_subs = core.subscriptions(model_root);
             // A cycle policy may allocate in the compiler frame. Keep the
             // stream in the shim arena, and reset both only in finishCycle.
-            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy")) blk: {
+            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy") or @hasDecl(core, "nativeDbPolicy")) blk: {
                 const copy = core.rt.frameAlloc(u8, borrowed_subs.len);
                 @memcpy(copy, borrowed_subs);
                 break :blk copy;
@@ -3395,23 +3396,29 @@ pub fn TsCoreHost(comptime core: type) type {
                         for (0..table_count) |index| tables[index] = takeShortBytes(subs, &at);
 
                         const signature = std.hash.Wyhash.hash(0, subs[record_start..at]);
-                        const index = findDb(key) orelse freeDbIndex() orelse
-                            @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                        const plan: DbPlan = if (comptime @hasDecl(core, "nativeDbPolicy")) compiledDbDeclaration(key, signature, page_tag, done_tag, err_tag, &seen_db) else blk: {
+                            const index = findDb(key) orelse freeDbIndex() orelse
+                                @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                            const entry = &dbs[index];
+                            if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
+                            if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
+                            seen_db[index] = true;
+                            const changed = !entry.used or entry.signature != signature;
+                            break :blk .{ .slot = index, .start = changed, .stop = entry.used and changed, .page_tag = page_tag, .done_tag = done_tag, .err_tag = err_tag };
+                        };
+                        const index = plan.slot;
                         const entry = &dbs[index];
-                        if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
-                        if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
-                        seen_db[index] = true;
-                        if (!entry.used or entry.signature != signature) {
-                            if (entry.used) fx.dbUnsubscribe(db_key_base + index);
+                        if (plan.stop) fx.dbUnsubscribe(db_key_base + index);
+                        if (plan.start) {
                             entry.* = .{
                                 .used = true,
                                 .query = true,
                                 .live = true,
                                 .signature = signature,
                                 .key_len = key.len,
-                                .page_tag = page_tag,
-                                .done_tag = done_tag,
-                                .err_tag = err_tag,
+                                .page_tag = plan.page_tag,
+                                .done_tag = plan.done_tag,
+                                .err_tag = plan.err_tag,
                             };
                             @memcpy(entry.key[0..key.len], key);
                             fx.dbSubscribe(.{
@@ -3576,6 +3583,10 @@ pub fn TsCoreHost(comptime core: type) type {
         /// before it allocates any new ones.
         fn retainedDbSubscriptions(subs: []const u8) [runtime_effects.max_db_effects]bool {
             var retained = [_]bool{false} ** runtime_effects.max_db_effects;
+            // Keep the complete key list separate from the borrowed stream;
+            // policy allocation never revokes subsequent subscription records.
+            const request: []u8 = if (comptime @hasDecl(core, "nativeDbPolicy")) core.rt.frameAlloc(u8, subs.len + max_db_policy_bytes + 5) else &.{};
+            var keys_at: usize = 5;
             var at: usize = 0;
             while (at < subs.len) switch (takeByte(subs, &at)) {
                 0x01 => {
@@ -3596,13 +3607,80 @@ pub fn TsCoreHost(comptime core: type) type {
                     const table_count: usize = @intCast(takeU32(subs, &at));
                     if (table_count == 0 or table_count > runtime_effects.max_effect_db_live_tables) @panic("ts core host: a live query carries an invalid dependency table set");
                     for (0..table_count) |_| _ = takeShortBytes(subs, &at);
-                    if (findDb(key)) |index| {
+                    if (comptime @hasDecl(core, "nativeDbPolicy")) {
+                        request[keys_at] = @intCast(key.len);
+                        keys_at += 1;
+                        @memcpy(request[keys_at..][0..key.len], key);
+                        keys_at += key.len;
+                    } else if (findDb(key)) |index| {
                         if (dbs[index].live) retained[index] = true;
                     }
                 },
                 else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
             };
+            if (comptime @hasDecl(core, "nativeDbPolicy")) {
+                request[0] = 1;
+                std.mem.writeInt(u32, request[1..5], @intCast(keys_at - 5), .little);
+                const end = writeDbTable(request, keys_at);
+                var result: [2]u8 = undefined;
+                if (core.nativeDbPolicy(request[0..end], &result) != result.len) @panic("ts core host: invalid compiled database retention result");
+                const mask = std.mem.readInt(u16, &result, .little);
+                for (&retained, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            }
             return retained;
+        }
+
+        const DbPlan = struct { slot: usize, start: bool, stop: bool, page_tag: u8, done_tag: u8, err_tag: u8 };
+        const max_db_policy_bytes = 15 + max_wire_key_bytes + 16 * (11 + max_wire_key_bytes);
+
+        fn writeDbTable(request: []u8, start: usize) usize {
+            comptime std.debug.assert(runtime_effects.max_db_effects == 16);
+            var at = start;
+            for (&dbs) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.live);
+                request[at + 2] = @intCast(length);
+                at += 3;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                std.mem.writeInt(u64, request[at..][0..8], entry.signature, .little);
+                at += 8;
+            }
+            return at;
+        }
+
+        fn compiledDbLookup(key: []const u8) ?usize {
+            var request: [max_db_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const at = writeDbTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeDbPolicy(request[0..at], &result) != result.len) @panic("ts core host: invalid compiled database lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= dbs.len or !dbs[result[0]].used) @panic("ts core host: invalid compiled database lookup slot");
+            return result[0];
+        }
+
+        fn compiledDbDeclaration(key: []const u8, signature: u64, page_tag: u8, done_tag: u8, err_tag: u8, seen: *[runtime_effects.max_db_effects]bool) DbPlan {
+            var request: [max_db_policy_bytes]u8 = undefined;
+            request[0] = 2;
+            std.mem.writeInt(u16, request[1..3], timerSeenMask(seen.*), .little);
+            request[3] = @intCast(key.len);
+            @memcpy(request[4..][0..key.len], key);
+            const at = 4 + key.len;
+            std.mem.writeInt(u64, request[at..][0..8], signature, .little);
+            request[at + 8] = page_tag;
+            request[at + 9] = done_tag;
+            request[at + 10] = err_tag;
+            const end = writeDbTable(&request, at + 11);
+            var result: [8]u8 = undefined;
+            if (core.nativeDbPolicy(request[0..end], &result) != result.len or result[0] >= dbs.len or result[1] > 1 or result[2] > 1)
+                @panic("ts core host: invalid compiled database declaration result");
+            const mask = std.mem.readInt(u16, result[6..8], .little);
+            for (seen, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            return .{ .slot = result[0], .start = result[1] == 1, .stop = result[2] == 1, .page_tag = result[3], .done_tag = result[4], .err_tag = result[5] };
         }
 
         fn freeTimerIndex() ?usize {

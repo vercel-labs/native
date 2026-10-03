@@ -400,7 +400,7 @@ test("the complete feed view uses native input constructors and committed servic
 });
 
 test("text event bindings reject malformed unions and mismatched widgets at build time", () => {
-  for (const markup of ['<input on-input="refresh"/>', '<input on-input="url_edit:{url}"/>', '<text on-input="url_edit"/>', '<panel wrap="true"/>', '<text placeholder="hint"/>', '<input size="heading"/>', '<input text="{url}">duplicate</input>']) {
+  for (const markup of ['<input on-input="refresh"/>', '<input on-input="url_edit:{url}"/>', '<text on-input="url_edit"/>', '<panel wrap="true"/>', '<text placeholder="hint"/>', '<input size="heading"/>', '<input size="display"/>', '<input text="{url}">duplicate</input>']) {
     assert.throws(() => compileView(markup, feedContract), /app.native:\d+:\d+/);
   }
   const inputUnion = feedContract.types.unions!.find(item => item.name === "TextInputEvent")!;
