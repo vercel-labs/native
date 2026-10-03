@@ -411,6 +411,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             stamped.on_lifecycle = lifecycleAdapter;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
+            if (comptime @hasDecl(core, "nativePressHoldPolicy")) {
+                if (options.press_hold_policy != null) @panic("TsUiApp owns press_hold_policy - remove custom hold policy wiring");
+                stamped.press_hold_policy = core.nativePressHoldPolicy;
+            }
             // A TypeScript core can select a built-in pack from ordinary
             // model state without ejecting the generated launcher. The
             // exported single-model helper emits as a Model method, so it

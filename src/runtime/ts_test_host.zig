@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, tray, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, tray, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
     app_data_directory: []const u8 = "",
     width: u32 = 640,
     height: u32 = 480,
@@ -533,6 +533,10 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 .timer => {
                     const event = try value.state.effects.fakeTimerEvent(try std.fmt.parseInt(u64, request.key, 10), value.frame_index * 16_000_000);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .timer = event });
+                },
+                .hold_timer => {
+                    const event = value.harness.null_platform.fireTimer(sdk.platform.press_hold_timer_id, value.frame_index * 16_000_000) orelse return error.HoldTimerNotArmed;
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), event);
                 },
                 .replay => {
                     recorder.finish();

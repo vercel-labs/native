@@ -332,7 +332,7 @@ const Emitter = struct {
             try reserved.appendSlice(self.arena, &.{ "nativeResizablePolicy", "request", "output", "ptr", "len" });
         }
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_text_policy")) {
-            try reserved.appendSlice(self.arena, &.{ "nativeTextPolicy", "request", "output", "ptr", "len" });
+            try reserved.appendSlice(self.arena, &.{ "nativeTextPolicy", "nativePressHoldPolicy", "request", "output", "ptr", "len" });
         }
         if (sidecar_mod.abiHasExport(self.sidecar.abi, "native_timer_policy")) {
             try reserved.appendSlice(self.arena, &.{ "nativeTimerPolicy", "request", "output", "ptr", "len" });
@@ -1435,6 +1435,16 @@ const Emitter = struct {
                 \\    abi.native_text_policy(request.ptr, request.len, &ptr, &len);
                 \\    defer abi.frame_reset();
                 \\    if (len > output.len) @panic("invalid compiled text policy result");
+                \\    @memcpy(output[0..len], ptr[0..len]);
+                \\    return len;
+                \\}
+                \\
+                \\/// Cycle policy: copy results; finishCycle owns the frame reset.
+                \\pub fn nativePressHoldPolicy(request: []const u8, output: []u8) usize {
+                \\    var ptr: [*]const u8 = undefined;
+                \\    var len: usize = 0;
+                \\    abi.native_text_policy(request.ptr, request.len, &ptr, &len);
+                \\    if (len > output.len) @panic("invalid compiled press hold policy result");
                 \\    @memcpy(output[0..len], ptr[0..len]);
                 \\    return len;
                 \\}

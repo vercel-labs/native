@@ -4776,6 +4776,172 @@ fn statusPolicyRequest(buffer: []u8, ids: []const u32, index: ?usize, used: u8, 
     return buffer[0..at];
 }
 
+test "compiled hold planning preserves every gesture state and borrowed cycle data" {
+    defer core.rt.frameReset();
+    const callbacks = [_]*const fn ([]const u8, []u8) usize{
+        core.nativeTextPolicy,   core.nativeRadioPolicy,     core.nativeTabsPolicy,
+        core.nativeTreePolicy,   core.nativeListPolicy,      core.nativeMenuPolicy,
+        core.nativeTogglePolicy, core.nativeAccordionPolicy, core.nativeSliderPolicy,
+        core.nativeSplitPolicy,  core.nativeScrollPolicy,    core.nativeResizablePolicy,
+    };
+    for (callbacks) |policy| for (0..4) |operation| for (0..16) |facts| {
+        const armed = facts & 1 != 0;
+        const fired = facts & 2 != 0;
+        const expected: u8 = if (operation == 2)
+            (if (armed and !fired and facts & 8 != 0) @as(u8, 16) else 0)
+        else
+            2 | @as(u8, @intFromBool(armed and !fired)) |
+                (if (operation == 0 and facts & 4 != 0) @as(u8, 4) else 0) |
+                (if (operation == 1 and fired) @as(u8, 8) else 0);
+        const request = [_]u8{ 19, @intCast(operation), @intCast(facts) };
+        var output: [1]u8 = undefined;
+        try std.testing.expectEqual(output.len, policy(&request, &output));
+        try std.testing.expectEqual(expected, output[0]);
+    };
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    for (0..4) |operation| for (0..16) |facts| {
+        var output: [1]u8 = undefined;
+        const request = [_]u8{ 19, @intCast(operation), @intCast(facts) };
+        try std.testing.expectEqual(output.len, core.nativePressHoldPolicy(&request, &output));
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    };
+    var result: [1]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativePressHoldPolicy(&.{ 19, 2, 9 }, &result));
+    core.rt.frameReset();
+    _ = core.initialModel();
+    try std.testing.expectEqual(@as(u8, 16), result[0]);
+}
+
+const HoldConsumerModel = struct { presses: u32 = 0, holds: u32 = 0, drags: u32 = 0 };
+const HoldConsumerMsg = union(enum) {
+    pressed,
+    held,
+    dragged: struct { sourceId: u64 = 1, phase: u32 = 0, x: f32 = 0, y: f32 = 0, viewWidth: f32 = 0, viewHeight: f32 = 0 },
+};
+const HoldConsumer = native_sdk.UiApp(HoldConsumerModel, HoldConsumerMsg);
+const HoldConsumerFunctions = struct {
+    fn update(model: *HoldConsumerModel, msg: HoldConsumerMsg) void {
+        switch (msg) {
+            .pressed => model.presses += 1,
+            .held => model.holds += 1,
+            .dragged => |drag| if (drag.phase == 0) {
+                model.drags += 1;
+            },
+        }
+    }
+    fn view(ui: *HoldConsumer.Ui, _: *const HoldConsumerModel) HoldConsumer.Ui.Node {
+        return ui.button(.{ .on_press = .pressed, .on_hold = .held, .on_drag = .{ .dragged = .{} }, .height = 60 }, "Hold");
+    }
+    fn suppress(_: []const u8, output: []u8) usize {
+        output[0] = 0;
+        return 1;
+    }
+};
+const HoldTimerCapabilities = struct {
+    var original: native_sdk.platform.PlatformServices = undefined;
+    var fail_start = false;
+    var fail_cancel = false;
+    var calls = [_]usize{0} ** 2;
+    fn start(_: ?*anyopaque, id: u64, interval: u64, repeats: bool) anyerror!void {
+        calls[0] += 1;
+        if (fail_start) return error.StartFailed;
+        try original.startTimer(id, interval, repeats);
+    }
+    fn cancel(_: ?*anyopaque, id: u64) anyerror!void {
+        calls[1] += 1;
+        if (fail_cancel) return error.CancelFailed;
+        try original.cancelTimer(id);
+    }
+};
+
+test "compiled hold decisions own runtime gestures and preserve failed timer behavior" {
+    var reference: [4]usize = undefined;
+    for ([_]bool{ false, true }) |compiled| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        HoldTimerCapabilities.original = harness.runtime.options.platform.services;
+        HoldTimerCapabilities.fail_start = false;
+        HoldTimerCapabilities.fail_cancel = false;
+        HoldTimerCapabilities.calls = @splat(0);
+        harness.runtime.options.platform.services.start_timer_fn = HoldTimerCapabilities.start;
+        harness.runtime.options.platform.services.cancel_timer_fn = HoldTimerCapabilities.cancel;
+        const state = try HoldConsumer.create(std.heap.page_allocator, .{
+            .name = "hold-consumer",
+            .scene = app_scene,
+            .canvas_label = canvas_label,
+            .view = HoldConsumerFunctions.view,
+            .update = HoldConsumerFunctions.update,
+            .press_hold_policy = if (compiled) core.nativePressHoldPolicy else null,
+        });
+        defer state.destroy();
+        try harness.start(state.app());
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(640, 480),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        const id = state.tree.?.root.id;
+        const point = (try harness.runtime.canvasWidgetLayout(1, canvas_label)).findById(id).?.frame.normalized().center();
+        var command_buffer: [128]u8 = undefined;
+        const hold_command = try std.fmt.bufPrint(&command_buffer, "widget-hold {s} {d}", .{ canvas_label, id });
+        try harness.runtime.dispatchAutomationCommand(state.app(), hold_command);
+        try std.testing.expectEqual(@as(u32, 1), state.model.holds);
+        try std.testing.expectEqual(@as(u32, 0), state.model.presses);
+        // Failed starts still retain the native reference's armed gesture.
+        // Failed cancels still clear it, so a late timer cannot fire a Msg.
+        HoldTimerCapabilities.fail_start = true;
+        HoldTimerCapabilities.fail_cancel = true;
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }) |kind|
+            try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = canvas_label,
+                .kind = kind,
+                .x = point.x,
+                .y = point.y,
+            } });
+        try std.testing.expectEqual(@as(canvas.ObjectId, 0), state.hold_armed_id);
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .timer = .{ .id = HoldConsumer.press_hold_timer_id, .timestamp_ns = 400_000_000 } });
+        try std.testing.expectEqual(@as(u32, 1), state.model.holds);
+        try std.testing.expectEqual(@as(u32, 1), state.model.presses);
+        const observed = [_]usize{ state.model.presses, state.model.holds, HoldTimerCapabilities.calls[0], HoldTimerCapabilities.calls[1] };
+        if (compiled) try std.testing.expectEqualSlices(usize, &reference, &observed) else reference = observed;
+        HoldTimerCapabilities.fail_start = false;
+        HoldTimerCapabilities.fail_cancel = false;
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_drag }) |kind|
+            try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = canvas_label,
+                .kind = kind,
+                .x = point.x + (if (kind == .pointer_drag) @as(f32, 40) else 0),
+                .y = point.y,
+            } });
+        try std.testing.expectEqual(@as(u32, 1), state.model.drags);
+        try std.testing.expectEqual(@as(canvas.ObjectId, 0), state.hold_armed_id);
+        try std.testing.expect(harness.null_platform.fireTimer(HoldConsumer.press_hold_timer_id, 500_000_000) == null);
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .pointer_up,
+            .x = point.x + 40,
+            .y = point.y,
+        } });
+        try std.testing.expectEqual(@as(u32, 1), state.model.holds);
+        try std.testing.expectEqual(@as(u32, 1), state.model.presses);
+        // The consumer must honor policy output rather than re-derive arming.
+        state.options.press_hold_policy = HoldConsumerFunctions.suppress;
+        try harness.runtime.dispatchAutomationCommand(state.app(), hold_command);
+        try std.testing.expectEqual(@as(u32, 1), state.model.holds);
+        try std.testing.expectEqual(@as(u32, 2), state.model.presses);
+    }
+}
+
 test "compiled status policy preserves admission retirement exact hash bytes and cycle ownership" {
     defer core.rt.frameReset();
     _ = core.initialModel();

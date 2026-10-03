@@ -35,6 +35,43 @@ const evaluate = (markup: string) => {
   return { model, view: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
 
+test("hold envelopes preserve borrowed text and coexist with ordinary press handlers", () => {
+  const input: ViewContract = { ...contract, msg: { arms: [
+    { name: "held", member: "text", payload: { kind: "bytes" } },
+    { name: "pressed", payload: { kind: "void" } },
+  ] } };
+  const model = { status: new TextEncoder().encode("Café\0日本") };
+  const exports: { native_view?: () => Uint8Array } = {};
+  const generated = compileView('<button on-press="pressed" on-hold="held:{status}">Card</button>', input);
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: model,
+    nscfPackMsg: (msg: { kind: string; text?: Uint8Array }) => new Uint8Array([1, msg.kind === "held" ? 0 : 1, ...msg.text ?? []]),
+  });
+  const view = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  assert.deepEqual(view.hold, [1, 0, ...model.status]);
+  assert.deepEqual(view.press, [1, 1]);
+  model.status = new TextEncoder().encode("changed");
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0].hold, [1, 0, ...model.status]);
+  assert.throws(() => compileView('<button on-hold="held">Card</button>', input), /matching scalar/);
+  assert.throws(() => compileView('<button on-hold="unknown">Card</button>', input), /event/);
+});
+
+test("hold coordination preserves cancellation, release suppression and missing-tree behavior", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  assert.deepEqual([...policy(new Uint8Array([19, 0, 4]))], [6]); // First down arms.
+  assert.deepEqual([...policy(new Uint8Array([19, 0, 1]))], [3]); // New down cancels the previous timer.
+  assert.deepEqual([...policy(new Uint8Array([19, 1, 3]))], [10]); // A fired hold consumes release.
+  assert.deepEqual([...policy(new Uint8Array([19, 1, 1]))], [3]); // Early release cancels.
+  assert.deepEqual([...policy(new Uint8Array([19, 2, 1]))], [0]); // Missing view leaves the gesture pending.
+  assert.deepEqual([...policy(new Uint8Array([19, 2, 9]))], [16]);
+  assert.deepEqual([...policy(new Uint8Array([19, 2, 11]))], [0]); // Repeated timer never dispatches twice.
+  assert.deepEqual([...policy(new Uint8Array([19, 3, 1]))], [3]); // Drag takeover cancels.
+  for (const bytes of [[19], [19, 0], [19, 0, 0, 0], [19, 4, 0], [19, 0, 16]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /press hold/);
+});
+
 test("the view frontend and portable components typecheck", () => {
   const program = ts.createProgram(["view_frontend.ts", "view_components.ts", "runtime_policy.ts", "stream_policy.ts"].map(name => new URL(`../src/${name}`, import.meta.url).pathname), {
     noEmit: true, strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,

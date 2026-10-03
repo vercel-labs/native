@@ -1171,6 +1171,26 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&relational_driver_run.step);
         test_step.dependOn(&relational_driver_run.step);
 
+        const hold_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        hold_policy_reference_run.setCwd(b.path("examples/hold-policy"));
+        hold_policy_reference_run.has_side_effects = true;
+        hold_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        hold_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/hold-policy-view-reference"));
+        _ = hold_policy_reference_run.captureStdOut(.{});
+        _ = hold_policy_reference_run.captureStdErr(.{});
+        const hold_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        hold_policy_driver_run.setCwd(b.path("examples/hold-policy"));
+        hold_policy_driver_run.has_side_effects = true;
+        hold_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        hold_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/hold-policy-view-reference"));
+        _ = hold_policy_driver_run.captureStdOut(.{});
+        _ = hold_policy_driver_run.captureStdErr(.{});
+        hold_policy_driver_run.step.dependOn(&hold_policy_reference_run.step);
+        native_driver_step.dependOn(&hold_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&hold_policy_driver_run.step);
+        test_step.dependOn(&hold_policy_driver_run.step);
+        b.step("test-hold-policy", "Compare complete gesture lab snapshots and replay across view backends").dependOn(&hold_policy_driver_run.step);
+
         const theme_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         theme_policy_reference_run.setCwd(b.path("examples/theme-policy"));
         theme_policy_reference_run.has_side_effects = true;
@@ -2364,6 +2384,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-status-policy", "Run menu desk example tests", "examples/status-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-hold-policy", "Run gesture lab example tests", "examples/hold-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effect-policy", "Run named effect policy example tests", "examples/effect-policy", .managed),
         ui_inbox_example_step,

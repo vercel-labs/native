@@ -501,7 +501,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
         if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
         props.push(`${name}: ${JSON.stringify(value)}`);
-      } else if (["on-press", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize"].includes(name)) {
+      } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
         if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && node.name !== "dropdown-menu") fail(node, `${name} is unsupported on ${node.name}`);

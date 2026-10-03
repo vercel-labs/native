@@ -230,6 +230,15 @@ export class NativeApp implements AsyncDisposable {
   click(widget: NativeWidget): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-click ${token(widget.view)} ${identity(widget.id)}` });
   }
+  /** Pointer down, native hold timer, then the suppressed release. */
+  hold(widget: NativeWidget): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "automation", command: `widget-hold ${token(widget.view)} ${identity(widget.id)}` });
+  }
+  contextPress(widget: NativeWidget): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "automation", command: `widget-context-press ${token(widget.view)} ${identity(widget.id)}` });
+  }
+  /** Deliver the reserved timer while a manually driven gesture is armed. */
+  fireHoldTimer(): Promise<NativeSnapshot> { return this.#snapshot({ op: "hold_timer" }); }
   /** Physical pointer input through native hit testing and pointer capture. */
   pointer(widget: NativeWidget, phase: "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }, modifiers: { readonly shift?: boolean } = {}): Promise<NativeSnapshot> {
     for (const number of [point.x, point.y, delta.x, delta.y]) if (!Number.isFinite(number)) throw new Error("Expected finite pointer coordinates");

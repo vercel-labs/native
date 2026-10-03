@@ -19,7 +19,7 @@ type NscViewNode = {
   spanWeight?: string; spanColor?: string; spanScale?: number;
   codeLanguage?: string; codeLineDigits?: number;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
-  press?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
+  press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number;
 };
@@ -44,6 +44,7 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   if (request[0] === 3) return nscvTextPointerSelection(request);
   if (request[0] === 4) return nscvTextEdit(request);
   if (request[0] === 5) return nscvTextReconcile(request);
@@ -92,6 +93,27 @@ export function native_text_policy(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = intent; result[1] = shift ? 1 : 0;
+  return result;
+}
+
+/** Shared press-and-hold coordination. Tag 19, operation (0 down, 1 release
+ * or cancel, 2 timer fire, 3 disarm), facts (armed/fired/hold handler/tree).
+ * Result bits cancel the timer, clear the gesture, arm, suppress the release,
+ * or consume the timer fire. Native owns timer capabilities and handler data.
+ */
+function nscvPressHold(request: Uint8Array): Uint8Array {
+  if (request.length !== 3 || request[1]! > 3 || request[2]! > 15)
+    throw new Error("invalid press hold policy request");
+  const operation = request[1]!, facts = request[2]!;
+  const armed = (facts & 1) !== 0, fired = (facts & 2) !== 0;
+  const result = new Uint8Array(1);
+  if (operation === 2) {
+    if (armed && !fired && (facts & 8) !== 0) result[0] = 16;
+  } else {
+    result[0] = 2 | (armed && !fired ? 1 : 0);
+    if (operation === 0 && (facts & 4) !== 0) result[0] = result[0]! | 4;
+    if (operation === 1 && fired) result[0] = result[0]! | 8;
+  }
   return result;
 }
 
@@ -774,6 +796,7 @@ export function native_radio_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid radio policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -840,6 +863,7 @@ export function native_tabs_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tabs policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -913,6 +937,7 @@ export function native_list_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid list policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -967,6 +992,7 @@ export function native_menu_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid menu policy request");
   const operation = request[0]!, subject = read(1), count = read(3);
@@ -1036,6 +1062,7 @@ export function native_toggle_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   if (request.length === 0) throw new Error("invalid toggle policy request");
   const operation = request[0]!;
   if (operation === 8 || operation === 9 || operation === 10) {
@@ -1083,6 +1110,7 @@ export function native_accordion_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   if (request.length !== 2 || (request[0] !== 8 && request[0] !== 9) || request[1]! > 15) {
     throw new Error("invalid accordion state request");
   }
@@ -1107,6 +1135,7 @@ export function native_slider_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   return nscvSliderPolicy(request);
 }
 
@@ -1146,6 +1175,7 @@ export function native_split_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   return nscvSplitPolicy(request);
 }
 
@@ -1197,6 +1227,7 @@ export function native_resizable_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   if (request.length !== 13 || request[0]! > 1) throw new Error("invalid resizable policy request");
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const height = wire.getFloat32(1, true), current = wire.getFloat32(5, true), delta = wire.getFloat32(9, true);
@@ -1223,6 +1254,7 @@ export function native_scroll_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   return nscvScrollPolicy(request);
 }
 
@@ -1281,6 +1313,7 @@ export function native_tree_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvSemanticControl(request);
   if (request[0] === 17) return nscvSemanticActions(request);
   if (request[0] === 18) return nscvStepControl(request);
+  if (request[0] === 19) return nscvPressHold(request);
   const read = (at: number): number => request[at]! + request[at + 1]! * 256;
   if (request.length < 5) throw new Error("invalid tree policy request");
   const operation = request[0]!, subject = read(1), count = read(3);

@@ -829,6 +829,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// facts. The callback copies its output; rebuild/view consumers
             /// retain ownership of the compiler frame and descriptor storage.
             window_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
+            /// Optional portable hold coordination; native retains timer
+            /// capabilities, armed identities and owned handler tables.
+            press_hold_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
@@ -5230,9 +5233,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const terminal_selected = try self.handleTerminalPointer(runtime, pointer_event);
             switch (pointer_event.pointer.phase) {
                 .down => {
-                    self.disarmHold(runtime);
+                    const has_hold = if (pointer_event.press_target) |target| tree.hasHoldHandler(target.id) else false;
+                    const plan = self.pressHoldPlan(0, has_hold, true);
+                    self.applyHoldReset(runtime, plan);
                     if (pointer_event.press_target) |target| {
-                        if (tree.hasHoldHandler(target.id)) {
+                        if (plan & 4 != 0) {
                             self.hold_armed_id = target.id;
                             self.hold_fired = false;
                             // One pointer, one gesture — but it can be
@@ -5248,9 +5253,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     }
                 },
                 .up, .cancel => {
-                    const suppressed = self.hold_fired;
-                    self.disarmHold(runtime);
-                    if (suppressed) return;
+                    const plan = self.pressHoldPlan(1, false, true);
+                    self.applyHoldReset(runtime, plan);
+                    if (plan & 8 != 0) return;
                 },
                 else => {},
             }
@@ -5980,10 +5985,44 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.rebuildVideoChrome(runtime);
         }
 
+        fn pressHoldPlan(self: *const Self, operation: u8, has_hold: bool, tree_available: bool) u8 {
+            const armed = self.hold_armed_id != 0;
+            if (self.options.press_hold_policy) |policy| {
+                const facts = @as(u8, @intFromBool(armed)) |
+                    (@as(u8, @intFromBool(self.hold_fired)) << 1) |
+                    (@as(u8, @intFromBool(has_hold)) << 2) |
+                    (@as(u8, @intFromBool(tree_available)) << 3);
+                const request = [_]u8{ 19, operation, facts };
+                var result: [1]u8 = undefined;
+                const allowed: u8 = switch (operation) {
+                    0 => 7,
+                    1 => 11,
+                    2 => 16,
+                    3 => 3,
+                    else => unreachable,
+                };
+                if (policy(&request, &result) != result.len or result[0] & ~allowed != 0 or
+                    (result[0] & 4 != 0 and !has_hold) or
+                    (result[0] & 16 != 0 and (!armed or self.hold_fired or !tree_available)))
+                    @panic("invalid compiled press hold result");
+                return result[0];
+            }
+            if (operation == 2) return if (armed and !self.hold_fired and tree_available) 16 else 0;
+            const reset: u8 = 2 | @as(u8, @intFromBool(armed and !self.hold_fired));
+            return reset | (if (operation == 0 and has_hold) @as(u8, 4) else 0) |
+                (if (operation == 1 and self.hold_fired) @as(u8, 8) else 0);
+        }
+
+        fn applyHoldReset(self: *Self, runtime: *Runtime, plan: u8) void {
+            if (plan & 1 != 0) runtime.cancelTimer(press_hold_timer_id) catch {};
+            if (plan & 2 != 0) {
+                self.hold_armed_id = 0;
+                self.hold_fired = false;
+            }
+        }
+
         fn disarmHold(self: *Self, runtime: *Runtime) void {
-            if (self.hold_armed_id != 0 and !self.hold_fired) runtime.cancelTimer(press_hold_timer_id) catch {};
-            self.hold_armed_id = 0;
-            self.hold_fired = false;
+            self.applyHoldReset(runtime, self.pressHoldPlan(3, false, false));
         }
 
         /// The hold timer fired while the press is still down: dispatch
@@ -5992,11 +6031,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// that this gesture consumed its press.
         fn firePressHold(self: *Self, runtime: *Runtime) anyerror!void {
             const armed_id = self.hold_armed_id;
-            if (armed_id == 0 or self.hold_fired) return;
             const hold_label = self.hold_view_label_storage[0..self.hold_view_label_len];
-            const tree = self.treeForViewLabel(hold_label) orelse return;
+            const tree = if (armed_id != 0 and !self.hold_fired) self.treeForViewLabel(hold_label) else null;
+            if (self.pressHoldPlan(2, false, tree != null) & 16 == 0) return;
             self.hold_fired = true;
-            if (tree.msgForHold(armed_id)) |msg| {
+            if (tree.?.msgForHold(armed_id)) |msg| {
                 try self.dispatch(runtime, self.hold_window_id, msg);
             }
         }
