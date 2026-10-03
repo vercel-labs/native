@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, frame, window_close, host_result, db_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, replay, close },
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -20,6 +20,13 @@ const Request = struct {
     db_kind: sdk.EffectDbResultKind = .done,
     db_outcome: sdk.EffectDbOutcome = .ok,
     db_bytes: []const u8 = &.{},
+    stream_bytes: []const u8 = &.{},
+    truncated: bool = false,
+    dropped_before: u32 = 0,
+    exit_code: i32 = 0,
+    exit_reason: sdk.EffectExitReason = .exited,
+    fetch_outcome: sdk.EffectFetchOutcome = .ok,
+    http_status: u16 = 200,
     view: []const u8 = "",
     window: u64 = 1,
     widget: []const u8 = "0",
@@ -185,6 +192,50 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 try json.endObject();
             }
             try json.endArray();
+            try json.objectField("spawns");
+            try json.beginArray();
+            for (0..self.state.effects.pendingSpawnCount()) |index| {
+                const request = self.state.effects.pendingSpawnAt(index).?;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{request.key}));
+                try json.objectField("output");
+                try json.write(request.output);
+                try json.objectField("maxLineBytes");
+                try json.write(request.max_line_bytes);
+                json.options.emit_strings_as_arrays = true;
+                try json.objectField("argv");
+                try json.write(request.argv);
+                try json.objectField("stdin");
+                try json.write(request.stdin);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            }
+            try json.endArray();
+            try json.objectField("fetches");
+            try json.beginArray();
+            for (0..self.state.effects.pendingFetchCount()) |index| {
+                const request = self.state.effects.pendingFetchAt(index).?;
+                try json.beginObject();
+                try json.objectField("key");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{request.key}));
+                try json.objectField("method");
+                try json.write(request.method);
+                try json.objectField("response");
+                try json.write(request.response);
+                try json.objectField("maxLineBytes");
+                try json.write(request.max_line_bytes);
+                json.options.emit_strings_as_arrays = true;
+                try json.objectField("url");
+                try json.write(request.url);
+                try json.objectField("headers");
+                try json.write(request.headers);
+                try json.objectField("body");
+                try json.write(request.body);
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            }
+            try json.endArray();
             try json.objectField("timers");
             try json.beginArray();
             for (0..self.state.effects.pendingTimerCount()) |index| {
@@ -342,6 +393,20 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 },
                 .db_result => {
                     try value.state.effects.feedDbResult(try std.fmt.parseInt(u64, request.key, 10), request.db_kind, request.db_outcome, request.db_bytes);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .stream_line => {
+                    try value.state.effects.feedLineWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes, request.truncated, request.dropped_before);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .spawn_exit => {
+                    if (request.stream_bytes.len > 0) try value.state.effects.feedOutput(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes);
+                    try value.state.effects.feedExitReason(try std.fmt.parseInt(u64, request.key, 10), request.exit_code, request.exit_reason);
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
+                .spawn_output => try value.state.effects.feedOutput(try std.fmt.parseInt(u64, request.key, 10), request.stream_bytes),
+                .fetch_response => {
+                    try value.state.effects.feedResponseOutcomeWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.fetch_outcome, request.http_status, request.stream_bytes, request.truncated, request.dropped_before);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
                 },
                 .timer => {

@@ -12852,6 +12852,16 @@ pub fn Effects(comptime Msg: type) type {
         /// feed, which must deliver exactly the reason the recorded
         /// session delivered (`.signaled`, `.cancelled`, ...).
         pub fn feedExitReason(self: *Self, key: u64, code: i32, reason: EffectExitReason) error{EffectNotFound}!void {
+            return self.feedExitWithMetadata(key, code, reason, .{});
+        }
+
+        /// Preserve the complete journaled terminal, including loss that
+        /// cannot be inferred from an already-truncated output/tail payload.
+        pub fn feedExitWithMetadata(self: *Self, key: u64, code: i32, reason: EffectExitReason, metadata: struct {
+            output_truncated: bool = false,
+            stderr_truncated: bool = false,
+            dropped_lines: ?u32 = null,
+        }) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .spawn) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             var entry: Entry = .{
@@ -12861,12 +12871,16 @@ pub fn Effects(comptime Msg: type) type {
                 .key = slot.key,
                 .code = code,
                 .reason = reason,
-                .dropped_lines = slot.dropped_total,
+                .dropped_lines = metadata.dropped_lines orelse slot.dropped_total,
+                .collect_truncated = metadata.output_truncated,
+                .stderr_truncated = metadata.stderr_truncated,
                 .exit_fn = slot.on_exit,
             };
             const exit_fn = slot.on_exit;
             if (slot.output_mode == .collect) {
                 stampCollectExit(slot, &entry);
+                entry.collect_truncated = entry.collect_truncated or metadata.output_truncated;
+                entry.stderr_truncated = entry.stderr_truncated or metadata.stderr_truncated;
                 slot.state.store(.draining, .release);
                 if (!self.enqueue(&entry)) {
                     self.releaseSpawnSlot(slot);
@@ -12896,6 +12910,8 @@ pub fn Effects(comptime Msg: type) type {
                     .code = code,
                     .reason = reason,
                     .dropped_lines = entry.dropped_lines,
+                    .output_truncated = entry.collect_truncated,
+                    .stderr_truncated = entry.stderr_truncated,
                 }, exit_fn);
             }
             self.wakeHost();

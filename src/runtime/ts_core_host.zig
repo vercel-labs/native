@@ -1830,19 +1830,15 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
             stdin: []const u8,
         ) void {
-            if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
-                return;
-            }
-            const index = freeStreamIndex() orelse {
-                // Resource refusal is an ordinary stream terminal. The
-                // engine would report the same rejection if it owned one
-                // more routing slot; the bridge table must not turn that
-                // public outcome into a process panic.
+            const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, false) else blk: {
+                if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) break :blk null;
+                break :blk freeStreamIndex();
+            };
+            const slot = index orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             };
-            const entry = &streams[index];
+            const entry = &streams[slot];
             entry.used = true;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
@@ -1853,7 +1849,7 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.fetch = false;
             entry.damaged = false;
             fx.spawn(.{
-                .key = spawn_key_base + index,
+                .key = spawn_key_base + slot,
                 .argv = argv,
                 .stdin = if (stdin.len > 0) stdin else null,
                 .output = if (collect) .collect else .lines,
@@ -1876,17 +1872,15 @@ pub fn TsCoreHost(comptime core: type) type {
         /// replacing a source that has already delivered lines would splice
         /// two HTTP responses into one app-owned stream.
         fn issueFetchStream(fx: *Fx, head: SpawnHead, options: FetchStreamOptions) void {
-            if (head.key.len > 0 and
-                (findStream(head.key) != null or findEffect(head.key) != null or fileStreamOccupiesKey(head.key)))
-            {
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
-                return;
-            }
-            const index = freeStreamIndex() orelse {
+            const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, true) else blk: {
+                if (head.key.len > 0 and (findStream(head.key) != null or findEffect(head.key) != null or fileStreamOccupiesKey(head.key))) break :blk null;
+                break :blk freeStreamIndex();
+            };
+            const slot = index orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             };
-            const entry = &streams[index];
+            const entry = &streams[slot];
             entry.used = true;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
@@ -1897,7 +1891,7 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.fetch = true;
             entry.damaged = false;
             fx.fetch(.{
-                .key = spawn_key_base + index,
+                .key = spawn_key_base + slot,
                 .method = options.method,
                 .url = options.url,
                 .headers = options.headers,
@@ -1911,6 +1905,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findStream(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) return compiledStreamLookup(key);
             for (&streams, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -1922,6 +1917,62 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (!entry.used) return index;
             }
             return null;
+        }
+
+        const max_stream_policy_bytes = 5 + max_wire_key_bytes + runtime_effects.max_effects * (2 + max_wire_key_bytes);
+
+        fn appendStreamTable(request: []u8, start: usize) usize {
+            var at = start;
+            for (streams) |entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(entry.key_len);
+                at += 2;
+                @memcpy(request[at..][0..entry.key_len], entry.wireKey());
+                at += entry.key_len;
+            }
+            return at;
+        }
+
+        fn compiledStreamSlot(request: []const u8) ?usize {
+            var result: [1]u8 = undefined;
+            if (core.nativeStreamPolicy(request, &result) != result.len) @panic("ts core host: invalid compiled stream slot result");
+            if (result[0] == 255) return null;
+            if (result[0] >= streams.len) @panic("ts core host: compiled stream slot outside table");
+            return result[0];
+        }
+
+        fn compiledStreamAdmission(key: []const u8, fetch: bool) ?usize {
+            var request: [max_stream_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intFromBool(fetch);
+            request[2] = @intFromBool(fileStreamOccupiesKey(key));
+            request[3] = @intFromBool(fetch and key.len > 0 and findEffect(key) != null);
+            request[4] = @intCast(key.len);
+            @memcpy(request[5..][0..key.len], key);
+            const end = appendStreamTable(&request, 5 + key.len);
+            const slot = compiledStreamSlot(request[0..end]) orelse return null;
+            if (streams[slot].used) @panic("ts core host: compiled stream admission selected occupied slot");
+            return slot;
+        }
+
+        fn compiledStreamLookup(key: []const u8) ?usize {
+            var request: [max_stream_policy_bytes]u8 = undefined;
+            request[0] = 1;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const end = appendStreamTable(&request, 2 + key.len);
+            const slot = compiledStreamSlot(request[0..end]) orelse return null;
+            if (!streams[slot].used) @panic("ts core host: compiled stream lookup selected unused slot");
+            return slot;
+        }
+
+        const StreamCompletion = struct { tag: u8, shape: enum { bytes, number, number_bytes }, damaged: bool, retire: bool, truncated: bool };
+
+        fn compiledStreamCompletion(request: []const u8) StreamCompletion {
+            var result: [5]u8 = undefined;
+            if (core.nativeStreamPolicy(request, &result) != result.len or result[1] > 2 or result[2] > 1 or result[3] > 1 or result[4] > 1)
+                @panic("ts core host: invalid compiled stream completion result");
+            return .{ .tag = result[0], .shape = @enumFromInt(result[1]), .damaged = result[2] != 0, .retire = result[3] != 0, .truncated = result[4] != 0 };
         }
 
         fn findFileStream(key: []const u8) ?usize {
@@ -2087,6 +2138,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// complete.
         fn streamLineMsg(line: runtime_effects.EffectLine) Msg {
             const entry = streamAt(line.key);
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 2, @intFromBool(entry.fetch), @intFromBool(entry.damaged), @intFromBool(line.truncated), @intFromBool(line.dropped_before != 0), entry.line_tag });
+                if (plan.shape != .bytes) @panic("ts core host: invalid compiled stream line payload");
+                entry.damaged = plan.damaged;
+                if (plan.retire) entry.used = false;
+                return msgFromTagBytes(plan.tag, line.line);
+            }
             if (entry.fetch and (line.truncated or line.dropped_before != 0)) {
                 entry.damaged = true;
             }
@@ -2102,6 +2160,15 @@ pub fn TsCoreHost(comptime core: type) type {
         /// with the reason name as bytes.
         fn spawnExitMsg(exit: runtime_effects.EffectExit) Msg {
             const entry = streamAt(exit.key);
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 3, @intFromBool(entry.collect), @intFromBool(exit.reason == .exited), @intFromBool(exit.output_truncated), entry.exit_tag, entry.err_tag });
+                if (plan.retire) entry.used = false;
+                return switch (plan.shape) {
+                    .bytes => msgFromTagBytes(plan.tag, if (plan.truncated) "truncated" else @tagName(exit.reason)),
+                    .number => msgFromTagNumber(plan.tag, @floatFromInt(exit.code)),
+                    .number_bytes => msgFromTagNumberBytes("spawn exit", "{ code, output }", plan.tag, exit.code, exit.output),
+                };
+            }
             entry.used = false;
             if (exit.reason == .exited) {
                 if (!entry.collect) {
@@ -2123,6 +2190,16 @@ pub fn TsCoreHost(comptime core: type) type {
         /// shared stream entry, so no later line can route for the key.
         fn fetchStreamResultMsg(response: runtime_effects.EffectResponse) Msg {
             const entry = streamAt(response.key);
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 4, @intFromBool(entry.damaged), @intFromBool(response.truncated), @intFromBool(response.dropped_before != 0), @intFromBool(response.outcome == .ok), entry.exit_tag, entry.err_tag });
+                entry.damaged = plan.damaged;
+                if (plan.retire) entry.used = false;
+                return switch (plan.shape) {
+                    .bytes => if (plan.truncated) msgFromTagStaticBytes(plan.tag, "truncated") else msgFromTagBytes(plan.tag, @tagName(response.outcome)),
+                    .number => msgFromTagNumber(plan.tag, @floatFromInt(response.status)),
+                    .number_bytes => @panic("ts core host: invalid compiled fetch terminal payload"),
+                };
+            }
             const damaged = entry.damaged or response.truncated or response.dropped_before != 0;
             entry.used = false;
             if (response.outcome == .ok) {

@@ -273,6 +273,7 @@ pub const conditional_exports = [_][]const u8{
     "native_text_policy",
     "native_timer_policy",
     "native_db_policy",
+    "native_stream_policy",
 };
 
 // ------------------------------------------------------------ reading

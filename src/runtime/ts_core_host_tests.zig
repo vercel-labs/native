@@ -3536,3 +3536,86 @@ test "database key lookup is owned by the compiled policy and preserves live com
     try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
     try std.testing.expect(db_policy_probe_core.calls[0] >= 2);
 }
+
+const stream_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var admit = false;
+    var lookup = false;
+    var calls = [_]usize{0} ** 5;
+    pub fn nativeStreamPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 37), 255);
+        switch (request[0]) {
+            0 => {
+                output[0] = if (admit) 6 else 255;
+                return 1;
+            },
+            1 => {
+                output[0] = if (lookup) 6 else 255;
+                return 1;
+            },
+            2 => {
+                output[0..5].* = .{ 8, 0, 1, 0, 0 }; // failed instead of got_line
+                return 5;
+            },
+            3 => {
+                output[0..5].* = .{ 26, 1, 0, 1, 0 }; // number even for collect
+                return 5;
+            },
+            4 => {
+                output[0..5].* = .{ 8, 0, 1, 1, 1 }; // truncated even for success
+                return 5;
+            },
+            else => unreachable,
+        }
+    }
+};
+
+test "stream host consumes compiled admission lookup line payload route and retirement" {
+    const Probe = ts_core_host.TsCoreHost(stream_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    stream_policy_probe_core.admit = false;
+    stream_policy_probe_core.lookup = false;
+    stream_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .run_lines);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    stream_policy_probe_core.admit = true;
+    Probe.dispatch(fx, .run_lines);
+    const key = ts_core_host.spawn_key_base + 6;
+    try std.testing.expectEqual(key, fx.pendingSpawnAt(0).?.key);
+    try fx.feedLine(key, "redirected line");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("redirected line", Probe.model().last_err);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().line_count);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    Probe.dispatch(fx, .stop_job); // Lookup refuses the real stored key.
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    stream_policy_probe_core.lookup = true;
+    Probe.dispatch(fx, .stop_job);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    Probe.dispatch(fx, .run_collect); // Retired slot may be reused.
+    try fx.feedOutput(key, "collected bytes");
+    try fx.feedExit(key, 7);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 7), Probe.model().exit_code);
+    try std.testing.expectEqualStrings("", Probe.model().output);
+    Probe.dispatch(fx, .stream_get);
+    try std.testing.expectEqual(key, fx.pendingFetchAt(0).?.key);
+    try fx.feedResponse(key, 200, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("truncated", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqualSlices(usize, &.{ 4, 2, 1, 2, 1 }, &stream_policy_probe_core.calls);
+}
