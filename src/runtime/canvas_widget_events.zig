@@ -1121,7 +1121,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 // Pointer-owned tooltips are untouched — hover holds
                 // them, and a focus move says nothing about the pointer.
                 .programmatic_focus => {
-                    if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus) {
+                    if (view.applyCompiledCanvasTooltipIntent(.programmatic_focus, 0, 0, false)) |changed| {
+                        if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                    } else if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus) {
                         view.canvas_tooltip_shown_id = 0;
                         view.canvas_tooltip_shown_owner_id = 0;
                         view.canvas_tooltip_shown_from_focus = false;
@@ -1140,16 +1142,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 // is a stale affordance, and its semantics node would
                 // keep claiming visible in the a11y tree.
                 .view_blur => {
-                    const had_shown = view.canvas_tooltip_shown_id != 0;
-                    view.canvas_tooltip_armed_id = 0;
-                    view.canvas_tooltip_armed_owner_id = 0;
-                    view.canvas_tooltip_deadline_ns = 0;
-                    view.canvas_tooltip_warm_until_ns = 0;
-                    view.canvas_tooltip_transit_deadline_ns = 0;
-                    view.canvas_tooltip_shown_id = 0;
-                    view.canvas_tooltip_shown_owner_id = 0;
-                    view.canvas_tooltip_shown_from_focus = false;
-                    if (had_shown) try commitCanvasTooltipVisibility(self, view_index);
+                    if (view.applyCompiledCanvasTooltipIntent(.blur, 0, 0, false)) |changed| {
+                        if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                    } else {
+                        const had_shown = view.canvas_tooltip_shown_id != 0;
+                        view.canvas_tooltip_armed_id = 0;
+                        view.canvas_tooltip_armed_owner_id = 0;
+                        view.canvas_tooltip_deadline_ns = 0;
+                        view.canvas_tooltip_warm_until_ns = 0;
+                        view.canvas_tooltip_transit_deadline_ns = 0;
+                        view.canvas_tooltip_shown_id = 0;
+                        view.canvas_tooltip_shown_owner_id = 0;
+                        view.canvas_tooltip_shown_from_focus = false;
+                        if (had_shown) try commitCanvasTooltipVisibility(self, view_index);
+                    }
                 },
             }
 
@@ -1788,6 +1794,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         fn updateCanvasTooltipIntentForPress(self: *Runtime, view_index: usize) anyerror!void {
             const view = &self.views[view_index];
+            if (view.applyCompiledCanvasTooltipIntent(.press, 0, 0, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             view.canvas_tooltip_armed_id = 0;
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;
@@ -1823,6 +1833,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
             const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
 
+            if (view.applyCompiledCanvasTooltipIntent(.focus, tooltip_id, focus_visible_id, canvasTooltipIntentActionAllowed(self, view_index))) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             var shown_changed = false;
             if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus and view.canvas_tooltip_shown_id != tooltip_id) {
                 view.canvas_tooltip_shown_id = 0;
@@ -1896,6 +1910,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 break :blk view.widget_layout_nodes[tooltip_index].widget.id;
             };
             if (tooltip_id == 0) return;
+            if (view.applyCompiledCanvasTooltipIntent(.activation, tooltip_id, target.id, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, index);
+                return;
+            }
             var matched = false;
             if (view.canvas_tooltip_armed_id == tooltip_id) {
                 view.canvas_tooltip_armed_id = 0;
@@ -2118,6 +2136,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// courtesy earned by a pointer we cannot place.
         fn closeCanvasTooltipPointerIntent(self: *Runtime, view_index: usize) anyerror!void {
             const view = &self.views[view_index];
+            if (view.applyCompiledCanvasTooltipIntent(.pointer_close, 0, 0, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             view.canvas_tooltip_armed_id = 0;
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;

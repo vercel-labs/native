@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 24) return nscvTooltipIntent(request);
   if (request[0] === 23) return nscvTooltipBinding(request);
   if (request[0] === 22) return nscvFocusReturn(request);
   if (request[0] === 21) return nscvSurfaceScope(request);
@@ -182,6 +183,53 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+/** Tooltip intent. Tag 24, cause (focus/press/activation/programmatic focus/
+ * blur/pointer close/dismissal), facts byte: shown, focus-owned, target present,
+ * shown matches target, armed matches target, focus matches owner, reveal allowed.
+ * Result flags: clear armed/shown, reveal focus, clear warmth/transit, consume
+ * standing keyboard intent, visibility changed. IDs, clocks, register writes,
+ * visibility commits and OS effects remain native; no JS numeric ID conversion.
+ */
+function nscvTooltipIntent(request: Uint8Array): Uint8Array {
+  if (request.length !== 3 || request[1]! > 6 || request[2]! > 127)
+    throw new Error("invalid tooltip intent request");
+  const cause = request[1]!, facts = request[2]!;
+  const shown = (facts & 1) !== 0, focusOwned = (facts & 2) !== 0;
+  const target = (facts & 4) !== 0, shownMatches = (facts & 8) !== 0;
+  const armedMatches = (facts & 16) !== 0, focusMatches = (facts & 32) !== 0;
+  let flags = 0;
+  if (cause === 0) {
+    if (shown && focusOwned && !shownMatches) flags |= 2 | 64;
+    if (target && (facts & 64) !== 0) {
+      flags |= 4 | 16;
+      if (!shownMatches) flags |= 64;
+      if (armedMatches) flags |= 1;
+    }
+  } else if (cause === 1 || cause === 4) {
+    flags = 1 | 8 | 16;
+    if (shown || cause === 4) flags |= 2;
+    if (shown) flags |= 64;
+  } else if (cause === 2 || cause === 6) {
+    if (target || cause === 6) {
+      if (armedMatches) flags |= 1;
+      if (shownMatches) { flags |= 2 | 16; if (shown) flags |= 64; }
+      if (cause === 2) {
+        if (armedMatches || shownMatches) {
+          flags |= 8;
+          if (focusMatches) flags |= 32;
+        }
+      } else if (shownMatches && focusMatches) flags |= 32;
+    }
+  } else if (cause === 3) {
+    if (shown && focusOwned) flags = 2 | 64;
+  } else {
+    flags = 1 | 8 | 16;
+    if (shown && !focusOwned) flags |= 2 | 64;
+  }
+  const result = new Uint8Array(1); result[0] = flags;
   return result;
 }
 

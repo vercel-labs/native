@@ -1240,3 +1240,28 @@ test("compiled tooltips retain anchored delay overrides and static visibility", 
   assert.equal(evaluate('<tooltip anchor="below" tooltip-delay="007">Leading zero</tooltip>').view().nodes[0].tooltipDelay, 7);
   assert.equal(evaluate('<tooltip anchor="below">Default</tooltip>').view().nodes[0].tooltipDelay, undefined);
 });
+
+test("tooltip intent isolates keyboard holds, dismissal and pointer conversation resets", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<tooltip anchor="above">Hint</tooltip>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const intent = (cause: number, facts: number) => Array.from(policy(new Uint8Array([24, cause, facts])));
+  assert.deepEqual(intent(0, 4 | 64), [4 | 16 | 64]); // Keyboard arrival.
+  assert.deepEqual(intent(0, 1 | 4 | 8 | 16 | 64), [1 | 4 | 16]); // Pointer-to-focus handover, no repaint.
+  assert.deepEqual(intent(0, 1 | 2 | 4), [2 | 64]); // Inactive reveal still releases old hold.
+  assert.deepEqual(intent(0, 1 | 4), [0]); // Inactive focus leaves pointer-owned hint alone.
+  assert.deepEqual(intent(1, 1 | 2), [1 | 2 | 8 | 16 | 64]);
+  assert.deepEqual(intent(2, 4 | 16 | 32), [1 | 8 | 32]); // Armed-only activation spends standing intent.
+  assert.deepEqual(intent(2, 1 | 2 | 4), [0]); // Unrelated activation.
+  assert.deepEqual(intent(3, 1 | 2), [2 | 64]); // Programmatic focus releases keyboard hold only.
+  assert.deepEqual(intent(3, 1), [0]);
+  assert.deepEqual(intent(4, 0), [1 | 2 | 8 | 16]); // Blur resets even stale empty-slot registers.
+  assert.deepEqual(intent(5, 1 | 2), [1 | 8 | 16]); // Pointer departure preserves keyboard hold.
+  assert.deepEqual(intent(5, 1), [1 | 2 | 8 | 16 | 64]);
+  assert.deepEqual(intent(6, 1 | 2 | 4 | 8 | 16 | 32), [1 | 2 | 16 | 32 | 64]); // Escape preserves warmth.
+  assert.deepEqual(intent(6, 4 | 16 | 32), [1]); // Armed-only dismissal preserves keyboard provenance.
+  assert.deepEqual(intent(6, 8 | 16 | 32), [1 | 2 | 16 | 32]); // Zero-ID dismissal clears stale slots.
+  for (const bytes of [[24], [24, 0], [24, 0, 0, 0], [24, 7, 0], [24, 0, 128], [24, 255, 255]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /tooltip intent request/);
+});
