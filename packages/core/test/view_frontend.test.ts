@@ -1497,3 +1497,95 @@ test("compiled keyboard participation preserves quiet plain rows and explicit ri
   for (const request of [[33], [33, 0, 0, 42], [33, 0, 0, 42, 0, 0], [33, 2, 0, 42, 0], [33, 0, 16, 42, 0], [33, 0, 0, 63, 0], [33, 0, 0, 42, 1]])
     assert.throws(() => policy(new Uint8Array(request)), /keyboard participation/);
 });
+
+
+test("keyboard focus coordinator owns traversal ordering, modifiers, retries and provenance", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const decide = (stage: number, a = 0, b = 0, c = 0, kind = 63, parent = 63, target = 63, facts = 0) => {
+    const output = policy(new Uint8Array([34, stage, a, b, c, kind, parent, target, facts & 255, facts >> 8]));
+    assert.equal(output.length, 1); return output[0];
+  };
+  for (let phase = 0; phase < 3; phase++) for (let key = 0; key < 8; key++) for (let modifiers = 0; modifiers < 32; modifiers++) for (let owners = 0; owners < 4; owners++) {
+    let expected = 0;
+    if (phase === 0) {
+      if (key === 1 && (owners & 1) === 0 && !((owners & 2) !== 0 && modifiers === 0)) expected = modifiers & 1 ? 2 : 1;
+      if (key > 1 && (modifiers & 30) === 0) {
+        if (key < 4 && modifiers === 0) expected = key + 1;
+        if (key >= 4) expected = key + 1;
+      }
+    }
+    assert.equal(decide(0, phase, key, modifiers, 63, 63, 63, owners), expected);
+    for (let held = 0; held < 2; held++) assert.equal(decide(1, phase, key, 0, 63, 63, 63, held), phase < 2 && key === 1 && held ? (phase === 1 ? 2 : 1) : 0);
+  }
+  for (let parent = 0; parent < 64; parent++) for (let kind = 0; kind < 63; kind++) {
+    const buttons = [8, 9, 10].includes(parent), toggles = [9, 13].includes(parent);
+    assert.equal(decide(3, 0, 0, 0, kind, parent), [41, 42, 44, 46, 48].includes(kind) || ([31, 33].includes(kind) && buttons) || (kind === 32 && toggles) ? 1 : 0);
+    for (let direction = 0; direction < 6; direction++) {
+      const horizontal = direction === 2 || direction === 3, vertical = direction === 4 || direction === 5;
+      const h = (buttons && [31, 33].includes(kind)) || (parent === 13 && kind === 32) || (parent === 12 && kind === 46);
+      const v = (parent === 7 && kind === 42) || ([24, 25].includes(parent) && kind === 41);
+      assert.equal(decide(2, direction, 0, 0, kind, parent), (h && horizontal) || (v && vertical) ? (direction === 2 || direction === 4 ? 1 : 2) : 0);
+      for (let facts = 0; facts < 16; facts++) {
+        const allowed = kind === 44 || (kind === 48 ? ((facts & 6) !== 0 ? (facts & 10) === 10 : (facts & 1) !== 0) :
+          (facts & 1) !== 0 && (([41, 42].includes(kind) && vertical) || (kind === 46 && horizontal) || ([31, 33].includes(kind) && buttons && horizontal) || (kind === 32 && toggles && horizontal)));
+        assert.equal(decide(4, direction, 0, 0, kind, parent, kind, facts), allowed ? 1 : 0);
+        assert.equal(decide(4, direction, 0, 0, kind, parent, (kind + 1) % 63, facts), 0);
+      }
+    }
+  }
+  // Every transition is observable: queries are selected here, not by the executor.
+  const cases = [
+    [1, 0, 0, 1], [2, 0, 0, 1], [3, 0, 64, 9], [4, 0, 64, 9], [8, 0, 64, 8],
+    [8, 0, 192, 0], [8, 1, 1, 2], [8, 1, 0, 0], [1, 2, 2, 7], [1, 2, 4, 3], [1, 2, 0, 7],
+    [1, 3, 1, 4], [1, 3, 9, 5], [1, 4, 2, 7], [1, 4, 0, 5], [1, 5, 1, 6], [1, 5, 9, 0],
+    [1, 6, 0, 7], [1, 7, 2, 17], [1, 7, 514, 18], [1, 7, 512, 0],
+    [8, 8, 1, 14], [8, 8, 0, 11], [3, 9, 1, 14], [3, 9, 0, 10],
+    [3, 10, 1, 14], [3, 10, 3109, 15], [3, 10, 33, 0], [3, 10, 0, 0],
+    [8, 11, 1, 14], [8, 11, 0, 12], [8, 12, 0, 13], [8, 12, 1, 14],
+    [8, 13, 4097, 14], [8, 13, 1, 0], [8, 14, 2, 17], [8, 14, 0, 0],
+    [8, 15, 0, 16], [8, 15, 2, 17], [8, 16, 3077, 15], [8, 16, 3085, 0], [8, 16, 3093, 0], [8, 16, 1029, 0],
+  ];
+  for (const [intent, action, facts, next] of cases) assert.equal(decide(5, intent, action, 0, (facts & 32) !== 0 ? 48 : 31, 63, 63, facts), next);
+  for (let facts = 0; facts < 8; facts++) for (let visible = 0; visible < 2; visible++) {
+    assert.equal(decide(6, visible, 0, 0, 63, 63, 63, facts), (facts & 3) === 3 ? 0 : 1 | (visible && (facts & 4) !== 0 ? 6 : 0));
+    assert.equal(decide(8, 0, 0, 0, 63, 63, 63, facts), facts === 7 ? 1 : 0);
+    assert.equal(decide(9, 0, 0, 0, 63, 63, 63, facts), facts === 7 ? 1 : 0);
+  }
+  for (let intent = 0; intent < 9; intent++) for (let match = 0; match < 2; match++) assert.equal(decide(7, intent, 0, 0, 63, 63, 63, match), intent === 1 || intent === 2 || match ? 1 : 0);
+  for (const bytes of [[34], [34, 11, 0, 0, 0, 63, 63, 63, 0, 0], [34, 0, 3, 0, 0, 63, 63, 63, 0, 0],
+    [34, 0, 0, 8, 0, 63, 63, 63, 0, 0], [34, 0, 0, 0, 32, 63, 63, 63, 0, 0], [34, 4, 6, 0, 0, 0, 0, 0, 0, 0],
+    [34, 5, 9, 0, 0, 63, 63, 63, 0, 0], [34, 5, 0, 19, 0, 63, 63, 63, 0, 0], [34, 5, 0, 0, 0, 64, 63, 63, 0, 0],
+    [34, 6, 2, 0, 0, 63, 63, 63, 0, 0], [34, 8, 0, 0, 0, 63, 63, 63, 8, 0]]) assert.throws(() => policy(new Uint8Array(bytes)), /keyboard focus/);
+});
+
+test("compiled generic groups preserve sibling traversal, logical list targets and authoring", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const query = (operation: number, kind: number, parentKind: number, records: number[][]) => {
+    const request = new Uint8Array([34, 10, operation, kind, parentKind, 0, 0, records.length, 0, ...records.flat()]);
+    const result = exports.native_text_policy!(request); assert.equal(result.length, 2); return result[0] | result[1] << 8;
+  };
+  for (let flags = 0; flags < 8; flags++) for (let operation = 0; operation < 4; operation++) for (const kind of [31, 32, 33, 41, 42, 44, 46]) {
+    const records = [[255, 255, 0, 0], [0, 0, kind, flags], [0, 0, kind, 7], [0, 0, kind, 5], [1, 0, kind, 7], [0, 0, (kind + 1) % 63, 7]];
+    for (const parent of [7, 9, 63]) {
+      const logical = operation < 2 && kind === 42 && parent === 7;
+      let expected = 65535, previous = 65535, seen = false;
+      for (let i = 0; i < records.length; i++) {
+        const [p, high, k, f] = records[i]; if (p !== 0 || high !== 0 || k !== kind || !(f & (logical ? 4 : 1))) continue;
+        if (operation === 2) { expected = i; break; }
+        if (operation === 3) { expected = i; continue; }
+        if (seen) { expected = i; break; }
+        if (f & 2) { if (operation === 0) { expected = previous; break; } seen = true; } else previous = i;
+      }
+      assert.equal(query(operation, kind, parent, records), expected);
+    }
+  }
+  for (const tag of ["button-group", "breadcrumb", "pagination"]) {
+    const { view } = evaluate(`<${tag} gap="4"><button on-press="increment">First</button><button disabled="true">Unavailable</button><button on-press="increment">Last</button></${tag}>`);
+    const nodes = view().nodes; assert.equal(nodes[0].kind, tag.replaceAll("-", "_")); assert.equal(nodes[0].end, 4); assert.equal(nodes[0].gap, 4); assert.equal(nodes[2].disabled, true);
+    assert.throws(() => compileView(`<${tag}>mixed<button/></${tag}>`, contract), /mixed content/);
+  }
+  for (const bytes of [[34, 10], [34, 10, 4, 31, 9, 0, 0, 0, 0], [34, 10, 0, 63, 9, 0, 0, 0, 0], [34, 10, 0, 31, 64, 0, 0, 0, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0, 0, 0, 64, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0, 0, 0, 31, 8]]) assert.throws(() => exports.native_text_policy!(new Uint8Array(bytes)), /keyboard group/);
+});

@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 34) return nscvKeyboardFocus(request);
   if (request[0] === 33) return nscvKeyboardParticipation(request);
   if (request[0] === 32) return nscvSelectionPress(request);
   if (request[0] === 31) return nscvClickSequence(request);
@@ -286,6 +287,143 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Keyboard focus coordinator, operation 34. Ten copied bytes: stage,
+ * three stage arguments, stable kind/parent/target codes (63 = absent), and
+ * LE u16 capability/equality facts. No identity or borrowed layout crosses
+ * this boundary. Native executes each requested query/reveal/commit and
+ * reports its outcome; this policy owns ordering and continuation.
+ * Stages: intent, held Tab lifetime, group direction, Home/End eligibility,
+ * spatial eligibility, traversal continuation, commit/ring/provenance,
+ * navigation visibility, editable caret entry, and successful movement.
+ * Directions: forward/backward/left/right/up/down = 0..5. Intents:
+ * none/Tab/ShiftTab/Home/End/Left/Right/Up/Down = 0..8.
+ */
+function nscvKeyboardFocus(request: Uint8Array): Uint8Array {
+  if (request[1] === 10) return nscvKeyboardGroupTarget(request);
+  if (request.length !== 10 || request[1]! > 9 || request[5]! > 63 ||
+      request[6]! > 63 || request[7]! > 63 || request[9]! > 31)
+    throw new Error("invalid keyboard focus request");
+  const stage = request[1]!, a = request[2]!, b = request[3]!, c = request[4]!;
+  const kind = request[5]!, parent = request[6]!, target = request[7]!;
+  const facts = request[8]! | request[9]! << 8;
+  let decision = 0;
+  const horizontal = a === 2 || a === 3, vertical = a === 4 || a === 5;
+  const buttonParent = parent === 9 || parent === 10 || parent === 8;
+  const toggleParent = parent === 9 || parent === 13;
+  if (stage === 0) {
+    if (a > 2 || b > 7 || c > 31 || facts > 3) throw new Error("invalid keyboard focus intent");
+    if (a === 0) {
+      if (b === 1) {
+        if ((facts & 1) === 0 && !((facts & 2) !== 0 && c === 0)) decision = (c & 1) !== 0 ? 2 : 1;
+      } else if ((c & 30) === 0) {
+        if (b === 2 && c === 0) decision = 3;
+        else if (b === 3 && c === 0) decision = 4;
+        else if (b >= 4) decision = b + 1;
+      }
+    }
+  } else if (stage === 1) {
+    if (a > 2 || b > 7 || facts > 1) throw new Error("invalid keyboard focus lifetime");
+    if (a < 2 && b === 1 && (facts & 1) !== 0) decision = a === 1 ? 2 : 1;
+  } else if (stage === 2) {
+    if (a > 5) throw new Error("invalid keyboard focus direction");
+    const horizontalGroup = (buttonParent && (kind === 31 || kind === 33)) ||
+      (parent === 13 && kind === 32) || (parent === 12 && kind === 46);
+    const verticalGroup = (parent === 7 && kind === 42) || ((parent === 24 || parent === 25) && kind === 41);
+    if ((horizontalGroup && horizontal) || (verticalGroup && vertical)) decision = a === 2 || a === 4 ? 1 : 2;
+  } else if (stage === 3) {
+    if (kind === 42 || kind === 41 || kind === 44 || kind === 46 || kind === 48 ||
+        ((kind === 31 || kind === 33) && buttonParent) || (kind === 32 && toggleParent)) decision = 1;
+  } else if (stage === 4) {
+    if (a > 5 || facts > 15) throw new Error("invalid keyboard focus spatial facts");
+    if (kind === target) {
+      if (kind === 44) decision = 1;
+      else if (kind === 48) decision = (facts & 6) !== 0 ? ((facts & 10) === 10 ? 1 : 0) : facts & 1;
+      else if ((facts & 1) !== 0 && (((kind === 42 || kind === 41) && vertical) ||
+          (kind === 46 && horizontal) || ((kind === 31 || kind === 33) && buttonParent && horizontal) ||
+          (kind === 32 && toggleParent && horizontal))) decision = 1;
+    }
+  } else if (stage === 5) {
+    if (a > 8 || b > 18) throw new Error("invalid keyboard focus continuation");
+    const present = (facts & 1) !== 0, moved = (facts & 2) !== 0, different = (facts & 4) !== 0;
+    // Actions 1..7: Tab target/commit, visible-entry/commit, fallback/commit, finish.
+    // Actions 8..16: menu, tree-edge, group-edge, tree, group, spatial,
+    // ordinary commit, radio commit, radio next. 17/18 finish moved/capture Tab.
+    if (b === 0) {
+      if (a === 1 || a === 2) decision = 1;
+      else if (a !== 0 && (facts & 192) === 64) {
+        if (a === 3 || a === 4) decision = 9;
+        else decision = (a === 7 || a === 8) && (kind === 31 || kind === 33 || kind === 34 || kind === 38) ? 8 : 11;
+      }
+    } else if (b === 1) decision = present ? 2 : 0;
+    else if (b === 2) decision = moved ? 7 : different ? 3 : 7;
+    else if (b === 3) decision = present && (facts & 8) === 0 ? 4 : 5;
+    else if (b === 4) decision = moved ? 7 : 5;
+    else if (b === 5) decision = present && (facts & 8) === 0 ? 6 : 0;
+    else if (b === 6) decision = 7;
+    else if (b === 7) decision = moved ? ((facts & 512) !== 0 ? 18 : 17) : 0;
+    else if (b === 8) decision = present ? 14 : 11;
+    else if (b === 9) decision = present ? 14 : 10;
+    else if (b === 10 || b === 12) {
+      if (present) decision = kind === 48 && (facts & 32) !== 0 ? ((facts & 3076) === 3076 ? 15 : 0) : 14;
+      else decision = b === 12 ? 13 : 0;
+    } else if (b === 11) decision = present ? 14 : 12;
+    else if (b === 13) decision = present && (facts & 4096) !== 0 ? 14 : 0;
+    else if (b === 14) decision = moved ? 17 : 0;
+    else if (b === 15) decision = moved ? 17 : 16;
+    else if (b === 16) decision = present && (facts & 24) === 0 && (facts & 3076) === 3076 ? 15 : 0;
+  } else if (stage === 6) {
+    if (a > 1 || facts > 7) throw new Error("invalid keyboard focus commit");
+    if ((facts & 3) !== 3) decision = 1 | (a === 1 && (facts & 4) !== 0 ? 6 : 0);
+  } else if (stage === 7) {
+    if (a > 8 || facts > 1) throw new Error("invalid keyboard focus visibility");
+    decision = a === 1 || a === 2 || facts !== 0 ? 1 : 0;
+  } else if (stage === 8 || stage === 9) {
+    if (facts > 7) throw new Error("invalid keyboard focus outcome");
+    decision = facts === 7 ? 1 : 0;
+  }
+  const result = new Uint8Array(1);
+  result[0] = decision;
+  return result;
+}
+
+/** Stage 10: generic group traversal. Nine-byte header: operation/stage,
+ * previous/next/first/last (0..3), child and parent kind, LE u16 parent index
+ * (65535 absent), LE u16 count; four bytes/node: parent index, kind, capability
+ * flags (visible target, exact focused identity, logical target). Result is
+ * a copied LE u16 node index, 65535 absent. Native owns geometry and identities;
+ * TypeScript owns sibling filtering, traversal order and logical-list choice.
+ */
+function nscvKeyboardGroupTarget(request: Uint8Array): Uint8Array {
+  if (request.length < 9 || request[2]! > 3 || request[3]! > 62 || request[4]! > 63)
+    throw new Error("invalid keyboard group request");
+  const operation = request[2]!, kind = request[3]!, parentKind = request[4]!;
+  const parent = request[5]! | request[6]! << 8, count = request[7]! | request[8]! << 8;
+  if (count > 1024 || request.length !== 9 + count * 4) throw new Error("invalid keyboard group records");
+  for (let i = 0; i < count; i++) {
+    const at = 9 + i * 4;
+    if (request[at + 2]! > 62 || request[at + 3]! > 7) throw new Error("invalid keyboard group node");
+  }
+  const logical = operation < 2 && kind === 42 && parentKind === 7;
+  let chosen = 65535, previous = 65535, sawFocused = false;
+  for (let i = 0; i < count; i++) {
+    const at = 9 + i * 4, nodeParent = request[at]! | request[at + 1]! << 8;
+    const nodeKind = request[at + 2]!, facts = request[at + 3]!;
+    if (nodeParent !== parent || nodeKind !== kind || (facts & (logical ? 4 : 1)) === 0) continue;
+    if (operation === 2) { if (chosen === 65535) chosen = i; }
+    else if (operation === 3) chosen = i;
+    else if (chosen === 65535) {
+      if (sawFocused) chosen = i;
+      else if ((facts & 2) !== 0) {
+        if (operation === 0) { chosen = previous; break; }
+        sawFocused = true;
+      } else previous = i;
+    }
+  }
+  const result = new Uint8Array(2);
+  result[0] = chosen & 255; result[1] = chosen >> 8;
   return result;
 }
 

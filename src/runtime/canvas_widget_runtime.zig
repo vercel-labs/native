@@ -1,3 +1,4 @@
+const keyboard_focus = @import("canvas_keyboard_focus_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
@@ -1564,6 +1565,15 @@ pub fn canvasWidgetSpatialFocusAllowed(layout: canvas.WidgetLayoutTree, focused:
     };
 }
 
+pub fn canvasWidgetSpatialFocusAllowedWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, target: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection, policy: keyboard_focus.Policy) bool {
+    const focused_scope = canvasWidgetRadioGroupScopeIndex(layout, focused.index);
+    const target_scope = canvasWidgetRadioGroupScopeIndex(layout, target.index);
+    const facts: u16 = @as(u16, if (canvasWidgetFocusTargetsShareParent(layout, focused, target)) 1 else 0) |
+        @as(u16, if (focused_scope != null) 2 else 0) | @as(u16, if (target_scope != null) 4 else 0) |
+        @as(u16, if (focused_scope != null and focused_scope == target_scope) 8 else 0);
+    return keyboard_focus.decide(policy, .{ .stage = .spatial, .a = keyboard_focus.directionCode(direction), .kind = focused.kind, .target = target.kind, .parent = canvasWidgetFocusParentKind(layout, focused), .facts = facts }) != 0;
+}
+
 pub fn canvasWidgetFocusTargetsShareParent(layout: canvas.WidgetLayoutTree, a: canvas.WidgetFocusTarget, b: canvas.WidgetFocusTarget) bool {
     if (a.index >= layout.nodes.len or b.index >= layout.nodes.len) return false;
     return layout.nodes[a.index].parent_index == layout.nodes[b.index].parent_index;
@@ -1606,12 +1616,21 @@ pub const CanvasWidgetGroupDirection = enum {
 };
 
 pub fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
+    return canvasWidgetGroupDirectionalFocusTargetWithPolicy(layout, focused, direction, null);
+}
+
+pub fn canvasWidgetGroupDirectionalFocusTargetWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection, policy: keyboard_focus.Policy) ?canvas.WidgetFocusTarget {
     if (canvasWidgetRadioGroupDirectionalFocusTarget(layout, focused, direction)) |target| return target;
     if (focused.index >= layout.nodes.len) return null;
     const parent_index = layout.nodes[focused.index].parent_index orelse return null;
     if (parent_index >= layout.nodes.len) return null;
     const parent_kind = layout.nodes[parent_index].widget.kind;
-    const group_direction = canvasWidgetGroupDirectionForFocus(parent_kind, focused.kind, direction) orelse return null;
+    const decision = keyboard_focus.decide(policy, .{ .stage = .group, .a = keyboard_focus.directionCode(direction), .kind = focused.kind, .parent = parent_kind });
+    const group_direction: CanvasWidgetGroupDirection = switch (decision) {
+        1 => .previous,
+        2 => .next,
+        else => return null,
+    };
     if (parent_kind == .tabs and focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
         return compiledTabsFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
     if (parent_kind == .list and focused.kind == .list_item and layout.nodes[focused.index].widget.interaction_policy != null)
@@ -1620,6 +1639,7 @@ pub fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, 
         return canvasWidgetCompiledMenuFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
     if (parent_kind == .toggle_group and focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
         return canvasWidgetCompiledToggleFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (policy != null) return canvasWidgetCompiledGroupFocus(layout, focused, if (group_direction == .previous) 0 else 1, policy.?) orelse focused;
     return canvasWidgetAdjacentGroupFocusTarget(layout, parent_index, focused, group_direction) orelse focused;
 }
 
@@ -2298,8 +2318,12 @@ fn canvasWidgetTreeFirstChildRow(layout: canvas.WidgetLayoutTree, tree_index: us
 }
 
 pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, edge: CanvasWidgetGroupFocusEdge) ?canvas.WidgetFocusTarget {
+    return canvasWidgetGroupFocusEdgeTargetWithPolicy(layout, focused, edge, null);
+}
+
+pub fn canvasWidgetGroupFocusEdgeTargetWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, edge: CanvasWidgetGroupFocusEdge, policy: keyboard_focus.Policy) ?canvas.WidgetFocusTarget {
     if (canvasWidgetRadioGroupFocusEdgeTarget(layout, focused, edge)) |target| return target;
-    if (!canvasWidgetGroupHomeEndFocusKind(layout, focused)) return null;
+    if (keyboard_focus.decide(policy, .{ .stage = .edge, .kind = focused.kind, .parent = canvasWidgetFocusParentKind(layout, focused) }) == 0) return null;
     if (focused.index >= layout.nodes.len) return null;
     const parent_index = layout.nodes[focused.index].parent_index;
     if (focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
@@ -2310,6 +2334,7 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
         return canvasWidgetCompiledMenuFocus(layout, focused.index, if (edge == .first) 6 else 7);
     if (focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
         return canvasWidgetCompiledToggleFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (policy != null) return canvasWidgetCompiledGroupFocus(layout, focused, if (edge == .first) 2 else 3, policy.?);
     switch (edge) {
         .first => {
             for (layout.nodes) |node| {
@@ -2328,4 +2353,33 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
         },
     }
     return null;
+}
+
+/// Exact identities remain native. Only bounded indices and native focus
+/// capability outcomes cross the copied-byte group traversal boundary.
+fn canvasWidgetCompiledGroupFocus(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, operation: u8, policy: *const fn ([]const u8, []u8) usize) ?canvas.WidgetFocusTarget {
+    if (focused.index >= layout.nodes.len) return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("keyboard group exceeds native view budget");
+    const parent = layout.nodes[focused.index].parent_index;
+    const parent_kind = canvasWidgetFocusParentKind(layout, focused);
+    var request: [9 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0..5].* = .{ 34, 10, operation, @intCast(canvas.widgetKindCode(focused.kind)), if (parent_kind) |kind| @intCast(canvas.widgetKindCode(kind)) else 63 };
+    std.mem.writeInt(u16, request[5..7], if (parent) |index| @intCast(index) else 65535, .little);
+    std.mem.writeInt(u16, request[7..9], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const record = request[9 + index * 4 ..][0..4];
+        std.mem.writeInt(u16, record[0..2], if (node.parent_index) |parent_index| @intCast(parent_index) else 65535, .little);
+        record[2] = @intCast(canvas.widgetKindCode(node.widget.kind));
+        record[3] = @as(u8, if (layout.focusTargetById(node.widget.id) != null) 1 else 0) |
+            @as(u8, if (node.widget.id == focused.id) 2 else 0) | @as(u8, if (canvasWidgetLogicalFocusTarget(layout, index) != null) 4 else 0);
+    }
+    var response: [2]u8 = undefined;
+    if (policy(request[0 .. 9 + layout.nodes.len * 4], &response) != response.len) @panic("invalid compiled keyboard group result");
+    const index = std.mem.readInt(u16, &response, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("compiled keyboard group index out of bounds");
+    return if (operation < 2 and focused.kind == .list_item and parent_kind == .list)
+        canvasWidgetLogicalFocusTarget(layout, index)
+    else
+        layout.focusTargetById(layout.nodes[index].widget.id);
 }

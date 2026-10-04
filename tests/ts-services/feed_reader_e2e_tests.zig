@@ -8352,3 +8352,433 @@ test "compiled keyboard participation owns navigation, routing and explicit acti
     Spy.forced = null;
     core.rt.frameReset();
 }
+
+test "compiled keyboard focus intent and lifetimes preserve copied results and borrowed cycle bytes" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var first: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 0, 0, 1, 1, 63, 63, 63, 0, 0 }, &first));
+    for (0..3) |phase| for (0..8) |key| for (0..32) |modifiers| for (0..4) |owners| {
+        var expected: u8 = 0;
+        if (phase == 0) {
+            if (key == 1 and owners & 1 == 0 and !(owners & 2 != 0 and modifiers == 0)) expected = if (modifiers & 1 != 0) 2 else 1;
+            if (key > 1 and modifiers & 30 == 0) {
+                if (key < 4 and modifiers == 0) expected = @intCast(key + 1);
+                if (key >= 4) expected = @intCast(key + 1);
+            }
+        }
+        var result: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 0, @intCast(phase), @intCast(key), @intCast(modifiers), 63, 63, 63, @intCast(owners), 0 }, &result));
+        try std.testing.expectEqual(expected, result[0]);
+        for (0..2) |held| {
+            try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 1, @intCast(phase), @intCast(key), 0, 63, 63, 63, @intCast(held), 0 }, &result));
+            try std.testing.expectEqual(@as(u8, if (phase < 2 and key == 1 and held != 0) (if (phase == 1) 2 else 1) else 0), result[0]);
+        }
+        try std.testing.expectEqualSlices(u8, saved, borrowed);
+    };
+    try std.testing.expectEqual(@as(u8, 2), first[0]);
+    core.rt.frameReset();
+    try std.testing.expectEqual(@as(u8, 2), first[0]);
+}
+
+test "compiled keyboard focus matches complete native dispatch across groups, modifiers and exact identities" {
+    const Events = struct {
+        keyboard: ?runtime_ns.CanvasWidgetKeyboardEvent = null,
+        entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+        count: usize = 0,
+        fn event(context: *anyopaque, _: *runtime_ns.Runtime, value: native_sdk.Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (value == .canvas_widget_keyboard) {
+                self.count += 1;
+                self.keyboard = value.canvas_widget_keyboard;
+                @memcpy(self.entries[0..self.keyboard.?.route.len], self.keyboard.?.route);
+                self.keyboard.?.route = self.entries[0..self.keyboard.?.route.len];
+            }
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var events = [_]Events{ .{}, .{} };
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(.{ .context = &events[backend], .name = "focus-coordination", .source = native_sdk.WebViewSource.html(""), .event_fn = Events.event });
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+    }
+    const cases = [_]struct { parent: canvas.WidgetKind, child: canvas.WidgetKind, tree: bool = false }{
+        .{ .parent = .button_group, .child = .button },      .{ .parent = .pagination, .child = .icon_button },
+        .{ .parent = .breadcrumb, .child = .button },        .{ .parent = .toggle_group, .child = .toggle_button },
+        .{ .parent = .tabs, .child = .segmented_control },   .{ .parent = .list, .child = .list_item },
+        .{ .parent = .menu_surface, .child = .menu_item },   .{ .parent = .dropdown_menu, .child = .menu_item },
+        .{ .parent = .radio_group, .child = .radio },        .{ .parent = .panel, .child = .radio },
+        .{ .parent = .panel, .child = .data_cell },          .{ .parent = .panel, .child = .button },
+        .{ .parent = .tree, .child = .panel, .tree = true },
+    };
+    for (cases) |spec| for (0..4) |focus_case| for ([_]bool{ false, true }) |ring| for (0..4) |disabled| {
+        const base: u64 = 0xffff_ffff_ffff_ff00;
+        const children = [_]canvas.Widget{
+            .{ .id = base + 1, .kind = spec.child, .text = "First", .state = .{ .selected = true }, .semantics = .{ .role = if (spec.tree) .treeitem else .none }, .frame = geometry.RectF.init(10, 10, 100, 32) },
+            .{ .id = base + 2, .kind = spec.child, .text = "Second", .state = .{ .disabled = disabled & 1 != 0 }, .semantics = .{ .role = if (spec.tree) .treeitem else .none }, .frame = geometry.RectF.init(140, 70, 100, 32) },
+            .{ .id = base + 3, .kind = spec.child, .text = "Third", .state = .{ .disabled = disabled & 2 != 0 }, .semantics = .{ .role = if (spec.tree) .treeitem else .none }, .frame = geometry.RectF.init(270, 130, 100, 32) },
+        };
+        var nodes: [4]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = spec.parent, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .key_down, .key_up, .text_input }) |phase| for ([_][]const u8{ "TaB", "Home", "END", "ArrowLeft", "arrowright", "ArrowUp", "arrowdown", "unknown" }) |key| for (0..32) |mods| {
+            var expected: PointerIntentState = undefined;
+            for (harnesses, 0..) |harness, backend| {
+                _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                const view = &harness.runtime.views[0];
+                view.focused = true;
+                view.canvas_widget_focused_id = switch (focus_case) {
+                    0 => 0,
+                    1 => base + 1,
+                    2 => base + 2,
+                    else => std.math.maxInt(u64),
+                };
+                view.canvas_widget_focus_visible_id = if (ring) view.canvas_widget_focused_id else 0;
+                view.canvas_widget_focus_visible_keyboard = ring;
+                view.canvas_widget_tab_input_focus_entry_held = false;
+                events[backend].keyboard = null;
+                const app: native_sdk.App = .{ .context = &events[backend], .name = "focus-coordination", .source = native_sdk.WebViewSource.html(""), .event_fn = Events.event };
+                try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = phase, .timestamp_ns = 123_000_000, .key = key, .modifiers = .{ .shift = mods & 1 != 0, .control = mods & 2 != 0, .option = mods & 4 != 0, .command = mods & 8 != 0, .primary = mods & 16 != 0 } } });
+                if (backend == 0) expected = PointerIntentState.read(view, harness) else {
+                    try PointerIntentState.expect(expected, PointerIntentState.read(view, harness));
+                    try std.testing.expectEqualDeep(events[0].keyboard, events[1].keyboard);
+                    try std.testing.expectEqual(events[0].count, events[1].count);
+                    try std.testing.expectEqual(reference.runtime.views[0].canvas_widget_tab_input_focus_entry_held, view.canvas_widget_tab_input_focus_entry_held);
+                }
+            }
+            core.rt.frameReset();
+        };
+    };
+}
+
+test "compiled keyboard focus owns intent, ordering, eligibility, visibility, commits and held gestures" {
+    const Spy = struct {
+        var stage: u8 = 255;
+        var decision: u8 = 0;
+        var calls: [10]usize = @splat(0);
+        var last: [10][10]u8 = undefined;
+        fn policy(input: []const u8, output: []u8) usize {
+            if (input[0] != 34) return core.nativeSurfaceScopePolicy(input, output);
+            if (input[1] == 10) return core.nativeSurfaceScopePolicy(input, output);
+            std.debug.assert(input.len == 10 and output.len == 1);
+            calls[input[1]] += 1;
+            @memcpy(&last[input[1]], input);
+            if (input[1] == stage) {
+                output[0] = decision;
+                return 1;
+            }
+            return core.nativeSurfaceScopePolicy(input, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "focus-ownership", .source = native_sdk.WebViewSource.html("") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    var children = [_]canvas.Widget{
+        .{ .id = 9007199254740993, .kind = .button, .text = "First", .frame = geometry.RectF.init(10, 10, 100, 32) },
+        .{ .id = 9007199254740994, .kind = .button, .text = "Second", .frame = geometry.RectF.init(140, 10, 100, 32) },
+        .{ .id = std.math.maxInt(u64), .kind = .button, .text = "Third", .frame = geometry.RectF.init(270, 10, 100, 32) },
+    };
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_surface_scope_policy = Spy.policy;
+    for ([_]struct { stage: u8, decision: u8, parent: canvas.WidgetKind, key: []const u8, expected: u64 }{
+        .{ .stage = 0, .decision = 5, .parent = .button_group, .key = "unknown", .expected = children[0].id },
+        .{ .stage = 2, .decision = 1, .parent = .button_group, .key = "arrowright", .expected = children[0].id },
+        .{ .stage = 3, .decision = 0, .parent = .button_group, .key = "home", .expected = children[1].id },
+        .{ .stage = 4, .decision = 1, .parent = .panel, .key = "arrowright", .expected = children[2].id },
+        .{ .stage = 5, .decision = 0, .parent = .button_group, .key = "arrowright", .expected = children[1].id },
+        .{ .stage = 6, .decision = 0, .parent = .button_group, .key = "arrowright", .expected = children[1].id },
+        .{ .stage = 7, .decision = 0, .parent = .button_group, .key = "tab", .expected = children[2].id },
+    }) |spec| {
+        Spy.stage = spec.stage;
+        Spy.decision = spec.decision;
+        Spy.calls = @splat(0);
+        var nodes: [4]canvas.WidgetLayoutNode = undefined;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = spec.parent, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes));
+        view.focused = true;
+        view.canvas_widget_focused_id = children[1].id;
+        view.canvas_widget_focus_visible_id = children[1].id;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .timestamp_ns = 123_000_000, .key = spec.key } });
+        try std.testing.expectEqual(spec.expected, view.canvas_widget_focused_id);
+        try std.testing.expect(Spy.calls[spec.stage] > 0);
+        if (spec.stage == 7) {
+            try std.testing.expectEqual(@as(u64, 0), view.canvas_widget_focus_visible_id);
+            try std.testing.expect(!view.canvas_widget_focus_visible_keyboard);
+        }
+    }
+    Spy.stage = 1;
+    Spy.decision = 2;
+    view.canvas_widget_tab_input_focus_entry_held = true;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .text_input, .key = "unknown", .timestamp_ns = 123_000_000 } });
+    try std.testing.expect(!view.canvas_widget_tab_input_focus_entry_held);
+    children[1].kind = .textarea;
+    children[1].text = "café";
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes));
+    for ([_]u8{ 8, 6 }) |stage| {
+        view.canvas_widget_focused_id = children[0].id;
+        view.canvas_widget_focus_visible_id = 0;
+        view.widget_layout_nodes[2].widget.text_selection = null;
+        Spy.stage = stage;
+        Spy.decision = if (stage == 6) 1 else 0;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 123_000_000 } });
+        try std.testing.expectEqual(children[1].id, view.canvas_widget_focused_id);
+        if (stage == 8) try std.testing.expectEqual(@as(?canvas.TextSelection, null), view.widget_layout_nodes[2].widget.text_selection) else {
+            try std.testing.expectEqual(@as(u64, 0), view.canvas_widget_focus_visible_id);
+            try std.testing.expect(!view.canvas_widget_focus_visible_keyboard);
+            try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.widget_layout_nodes[2].widget.text_selection.?);
+        }
+    }
+    Spy.stage = 255;
+    core.rt.frameReset();
+}
+
+test "compiled keyboard focus preserves editor and terminal ownership through repeats and release" {
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "focus-tab-owners", .source = native_sdk.WebViewSource.html("") };
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+    }
+    var grid: canvas.TerminalGrid = .{ .background = canvas.Color.rgba(0, 0, 0, 1), .foreground = canvas.Color.rgba(1, 1, 1, 1), .cursor_color = canvas.Color.rgba(1, 1, 1, 1), .selection_color = canvas.Color.rgba(0, 0.5, 1, 1) };
+    for ([_]canvas.WidgetKind{ .textarea, .terminal }) |kind| for (0..4) |capability| for ([_]bool{ false, true }) |shift| {
+        grid.running = capability & 1 == 0;
+        const children = [_]canvas.Widget{
+            .{ .id = 9007199254740993, .kind = kind, .text = "alpha café", .runtime_flags = .{ .code_editor = true }, .terminal = .{ .pty = if (capability & 2 == 0) 7 else 0, .grid = &grid }, .frame = geometry.RectF.init(10, 10, 200, 100) },
+            .{ .id = std.math.maxInt(u64), .kind = .button, .text = "After", .frame = geometry.RectF.init(240, 10, 100, 32) },
+        };
+        var nodes: [3]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        for (harnesses) |harness| {
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            harness.runtime.views[0].focused = true;
+            harness.runtime.views[0].canvas_widget_focused_id = children[1].id;
+        }
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .key_down, .key_down, .key_up, .key_down, .key_up }) |phase| {
+            var expected: PointerIntentState = undefined;
+            for (harnesses, 0..) |harness, backend| {
+                try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = phase, .timestamp_ns = 456_000_000, .key = "tAb", .modifiers = .{ .shift = shift } } });
+                const view = &harness.runtime.views[0];
+                if (backend == 0) expected = PointerIntentState.read(view, harness) else {
+                    try PointerIntentState.expect(expected, PointerIntentState.read(view, harness));
+                    try std.testing.expectEqual(reference.runtime.views[0].canvas_widget_tab_input_focus_entry_held, view.canvas_widget_tab_input_focus_entry_held);
+                }
+            }
+        }
+    };
+    core.rt.frameReset();
+}
+
+test "compiled keyboard focus preserves fixed clip continuations, exhausted walks and fallible caret commit" {
+    const Probe = struct {
+        var commits: usize = 0;
+        var continuations: usize = 0;
+        fn policy(input: []const u8, output: []u8) usize {
+            if (input[0] == 34 and input[1] == 5) {
+                if (input[3] == 2 or input[3] == 4 or input[3] == 6 or input[3] == 15) commits += 1;
+                if (input[3] == 3 or input[3] == 5 or input[3] == 16) continuations += 1;
+            }
+            return core.nativeSurfaceScopePolicy(input, output);
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "focus-reveal", .source = native_sdk.WebViewSource.html("") };
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
+    }
+    const radios = [_]canvas.Widget{
+        .{ .id = 3, .kind = .radio, .text = "Clipped first", .frame = geometry.RectF.init(0, 0, 28, 32) },
+        .{ .id = 4, .kind = .radio, .text = "Visible first", .frame = geometry.RectF.init(0, 0, 28, 32) },
+        .{ .id = 5, .kind = .radio, .text = "Clipped middle", .state = .{ .selected = true }, .frame = geometry.RectF.init(0, 0, 28, 32) },
+        .{ .id = 6, .kind = .radio, .text = "Visible last", .frame = geometry.RectF.init(0, 0, 28, 32) },
+        .{ .id = 7, .kind = .radio, .text = "Clipped last", .frame = geometry.RectF.init(0, 0, 28, 32) },
+    };
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .button, .text = "Before", .frame = geometry.RectF.init(0, 0, 40, 32) },
+        .{ .id = 10, .kind = .radio_group, .frame = geometry.RectF.init(52, 0, 160, 32), .layout = .{ .clip_content = true, .gap = 4 }, .children = &radios },
+        .{ .id = 8, .kind = .button, .text = "After", .frame = geometry.RectF.init(240, 0, 40, 32) },
+    };
+    for ([_]bool{ false, true }) |fully_clipped| for ([_]bool{ false, true }) |ring| for ([_][]const u8{ "tab", "arrowright", "arrowleft", "home", "end" }) |key| {
+        var nodes: [9]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        for (nodes[0..layout.nodes.len]) |*node| {
+            if (node.widget.id == 4 or node.widget.id == 6) node.frame = geometry.RectF.init(if (node.widget.id == 4) 80 else 140, 0, 28, 32);
+            if ((node.widget.kind == .radio and fully_clipped) or node.widget.id == 3 or node.widget.id == 5 or node.widget.id == 7) node.frame.x = 400;
+        }
+        var expected: PointerIntentState = undefined;
+        for (harnesses, 0..) |harness, backend| {
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            const view = &harness.runtime.views[0];
+            view.focused = true;
+            for (view.widget_layout_nodes[0..view.widget_layout_node_count]) |*node| if (node.widget.kind == .radio) {
+                node.widget.state.selected = node.widget.id == 5;
+                node.widget.value = 0;
+            };
+            try view.refreshCanvasWidgetSemantics();
+            view.canvas_widget_focused_id = if (std.mem.eql(u8, key, "tab")) 2 else 4;
+            view.canvas_widget_focus_visible_id = if (ring) view.canvas_widget_focused_id else 0;
+            view.canvas_widget_focus_visible_keyboard = ring;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = key, .timestamp_ns = 789_000_000 } });
+            if (backend == 0) expected = PointerIntentState.read(view, harness) else try PointerIntentState.expect(expected, PointerIntentState.read(view, harness));
+            if (std.mem.eql(u8, key, "tab")) try std.testing.expectEqual(@as(u64, if (fully_clipped) 8 else 4), view.canvas_widget_focused_id);
+        }
+    };
+    try std.testing.expect(Probe.commits > 0 and Probe.continuations > 0);
+    const editables = [_]canvas.Widget{
+        .{ .id = 9007199254740993, .kind = .input, .text = "café", .frame = geometry.RectF.init(10, 10, 200, 40) },
+        .{ .id = 2, .kind = .button, .text = "Other", .frame = geometry.RectF.init(240, 10, 100, 32) },
+    };
+    for ([_]bool{ false, true }) |existing_selection| {
+        var expected: PointerIntentState = undefined;
+        for (harnesses, 0..) |harness, backend| {
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &editables }, geometry.RectF.init(0, 0, 640, 480), &nodes));
+            const view = &harness.runtime.views[0];
+            view.canvas_widget_focused_id = 2;
+            view.canvas_widget_focus_visible_id = 0;
+            view.canvas_widget_focus_visible_keyboard = false;
+            view.widget_layout_nodes[1].widget.text_selection = if (existing_selection) .{ .anchor = 1, .focus = 3 } else null;
+            view.widget_layout_nodes[2].depth = canvas.max_widget_depth;
+            const revision = view.widget_revision;
+            if (!existing_selection) {
+                try std.testing.expectError(error.WidgetDepthExceeded, harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 789_000_000 } }));
+                try std.testing.expectEqual(revision, view.widget_revision);
+                try std.testing.expectEqual(canvas.TextSelection.collapsed("café".len), view.widget_layout_nodes[1].widget.text_selection.?);
+            } else try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "tab", .timestamp_ns = 789_000_000 } });
+            try std.testing.expectEqual(editables[0].id, view.canvas_widget_focused_id);
+            if (backend == 0) expected = PointerIntentState.read(view, harness) else try PointerIntentState.expect(expected, PointerIntentState.read(view, harness));
+        }
+    }
+    core.rt.frameReset();
+}
+
+test "compiled keyboard focus group and spatial policy matches all stable kinds and parent relations" {
+    const parents = [_]u8{ 0, 7, 8, 9, 10, 12, 13, 24, 25, 63 };
+    for (0..63) |kind| for (parents) |parent| {
+        const buttons = parent == 8 or parent == 9 or parent == 10;
+        const toggles = parent == 9 or parent == 13;
+        var result: [1]u8 = undefined;
+        const edge = kind == 41 or kind == 42 or kind == 44 or kind == 46 or kind == 48 or ((kind == 31 or kind == 33) and buttons) or (kind == 32 and toggles);
+        try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 3, 0, 0, 0, @intCast(kind), parent, 63, 0, 0 }, &result));
+        try std.testing.expectEqual(@as(u8, @intFromBool(edge)), result[0]);
+        for (0..6) |direction| {
+            const horizontal = direction == 2 or direction == 3;
+            const vertical = direction == 4 or direction == 5;
+            const h = (buttons and (kind == 31 or kind == 33)) or (parent == 13 and kind == 32) or (parent == 12 and kind == 46);
+            const v = (parent == 7 and kind == 42) or ((parent == 24 or parent == 25) and kind == 41);
+            try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 2, @intCast(direction), 0, 0, @intCast(kind), parent, 63, 0, 0 }, &result));
+            try std.testing.expectEqual(@as(u8, if ((h and horizontal) or (v and vertical)) (if (direction == 2 or direction == 4) 1 else 2) else 0), result[0]);
+            for (0..16) |facts| {
+                const allowed = kind == 44 or (if (kind == 48) (if (facts & 6 != 0) facts & 10 == 10 else facts & 1 != 0) else facts & 1 != 0 and (((kind == 41 or kind == 42) and vertical) or (kind == 46 and horizontal) or ((kind == 31 or kind == 33) and buttons and horizontal) or (kind == 32 and toggles and horizontal)));
+                try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 4, @intCast(direction), 0, 0, @intCast(kind), parent, @intCast(kind), @intCast(facts), 0 }, &result));
+                try std.testing.expectEqual(@as(u8, @intFromBool(allowed)), result[0]);
+                try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&.{ 34, 4, @intCast(direction), 0, 0, @intCast(kind), parent, @intCast((kind + 1) % 63), @intCast(facts), 0 }, &result));
+                try std.testing.expectEqual(@as(u8, 0), result[0]);
+            }
+        }
+        core.rt.frameReset();
+    };
+}
+
+test "compiled keyboard focus generic group walk consumes exact identity facts and copied indices" {
+    for ([_]u8{ 31, 32, 33, 41, 42, 44, 46 }) |kind| for ([_]u8{ 7, 9, 63 }) |parent| for (0..4) |operation| for (0..8) |flags| {
+        const records = [6][4]u8{ .{ 255, 255, 0, 0 }, .{ 0, 0, kind, @intCast(flags) }, .{ 0, 0, kind, 7 }, .{ 0, 0, kind, 5 }, .{ 1, 0, kind, 7 }, .{ 0, 0, (kind + 1) % 63, 7 } };
+        var request: [9 + records.len * 4]u8 = undefined;
+        request[0..9].* = .{ 34, 10, @intCast(operation), kind, parent, 0, 0, records.len, 0 };
+        for (records, 0..) |record, i| @memcpy(request[9 + i * 4 ..][0..4], &record);
+        const logical = operation < 2 and kind == 42 and parent == 7;
+        var expected: u16 = 65535;
+        var previous: u16 = 65535;
+        var seen = false;
+        for (records, 0..) |record, i| {
+            if (record[0] != 0 or record[1] != 0 or record[2] != kind or record[3] & @as(u8, if (logical) 4 else 1) == 0) continue;
+            if (operation == 2) {
+                expected = @intCast(i);
+                break;
+            }
+            if (operation == 3) {
+                expected = @intCast(i);
+                continue;
+            }
+            if (seen) {
+                expected = @intCast(i);
+                break;
+            }
+            if (record[3] & 2 != 0) {
+                if (operation == 0) {
+                    expected = previous;
+                    break;
+                }
+                seen = true;
+            } else previous = @intCast(i);
+        }
+        var result: [2]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 2), core.nativeSurfaceScopePolicy(&request, &result));
+        try std.testing.expectEqual(expected, std.mem.readInt(u16, &result, .little));
+        core.rt.frameReset();
+        try std.testing.expectEqual(expected, std.mem.readInt(u16, &result, .little));
+    };
+    const Spy = struct {
+        var calls: usize = 0;
+        fn policy(input: []const u8, output: []u8) usize {
+            if (input[0] == 34 and input[1] == 10) {
+                calls += 1;
+                std.debug.assert(output.len == 2);
+                std.mem.writeInt(u16, output[0..2], 3, .little);
+                return 2;
+            }
+            return core.nativeSurfaceScopePolicy(input, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "group-target-ownership", .source = native_sdk.WebViewSource.html("") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const children = [_]canvas.Widget{
+        .{ .id = 9007199254740993, .kind = .button, .text = "First", .frame = geometry.RectF.init(10, 10, 100, 32) },
+        .{ .id = 9007199254740994, .kind = .button, .text = "Second", .frame = geometry.RectF.init(140, 10, 100, 32) },
+        .{ .id = std.math.maxInt(u64), .kind = .button, .text = "Third", .frame = geometry.RectF.init(270, 10, 100, 32) },
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = .button_group, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes));
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_surface_scope_policy = Spy.policy;
+    view.focused = true;
+    for ([_][]const u8{ "arrowleft", "home" }) |key| {
+        view.canvas_widget_focused_id = children[1].id;
+        view.canvas_widget_focus_visible_id = children[1].id;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = key, .timestamp_ns = 123_000_000 } });
+        try std.testing.expectEqual(children[2].id, view.canvas_widget_focused_id);
+    }
+    try std.testing.expect(Spy.calls >= 2);
+    core.rt.frameReset();
+}
