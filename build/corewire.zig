@@ -4,9 +4,11 @@ const std = @import("std");
 pub fn profileArchive(b: *std.Build, sdk: *std.Build, node: []const u8) std.Build.LazyPath {
     const source = b.addWriteFiles();
     _ = source.addCopyFile(sdk.path("tools/corewire/emit_profile.ts"), "emit_profile.ts");
+    _ = source.addCopyFile(sdk.path("tools/corewire/emit_service.ts"), "emit_service.ts");
+    _ = source.addCopyFile(sdk.path("tools/corewire/service_templates.ts"), "service_templates.ts");
     _ = source.addCopyFile(sdk.path("tools/corewire/profile_library.json"), "profile_library.json");
     const compile = b.addSystemCommand(&.{node});
-    compile.setName("native corewire profile (scriptc)");
+    compile.setName("native corewire projections (scriptc)");
     compile.addFileArg(sdk.path("tools/corewire/build_profile.mjs"));
     compile.addFileInput(sdk.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");

@@ -434,7 +434,7 @@ pub fn build(b: *std.Build) void {
     const eject_components_tests = testArtifact(b, eject_components_mod);
 
     // corewire, the contract-sidecar shim generator (tools/corewire):
-    // std-only unit suites, one test root per source file (tests live
+    // Core contract/mirror std-only suites, one test root per source file (tests live
     // in the file they cover, and imported files' tests do not run
     // under an importer's root). The conformance suite — every fixture's
     // generated mirror validated over its frontend-emitted contract —
@@ -443,8 +443,6 @@ pub fn build(b: *std.Build) void {
     const corewire_sidecar_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/sidecar.zig"));
     const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
     const corewire_facade_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_facade.zig"));
-    const corewire_service_contract_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/service_contract.zig"));
-    const corewire_service_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_service.zig"));
     const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
 
     // TypeScript-core end-to-end suite: each fixture core is compiled
@@ -767,8 +765,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(corewire_sidecar_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_facade_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_service_contract_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_service_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
     const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
@@ -1320,6 +1316,25 @@ pub fn build(b: *std.Build) void {
         profile_cli_tests.has_side_effects = true;
         profile_step.dependOn(&profile_cli_tests.step);
         test_step.dependOn(&profile_cli_tests.step);
+        const service_projection_step = b.step("test-corewire-services", "Test compiled service validation, projections, fingerprints, and owned result bytes");
+        for ([_][]const u8{ "service_contract.zig", "emit_service.zig" }) |source| {
+            const service_tests_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
+            @import("build/corewire.zig").linkProfile(service_tests_mod, ts_core_artifacts.profile_archive);
+            const run = b.addRunArtifact(testArtifact(b, service_tests_mod));
+            service_projection_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+        }
+        const service_projection_cli_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable });
+        service_projection_cli_tests.addFileArg(b.path("tools/corewire/service.test.ts"));
+        service_projection_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/emit_service.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_templates.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_cases.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_goldens.json"));
+        service_projection_cli_tests.has_side_effects = true;
+        service_projection_cli_tests.setCwd(b.path("."));
+        service_projection_step.dependOn(&service_projection_cli_tests.step);
+        test_step.dependOn(&service_projection_cli_tests.step);
         // ABI-law suites over real compiled cores: the broad markup fixture
         // plus the focused mixed bare-Model/[Model, Cmd] return regression.
         const abi_laws_run = b.addRunArtifact(ts_core_artifacts.external_core_abi_laws);

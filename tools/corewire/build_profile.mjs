@@ -1,4 +1,4 @@
-// Compile the profile generator for the build host with the SDK's exact pin.
+// Compile the corewire projections for the build host with the SDK's exact pin.
 // This library has no contract sidecar, so scriptc's native library command
 // can build it directly, without the app-core sidecar compatibility path.
 import { spawnSync } from "node:child_process";
@@ -23,7 +23,7 @@ if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) throw new Error("th
 const command = args.compiler ? compilerArgv(args.compiler) : publishedScriptcArgv(manifest);
 const version = spawnSync(command[0], [...command.slice(1), "-v"], { encoding: "utf8" });
 if (version.status !== 0 || version.stdout.trim() !== pin) {
-  throw new Error(`the corewire profile generator requires scriptc ${pin}; reinstall the SDK dependencies or fix NATIVE_SDK_CORE_COMPILER`);
+  throw new Error(`the corewire projections require scriptc ${pin}; reinstall the SDK dependencies or fix NATIVE_SDK_CORE_COMPILER`);
 }
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-profile-"));
@@ -45,7 +45,7 @@ try {
   if (build.status !== 0) process.exitCode = build.status ?? 1;
   else {
     const artifact = ["profile.lib.a", "profile"].find(file => fs.existsSync(path.join(work, file)));
-    if (!artifact) throw new Error("scriptc produced no profile-generator archive");
+    if (!artifact) throw new Error("scriptc produced no corewire projection archive");
     fs.copyFileSync(path.join(work, artifact), path.resolve(args.out));
   }
 } finally {

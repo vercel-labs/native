@@ -2,6 +2,12 @@
 // Compiled by scriptc and linked into corewire; Node runs the same source in tests.
 // Fixed key order and whitespace preserve the existing profile bytes.
 
+import { generateServices as serviceGenerate, validateServices as serviceValidate } from "./emit_service.ts";
+export function generateServices(input: string, projection: string, optimization: string): string {
+  return serviceGenerate(input, projection, optimization);
+}
+export function validateServices(input: string): string { return serviceValidate(input); }
+
 export interface ProfileInput {
   deterministic: boolean;
   async_free: boolean;

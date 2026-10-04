@@ -12,6 +12,8 @@
     "result_reset_symbol": "nsc_profile_reset"
   },
   "exports": [
-    { "export": "generate", "symbol": "nsc_profile_generate", "params": ["string", "string", "string"], "returns": "string" }
+    { "export": "generate", "symbol": "nsc_profile_generate", "params": ["string", "string", "string"], "returns": "string" },
+    { "export": "generateServices", "symbol": "nsc_profile_generate_services", "params": ["string", "string", "string"], "returns": "string" },
+    { "export": "validateServices", "symbol": "nsc_profile_validate_services", "params": ["string"], "returns": "string" }
   ]
 }
