@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 29) return nscvPointerIntent(request);
   if (request[0] === 28) return nscvSurfaceDismissal(request);
   if (request[0] === 27) return nscvTooltipPresentation(request);
   if (request[0] === 26) return nscvTooltipReconcile(request);
@@ -281,6 +282,56 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Pointer intent. Tag 29, stage, phase (hover/down/move/up/cancel/wheel),
+ * bounded native facts and the stable little-endian u16 widget-kind code.
+ * 0: present/eligible press target -> choose target (1), ring (2), spend
+ * keyboard provenance (4), and apply pointer focus (8).
+ * 1: proven/touch/inside -> hover/press/cursor source selectors and containment
+ * actions: earn proof (1), store point (2), re-hit chain (4), clear chain (8),
+ * clear live proof (16). Sources 0 keep, 1 clear/arrow, 2 routed/raw, 3 fresh.
+ * 2: chart sample present -> retain point unless cancelled.
+ * 3: hover/press/detail/cursor changed -> commit (1), sync cursor (2), dirty (4).
+ * 4: proven/inside -> consumed secondary retirement, preserving stored id/point.
+ * 5: focus/ring changed -> commit focus. Native owns identities and capabilities.
+ */
+function nscvPointerIntent(request: Uint8Array): Uint8Array {
+  if (request.length !== 6 || request[1]! > 5 || request[2]! > 5)
+    throw new Error("invalid pointer intent request");
+  const stage = request[1]!, phase = request[2]!, facts = request[3]!;
+  const kind = request[4]! | request[5]! << 8;
+  const limit = stage === 1 || stage === 4 ? 7 : stage === 3 ? 15 : stage === 2 ? 1 : 3;
+  if (facts > limit || (stage === 0 ? kind > 62 : kind !== 0) ||
+      ((stage === 3 || stage === 5) && phase !== 0)) throw new Error("invalid pointer intent facts");
+  const result = new Uint8Array(stage === 1 ? 4 : 1);
+  if (stage === 0) {
+    if (phase === 1) {
+      const present = (facts & 1) !== 0;
+      result[0] = 12 | (present && (facts & 2) !== 0 ? 1 : 0) |
+        (present && (kind >= 35 && kind <= 39 || kind === 62) ? 2 : 0);
+    }
+  } else if (stage === 1) {
+    const proven = (facts & 1) !== 0;
+    if (phase === 0 || phase === 2) {
+      result[0] = 3; result[2] = 3;
+      result[3] = phase === 0 && (facts & 2) === 0 ? 7 : proven ? 6 : 0;
+    } else if (phase === 1) {
+      result[0] = 2; result[1] = 2; result[2] = 2; result[3] = proven ? 6 : 0;
+    } else if (phase === 3) {
+      result[0] = 3; result[1] = 1; result[2] = 3;
+      result[3] = proven ? ((facts & 4) !== 0 ? 6 : 24) : 0;
+    } else if (phase === 4) {
+      result[0] = 1; result[1] = 1; result[2] = 1; result[3] = proven ? 24 : 0;
+    } else result[3] = proven ? 2 : 0;
+  } else if (stage === 2) result[0] = phase !== 4 && facts !== 0 ? 1 : 0;
+  else if (stage === 3) {
+    const interaction = (facts & 7) !== 0, cursor = (facts & 8) !== 0;
+    result[0] = (interaction || cursor ? 1 : 0) | (cursor ? 2 : 0) | (interaction ? 4 : 0);
+  } else if (stage === 4) result[0] = (facts & 1) !== 0 &&
+    (phase === 4 || phase === 3 && (facts & 4) === 0) ? 24 : 0;
+  else result[0] = facts !== 0 ? 1 : 0;
   return result;
 }
 

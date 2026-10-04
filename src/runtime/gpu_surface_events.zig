@@ -226,13 +226,6 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // a right-drag (the mouseenter/mouseleave
                     // convention), exactly as the wash does for the
                     // same journaled moves.
-                    if (input_event.kind == .pointer_cancel and
-                        self.views[index].canvas_widget_hover_pointer_live and
-                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)
-                    {
-                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
-                        self.views[index].canvas_widget_hover_pointer_live = false;
-                    }
                     // A consumed secondary RELEASE outside the view is
                     // the gesture ending with the pointer already gone —
                     // hosts hold an implicit grab through a right-drag,
@@ -240,14 +233,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // re-entry: retire containment like the cancel
                     // above, matching the primary path whose outside
                     // release re-hit-tests to nothing.
-                    if (input_event.kind == .pointer_up and
-                        self.views[index].canvas_widget_hover_pointer_live and
-                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id and
-                        !gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y))
-                    {
-                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
-                        self.views[index].canvas_widget_hover_pointer_live = false;
-                    }
+                    CanvasWidgetEventMethods().retireCanvasWidgetHoverForConsumedPointer(&self.views[index], input_event, gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y));
                 }
                 // The whole consumed stream still feeds the tooltip
                 // intent choke point: every pointer-carrying event

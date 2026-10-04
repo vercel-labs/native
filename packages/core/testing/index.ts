@@ -108,6 +108,12 @@ export interface NativeAppOptions {
   readonly executable?: string;
 }
 export interface NativePoint { readonly x: number; readonly y: number }
+export interface NativePointerOptions {
+  /** Decimal u64 token, including a host's touch-source stamp. */
+  readonly pointerId?: string;
+  readonly button?: 0 | 1;
+  readonly shift?: boolean;
+}
 interface Reply {
   protocol: number;
   snapshot?: NativeSnapshot;
@@ -128,7 +134,7 @@ function token(value: string): string {
   return value;
 }
 function identity(value: string): string {
-  if (!/^\d+$/.test(value) || BigInt(value) > 0xffffffffffffffffn) throw new Error("Invalid native identity");
+  if (!value || /[^0-9]/.test(value) || BigInt(value) > 0xffffffffffffffffn) throw new Error("Invalid native identity");
   return value;
 }
 
@@ -240,10 +246,17 @@ export class NativeApp implements AsyncDisposable {
   /** Deliver the reserved timer while a manually driven gesture is armed. */
   fireHoldTimer(): Promise<NativeSnapshot> { return this.#snapshot({ op: "hold_timer" }); }
   /** Physical pointer input through native hit testing and pointer capture. */
-  pointer(widget: NativeWidget, phase: "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }, modifiers: { readonly shift?: boolean } = {}): Promise<NativeSnapshot> {
+  pointer(widget: NativeWidget, phase: "move" | "down" | "drag" | "up" | "cancel", point: NativePoint, delta: NativePoint = { x: 0, y: 0 }, options: NativePointerOptions = {}): Promise<NativeSnapshot> {
     for (const number of [point.x, point.y, delta.x, delta.y]) if (!Number.isFinite(number)) throw new Error("Expected finite pointer coordinates");
+    const pointerId = identity(options.pointerId ?? "0"), button = options.button ?? 0;
+    if (button !== 0 && button !== 1) throw new Error("Expected primary or secondary pointer button");
     return this.#snapshot({ op: "input", view: token(widget.view), window: widget.window,
-      input: `pointer_${phase}`, x: point.x, y: point.y, delta_x: delta.x, delta_y: delta.y, shift: modifiers.shift ?? false });
+      input: `pointer_${phase}`, x: point.x, y: point.y, delta_x: delta.x, delta_y: delta.y,
+      shift: options.shift ?? false, pointer_id: pointerId, button });
+  }
+  /** A floating pointer move earns hover proof; drag is contact motion. */
+  hover(widget: NativeWidget, point: NativePoint, options: NativePointerOptions = {}): Promise<NativeSnapshot> {
+    return this.pointer(widget, "move", point, { x: 0, y: 0 }, options);
   }
   /** Leave the gesture active so tests can inspect the projected insertion slot. */
   async beginDrag(widget: NativeWidget, destination: NativePoint): Promise<NativeSnapshot> {
@@ -255,11 +268,13 @@ export class NativeApp implements AsyncDisposable {
     await this.beginDrag(widget, destination);
     return this.pointer(widget, "up", destination);
   }
-  wheel(widget: NativeWidget, deltaY: number, deltaX = 0): Promise<NativeSnapshot> {
+  wheel(widget: NativeWidget, deltaY: number, deltaX = 0, options: NativePointerOptions = {}): Promise<NativeSnapshot> {
     if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY)) throw new Error("Expected finite wheel deltas");
+    const pointerId = identity(options.pointerId ?? "0"), button = options.button ?? 0;
+    if (button !== 0 && button !== 1) throw new Error("Expected primary or secondary pointer button");
     return this.#snapshot({ op: "input", view: token(widget.view), window: widget.window, input: "scroll",
       x: widget.bounds.x + widget.bounds.width / 2, y: widget.bounds.y + widget.bounds.height / 2,
-      delta_x: deltaX, delta_y: deltaY });
+      delta_x: deltaX, delta_y: deltaY, pointer_id: pointerId, button, shift: options.shift ?? false });
   }
   key(view: string, key: string): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-key ${token(view)} ${token(key)}` });

@@ -621,7 +621,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // item's label focuses the item, and clicking an editable
             // field (which claims its own presses) focuses the field
             // exactly as before.
-            const next_focus_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
+            var focus_action: [1]u8 = undefined;
+            const press = pointer_event.press_target;
+            var focus_compiled = false;
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const focus_facts = @as(u8, @intFromBool(press != null)) |
+                    (@as(u8, @intFromBool(if (press) |target| self.views[index].widgetLayoutTree().focusTargetById(target.id) != null else false)) << 1);
+                focus_compiled = compiledCanvasPointerIntent(&self.views[index], 0, .down, focus_facts, if (press) |target| canvas.widgetKindCode(target.kind) else 0, &focus_action);
+            }
+            const next_focus_id: canvas.ObjectId = if (focus_compiled)
+                (if ((focus_action[0] & 1) != 0) press.?.id else 0)
+            else if (pointer_event.press_target) |target| blk: {
                 if (self.views[index].widgetLayoutTree().focusTargetById(target.id) != null) break :blk target.id;
                 break :blk 0;
             } else 0;
@@ -630,7 +640,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // editable text widget shows its focus affordances (ring and
             // caret) however focus arrived — the :focus-visible contract
             // text inputs have on every platform.
-            const next_focus_visible_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
+            const next_focus_visible_id: canvas.ObjectId = if (focus_compiled)
+                (if ((focus_action[0] & 2) != 0) next_focus_id else 0)
+            else if (pointer_event.press_target) |target| blk: {
                 if (target.id == next_focus_id and canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) break :blk next_focus_id;
                 break :blk 0;
             } else 0;
@@ -641,8 +653,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // converts a keyboard ring into the caret contract, which
             // never reveals tooltips — Base UI's focus-visible guard
             // against click-focus opens).
-            self.views[index].canvas_widget_focus_visible_keyboard = false;
-            if (self.views[index].canvas_widget_focused_id == next_focus_id and self.views[index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+            if (focus_compiled and (focus_action[0] & 8) == 0) return;
+            if (!focus_compiled or (focus_action[0] & 4) != 0) self.views[index].canvas_widget_focus_visible_keyboard = false;
+            const changed = @as(u8, @intFromBool(self.views[index].canvas_widget_focused_id != next_focus_id)) |
+                (@as(u8, @intFromBool(self.views[index].canvas_widget_focus_visible_id != next_focus_visible_id)) << 1);
+            var commit: [1]u8 = undefined;
+            if (compiledCanvasPointerIntent(&self.views[index], 5, .hover, changed, 0, &commit)) {
+                if (commit[0] == 0) return;
+            } else if (changed == 0) return;
             const previous_state = self.views[index].canvasWidgetRenderState();
             self.views[index].canvas_widget_focused_id = next_focus_id;
             self.views[index].canvas_widget_focus_visible_id = next_focus_visible_id;
@@ -698,7 +716,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // mouse's proof.
             const hover_pointer_proven = self.views[index].canvas_widget_hover_pointer_live and
                 self.views[index].canvas_widget_hover_pointer_id == pointer_event.pointer.pointer_id;
-            switch (pointer_event.pointer.phase) {
+            const intent_facts = @as(u8, @intFromBool(hover_pointer_proven)) |
+                (@as(u8, @intFromBool(pointer_event.pointer.pointer_id & platform.touch_pointer_id_bit != 0)) << 1) |
+                (@as(u8, @intFromBool(geometry.RectF.fromSize(self.views[index].gpu_size).containsPoint(pointer_event.pointer.point))) << 2);
+            var intent: [4]u8 = undefined;
+            if (compiledCanvasPointerIntent(&self.views[index], 1, pointer_event.pointer.phase, intent_facts, 0, &intent)) {
+                next_hovered_id = switch (intent[0]) {
+                    0 => next_hovered_id,
+                    1 => 0,
+                    2 => hover_target_id,
+                    3 => hit_target_id,
+                    else => unreachable,
+                };
+                next_pressed_id = switch (intent[1]) {
+                    0 => next_pressed_id,
+                    1 => 0,
+                    2 => target_id,
+                    else => unreachable,
+                };
+                next_cursor = switch (intent[2]) {
+                    0 => next_cursor,
+                    1 => .arrow,
+                    2 => platformCursorFromCanvas(layout_tree.cursorForHit(hover_target)),
+                    3 => hit_cursor,
+                    else => unreachable,
+                };
+                applyCanvasPointerContainment(&self.views[index], intent[3], pointer_event.pointer.pointer_id, pointer_event.pointer.point, hover_raw_hit);
+            } else switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
@@ -787,8 +831,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // whenever the pointer is over a hover-detail widget, and a
             // repaint fires only when the snapped sample index changes —
             // gliding within one sample costs nothing.
-            const next_hover_point: ?geometry.PointF = if (pointer_event.pointer.phase != .cancel and
-                canvasChartHoverIndexForId(self, index, next_hovered_id, pointer_event.pointer.point) != null)
+            const chart_sample_present = pointer_event.pointer.phase != .cancel and
+                canvasChartHoverIndexForId(self, index, next_hovered_id, pointer_event.pointer.point) != null;
+            var point_action: [1]u8 = undefined;
+            const keep_point = if (compiledCanvasPointerIntent(&self.views[index], 2, pointer_event.pointer.phase, @intFromBool(chart_sample_present), 0, &point_action))
+                point_action[0] != 0
+            else
+                chart_sample_present;
+            const next_hover_point: ?geometry.PointF = if (keep_point)
                 pointer_event.pointer.point
             else
                 null;
@@ -819,15 +869,69 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // any other interaction) changes: hover chrome is a pure
             // function of the snapped index, so a stale point that maps
             // to the same sample renders the same pixels.
-            if (!interaction_changed and !cursor_changed) return;
+            const commit_facts = @as(u8, @intFromBool(self.views[index].canvas_widget_hovered_id != next_hovered_id)) |
+                (@as(u8, @intFromBool(self.views[index].canvas_widget_pressed_id != next_pressed_id)) << 1) |
+                (@as(u8, @intFromBool(hover_detail_changed)) << 2) | (@as(u8, @intFromBool(cursor_changed)) << 3);
+            var commit_action: [1]u8 = undefined;
+            const commit_compiled = compiledCanvasPointerIntent(&self.views[index], 3, .hover, commit_facts, 0, &commit_action);
+            if (commit_compiled) {
+                if ((commit_action[0] & 1) == 0) return;
+            } else if (!interaction_changed and !cursor_changed) return;
 
             const previous_state = self.views[index].canvasWidgetRenderState();
             self.views[index].canvas_widget_hovered_id = next_hovered_id;
             self.views[index].canvas_widget_pressed_id = next_pressed_id;
             self.views[index].canvas_widget_hover_point = next_hover_point;
             self.views[index].canvas_widget_cursor = next_cursor;
-            if (cursor_changed) try syncCanvasWidgetCursorForView(self, index);
-            if (interaction_changed) try invalidateForCanvasWidgetRenderStateChange(self, index, previous_state, self.views[index].canvasWidgetRenderState());
+            if (if (commit_compiled) (commit_action[0] & 2) != 0 else cursor_changed) try syncCanvasWidgetCursorForView(self, index);
+            if (if (commit_compiled) (commit_action[0] & 4) != 0 else interaction_changed) try invalidateForCanvasWidgetRenderStateChange(self, index, previous_state, self.views[index].canvasWidgetRenderState());
+        }
+
+        fn compiledCanvasPointerIntent(view: anytype, stage: u8, phase: canvas.WidgetPointerPhase, facts: u8, kind: u16, output: []u8) bool {
+            const policy = view.canvas_widget_surface_scope_policy orelse return false;
+            var request = [6]u8{ 29, stage, @intFromEnum(phase), facts, 0, 0 };
+            std.mem.writeInt(u16, request[4..6], kind, .little);
+            if (policy(&request, output) != output.len) @panic("invalid compiled pointer intent result");
+            if (stage == 1) {
+                if (output.len != 4 or output[0] > 3 or output[1] > 2 or output[2] > 3 or output[3] > 31)
+                    @panic("invalid compiled pointer intent selectors");
+            } else {
+                const limit: u8 = if (stage == 0) 15 else if (stage == 3) 7 else if (stage == 4) 24 else 1;
+                if (output.len != 1 or output[0] > limit or (stage == 4 and output[0] != 0 and output[0] != 24))
+                    @panic("invalid compiled pointer intent action");
+            }
+            return true;
+        }
+
+        fn applyCanvasPointerContainment(view: anytype, actions: u8, pointer_id: u64, point: geometry.PointF, hit: ?canvas.WidgetHit) void {
+            if ((actions & 1) != 0) {
+                view.canvas_widget_hover_pointer_live = true;
+                view.canvas_widget_hover_pointer_id = pointer_id;
+            }
+            if ((actions & 2) != 0) view.canvas_widget_hover_pointer_position = point;
+            if ((actions & 4) != 0) view.setCanvasWidgetHoverMsgChainForHit(hit);
+            if ((actions & 8) != 0) view.canvas_widget_hover_msg_chain_len = 0;
+            if ((actions & 16) != 0) view.canvas_widget_hover_pointer_live = false;
+        }
+
+        pub fn retireCanvasWidgetHoverForConsumedPointer(view: anytype, input: GpuSurfaceInputEvent, inside: bool) void {
+            const proven = view.canvas_widget_hover_pointer_live and view.canvas_widget_hover_pointer_id == input.pointer_id;
+            const phase: canvas.WidgetPointerPhase = switch (input.kind) {
+                .pointer_move => .hover,
+                .pointer_down => .down,
+                .pointer_drag => .move,
+                .pointer_up => .up,
+                .pointer_cancel => .cancel,
+                else => return,
+            };
+            const facts = @as(u8, @intFromBool(proven)) | (@as(u8, @intFromBool(inside)) << 2);
+            var action: [1]u8 = undefined;
+            if (compiledCanvasPointerIntent(view, 4, phase, facts, 0, &action)) {
+                applyCanvasPointerContainment(view, action[0], input.pointer_id, .{ .x = input.x, .y = input.y }, null);
+            } else if (proven and (input.kind == .pointer_cancel or input.kind == .pointer_up and !inside)) {
+                view.canvas_widget_hover_msg_chain_len = 0;
+                view.canvas_widget_hover_pointer_live = false;
+            }
         }
 
         /// The (widget id, snapped sample index) pair chart hover chrome

@@ -30,6 +30,71 @@ const runtime_ns = native_sdk.runtime;
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
 
+const PointerIntentState = struct {
+    ids: [9]u64,
+    clocks: [6]u64,
+    flags: [4]bool,
+    cursor: native_sdk.platform.Cursor,
+    hover_point: ?geometry.PointF,
+    last_point: ?geometry.PointF,
+    proof_point: geometry.PointF,
+    tooltip_point: geometry.PointF,
+    chain: [canvas.max_widget_depth]canvas.ObjectId,
+    chain_len: usize,
+    nodes: [16]canvas.WidgetLayoutNode,
+    node_len: usize,
+    semantics: [16]canvas.WidgetSemanticsNode,
+    semantic_len: usize,
+    dirty: [16]geometry.RectF,
+    dirty_len: usize,
+    cursor_calls: usize,
+    platform_cursor: native_sdk.platform.Cursor,
+    cursor_window: u64,
+    cursor_label: [32]u8 = @splat(0),
+    frame_calls: usize,
+    fn read(v: anytype, harness: anytype) @This() {
+        var state: @This() = undefined;
+        state.ids = .{ v.canvas_widget_focused_id, v.canvas_widget_focus_visible_id, v.canvas_widget_hovered_id, v.canvas_widget_pressed_id, v.canvas_widget_hover_pointer_id, v.canvas_tooltip_armed_id, v.canvas_tooltip_armed_owner_id, v.canvas_tooltip_shown_id, v.canvas_tooltip_shown_owner_id };
+        state.clocks = .{ v.canvas_tooltip_deadline_ns, v.canvas_tooltip_warm_until_ns, v.canvas_tooltip_transit_deadline_ns, v.widget_revision, v.gpu_input_timestamp_ns, v.gpu_timestamp_ns };
+        state.flags = .{ v.canvas_widget_focus_visible_keyboard, v.canvas_widget_hover_pointer_live, v.canvas_tooltip_shown_from_focus, v.gpu_canvas_frame_requested };
+        state.cursor = v.canvas_widget_cursor;
+        state.hover_point = v.canvas_widget_hover_point;
+        state.last_point = v.canvas_last_pointer_position;
+        state.proof_point = v.canvas_widget_hover_pointer_position;
+        state.tooltip_point = v.canvas_tooltip_pointer_from;
+        state.chain = v.canvas_widget_hover_msg_chain;
+        state.chain_len = v.canvas_widget_hover_msg_chain_len;
+        state.node_len = v.widget_layout_node_count;
+        @memcpy(state.nodes[0..state.node_len], v.widget_layout_nodes[0..state.node_len]);
+        state.semantic_len = v.widget_semantics_node_count;
+        @memcpy(state.semantics[0..state.semantic_len], v.widget_semantics_nodes[0..state.semantic_len]);
+        state.dirty_len = harness.runtime.dirty_region_count;
+        @memcpy(state.dirty[0..state.dirty_len], harness.runtime.dirty_regions[0..state.dirty_len]);
+        state.cursor_calls = harness.null_platform.view_cursor_count;
+        state.platform_cursor = harness.null_platform.view_cursor;
+        state.cursor_window = harness.null_platform.view_cursor_window_id;
+        state.cursor_label = @splat(0);
+        const label = harness.null_platform.view_cursor_label_storage[0..harness.null_platform.view_cursor_label_len];
+        @memcpy(state.cursor_label[0..label.len], label);
+        state.frame_calls = harness.null_platform.gpu_surface_frame_request_count;
+        return state;
+    }
+    fn expect(expected: @This(), actual: @This()) !void {
+        inline for (.{ "ids", "clocks", "flags", "cursor", "hover_point", "last_point", "proof_point", "tooltip_point", "chain", "chain_len", "cursor_calls", "platform_cursor", "cursor_window", "cursor_label", "frame_calls" }) |field| {
+            std.testing.expectEqualDeep(@field(expected, field), @field(actual, field)) catch |err| {
+                std.debug.print("pointer state field: {s}\n", .{field});
+                return err;
+            };
+        }
+        try std.testing.expectEqual(expected.node_len, actual.node_len);
+        try std.testing.expectEqualDeep(expected.nodes[0..expected.node_len], actual.nodes[0..actual.node_len]);
+        try std.testing.expectEqual(expected.semantic_len, actual.semantic_len);
+        try std.testing.expectEqualDeep(expected.semantics[0..expected.semantic_len], actual.semantics[0..actual.semantic_len]);
+        try std.testing.expectEqual(expected.dirty_len, actual.dirty_len);
+        try std.testing.expectEqualDeep(expected.dirty[0..expected.dirty_len], actual.dirty[0..actual.dirty_len]);
+    }
+};
+
 const Adapter = native_sdk.TsUiApp(core);
 const App = Adapter.App;
 const Bridge = Adapter.Host;
@@ -7087,5 +7152,472 @@ test "compiled outside dismissal preserves anchor toggles, shielding and all cal
         }
     };
     try std.testing.expectEqual(@as(usize, 3780), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled pointer policy preserves all phase verdicts and borrowed cycle ownership" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    var last: [4]u8 = undefined;
+    for (0..6) |phase| {
+        for (0..4) |facts| for (0..63) |kind| {
+            var request = [6]u8{ 29, 0, @intCast(phase), @intCast(facts), @intCast(kind), 0 };
+            var result: [1]u8 = undefined;
+            try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&request, &result));
+            const present = facts & 1 != 0;
+            const ring = kind >= 35 and kind <= 39 or kind == 62;
+            const expected: u8 = if (phase != 1) 0 else 12 | @as(u8, if (present and facts & 2 != 0) 1 else 0) | @as(u8, if (present and ring) 2 else 0);
+            try std.testing.expectEqual(expected, result[0]);
+            try std.testing.expectEqualSlices(u8, copy, borrowed);
+        };
+        for (0..8) |facts| {
+            var request = [6]u8{ 29, 1, @intCast(phase), @intCast(facts), 0, 0 };
+            try std.testing.expectEqual(last.len, core.nativeSurfaceScopePolicy(&request, &last));
+            const proven = facts & 1 != 0;
+            const expected: [4]u8 = switch (phase) {
+                0 => .{ 3, 0, 3, if (facts & 2 == 0) 7 else if (proven) 6 else 0 },
+                1 => .{ 2, 2, 2, if (proven) 6 else 0 },
+                2 => .{ 3, 0, 3, if (proven) 6 else 0 },
+                3 => .{ 3, 1, 3, if (proven) (if (facts & 4 != 0) @as(u8, 6) else 24) else 0 },
+                4 => .{ 1, 1, 1, if (proven) 24 else 0 },
+                else => .{ 0, 0, 0, if (proven) 2 else 0 },
+            };
+            try std.testing.expectEqualDeep(expected, last);
+            request[1] = 4;
+            var retirement: [1]u8 = undefined;
+            try std.testing.expectEqual(retirement.len, core.nativeSurfaceScopePolicy(&request, &retirement));
+            try std.testing.expectEqual(@as(u8, if (proven and (phase == 4 or phase == 3 and facts & 4 == 0)) 24 else 0), retirement[0]);
+            try std.testing.expectEqualSlices(u8, copy, borrowed);
+        }
+        for (0..2) |sample| {
+            var result: [1]u8 = undefined;
+            try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 29, 2, @intCast(phase), @intCast(sample), 0, 0 }, &result));
+            try std.testing.expectEqual(@as(u8, @intFromBool(phase != 4 and sample != 0)), result[0]);
+        }
+    }
+    for (0..16) |facts| {
+        var result: [1]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 29, 3, 0, @intCast(facts), 0, 0 }, &result));
+        const expected: u8 = @as(u8, @intFromBool(facts != 0)) | @as(u8, if (facts & 8 != 0) 2 else 0) | @as(u8, if (facts & 7 != 0) 4 else 0);
+        try std.testing.expectEqual(expected, result[0]);
+    }
+    for (0..4) |facts| {
+        var result: [1]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 29, 5, 0, @intCast(facts), 0, 0 }, &result));
+        try std.testing.expectEqual(@as(u8, @intFromBool(facts != 0)), result[0]);
+    }
+    try std.testing.expectEqualSlices(u8, copy, borrowed);
+    core.rt.frameReset();
+    try std.testing.expectEqualDeep([4]u8{ 0, 0, 0, 2 }, last);
+}
+
+test "compiled pointer interaction matches complete native state and fallible commit ordering" {
+    const NoEvents = struct {
+        var tags: [16]std.meta.Tag(native_sdk.Event) = undefined;
+        var len: usize = 0;
+        var pointer: ?runtime_ns.CanvasWidgetPointerEvent = null;
+        var input: ?native_sdk.GpuSurfaceInputEvent = null;
+        var route: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, value: native_sdk.Event) anyerror!void {
+            tags[len] = std.meta.activeTag(value);
+            len += 1;
+            switch (value) {
+                .canvas_widget_pointer => |p| {
+                    @memcpy(route[0..p.route.len], p.route);
+                    pointer = p;
+                    pointer.?.route = route[0..p.route.len];
+                },
+                .gpu_surface_input => |i| input = i,
+                else => {},
+            }
+        }
+    };
+    const CursorProbe = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        var cursor: native_sdk.platform.Cursor = .arrow;
+        var window: u64 = 0;
+        var label: [16]u8 = @splat(0);
+        fn set(_: ?*anyopaque, window_id: u64, view_label: []const u8, next_cursor: native_sdk.platform.Cursor) anyerror!void {
+            @This().calls += 1;
+            @This().cursor = next_cursor;
+            @This().window = window_id;
+            @This().label = @splat(0);
+            @memcpy(@This().label[0..view_label.len], view_label);
+            if (fail) return error.CursorFailed;
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "pointer-intent-parity", .source = native_sdk.WebViewSource.html("<h1>Pointer</h1>"), .event_fn = NoEvents.event };
+    for (harnesses) |harness| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    }
+    const base: canvas.ObjectId = 0xffff_ffff_ffff_ff00;
+    const hint = [_]canvas.Widget{.{ .id = base + 3, .kind = .tooltip, .text = "Hint", .layout = .{ .anchor = .{ .placement = .above } }, .tooltip_delay_ms = 0 }};
+    const row_text = [_]canvas.Widget{.{ .id = base + 2, .kind = .text, .text = "Row child", .hover_msgs = true, .children = &hint }};
+    const samples = [_]f32{ 2, 4, 3, 6, 5 };
+    const series = [_]canvas.ChartSeries{.{ .values = &samples, .label = "Samples" }};
+    const children = [_]canvas.Widget{
+        .{ .id = base + 1, .kind = .list_item, .hover_msgs = true, .children = &row_text },
+        .{ .id = base + 4, .kind = .text_field, .text = "Editor" },
+        .{ .id = base + 5, .kind = .chart, .chart = .{ .series = &series, .hover_details = true } },
+        .{ .id = base + 6, .kind = .button, .text = "Overflow", .hover_msgs = true },
+        .{ .id = base + 7, .kind = .text, .text = "Inert" },
+    };
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = base, .kind = .panel, .hover_msgs = true, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    nodes[1].frame = geometry.RectF.init(20, 20, 160, 40);
+    nodes[2].frame = geometry.RectF.init(30, 25, 100, 30);
+    nodes[3].frame = geometry.RectF.init(30, 65, 100, 24);
+    nodes[4].frame = geometry.RectF.init(20, 110, 180, 40);
+    nodes[5].frame = geometry.RectF.init(250, 100, 300, 150);
+    nodes[6].frame = geometry.RectF.init(600, 430, 100, 80);
+    nodes[7].frame = geometry.RectF.init(0, 300, 20, 20);
+    var retained: [2][8]canvas.WidgetLayoutNode = undefined;
+    for (harnesses, 0..) |harness, backend| {
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        @memcpy(&retained[backend], harness.runtime.views[0].widget_layout_nodes[0..8]);
+        harness.runtime.options.platform.services.set_view_cursor_fn = CursorProbe.set;
+    }
+    const points = [_]geometry.PointF{ .{ .x = 50, .y = 40 }, .{ .x = 50, .y = 125 }, .{ .x = 320, .y = 170 }, .{ .x = 321, .y = 170 }, .{ .x = 670, .y = 460 }, .{ .x = -10, .y = -20 } };
+    const pointers = [_]u64{ 0, 7, 0x8000_0000_0000_0007, std.math.maxInt(u64) };
+    const kinds = [_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_move, .pointer_down, .pointer_drag, .pointer_up, .pointer_cancel, .scroll };
+    var comparisons: usize = 0;
+    var semantics_failures: usize = 0;
+    var cursor_failures: usize = 0;
+    for (kinds) |kind| for (points) |point| for (pointers) |pointer_id| for (0..4) |proof| for (0..3) |fault| {
+        var expected: PointerIntentState = undefined;
+        var expected_error: ?anyerror = null;
+        var expected_calls: usize = 0;
+        var expected_cursor: native_sdk.platform.Cursor = .arrow;
+        var expected_pointer: ?runtime_ns.CanvasWidgetPointerEvent = null;
+        var expected_input: ?native_sdk.GpuSurfaceInputEvent = null;
+        var expected_tags: [16]std.meta.Tag(native_sdk.Event) = undefined;
+        var expected_len: usize = 0;
+        var expected_route: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+        for (0..2) |backend| {
+            const harness = harnesses[backend];
+            const v = &harness.runtime.views[0];
+            core.rt.frameReset();
+            @memcpy(v.widget_layout_nodes[0..8], &retained[backend]);
+            v.canvas_widget_surface_scope_policy = null;
+            v.canvas_widget_tooltip_policy = null;
+            v.canvas_widget_focused_id = base + 4;
+            v.canvas_widget_focus_visible_id = base + 4;
+            v.canvas_widget_focus_visible_keyboard = true;
+            v.canvas_widget_hovered_id = if (proof == 0) base + 5 else base + 1;
+            v.canvas_widget_pressed_id = if (proof == 2) 0 else base + 2;
+            v.canvas_widget_cursor = if (proof == 3) .text else .arrow;
+            v.canvas_widget_hover_point = if (proof == 0) .{ .x = 320, .y = 170 } else null;
+            v.canvas_last_pointer_position = .{ .x = 123, .y = 234 };
+            v.canvas_widget_hover_pointer_live = proof != 0;
+            v.canvas_widget_hover_pointer_id = if (proof == 2) pointer_id ^ 1 else pointer_id;
+            v.canvas_widget_hover_pointer_position = .{ .x = 50, .y = 40 };
+            v.canvas_widget_click_count = 0;
+            v.canvas_widget_click_timestamp_ns = 0;
+            v.canvas_widget_click_point = .{};
+            v.canvas_widget_click_pointer_id = 0;
+            v.canvas_widget_click_target_id = 0;
+            v.canvas_widget_selected_text_id = 0;
+            v.canvas_widget_selected_text_group_id = 0;
+            v.canvas_widget_multi_click_anchor = .{};
+            for (&v.canvas_widget_hover_msg_chain, 0..) |*id, index| id.* = base + @as(u64, @intCast(index));
+            v.canvas_widget_hover_msg_chain_len = canvas.max_widget_depth;
+            v.canvas_tooltip_armed_id = base + 3;
+            v.canvas_tooltip_armed_owner_id = base + 1;
+            v.canvas_tooltip_deadline_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_shown_id = if (fault == 1) base + 3 else 0;
+            v.canvas_tooltip_shown_owner_id = base + 1;
+            v.canvas_tooltip_shown_from_focus = false;
+            v.canvas_tooltip_warm_until_ns = 0;
+            v.canvas_tooltip_transit_deadline_ns = 0;
+            v.canvas_tooltip_pointer_from = .{ .x = 50, .y = 40 };
+            v.gpu_input_timestamp_ns = 0x8000_0000_0000_0000;
+            v.gpu_timestamp_ns = 0;
+            v.widget_revision = 100;
+            v.gpu_canvas_frame_requested = false;
+            v.applyCanvasTooltipVisibility();
+            try v.refreshCanvasWidgetSemantics();
+            harness.runtime.dirty_region_count = 0;
+            harness.null_platform.gpu_surface_frame_request_count = 0;
+            harness.null_platform.view_cursor_count = 0;
+            harness.null_platform.view_cursor = .arrow;
+            harness.null_platform.view_cursor_window_id = 0;
+            harness.null_platform.view_cursor_label_len = 0;
+            CursorProbe.calls = 0;
+            CursorProbe.fail = fault == 2;
+            CursorProbe.cursor = .arrow;
+            CursorProbe.window = 0;
+            CursorProbe.label = @splat(0);
+            NoEvents.len = 0;
+            NoEvents.pointer = null;
+            NoEvents.input = null;
+            const input = native_sdk.GpuSurfaceInputEvent{ .window_id = 1, .label = "canvas", .kind = kind, .pointer_id = pointer_id, .x = point.x, .y = point.y };
+            // An unrelated invalid node fails only a later semantics commit.
+            if (fault == 1) v.widget_layout_nodes[7].depth = canvas.max_widget_depth;
+            v.canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+            var err: ?anyerror = null;
+            harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = input }) catch |failure| {
+                err = failure;
+            };
+            if (backend == 0) {
+                expected = PointerIntentState.read(v, harness);
+                expected_error = err;
+                expected_calls = CursorProbe.calls;
+                expected_cursor = CursorProbe.cursor;
+                expected_pointer = NoEvents.pointer;
+                if (expected_pointer) |*p| {
+                    @memcpy(expected_route[0..p.route.len], p.route);
+                    p.route = expected_route[0..p.route.len];
+                }
+                expected_input = NoEvents.input;
+                expected_len = NoEvents.len;
+                @memcpy(expected_tags[0..expected_len], NoEvents.tags[0..expected_len]);
+            } else {
+                PointerIntentState.expect(expected, PointerIntentState.read(v, harness)) catch |failure| {
+                    std.debug.print("pointer case: {t} point={any} id={d} proof={d} fault={d}\n", .{ kind, point, pointer_id, proof, fault });
+                    return failure;
+                };
+                try std.testing.expectEqual(expected_error, err);
+                try std.testing.expectEqual(expected_calls, CursorProbe.calls);
+                try std.testing.expectEqual(expected_cursor, CursorProbe.cursor);
+                try std.testing.expectEqual(expected_len, NoEvents.len);
+                try std.testing.expectEqualDeep(expected_tags[0..expected_len], NoEvents.tags[0..NoEvents.len]);
+                try std.testing.expectEqualDeep(expected_input, NoEvents.input);
+                try std.testing.expectEqualDeep(expected_pointer, NoEvents.pointer);
+                if (err != null and err.? == error.WidgetDepthExceeded) {
+                    semantics_failures += 1;
+                    try std.testing.expectEqual(@as(u64, 100), v.widget_revision);
+                    try std.testing.expectEqual(@as(usize, 0), CursorProbe.calls);
+                }
+                if (err != null and err.? == error.CursorFailed) {
+                    cursor_failures += 1;
+                    if (kind == .pointer_move and point.x == 50 and point.y == 125)
+                        try std.testing.expectEqual(@as(usize, 0), harness.runtime.dirty_region_count);
+                    try std.testing.expectEqual(@as(usize, 1), CursorProbe.calls);
+                }
+                comparisons += 1;
+            }
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 1728), comparisons);
+    try std.testing.expect(semantics_failures > 0);
+    try std.testing.expect(cursor_failures > 0);
+    core.rt.frameReset();
+}
+
+test "compiled pointer focus preserves all ring kinds, aliases and unchanged keyboard provenance" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const Probe = struct {
+        var focus_calls: usize = 0;
+        var commits: usize = 0;
+        fn policy(request: []const u8, output: []u8) usize {
+            const size = core.nativeSurfaceScopePolicy(request, output);
+            if (request[0] == 29 and request[1] == 0) focus_calls += 1;
+            if (request[0] == 29 and request[1] == 5 and output[0] != 0) commits += 1;
+            return size;
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "pointer-focus-parity", .source = native_sdk.WebViewSource.html("<h1>Focus</h1>"), .event_fn = NoEvents.event };
+    for (harnesses) |harness| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    }
+    const kinds = [_]canvas.WidgetKind{ .input, .text_field, .search_field, .combobox, .textarea, .terminal, .button, .list_item, .text };
+    const target: canvas.ObjectId = 0xffff_ffff_ffff_ff03;
+    const retained_ids = [_]canvas.ObjectId{ 0, target, 0xffff_ffff_ffff_ff01, std.math.maxInt(u64) };
+    var comparisons: usize = 0;
+    for (kinds) |kind| for (0..5) |variant| for (0..4) |slot| for ([_]bool{ false, true }) |keyboard| {
+        var expected: PointerIntentState = undefined;
+        var expected_error: ?anyerror = null;
+        for (0..2) |backend| {
+            const harness = harnesses[backend];
+            const v = &harness.runtime.views[0];
+            core.rt.frameReset();
+            const children = [_]canvas.Widget{
+                .{ .id = target - 2, .kind = .button, .text = "First", .semantics = .{ .focusable = true } },
+                .{ .id = target, .kind = kind, .text = "Target", .semantics = .{ .focusable = true }, .state = .{ .disabled = variant == 1 } },
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .id = target - 3, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+            nodes[1].frame = geometry.RectF.init(20, 20, 160, 40);
+            nodes[2].frame = geometry.RectF.init(20, 100, 160, 40);
+            v.canvas_widget_surface_scope_policy = null;
+            v.canvas_widget_tooltip_policy = null;
+            v.canvas_widget_focused_id = 0;
+            v.canvas_widget_hovered_id = 0;
+            v.canvas_widget_pressed_id = 0;
+            v.canvas_widget_focus_visible_id = 0;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            // Raw retained aliases and zero IDs retain the reference's
+            // first-match behavior; source publication rejects aliases.
+            if (variant == 2) v.widget_layout_nodes[1].widget.id = target;
+            if (variant == 4) v.widget_layout_nodes[2].widget.id = 0;
+            v.canvas_widget_focused_id = retained_ids[slot];
+            v.canvas_widget_focus_visible_id = retained_ids[slot];
+            v.canvas_widget_focus_visible_keyboard = keyboard;
+            v.canvas_widget_hover_pointer_live = false;
+            v.canvas_widget_hover_pointer_id = std.math.maxInt(u64);
+            v.canvas_widget_hover_pointer_position = .{ .x = 70, .y = 75 };
+            v.canvas_widget_hover_point = null;
+            v.canvas_last_pointer_position = null;
+            v.canvas_widget_hover_msg_chain = @splat(0);
+            v.canvas_widget_hover_msg_chain_len = 0;
+            v.canvas_widget_click_count = 0;
+            v.canvas_widget_click_timestamp_ns = 0;
+            v.canvas_widget_click_pointer_id = 0;
+            v.canvas_widget_click_target_id = 0;
+            v.canvas_widget_click_point = .{};
+            v.canvas_widget_selected_text_id = 0;
+            v.widget_revision = 100;
+            v.gpu_timestamp_ns = 0;
+            v.gpu_input_timestamp_ns = 0;
+            v.gpu_canvas_frame_requested = false;
+            harness.runtime.dirty_region_count = 0;
+            harness.null_platform.view_cursor_count = 0;
+            harness.null_platform.view_cursor = .arrow;
+            harness.null_platform.view_cursor_window_id = 0;
+            harness.null_platform.view_cursor_label_len = 0;
+            harness.null_platform.gpu_surface_frame_request_count = 0;
+            v.canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
+            Probe.focus_calls = 0;
+            Probe.commits = 0;
+            var err: ?anyerror = null;
+            harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = if (variant == 3) -5 else 50, .y = 120, .pointer_id = std.math.maxInt(u64) } }) catch |failure| {
+                err = failure;
+            };
+            if (backend == 0) {
+                expected = PointerIntentState.read(v, harness);
+                expected_error = err;
+            } else {
+                PointerIntentState.expect(expected, PointerIntentState.read(v, harness)) catch |failure| {
+                    std.debug.print("pointer focus case: {t} variant={d} slot={d} keyboard={}\n", .{ kind, variant, slot, keyboard });
+                    return failure;
+                };
+                try std.testing.expectEqual(expected_error, err);
+                if (err == null) {
+                    try std.testing.expectEqual(@as(usize, 1), Probe.focus_calls);
+                    try std.testing.expect(!v.canvas_widget_focus_visible_keyboard);
+                }
+                if (err == null and variant == 0 and slot == 1 and (kind == .input or kind == .text_field or kind == .search_field or kind == .combobox or kind == .textarea or kind == .terminal)) {
+                    try std.testing.expectEqual(target, v.canvas_widget_focus_visible_id);
+                    try std.testing.expectEqual(@as(usize, 0), Probe.commits);
+                }
+                comparisons += 1;
+            }
+            // Restore the deliberately invalid raw fixture before the
+            // next adoption validates both old and candidate identities.
+            v.widget_layout_nodes[1].widget.id = target - 2;
+            v.widget_layout_nodes[2].widget.id = target;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 360), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled consumed secondary input preserves containment retirement and view compaction" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const Probe = struct {
+        var calls: usize = 0;
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request[0] == 29 and request[1] == 4) calls += 1;
+            return core.nativeSurfaceScopePolicy(request, output);
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "secondary-pointer-parity", .source = native_sdk.WebViewSource.html("<h1>Secondary</h1>"), .event_fn = NoEvents.event };
+
+    const children = [_]canvas.Widget{.{ .id = 0xffff_ffff_ffff_ff01, .kind = .button, .frame = geometry.RectF.init(600, 430, 100, 80), .text = "Overflow", .hover_msgs = true }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 0xffff_ffff_ffff_ff00, .kind = .panel, .hover_msgs = true, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    var retained: [2][2]canvas.WidgetLayoutNode = undefined;
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "retired", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        harness.runtime.views[1].canvas_widget_surface_scope_policy = Probe.policy;
+        try harness.runtime.closeView(1, "retired");
+        try std.testing.expect(harness.runtime.views[0].canvas_widget_surface_scope_policy == Probe.policy);
+        @memcpy(&retained[backend], harness.runtime.views[0].widget_layout_nodes[0..2]);
+    }
+    const kinds = [_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up, .pointer_drag, .pointer_move, .pointer_cancel };
+    const pointers = [_]u64{ 0, 7, 0x8000_0000_0000_0007, std.math.maxInt(u64) };
+    var comparisons: usize = 0;
+    for (kinds) |kind| for ([_]bool{ false, true }) |inside| for (pointers) |pointer_id| for (0..3) |proof| {
+        var expected: PointerIntentState = undefined;
+        for (0..2) |backend| {
+            const harness = harnesses[backend];
+            const v = &harness.runtime.views[0];
+            core.rt.frameReset();
+            @memcpy(v.widget_layout_nodes[0..2], &retained[backend]);
+            v.canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+            v.canvas_widget_hovered_id = children[0].id;
+            v.canvas_widget_pressed_id = children[0].id;
+            v.canvas_widget_focus_visible_id = children[0].id;
+            v.canvas_widget_focused_id = children[0].id;
+            v.canvas_widget_focus_visible_keyboard = true;
+            v.canvas_widget_hover_pointer_live = proof != 0;
+            v.canvas_widget_hover_pointer_id = if (proof == 2) pointer_id ^ 1 else pointer_id;
+            v.canvas_widget_hover_pointer_position = .{ .x = 610, .y = 440 };
+            v.canvas_widget_hover_point = null;
+            v.canvas_last_pointer_position = null;
+            v.canvas_widget_hover_msg_chain = @splat(children[0].id);
+            v.canvas_widget_hover_msg_chain_len = canvas.max_widget_depth;
+            v.widget_revision = 100;
+            v.gpu_timestamp_ns = 0;
+            v.gpu_input_timestamp_ns = 0;
+            v.gpu_canvas_frame_requested = false;
+            harness.runtime.dirty_region_count = 0;
+            harness.null_platform.view_cursor_count = 0;
+            harness.null_platform.view_cursor = .arrow;
+            harness.null_platform.view_cursor_window_id = 0;
+            harness.null_platform.view_cursor_label_len = 0;
+            harness.null_platform.gpu_surface_frame_request_count = 0;
+            Probe.calls = 0;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = kind, .button = 1, .pointer_id = pointer_id, .x = if (inside) 610 else 670, .y = 440 } });
+            if (backend == 0) expected = PointerIntentState.read(v, harness) else {
+                try PointerIntentState.expect(expected, PointerIntentState.read(v, harness));
+                try std.testing.expectEqual(@as(usize, 1), Probe.calls);
+                try std.testing.expectEqual(children[0].id, v.canvas_widget_pressed_id);
+                try std.testing.expectEqual(children[0].id, v.canvas_widget_hovered_id);
+                const retired = proof == 1 and (kind == .pointer_cancel or kind == .pointer_up and !inside);
+                try std.testing.expectEqual(if (retired) @as(usize, 0) else canvas.max_widget_depth, v.canvas_widget_hover_msg_chain_len);
+                try std.testing.expectEqual(proof != 0 and !retired, v.canvas_widget_hover_pointer_live);
+                try std.testing.expectEqualDeep(geometry.PointF{ .x = 610, .y = 440 }, v.canvas_widget_hover_pointer_position);
+                comparisons += 1;
+            }
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 120), comparisons);
     core.rt.frameReset();
 }

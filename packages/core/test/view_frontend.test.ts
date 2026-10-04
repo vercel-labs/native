@@ -1381,3 +1381,42 @@ test("surface dismissal preserves trigger shielding and post-return cleanup", ()
     [28, 3, 8], [28, 0, 0, 0], [28, 4, 33, 0], [28, 4, 1, 0], [28, 4, 1, 0, 2]])
     assert.throws(() => policy(new Uint8Array(bytes)), /surface dismissal/);
 });
+
+
+test("pointer intent owns phase selection, focus provenance and consumed retirement", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button>Pointer</button>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const action = (stage: number, phase: number, facts: number, kind = 0) =>
+    Array.from(policy(new Uint8Array([29, stage, phase, facts, kind & 255, kind >>> 8])));
+  for (let phase = 0; phase < 6; phase++) for (let facts = 0; facts < 8; facts++) {
+    const proven = (facts & 1) !== 0;
+    let expected: number[];
+    switch (phase) {
+      case 0: expected = [3, 0, 3, (facts & 2) === 0 ? 7 : proven ? 6 : 0]; break;
+      case 1: expected = [2, 2, 2, proven ? 6 : 0]; break;
+      case 2: expected = [3, 0, 3, proven ? 6 : 0]; break;
+      case 3: expected = [3, 1, 3, proven ? ((facts & 4) !== 0 ? 6 : 24) : 0]; break;
+      case 4: expected = [1, 1, 1, proven ? 24 : 0]; break;
+      default: expected = [0, 0, 0, proven ? 2 : 0];
+    }
+    assert.deepEqual(action(1, phase, facts), expected);
+    assert.deepEqual(action(4, phase, facts), [proven && (phase === 4 || phase === 3 && (facts & 4) === 0) ? 24 : 0]);
+  }
+  for (let phase = 0; phase < 6; phase++) for (let facts = 0; facts < 4; facts++) for (let kind = 0; kind <= 62; kind++) {
+    const present = (facts & 1) !== 0;
+    assert.deepEqual(action(0, phase, facts, kind), [phase === 1 ?
+      12 | (present && (facts & 2) !== 0 ? 1 : 0) | (present && (kind >= 35 && kind <= 39 || kind === 62) ? 2 : 0) : 0]);
+  }
+  for (let facts = 0; facts < 16; facts++) assert.deepEqual(action(3, 0, facts), [
+    (facts !== 0 ? 1 : 0) | ((facts & 8) !== 0 ? 2 : 0) | ((facts & 7) !== 0 ? 4 : 0)]);
+  for (let phase = 0; phase < 6; phase++) for (let present = 0; present < 2; present++)
+    assert.deepEqual(action(2, phase, present), [phase !== 4 && present !== 0 ? 1 : 0]);
+  for (let facts = 0; facts < 4; facts++) assert.deepEqual(action(5, 0, facts), [facts !== 0 ? 1 : 0]);
+  for (const request of [[29], [29, 0, 1, 0, 0], [29, 6, 0, 0, 0, 0], [29, 0, 6, 0, 0, 0],
+    [29, 0, 1, 4, 0, 0], [29, 0, 1, 0, 63, 0], [29, 1, 0, 8, 0, 0], [29, 1, 0, 0, 1, 0],
+    [29, 2, 0, 2, 0, 0], [29, 3, 1, 0, 0, 0], [29, 3, 0, 16, 0, 0], [29, 4, 0, 8, 0, 0],
+    [29, 5, 1, 0, 0, 0], [29, 5, 0, 4, 0, 0], [29, 5, 0, 0, 0, 0, 0]])
+    assert.throws(() => policy(new Uint8Array(request)), /pointer intent/);
+});

@@ -43,7 +43,9 @@ const Request = struct {
     widget: []const u8 = "0",
     text_action: enum { set_text, set_selection, set_composition, commit_composition, cancel_composition } = .set_text,
     text: []const u8 = "",
-    input: enum { pointer_down, pointer_drag, pointer_up, pointer_cancel, scroll } = .pointer_down,
+    input: enum { pointer_move, pointer_down, pointer_drag, pointer_up, pointer_cancel, scroll } = .pointer_down,
+    pointer_id: []const u8 = "0",
+    button: u8 = 0,
     x: f32 = 0,
     y: f32 = 0,
     delta_x: f32 = 0,
@@ -463,6 +465,10 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 }),
                 .input => {
                     for ([_]f32{ request.x, request.y, request.delta_x, request.delta_y }) |number| if (!std.math.isFinite(number)) return error.InvalidInput;
+                    if (request.button > 1) return error.InvalidInput;
+                    if (request.pointer_id.len == 0) return error.InvalidInput;
+                    for (request.pointer_id) |byte| if (byte < '0' or byte > '9') return error.InvalidInput;
+                    const pointer_id = try std.fmt.parseInt(u64, request.pointer_id, 10);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .gpu_surface_input = .{
                         .window_id = request.window,
                         .label = request.view,
@@ -473,6 +479,8 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                         .y = request.y,
                         .delta_x = request.delta_x,
                         .delta_y = request.delta_y,
+                        .pointer_id = pointer_id,
+                        .button = request.button,
                         .modifiers = .{ .shift = request.shift },
                         .timestamp_ns = value.frame_index * 16_000_000 + 1,
                     } });
