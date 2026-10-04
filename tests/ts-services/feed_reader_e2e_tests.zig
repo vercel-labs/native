@@ -9251,7 +9251,7 @@ const HoverConsumerFunctions = struct {
             ui.row(.{ .height = 40, .on_hover_enter = .{ .enter = 2 }, .on_hover_leave = .{ .leave = .{ .id = 102 + model.version, .text = text } } }, .{ui.text(.{}, text)}),
             ui.row(.{ .height = 40, .on_hover_enter = .{ .enter = 3 }, .on_hover_leave = .{ .leave = .{ .id = 103 + model.version, .text = text } } }, .{ui.text(.{}, "Second")}),
         }) else ui.column(.{}, @as([]const HoverConsumer.Ui.Node, &.{}));
-        return ui.panel(.{ .height = 120, .on_hover_enter = if (model.outer) .{ .enter = 1 } else null, .on_hover_leave = if (model.outer) .{ .leave = .{ .id = 101 + model.version, .text = text } } else null }, .{rows});
+        return ui.column(.{}, .{ui.panel(.{ .height = 120, .on_hover_enter = if (model.outer) .{ .enter = 1 } else null, .on_hover_leave = if (model.outer) .{ .leave = .{ .id = 101 + model.version, .text = text } } else null }, .{rows})});
     }
     fn move(h: anytype, app: native_sdk.App, y: f32) !void {
         try h.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_move, .x = 40, .y = y, .pointer_id = std.math.maxInt(u64) >> 1 } });
