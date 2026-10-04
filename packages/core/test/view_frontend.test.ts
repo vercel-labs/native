@@ -1265,3 +1265,40 @@ test("tooltip intent isolates keyboard holds, dismissal and pointer conversation
   for (const bytes of [[24], [24, 0], [24, 0, 0, 0], [24, 7, 0], [24, 0, 128], [24, 255, 255]])
     assert.throws(() => policy(new Uint8Array(bytes)), /tooltip intent request/);
 });
+
+
+test("tooltip pointer policy preserves warmth boundaries, content holds and frame ordering", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<tooltip anchor="above">Hint</tooltip>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const action = (cause: number, facts: number) => Array.from(policy(new Uint8Array([25, cause, facts & 255, facts >> 8])));
+  assert.deepEqual(action(0, 4 | 256), [8]); // Cold arrival arms.
+  assert.deepEqual(action(0, 4 | 256 | 512), [4]); // Zero delay reveals.
+  assert.deepEqual(action(0, 4 | 256 | 1024), [4]); // Earned warmth reveals.
+  assert.deepEqual(action(0, 1 | 4 | 256 | 2048), [2 | 4]); // Sweep hides, then warm-shows.
+  assert.deepEqual(action(0, 1 | 4 | 256 | 1024), [2 | 8]); // Zero warmth overwrites old warmth.
+  assert.deepEqual(action(0, 1 | 2 | 4 | 256), [8]); // Focus hold survives until dwell promotion.
+  assert.deepEqual(action(0, 1 | 4 | 64 | 256 | 512), [0]); // Content shields underlying trigger.
+  assert.deepEqual(action(0, 1 | 128), [0]); // Honest transit holds on leave.
+  assert.deepEqual(action(0, 1 | 4 | 128), [2]); // Other trigger ends transit, even inactive.
+  assert.deepEqual(action(0, 16), [1]); // Departing armed target cancels dwell.
+  assert.deepEqual(action(1, 0), [1]); // Empty stale slot clears transit.
+  assert.deepEqual(action(1, 1 | 2 | 16), [1]); // Pointer never races keyboard hold.
+  assert.deepEqual(action(1, 1 | 4 | 16), [1 | 2]); // Owner reseeds apex and clears grace.
+  assert.deepEqual(action(1, 1 | 8 | 16), [1 | 2]); // Content reseeds apex.
+  assert.deepEqual(action(1, 1 | 16), [4]); // Safe travel renews grace.
+  assert.deepEqual(action(1, 1), [8]); // Motion away hides with warmth.
+  assert.deepEqual(action(2, 2 | 8), [1]); // Suppression disarms before expiry.
+  assert.deepEqual(action(2, 1 | 2 | 8), [2]); // Transit expiry commits before promotion.
+  assert.deepEqual(action(2, 1 | 2 | 4 | 8), [0]); // Focus hold ignores transit deadline.
+  assert.deepEqual(action(3, 1), [0]);
+  assert.deepEqual(action(3, 3), [1]); // Exact deadline promotes.
+  assert.deepEqual(action(4, 0), [0]); // Reconcile preserves stale empty slots.
+  assert.deepEqual(action(4, 1 | 8), [1 | 2]); // Content holds without transit.
+  assert.deepEqual(action(4, 1), [8]); // Moved content hides immediately.
+  assert.deepEqual(action(4, 1 | 2), [0]); // Keyboard hold is untouched.
+  for (const bytes of [[25], [25, 0, 0], [25, 0, 0, 0, 0], [25, 5, 0, 0],
+    [25, 0, 0, 16], [25, 1, 32, 0], [25, 2, 16, 0], [25, 3, 4, 0], [25, 4, 16, 0]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /tooltip pointer/);
+});

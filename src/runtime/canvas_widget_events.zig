@@ -1240,7 +1240,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // continuous scrolls or rebuilds re-arm the bounded grace
             // forever under a stationary pointer.
             var held_released = false;
-            if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus) {
+            if (view.canvas_widget_tooltip_policy != null) {
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id)) << 2) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, effective_point))) << 3);
+                const actions = compiledCanvasTooltipPointerActions(view, 4, facts, 11);
+                if ((actions & 1) != 0) view.canvas_tooltip_transit_deadline_ns = 0;
+                if ((actions & 2) != 0) view.canvas_tooltip_pointer_from = effective_point;
+                if ((actions & 8) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, canvasRenderAnimationStartNsForView(view));
+                    try commitCanvasTooltipVisibility(self, view_index);
+                    held_released = true;
+                }
+            } else if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus) {
                 const on_owner = next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id;
                 if (on_owner or canvasTooltipShownContentContains(view, effective_point)) {
                     view.canvas_tooltip_pointer_from = effective_point;
@@ -1403,6 +1416,41 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
             const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
 
+            if (view.canvas_widget_tooltip_policy != null) {
+                const delay_ns = if (tooltip_index) |i| canvasTooltipShowDelayNs(view.widget_layout_nodes[i].widget, view.widget_tokens) else 0;
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(tooltip_id != 0)) << 2) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_id == tooltip_id)) << 3) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_armed_id != 0)) << 4) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_armed_id == tooltip_id)) << 5) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, point))) << 6) |
+                    (@as(u16, @intFromBool(canvasTooltipTravelRegionContains(view, point))) << 7) |
+                    (@as(u16, @intFromBool(canvasTooltipIntentActionAllowed(self, view_index))) << 8) |
+                    (@as(u16, @intFromBool(delay_ns == 0)) << 9) |
+                    (@as(u16, @intFromBool(now_ns < view.canvas_tooltip_warm_until_ns)) << 10) |
+                    (@as(u16, @intFromBool(canvasTooltipWarmWindowNs(view.widget_tokens) != 0)) << 11);
+                const actions = compiledCanvasTooltipPointerActions(view, 0, facts, 15);
+                if ((actions & (4 | 8)) != 0 and (tooltip_id == 0 or !canvasTooltipIntentActionAllowed(self, view_index)))
+                    @panic("ineligible compiled tooltip pointer reveal");
+                if ((actions & 2) != 0) hideShownCanvasTooltipWithWarmth(view, now_ns);
+                if ((actions & 1) != 0) clearCanvasTooltipArm(view);
+                if ((actions & 4) != 0) {
+                    view.canvas_tooltip_shown_id = tooltip_id;
+                    view.canvas_tooltip_shown_owner_id = next_hovered_id;
+                    view.canvas_tooltip_shown_from_focus = false;
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    if (point) |value| view.canvas_tooltip_pointer_from = value;
+                } else if ((actions & 8) != 0) {
+                    view.canvas_tooltip_armed_id = tooltip_id;
+                    view.canvas_tooltip_armed_owner_id = next_hovered_id;
+                    view.canvas_tooltip_deadline_ns = now_ns + delay_ns;
+                    if (point) |value| view.canvas_tooltip_pointer_from = value;
+                }
+                if ((actions & (2 | 4)) != 0) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             var shown_changed = false;
             // The pointer sitting inside the shown tooltip's own frame
             // holds it open (WCAG 1.4.13: hover-revealed content must be
@@ -1503,6 +1551,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// deterministic (Base UI's safe polygon is unbounded).
         fn updateCanvasTooltipIntentForPointerTravel(self: *Runtime, view_index: usize, next_hovered_id: canvas.ObjectId, point: geometry.PointF) anyerror!void {
             const view = &self.views[view_index];
+            if (view.canvas_widget_tooltip_policy != null) {
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id)) << 2) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, point))) << 3) |
+                    (@as(u16, @intFromBool(canvasTooltipTravelRegionContains(view, point))) << 4);
+                const actions = compiledCanvasTooltipPointerActions(view, 1, facts, 15);
+                if ((actions & 1) != 0) view.canvas_tooltip_transit_deadline_ns = 0;
+                if ((actions & 2) != 0) view.canvas_tooltip_pointer_from = point;
+                if ((actions & 4) != 0) view.canvas_tooltip_transit_deadline_ns = canvasRenderAnimationStartNsForView(view) + tooltip_transit_grace_ms * std.time.ns_per_ms;
+                if ((actions & 8) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, canvasRenderAnimationStartNsForView(view));
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                return;
+            }
             if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) {
                 view.canvas_tooltip_transit_deadline_ns = 0;
                 return;
@@ -1520,6 +1584,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             }
             hideShownCanvasTooltipWithWarmth(view, now_ns);
             try commitCanvasTooltipVisibility(self, view_index);
+        }
+
+        /// The existing callback copies the borrowed result before another
+        /// compiled call; neither input nor output escapes or resets the cycle.
+        fn compiledCanvasTooltipPointerActions(view: anytype, cause: u8, facts: u16, allowed: u8) u8 {
+            const request = [4]u8{ 25, cause, @truncate(facts), @truncate(facts >> 8) };
+            var output: [1]u8 = undefined;
+            if (view.canvas_widget_tooltip_policy.?(&request, &output) != output.len or (output[0] & ~allowed) != 0)
+                @panic("invalid compiled tooltip pointer result");
+            return output[0];
+        }
+
+        fn clearCanvasTooltipArm(view: anytype) void {
+            view.canvas_tooltip_armed_id = 0;
+            view.canvas_tooltip_armed_owner_id = 0;
+            view.canvas_tooltip_deadline_ns = 0;
         }
 
         /// Hide the pointer-shown tooltip and open the shared warm
@@ -1664,6 +1744,36 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// frames coming while a delay is armed.
         pub fn advanceCanvasTooltipIntentForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
             const view = &self.views[view_index];
+            if (view.canvas_widget_tooltip_policy != null) {
+                const allowed = canvasTooltipIntentActionAllowed(self, view_index);
+                const facts: u16 = @as(u16, @intFromBool(allowed)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) << 1) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 2) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_transit_deadline_ns != 0 and timestamp_ns >= view.canvas_tooltip_transit_deadline_ns)) << 3);
+                const expiry = compiledCanvasTooltipPointerActions(view, 2, facts, 3);
+                if ((expiry & 1) != 0) {
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    return;
+                }
+                if ((expiry & 2) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, timestamp_ns);
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                const promote_facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_armed_id != 0)) |
+                    (@as(u16, @intFromBool(timestamp_ns >= view.canvas_tooltip_deadline_ns)) << 1);
+                if (compiledCanvasTooltipPointerActions(view, 3, promote_facts, 1) != 0) {
+                    if (!allowed or view.canvas_tooltip_armed_id == 0 or timestamp_ns < view.canvas_tooltip_deadline_ns)
+                        @panic("ineligible compiled tooltip deadline promotion");
+                    view.canvas_tooltip_shown_id = view.canvas_tooltip_armed_id;
+                    view.canvas_tooltip_shown_owner_id = view.canvas_tooltip_armed_owner_id;
+                    view.canvas_tooltip_shown_from_focus = false;
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                return;
+            }
             // A suppressed view promotes nothing: with the arm paths
             // gated on the same predicate and both suppression edges
             // (app deactivation, window key-loss) resetting the armed

@@ -6027,3 +6027,163 @@ test "compiled tooltip intent preserves borrowed cycle bytes across repeated tra
     }
     core.rt.frameReset();
 }
+
+test "compiled tooltip pointer and frame intent matches complete native retained state" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const State = struct {
+        armed: canvas.ObjectId,
+        armed_owner: canvas.ObjectId,
+        deadline: u64,
+        shown: canvas.ObjectId,
+        shown_owner: canvas.ObjectId,
+        from_focus: bool,
+        warm: u64,
+        transit: u64,
+        focus: canvas.ObjectId,
+        keyboard: bool,
+        revision: u64,
+        apex: geometry.PointF,
+        fn read(v: anytype) @This() {
+            return .{ .armed = v.canvas_tooltip_armed_id, .armed_owner = v.canvas_tooltip_armed_owner_id, .deadline = v.canvas_tooltip_deadline_ns, .shown = v.canvas_tooltip_shown_id, .shown_owner = v.canvas_tooltip_shown_owner_id, .from_focus = v.canvas_tooltip_shown_from_focus, .warm = v.canvas_tooltip_warm_until_ns, .transit = v.canvas_tooltip_transit_deadline_ns, .focus = v.canvas_widget_focus_visible_id, .keyboard = v.canvas_widget_focus_visible_keyboard, .revision = v.widget_revision, .apex = v.canvas_tooltip_pointer_from };
+        }
+        fn write(s: @This(), v: anytype) void {
+            v.canvas_tooltip_armed_id = s.armed;
+            v.canvas_tooltip_armed_owner_id = s.armed_owner;
+            v.canvas_tooltip_deadline_ns = s.deadline;
+            v.canvas_tooltip_shown_id = s.shown;
+            v.canvas_tooltip_shown_owner_id = s.shown_owner;
+            v.canvas_tooltip_shown_from_focus = s.from_focus;
+            v.canvas_tooltip_warm_until_ns = s.warm;
+            v.canvas_tooltip_transit_deadline_ns = s.transit;
+            v.canvas_widget_focus_visible_id = s.focus;
+            v.canvas_widget_focus_visible_keyboard = s.keyboard;
+            v.widget_revision = s.revision;
+            v.canvas_tooltip_pointer_from = s.apex;
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "tooltip-intent", .source = native_sdk.WebViewSource.html("<h1>Tooltip</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    const owner: canvas.ObjectId = 0xffff_ffff_ffff_ff02;
+    const other_owner: canvas.ObjectId = 0xffff_ffff_ffff_ff04;
+    const hint: canvas.ObjectId = 0xffff_ffff_ffff_ff03;
+    const plain_id: canvas.ObjectId = 0xffff_ffff_ffff_ff06;
+    const other_hint: canvas.ObjectId = 0xffff_ffff_ffff_ff05;
+    const hints = [_]canvas.Widget{.{ .id = hint, .kind = .tooltip, .text = "Hint", .layout = .{ .anchor = .{ .placement = .above } } }};
+    const other_hints = [_]canvas.Widget{.{ .id = other_hint, .kind = .tooltip, .text = "Other", .layout = .{ .anchor = .{ .placement = .above } } }};
+    const children = [_]canvas.Widget{
+        .{ .id = owner, .kind = .button, .text = "Run", .children = &hints },
+        .{ .id = other_owner, .kind = .button, .text = "Other", .children = &other_hints },
+        .{ .id = plain_id, .kind = .button, .text = "Plain" },
+    };
+    var nodes: [6]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    // Explicit frames expose the gap, content, both owners and collinear motion.
+    nodes[1].frame = geometry.RectF.init(50, 100, 80, 30);
+    nodes[2].frame = geometry.RectF.init(50, 60, 90, 32);
+    nodes[3].frame = geometry.RectF.init(180, 100, 80, 30);
+    nodes[4].frame = geometry.RectF.init(180, 60, 90, 32);
+    nodes[5].frame = geometry.RectF.init(340, 100, 80, 30);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.createWindow(.{ .label = "other-window" });
+    var comparisons: usize = 0;
+    // Clocks deliberately exceed the exact JS integer range.
+    const now: u64 = 0x8000_0000_0000_0000;
+    const points = [_]geometry.PointF{ .{ .x = 90, .y = 115 }, .{ .x = 95, .y = 75 }, .{ .x = 90, .y = 96 }, .{ .x = 0, .y = 60 }, .{ .x = 215, .y = 115 }, .{ .x = 10, .y = 10 }, .{ .x = 380, .y = 115 } };
+    for (0..432) |variant| {
+        const shown = variant % 3;
+        const armed = variant / 3 % 3;
+        const seed = State{ .armed = if (armed == 0) 0 else if (armed == 1) hint else other_hint, .armed_owner = if (armed == 2) other_owner else owner, .deadline = now + if (variant / 36 % 2 == 0) @as(u64, 1) else 0, .shown = if (shown == 0) 0 else if (shown == 1) hint else other_hint, .shown_owner = if (shown == 2) other_owner else owner, .from_focus = variant / 9 % 2 != 0, .warm = now + if (variant / 18 % 2 == 0) @as(u64, 1) else 0, .transit = now + if (variant / 36 % 2 == 0) @as(u64, 1) else 0, .focus = if (variant / 18 % 2 == 0) owner else other_owner, .keyboard = variant / 36 % 2 != 0, .revision = 100, .apex = .{ .x = 90, .y = 115 } };
+        harness.runtime.app_active = variant / 72 % 3 != 1;
+        harness.runtime.windows[0].info.focused = variant / 72 % 3 != 2;
+        for (0..13) |cause| {
+            var expected: State = undefined;
+            var expected_nodes: [6]canvas.WidgetLayoutNode = undefined;
+            var expected_semantics: [6]canvas.WidgetSemanticsNode = undefined;
+            var expected_semantics_count: usize = 0;
+            for (0..2) |backend| {
+                core.rt.frameReset();
+                @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+                seed.write(view);
+                harness.runtime.app_active = variant / 72 % 3 != 1;
+                harness.runtime.windows[0].info.focused = variant / 72 % 3 != 2;
+                harness.runtime.windows[1].info.focused = false;
+                view.focused = true;
+                harness.runtime.views[1].focused = false;
+                view.canvas_widget_focused_id = seed.focus;
+                view.canvas_last_pointer_position = null;
+                view.canvas_widget_hovered_id = 0;
+                view.canvas_widget_pressed_id = 0;
+                view.gpu_input_timestamp_ns = now;
+                view.gpu_timestamp_ns = 0;
+                view.widget_tokens.metrics.tooltip_warm_window_ms = if (variant / 216 == 0) 400 else 0;
+                // All declared delays, including immediate and the i32 maximum.
+                view.widget_layout_nodes[2].widget.tooltip_delay_ms = if (variant % 4 == 0) 0 else if (variant % 4 == 1) -1 else if (variant % 4 == 2) 10 else 2147483647;
+                view.applyCanvasTooltipVisibility();
+                try view.refreshCanvasWidgetSemantics();
+                view.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+                if (cause < points.len) {
+                    const point = points[cause];
+                    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .label = "canvas", .kind = .pointer_move, .timestamp_ns = now, .x = point.x, .y = point.y } });
+                } else if (cause < 10) {
+                    // Exact boundaries, before expiry and after both deadlines.
+                    try harness.runtime.advanceCanvasTooltipIntentForFrame(0, now - 1 + (cause - 7));
+                } else if (cause == 10) {
+                    view.canvas_widget_hovered_id = owner;
+                    view.canvas_last_pointer_position = points[1];
+                    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+                } else {
+                    // Replayable consecutive moves through the gap and content.
+                    for ([_]usize{ 0, 2, 1, 2, 0, 4, 5 }) |i| {
+                        const point = points[i];
+                        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .label = "canvas", .kind = .pointer_move, .timestamp_ns = now, .x = point.x, .y = point.y } });
+                        if (cause == 12) try harness.runtime.advanceCanvasTooltipIntentForFrame(0, now + 500 * std.time.ns_per_ms);
+                    }
+                }
+                if (backend == 0) {
+                    expected = State.read(view);
+                    @memcpy(&expected_nodes, view.widgetLayoutTree().nodes);
+                    expected_semantics_count = view.widgetSemantics().len;
+                    @memcpy(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
+                } else {
+                    try std.testing.expectEqualDeep(expected, State.read(view));
+                    try std.testing.expectEqualDeep(expected_nodes, view.widget_layout_nodes[0..nodes.len].*);
+                    try std.testing.expectEqual(expected_semantics_count, view.widgetSemantics().len);
+                    try std.testing.expectEqualDeep(expected_semantics[0..expected_semantics_count], view.widgetSemantics());
+                    comparisons += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 5616), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled tooltip pointer calls preserve borrowed cycle bytes across every native fact shape" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    var calls: usize = 0;
+    for ([_]usize{ 4096, 32, 16, 4, 16 }, 0..) |count, cause| {
+        for (0..count) |facts| {
+            var output: [1]u8 = undefined;
+            const request = [4]u8{ 25, @intCast(cause), @truncate(facts), @truncate(facts >> 8) };
+            try std.testing.expectEqual(output.len, core.nativeTooltipPolicy(&request, &output));
+            try std.testing.expect(output[0] <= 15);
+            try std.testing.expectEqualSlices(u8, copy, borrowed);
+            calls += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4164), calls);
+    core.rt.frameReset();
+}

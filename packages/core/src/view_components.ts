@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 25) return nscvTooltipPointer(request);
   if (request[0] === 24) return nscvTooltipIntent(request);
   if (request[0] === 23) return nscvTooltipBinding(request);
   if (request[0] === 22) return nscvFocusReturn(request);
@@ -183,6 +184,53 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+/** Pointer tooltip intent. Tag 25, cause, little-endian u16 native facts.
+ * Hover facts: shown/focus-owned/target/shown-match/armed/armed-match/content/
+ * corridor/allowed/zero-delay/warm/nonzero-warm-window. Actions: disarm/hide
+ * with warmth/reveal/arm. Travel facts: shown/focus-owned/owner/content/corridor;
+ * actions: clear transit/remember point/renew transit/hide with warmth.
+ * Frame expiry facts: allowed/shown/focus-owned/transit-expired; actions:
+ * disarm+clear transit/hide with warmth. Promotion facts: armed/dwell-expired;
+ * action: promote. Content reconciliation uses shown/focus-owned/owner/content
+ * facts and the travel actions, without a corridor or empty-slot mutation.
+ * Two frame calls preserve separate native visibility commits.
+ * Full-width identities, clock arithmetic, geometry and storage remain native.
+ */
+function nscvTooltipPointer(request: Uint8Array): Uint8Array {
+  if (request.length !== 4 || request[1]! > 4) throw new Error("invalid tooltip pointer request");
+  const cause = request[1]!, facts = request[2]! | request[3]! << 8;
+  const limit = cause === 0 ? 4095 : cause === 1 ? 31 : cause === 3 ? 3 : 15;
+  if (facts > limit) throw new Error("invalid tooltip pointer facts");
+  let actions = 0;
+  if (cause === 0) {
+    const target = (facts & 4) !== 0, shownMatches = (facts & 8) !== 0;
+    const content = (facts & 64) !== 0;
+    const hide = (facts & 1) !== 0 && (facts & 2) === 0 && !shownMatches &&
+      !content && (target || (facts & 128) === 0);
+    if (hide) actions |= 2;
+    if ((facts & 16) !== 0 && (facts & 32) === 0) actions |= 1;
+    if (target && !shownMatches && !content && (facts & 256) !== 0) {
+      // A hide opens warmth before the new target earns its dwell.
+      if ((facts & 512) !== 0 || (hide ? (facts & 2048) !== 0 : (facts & 1024) !== 0)) actions |= 4;
+      else if ((facts & 32) === 0) actions |= 8;
+    }
+  } else if (cause === 1) {
+    if ((facts & 1) === 0 || (facts & 2) !== 0) actions = 1;
+    else if ((facts & (4 | 8)) !== 0) actions = 1 | 2;
+    else if ((facts & 16) !== 0) actions = 4;
+    else actions = 8;
+  } else if (cause === 2) {
+    if ((facts & 1) === 0) actions = 1;
+    else if ((facts & 2) !== 0 && (facts & 4) === 0 && (facts & 8) !== 0) actions = 2;
+  } else if (cause === 3) {
+    if (facts === 3) actions = 1;
+  } else if ((facts & 1) !== 0 && (facts & 2) === 0) {
+    actions = (facts & (4 | 8)) !== 0 ? 1 | 2 : 8;
+  }
+  const result = new Uint8Array(1); result[0] = actions;
   return result;
 }
 
