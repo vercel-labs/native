@@ -2962,5 +2962,149 @@
     },
     "check_status": 0,
     "check_diagnostics": ""
+  },
+  "effective-opaque--0": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "b2474f1acfe1cc3e2e12e2a74669373f0ee769c42bd5539190521a2199b20a28"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque-9007199254740993": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "ed590d12c7e518d955626991b1e7f62eca0837317363e337dfd7ef213586350a"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque-18446744073709551615": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "abd21cb2d97f37038832fb4cbf18deda9916402b220576a5ad5abf17ef026985"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque--9223372036854775808": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "9304f3f256422f34c704a8410b7b041c763a4f6cf2cc0cd0e54b906db8473a4b"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque-1e-300": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "2b51351618d3ddb84032be382a1e6d9c7765439060a7bfe2cb17e73ee3fff223"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque-5e-324": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "778bf12cf5b6e034c9887e96ca3bdc57013006ce04f9f101369331d9cdea3daf"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-opaque-1.7976931348623157e308": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "a474d3405d563f2a158f31ec5dcc9704b865b8d7129d0c395c946e521b718cf0"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "effective-optional-u64": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "64e4b3ac41908a2fe7da7f428d839c46cca134722976d003ffd072877a4261f3",
+      "facade": "0260e37d7ea81fadbf7d881f83a30db0470754217ae6a8a3447ff92983cae010",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "c9a251dc38f4467bcc97301844d03d6bbe4a2b749ad36cf4dc7e8d8d9cb873bf"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "effective-two-slots": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "7b2a48799e70492dc81bc59c3ea82c62273d798bd77ebbcd78824cc9b1293552",
+      "facade": "ca5bcc2e4018072f8b0312427e55fa2e90e2ac83585760d6a4545f5bf36b2542",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "458d3de75a224de7bde81c6181ccd2eb35cb718a8c835f1c5e39868f8b9fb4a7"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "effective-repeated-slot": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Model.count does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 2,
+    "check_diagnostics": "corewire: --f64-slot Model.count does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n"
+  },
+  "effective-missing-before-repeated": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Missing.count names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 2,
+    "check_diagnostics": "corewire: --f64-slot Missing.count names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n"
+  },
+  "effective-original-whitespace": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "6c4c405218fac014b871abb1843bd16a001e14b89e1254392ead39d4f30aa767",
+      "facade": "7874d79a9d4f2a6dcad6892ecd01289b05578deca414b84e21ee0e85a5393cc1",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "f91df00e262b4a0054fbd8ccc4142cc38f491dce6f04ee8ee188eae26e071cdb"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
   }
 }

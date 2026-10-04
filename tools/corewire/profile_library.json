@@ -17,6 +17,10 @@
     { "export": "validateServices", "symbol": "nsc_profile_validate_services", "params": ["string"], "returns": "string" },
     { "export": "corePolicy", "symbol": "nsc_profile_core_policy", "params": ["string", "string"], "returns": "string" },
     { "export": "generateMirror", "symbol": "nsc_profile_generate_mirror", "params": ["string"], "returns": "string" },
-    { "export": "generateFacade", "symbol": "nsc_profile_generate_facade", "params": ["string"], "returns": "string" }
+    { "export": "generateFacade", "symbol": "nsc_profile_generate_facade", "params": ["string"], "returns": "string" },
+    { "export": "invocationPlan", "symbol": "nsc_profile_invocation_plan", "params": ["string"], "returns": "string" },
+    { "export": "invocationAliases", "symbol": "nsc_profile_invocation_aliases", "params": ["string"], "returns": "string" },
+    { "export": "coreInvocation", "symbol": "nsc_profile_core_invocation", "params": ["string"], "returns": "string" },
+    { "export": "effectiveSidecar", "symbol": "nsc_profile_effective_sidecar", "params": ["string"], "returns": "string" }
   ]
 }

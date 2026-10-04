@@ -1,0 +1,1143 @@
+{
+  "no-arguments": {
+    "status": 2,
+    "diagnostics": "usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "no-core-input": {
+    "status": 2,
+    "diagnostics": "usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "no-core-output": {
+    "status": 2,
+    "diagnostics": "usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "check-and-output": {
+    "status": 2,
+    "diagnostics": "usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "repeated-check": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---sidecar": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--sidecar\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---optimization": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--optimization\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---f64-slot": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--f64-slot\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---out": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--out\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---facade": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--facade\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---profile": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--profile\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-missing-value---effective-sidecar": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--effective-sidecar\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "unknown-core": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"--wat\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "empty-core-argument": {
+    "status": 2,
+    "diagnostics": "corewire: unknown argument \"\"\n\nusage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...\n\nGenerate the Zig mirror module (core_shim.zig), the TypeScript\nprojection (core_facade.ts), the library-mode compiler profile\n(core_profile.json), and/or the effective sidecar after projection\noverrides for a compiled core, or validate the input sidecar alone\n(--check). Generation outputs combine; --check stands alone.\n\n--f64-slot <path> carries the named attested integer slot as f64 for\nthis whole invocation (facade, profile, and mirror alike): a slot\nwhose values reach the f64-exact boundary (2^53) has no honest i64\ndeclaration on the compiled side, so the caller states the demotion\nexplicitly and every projection stays consistent. The path must name\nan attested slot — a misspelling would silently demote nothing.\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "flag-consumed-as-input": {
+    "status": 1,
+    "diagnostics": "corewire: cannot read --check: FileNotFound\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-input": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-optimization-ignored-mirror": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6c4c405218fac014b871abb1843bd16a001e14b89e1254392ead39d4f30aa767",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-optimization-ignored-effective": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-optimization-refused-check": {
+    "status": 2,
+    "diagnostics": "corewire: --optimization must be dev or release\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-optimization": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "76ee711b6e5d4a3ec32076f9c7f79bb6764058eeff4cdad79541fdf2fe6b2c42",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-output-0": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6c4c405218fac014b871abb1843bd16a001e14b89e1254392ead39d4f30aa767",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-output-1": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "7874d79a9d4f2a6dcad6892ecd01289b05578deca414b84e21ee0e85a5393cc1",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-output-2": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "100bd33fead90ff2bd75b27057df9cc0f7d99b8213e1741783fc67cd6f68a1e8",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-core-output-3": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "reverse-core-outputs": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "8c3b3524a5ed4ba3d6eb3937f9d8fae0a6789b6f1a6ccf179d931a9974b2c784",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "profile-relative-entry": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "7874d79a9d4f2a6dcad6892ecd01289b05578deca414b84e21ee0e85a5393cc1",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "nested/profile": "71dff945e0586f09b4d0d4b18da95db69b613d9d0a1aedcb97bfff46aed0d76b",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-alias-before-decode": {
+    "status": 2,
+    "diagnostics": "corewire: output ./input.json names the sidecar itself — generating would destroy the input contract\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-output-pair-alias": {
+    "status": 2,
+    "diagnostics": "corewire: two outputs name one file (./same) — the later projection would overwrite the earlier\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-staging-prefix-alias": {
+    "status": 2,
+    "diagnostics": "corewire: two outputs name one file (./mirror.corewire-tmp) — the later projection would overwrite the earlier\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "decode-before-slot": {
+    "status": 1,
+    "diagnostics": "input.json: error: the sidecar is not valid JSON — it should be the core.contract.json a core-mode compile writes beside the compiled object\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "slot-before-optimization": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Missing.count names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "mirror-before-optimization": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "4dbf5d7fe0dcc56dc9e30570b5db2f329701a634cad81fb05725f2ef0f96a8ce",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "facade-before-optimization": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.unbound: \"label_set\" is an unbound message arm shadowed by a homonymous Model field or exported helper — the compiler resolves Model fields and helpers before message arms, so the projection's single unbound list cannot mark this arm; rename one side in the core source\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "c56d47e0b7ce4b239deac813bc19864be9319b3f5c5f7eb1db5176db6afe09d4",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "check-demotion": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "check-duplicate-demotion": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Model.count does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-prefix-ignored": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-prefix-output-flag-value": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "unknown-service-after-input": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--unknown\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "core-flag-after-service": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--check\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-no-input": {
+    "status": 2,
+    "diagnostics": "usage: corewire --services-sidecar <services.contract.json> [--service-host-main <service_host_main.ts>] [--service-registry <services.zig>] [--service-client <services.gen.ts>] [--service-inproc-main <service_inproc_main.ts>] [--service-inproc-profile <service_profile.json>]\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-no-output": {
+    "status": 2,
+    "diagnostics": "corewire: the service projection needs at least one output\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-optimization-before-missing-input": {
+    "status": 2,
+    "diagnostics": "corewire: --optimization must be dev or release\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-input": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-optimization": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "5be59d4c0b63943e4bdbf4f72ee67399074db20823c08fc099ffe77254f27adc",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---services-sidecar": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--services-sidecar\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---optimization": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--optimization\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---service-host-main": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--service-host-main\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---service-registry": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--service-registry\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---service-client": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--service-client\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---service-inproc-main": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--service-inproc-main\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-missing-value---service-inproc-profile": {
+    "status": 2,
+    "diagnostics": "corewire: unknown service projection argument \"--service-inproc-profile\"\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-output-0": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-output-1": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-output-2": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-output-3": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "last-service-output-4": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "reverse-service-outputs": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "055c25d5760a8b80466eeb3b09c06a9ae74d60ac5c8996251881ff13c5b6b2cc",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-host-registry-case-alias": {
+    "status": 2,
+    "diagnostics": "corewire: the service host and registry outputs name one file\n",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-sequential-client-over-registry": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  },
+  "service-sequential-profile-over-inproc": {
+    "status": 0,
+    "diagnostics": "",
+    "files": {
+      "client": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "host": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "inproc": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "input.json": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860",
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "old": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "registry": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "same": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58",
+      "service-profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "services.json": "22bff1651b0ec7c8182d07905e7e0ed128890079f9be6e9070bc0ff64df0fe89"
+    }
+  }
+}

@@ -1013,56 +1013,7 @@ pub fn abiHasExport(abi: Abi, suffix: []const u8) bool {
 /// validates each path against the typed contract, so a miss here is internal
 /// projection drift rather than user input.
 pub fn projectF64SlotsJson(arena: std.mem.Allocator, source: []const u8, f64_slots: []const []const u8) ![]const u8 {
-    if (f64_slots.len == 0) return source;
-
-    var root = try std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{});
-    const types = root.object.getPtr("types").?;
-    const structs = types.object.getPtr("structs").?;
-    for (f64_slots) |slot_path| {
-        const dot = std.mem.indexOfScalar(u8, slot_path, '.') orelse return error.ProjectionDrift;
-        const container = slot_path[0..dot];
-        const field_name = slot_path[dot + 1 ..];
-        var changed = false;
-        for (structs.array.items) |*entry| {
-            if (!std.mem.eql(u8, entry.object.get("name").?.string, container)) continue;
-            const fields = entry.object.getPtr("fields").?;
-            for (fields.array.items) |*field| {
-                if (!std.mem.eql(u8, field.object.get("name").?.string, field_name)) continue;
-                const ref = field.object.getPtr("type").?;
-                const kind = ref.object.getPtr("kind").?;
-                if (std.mem.eql(u8, kind.string, "optional")) {
-                    const inner = ref.object.getPtr("inner").?;
-                    inner.object.getPtr("kind").?.* = .{ .string = "f64" };
-                } else {
-                    kind.* = .{ .string = "f64" };
-                }
-                changed = true;
-                break;
-            }
-            break;
-        }
-        if (!changed) return error.ProjectionDrift;
-    }
-
-    const attestations = root.object.getPtr("integer_slots").?;
-    var index: usize = 0;
-    while (index < attestations.array.items.len) {
-        const slot = attestations.array.items[index].object.get("slot").?.string;
-        const demoted = for (f64_slots) |candidate| {
-            if (std.mem.eql(u8, slot, candidate)) break true;
-        } else false;
-        if (demoted) {
-            _ = attestations.array.orderedRemove(index);
-        } else {
-            index += 1;
-        }
-    }
-
-    var out: std.Io.Writer.Allocating = .init(arena);
-    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
-    try json.write(root);
-    try out.writer.writeByte('\n');
-    return out.written();
+    return @import("invocation.zig").effective(arena, source, f64_slots);
 }
 
 // --------------------------------------------------------------- tests

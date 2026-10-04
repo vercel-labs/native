@@ -19,29 +19,9 @@
 
 const std = @import("std");
 const sidecar_mod = @import("sidecar.zig");
-const emit_mod = @import("emit.zig");
-const emit_facade_mod = @import("emit_facade.zig");
-const emit_profile_mod = @import("profile.zig");
+const invocation_mod = @import("invocation.zig");
 const service_contract_mod = @import("service_contract.zig");
 const emit_service_mod = @import("emit_service.zig");
-
-const usage =
-    \\usage: corewire --sidecar <core.contract.json> (--out <core_shim.zig> | --facade <core_facade.ts> | --profile <core_profile.json> | --effective-sidecar <effective.contract.json> | --check) [--f64-slot <path>]...
-    \\
-    \\Generate the Zig mirror module (core_shim.zig), the TypeScript
-    \\projection (core_facade.ts), the library-mode compiler profile
-    \\(core_profile.json), and/or the effective sidecar after projection
-    \\overrides for a compiled core, or validate the input sidecar alone
-    \\(--check). Generation outputs combine; --check stands alone.
-    \\
-    \\--f64-slot <path> carries the named attested integer slot as f64 for
-    \\this whole invocation (facade, profile, and mirror alike): a slot
-    \\whose values reach the f64-exact boundary (2^53) has no honest i64
-    \\declaration on the compiled side, so the caller states the demotion
-    \\explicitly and every projection stays consistent. The path must name
-    \\an attested slot — a misspelling would silently demote nothing.
-    \\
-;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -51,61 +31,25 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = std.Io.File.stderr().writerStreaming(init.io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
 
-    if (try serviceProjection(init, args, stderr)) return;
-
-    var sidecar_path: ?[]const u8 = null;
+    const invocation = try invocation_mod.plan(arena, args);
+    if (invocation.exit_code != 0) {
+        try stderr.writeAll(invocation.@"error");
+        try stderr.flush();
+        std.process.exit(invocation.exit_code);
+    }
+    if (invocation.mode == .service) return serviceProjection(init, args, invocation, stderr);
+    const input = args[invocation.input.?];
     var out_path: ?[]const u8 = null;
     var facade_path: ?[]const u8 = null;
     var profile_path: ?[]const u8 = null;
     var effective_sidecar_path: ?[]const u8 = null;
-    var check_only = false;
-    var optimization: ?[]const u8 = null;
-    var f64_slots: std.ArrayListUnmanaged([]const u8) = .empty;
-    var index: usize = 1;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--sidecar") and index + 1 < args.len) {
-            index += 1;
-            sidecar_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--out") and index + 1 < args.len) {
-            index += 1;
-            out_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--facade") and index + 1 < args.len) {
-            index += 1;
-            facade_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--profile") and index + 1 < args.len) {
-            index += 1;
-            profile_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--effective-sidecar") and index + 1 < args.len) {
-            index += 1;
-            effective_sidecar_path = args[index];
-        } else if (std.mem.eql(u8, arg, "--f64-slot") and index + 1 < args.len) {
-            index += 1;
-            try f64_slots.append(arena, args[index]);
-        } else if (std.mem.eql(u8, arg, "--check")) {
-            check_only = true;
-        } else if (std.mem.eql(u8, arg, "--optimization") and index + 1 < args.len) {
-            index += 1;
-            optimization = args[index];
-        } else {
-            try stderr.print("corewire: unknown argument \"{s}\"\n\n{s}", .{ arg, usage });
-            try stderr.flush();
-            std.process.exit(2);
-        }
-    }
-    const input = sidecar_path orelse {
-        try stderr.print("{s}", .{usage});
-        try stderr.flush();
-        std.process.exit(2);
+    for (invocation.outputs) |out| switch (out.kind) {
+        .mirror => out_path = args[out.path_index],
+        .facade => facade_path = args[out.path_index],
+        .profile => profile_path = args[out.path_index],
+        .effective => effective_sidecar_path = args[out.path_index],
+        else => unreachable,
     };
-    // Either validate-only, or at least one generation target — never
-    // both (a checker that writes files is not a checker).
-    const generates = out_path != null or facade_path != null or profile_path != null or effective_sidecar_path != null;
-    if (generates == check_only) {
-        try stderr.print("{s}", .{usage});
-        try stderr.flush();
-        std.process.exit(2);
-    }
     // Distinct paths only: the projections must not overwrite each
     // other, and no output may destroy the input contract. Compared
     // lexically normalized (cwd-resolved, `.`/`..` folded) — filesystem
@@ -131,35 +75,21 @@ pub fn main(init: std.process.Init) !void {
         const path = maybe_path orelse continue;
         resolved[path_index] = try canonicalSpelling(init.io, arena, path);
     }
-    for (resolved, 0..) |maybe_path, path_index| {
-        const path = maybe_path orelse continue;
-        // Case-insensitively: the default volumes on two of the three
-        // desktop platforms fold case, so differently-cased spellings
-        // of one file must count as aliases everywhere (refusing a
-        // case-only distinction on a case-sensitive volume costs
-        // nothing anyone wants).
-        if (std.ascii.eqlIgnoreCase(path, input_resolved)) {
-            try stderr.print("corewire: output {s} names the sidecar itself — generating would destroy the input contract\n", .{path});
-            try stderr.flush();
-            std.process.exit(2);
-        }
-        // Spelling checks cannot see every filesystem aliasing (Unicode
-        // case folding, links), so ask the filesystem: an output whose
-        // path already resolves to the sidecar's own file is the same
-        // refusal, whatever the spelling.
-        if (sameExistingFile(init.io, path, input_resolved)) {
-            try stderr.print("corewire: output {s} resolves to the sidecar's own file — generating would destroy the input contract\n", .{path});
-            try stderr.flush();
-            std.process.exit(2);
-        }
-        for (resolved[path_index + 1 ..]) |maybe_other| {
-            const other = maybe_other orelse continue;
-            if (std.ascii.eqlIgnoreCase(path, other) or sameExistingFile(init.io, path, other)) {
-                try stderr.print("corewire: two outputs name one file ({s}) — the later projection would overwrite the earlier\n", .{path});
-                try stderr.flush();
-                std.process.exit(2);
-            }
-        }
+    var canonical_paths: std.ArrayList([]const u8) = .empty;
+    for (resolved) |path| if (path) |value| try canonical_paths.append(arena, value);
+    const identities = try arena.alloc([]const bool, canonical_paths.items.len);
+    for (canonical_paths.items, 0..) |path, i| {
+        const row = try arena.alloc(bool, canonical_paths.items.len + 1);
+        @memset(row, false);
+        row[0] = sameExistingFile(init.io, path, input_resolved);
+        for (canonical_paths.items[i + 1 ..], i + 1..) |other, j| row[j + 1] = sameExistingFile(init.io, path, other);
+        identities[i] = row;
+    }
+    const alias_diagnostic = try invocation_mod.aliases(arena, input_resolved, canonical_paths.items, identities);
+    if (alias_diagnostic.len != 0) {
+        try stderr.writeAll(alias_diagnostic);
+        try stderr.flush();
+        std.process.exit(2);
     }
 
     const source = std.Io.Dir.cwd().readFileAlloc(init.io, input, arena, .limited(sidecar_mod.max_sidecar_bytes)) catch |err| {
@@ -169,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var diags = sidecar_mod.Diagnostics{ .arena = arena };
-    var parsed = sidecar_mod.read(arena, source, &diags) catch |err| switch (err) {
+    const parsed = sidecar_mod.read(arena, source, &diags) catch |err| switch (err) {
         error.Refused => {
             try diags.write(input, stderr);
             try stderr.flush();
@@ -178,111 +108,27 @@ pub fn main(init: std.process.Init) !void {
         error.OutOfMemory => return err,
     };
 
-    // Caller-stated f64 demotions apply to the parsed contract before
-    // any projection, so the facade's encoders, the profile's
-    // declarations, and the attestation list stay consistent by
-    // construction: the slot's type-table spelling rewrites to f64 and
-    // its attestation entry drops.
-    if (f64_slots.items.len > 0) {
-        var kept: std.ArrayListUnmanaged(sidecar_mod.IntegerSlot) = .empty;
-        for (f64_slots.items) |slot_path| {
-            const listed = for (parsed.integer_slots) |slot| {
-                if (std.mem.eql(u8, slot.slot, slot_path)) break true;
-            } else false;
-            if (!listed) {
-                try stderr.print("corewire: --f64-slot {s} names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n", .{slot_path});
-                try stderr.flush();
-                std.process.exit(2);
-            }
-            if (!demoteSlotToF64(parsed, slot_path)) {
-                try stderr.print("corewire: --f64-slot {s} does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n", .{slot_path});
-                try stderr.flush();
-                std.process.exit(2);
-            }
-        }
-        for (parsed.integer_slots) |slot| {
-            const demoted = for (f64_slots.items) |slot_path| {
-                if (std.mem.eql(u8, slot.slot, slot_path)) break true;
-            } else false;
-            if (!demoted) try kept.append(arena, slot);
-        }
-        parsed.integer_slots = kept.items;
+    // OS-relative entry facts are computed here; compiled coordination
+    // decides when to enforce them, after mirror/facade admission.
+    var entry: invocation_mod.Entry = .{};
+    if (facade_path != null and profile_path != null) {
+        const profile_dir = std.fs.path.dirname(profile_path.?) orelse ".";
+        entry = try profileRelativeEntry(init, profile_dir, facade_path.?);
+    } else if (facade_path) |path| {
+        const name = std.fs.path.basename(path);
+        entry = .{ .text = if (std.unicode.utf8ValidateSlice(name)) name else "", .utf8 = std.unicode.utf8ValidateSlice(name), .bytes = name };
     }
-
-    // `--check` runs the FULL pipeline (every projection) and discards
-    // the text: a sidecar must never pass the checker and then refuse at
-    // generate time (emitter-level rules — emission-name collisions
-    // above all — are part of the contract's validity).
-    const generated: []const u8 = emit_mod.emit(arena, parsed, &diags) catch |err| switch (err) {
-        error.Refused => {
-            try diags.write(input, stderr);
-            try stderr.flush();
-            std.process.exit(1);
-        },
-        error.OutOfMemory => return err,
-    };
-    // The profile targets the facade module as its entry, so emitting a
-    // profile runs the facade emitter's own refusal checks even when no
-    // facade file is written — a sidecar must never yield a profile
-    // whose referenced facade then refuses to generate.
-    const facade: ?[]const u8 = if (check_only or facade_path != null or profile_path != null)
-        emit_facade_mod.emitFacade(arena, parsed, &diags) catch |err| switch (err) {
-            error.Refused => {
-                try diags.write(input, stderr);
-                try stderr.flush();
-                std.process.exit(1);
-            },
-            error.OutOfMemory => return err,
-        }
-    else
-        null;
-    // The profile names the facade module as its entry, resolved
-    // against the profile file's own directory (the compilation root):
-    // when both are generated in one invocation the emitted spelling is
-    // the --facade path made profile-relative, and the conventional
-    // name otherwise.
-    const profile: ?[]const u8 = if (check_only or profile_path != null) blk: {
-        const entry = if (facade_path != null and profile_path != null)
-            profileRelativeEntry(init, stderr, profile_path.?, facade_path.?) catch |err| switch (err) {
-                error.Unrelatable => std.process.exit(2),
-                else => return err,
-            }
-        else if (facade_path) |path|
-            std.fs.path.basename(path)
-        else
-            emit_profile_mod.default_entry;
-        // The profile is a JSON document, and JSON text carries UTF-8
-        // only: a filename with other bytes would not survive the trip
-        // through any conforming consumer, so it refuses here instead
-        // of naming a file nothing can find.
-        if (!std.unicode.utf8ValidateSlice(entry)) {
-            try stderr.print("corewire: the profile's entry spelling \"{s}\" is not valid UTF-8 — the profile is a JSON document and JSON text carries UTF-8 only; rename the facade file\n", .{entry});
-            try stderr.flush();
-            std.process.exit(2);
-        }
-        if (optimization != null and !std.mem.eql(u8, optimization.?, "dev") and !std.mem.eql(u8, optimization.?, "release")) {
-            try stderr.print("corewire: --optimization must be dev or release\n", .{});
-            try stderr.flush();
-            std.process.exit(2);
-        }
-        break :blk emit_profile_mod.emitProfile(arena, parsed, entry, optimization, &diags) catch |err| switch (err) {
-            error.Refused => {
-                try diags.write(input, stderr);
-                try stderr.flush();
-                std.process.exit(1);
-            },
-            error.OutOfMemory => return err,
-        };
-    } else null;
-
-    // The staged contract twin: preserve the input document's complete
-    // additive vocabulary while applying the same explicit demotions the
-    // typed projections above consumed. This is the sidecar that truthfully
-    // belongs beside a generated facade/profile pair.
-    const effective_sidecar: ?[]const u8 = if (effective_sidecar_path != null)
-        try sidecar_mod.projectF64SlotsJson(arena, source, f64_slots.items)
-    else
-        null;
+    const result = try invocation_mod.core(arena, parsed, invocation, args, entry, source);
+    for (result.diagnostics) |diagnostic| diags.flag(diagnostic.path, "{s}", .{diagnostic.message});
+    if (result.exit_code != 0) {
+        if (result.@"error".len != 0) try stderr.writeAll(result.@"error") else try diags.write(input, stderr);
+        try stderr.flush();
+        std.process.exit(result.exit_code);
+    }
+    const generated = result.mirror;
+    const facade = result.facade;
+    const profile = result.profile;
+    const effective_sidecar = result.effective;
 
     // Warnings (unknown additive fields) surface even on success.
     try diags.write(input, stderr);
@@ -309,15 +155,15 @@ pub fn main(init: std.process.Init) !void {
         output_count += 1;
     }
     if (facade_path) |path| {
-        outputs_buffer[output_count] = .{ .flag = "--facade", .path = path, .data = facade.? };
+        outputs_buffer[output_count] = .{ .flag = "--facade", .path = path, .data = facade };
         output_count += 1;
     }
     if (profile_path) |path| {
-        outputs_buffer[output_count] = .{ .flag = "--profile", .path = path, .data = profile.? };
+        outputs_buffer[output_count] = .{ .flag = "--profile", .path = path, .data = profile };
         output_count += 1;
     }
     if (effective_sidecar_path) |path| {
-        outputs_buffer[output_count] = .{ .flag = "--effective-sidecar", .path = path, .data = effective_sidecar.? };
+        outputs_buffer[output_count] = .{ .flag = "--effective-sidecar", .path = path, .data = effective_sidecar };
         output_count += 1;
     }
     const outputs = outputs_buffer[0..output_count];
@@ -374,73 +220,9 @@ pub fn main(init: std.process.Init) !void {
 /// The service contract is a distinct schema from core.contract.json. Keep
 /// its projection mode explicit so neither reader can accidentally accept a
 /// document from the other class.
-fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *std.Io.Writer) !bool {
-    var input: ?[]const u8 = null;
-    var host_out: ?[]const u8 = null;
-    var registry_out: ?[]const u8 = null;
-    var client_out: ?[]const u8 = null;
-    var inproc_main_out: ?[]const u8 = null;
-    var inproc_profile_out: ?[]const u8 = null;
-    var saw_service_flag = false;
-    var optimization: ?[]const u8 = null;
-    var index: usize = 1;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--services-sidecar") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            input = args[index];
-        } else if (std.mem.eql(u8, arg, "--service-host-main") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            host_out = args[index];
-        } else if (std.mem.eql(u8, arg, "--service-registry") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            registry_out = args[index];
-        } else if (std.mem.eql(u8, arg, "--service-client") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            client_out = args[index];
-        } else if (std.mem.eql(u8, arg, "--service-inproc-main") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            inproc_main_out = args[index];
-        } else if (std.mem.eql(u8, arg, "--service-inproc-profile") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            inproc_profile_out = args[index];
-        } else if (saw_service_flag and std.mem.eql(u8, arg, "--optimization") and index + 1 < args.len) {
-            saw_service_flag = true;
-            index += 1;
-            optimization = args[index];
-        } else if (saw_service_flag) {
-            try stderr.print("corewire: unknown service projection argument \"{s}\"\n", .{arg});
-            try stderr.flush();
-            std.process.exit(2);
-        }
-    }
-    if (!saw_service_flag) return false;
-    if (optimization != null and !std.mem.eql(u8, optimization.?, "dev") and !std.mem.eql(u8, optimization.?, "release")) {
-        try stderr.print("corewire: --optimization must be dev or release\n", .{});
-        try stderr.flush();
-        std.process.exit(2);
-    }
-    const sidecar_path = input orelse {
-        try stderr.print("usage: corewire --services-sidecar <services.contract.json> [--service-host-main <service_host_main.ts>] [--service-registry <services.zig>] [--service-client <services.gen.ts>] [--service-inproc-main <service_inproc_main.ts>] [--service-inproc-profile <service_profile.json>]\n", .{});
-        try stderr.flush();
-        std.process.exit(2);
-    };
-    if (host_out == null and registry_out == null and client_out == null and inproc_main_out == null and inproc_profile_out == null) {
-        try stderr.print("corewire: the service projection needs at least one output\n", .{});
-        try stderr.flush();
-        std.process.exit(2);
-    }
-    if (host_out != null and registry_out != null and std.ascii.eqlIgnoreCase(host_out.?, registry_out.?)) {
-        try stderr.print("corewire: the service host and registry outputs name one file\n", .{});
-        try stderr.flush();
-        std.process.exit(2);
-    }
+fn serviceProjection(init: std.process.Init, args: []const []const u8, invocation: invocation_mod.Plan, stderr: *std.Io.Writer) !void {
+    const sidecar_path = args[invocation.input.?];
+    const optimization = if (invocation.optimization) |index| args[index] else null;
     const arena = init.arena.allocator();
     const source = std.Io.Dir.cwd().readFileAlloc(init.io, sidecar_path, arena, .limited(service_contract_mod.max_bytes)) catch |err| {
         try stderr.print("corewire: cannot read {s}: {t}\n", .{ sidecar_path, err });
@@ -455,40 +237,18 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
         error.OutOfMemory => return error.OutOfMemory,
         error.WriteFailed => return error.WriteFailed,
     };
-    if (host_out) |path| {
-        const generated = try emit_service_mod.emitHost(arena, contract);
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
-            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
-            try stderr.flush();
-            std.process.exit(1);
+    // The planner owns output selection and order. Native keeps the
+    // original sequential write behavior, including partial service outputs.
+    for (invocation.outputs) |out| {
+        const path = args[out.path_index];
+        const generated = switch (out.kind) {
+            .host => try emit_service_mod.emitHost(arena, contract),
+            .registry => try emit_service_mod.emitRegistry(arena, contract),
+            .client => try emit_service_mod.emitClient(arena, contract),
+            .inproc_main => try emit_service_mod.emitInprocMain(arena, contract),
+            .inproc_profile => try emit_service_mod.emitInprocProfile(arena, optimization),
+            else => unreachable,
         };
-    }
-    if (registry_out) |path| {
-        const generated = try emit_service_mod.emitRegistry(arena, contract);
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
-            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
-            try stderr.flush();
-            std.process.exit(1);
-        };
-    }
-    if (client_out) |path| {
-        const generated = try emit_service_mod.emitClient(arena, contract);
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
-            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
-            try stderr.flush();
-            std.process.exit(1);
-        };
-    }
-    if (inproc_main_out) |path| {
-        const generated = try emit_service_mod.emitInprocMain(arena, contract);
-        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
-            try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
-            try stderr.flush();
-            std.process.exit(1);
-        };
-    }
-    if (inproc_profile_out) |path| {
-        const generated = try emit_service_mod.emitInprocProfile(arena, optimization);
         std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = generated }) catch |err| {
             try stderr.print("corewire: cannot write {s}: {t}\n", .{ path, err });
             try stderr.flush();
@@ -496,38 +256,6 @@ fn serviceProjection(init: std.process.Init, args: []const []const u8, stderr: *
         };
     }
     try stderr.flush();
-    return true;
-}
-
-/// Rewrite one record-field slot's type-table spelling from i64 to f64
-/// (through one optional wrapper). Returns false when the path is not a
-/// `Container.field` record slot whose field spells i64.
-fn demoteSlotToF64(sidecar: sidecar_mod.Sidecar, slot_path: []const u8) bool {
-    const dot = std.mem.indexOfScalar(u8, slot_path, '.') orelse return false;
-    const container = slot_path[0..dot];
-    const field_name = slot_path[dot + 1 ..];
-    if (std.mem.indexOfScalar(u8, field_name, '.') != null) return false;
-    for (sidecar.types.structs) |entry| {
-        if (!std.mem.eql(u8, entry.name, container)) continue;
-        for (entry.fields) |*field| {
-            if (!std.mem.eql(u8, field.name, field_name)) continue;
-            const mutable: *sidecar_mod.Field = @constCast(field);
-            switch (field.type) {
-                .i64 => {
-                    mutable.type = .f64;
-                    return true;
-                },
-                .optional => |inner| {
-                    if (inner.* != .i64) return false;
-                    const mutable_inner: *sidecar_mod.TypeRef = @constCast(inner);
-                    mutable_inner.* = .f64;
-                    return true;
-                },
-                else => return false,
-            }
-        }
-    }
-    return false;
 }
 
 /// The facade path as the profile's entry spelling: relative to the
@@ -535,33 +263,18 @@ fn demoteSlotToF64(sidecar: sidecar_mod.Sidecar, slot_path: []const u8) bool {
 /// resolves against), POSIX separators. A pair that cannot relate
 /// (distinct roots) refuses with a teaching — a wrong spelling would
 /// point the consumer at a file that does not exist.
-fn profileRelativeEntry(init: std.process.Init, stderr: *std.Io.Writer, profile_path: []const u8, facade_path: []const u8) ![]const u8 {
+fn profileRelativeEntry(init: std.process.Init, profile_dir: []const u8, facade_path: []const u8) !invocation_mod.Entry {
     const arena = init.arena.allocator();
-    const profile_dir = std.fs.path.dirname(profile_path) orelse ".";
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = std.Io.Dir.cwd().realPath(init.io, &buffer) catch 0;
     const cwd: []const u8 = if (cwd_len == 0) "." else buffer[0..cwd_len];
-    // The environment rides along for the Windows resolver: a
-    // drive-RELATIVE spelling (C:foo) resolves against that drive's own
-    // working directory, which lives in the environment.
     const related = try std.fs.path.relative(arena, cwd, init.environ_map, profile_dir, facade_path);
-    // Paths on distinct roots have no relative spelling (the resolver
-    // hands back an absolute path instead): a profile consumer resolves
-    // the entry against the profile's directory, so an unreachable
-    // facade refuses rather than emitting a spelling that names nothing.
-    if (related.len == 0 or std.fs.path.isAbsolute(related)) {
-        try stderr.print("corewire: --facade {s} has no path relative to the --profile directory {s} — the profile's entry must reach the facade from beside the profile; emit them under one root\n", .{ facade_path, profile_dir });
-        try stderr.flush();
-        return error.Unrelatable;
-    }
-    // Separator conversion is a WINDOWS translation only: on POSIX a
-    // backslash is an ordinary filename byte and must ride verbatim.
-    if (std.fs.path.sep != std.fs.path.sep_windows) return related;
     const posix = try arena.dupe(u8, related);
-    for (posix) |*char| {
+    if (std.fs.path.sep == std.fs.path.sep_windows) for (posix) |*char| {
         if (char.* == std.fs.path.sep_windows) char.* = std.fs.path.sep_posix;
-    }
-    return posix;
+    };
+    const valid = std.unicode.utf8ValidateSlice(posix);
+    return .{ .text = if (valid) posix else "", .bytes = posix, .utf8 = valid, .unrelated = related.len == 0 or std.fs.path.isAbsolute(related), .facade_path = facade_path, .profile_directory = profile_dir };
 }
 
 /// A path spelling fit for alias comparison: components canonicalize

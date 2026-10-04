@@ -212,5 +212,22 @@ export function coreCases(): CoreCase[] {
     c.types.unions.push({ name: "TextInput", origin: "src/events.ts", exported: true, arms: tags.map(name => ({ name, member: name === "insert_text" || name === "set_composition" ? "text" : name === "move_caret" ? "move" : name === "set_selection" ? "selection" : null, payload: name === "insert_text" ? { kind: "bytes" } : name === "move_caret" ? { kind: "value", name: "CaretMove" } : name === "set_selection" ? { kind: "value", name: "Selection" } : name === "set_composition" ? { kind: "value", name: "Composition" } : { kind: "void" } })) });
     c.msg.arms.push({ name: "edit", member: "event", payload: { kind: "union", name: "TextInput" } });
   });
+  for (const scalar of ["-0", "9007199254740993", "18446744073709551615", "-9223372036854775808", "1e-300", "5e-324", "1.7976931348623157e308"]) {
+    const c = baseContract();
+    const input = encode(c).slice(0, -1) + ',"future":{"wide":' + scalar + ',"nested":[{},[],{"a\\b\\\"c":"café 🧪", "kind":"i64", "slot":"Model.count"}],"bool":true,"empty":null}}';
+    out.push({ name: "effective-opaque-" + scalar, input, slots: ["Model.count"] });
+  }
+  add("effective-optional-u64", c => {
+    c.types.structs[0].fields[0].type = { kind: "optional", inner: { kind: "i64" } };
+    c.integer_slots[0].class = "u64";
+  }, ["Model.count"]);
+  add("effective-two-slots", c => {
+    c.types.structs[0].fields.push({ name: "other", type: { kind: "optional", inner: { kind: "i64" } } });
+    c.integer_slots.push({ slot: "Model.other", class: "u64" });
+  }, ["Model.other", "Model.count"]);
+  add("effective-repeated-slot", () => {}, ["Model.count", "Model.count"]);
+  add("effective-missing-before-repeated", () => {}, ["Missing.count", "Model.count", "Model.count"]);
+  const untouched = encode(baseContract());
+  out.push({ name: "effective-original-whitespace", input: " \n" + untouched + " \t\n" });
   return out;
 }
