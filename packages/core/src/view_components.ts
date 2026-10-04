@@ -5,7 +5,7 @@
 import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, textClipboardRange as nscvClipboardRange, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewNode = {
-  end: number; kind: string; text: string; placeholder?: string; wrap?: boolean; submitOnEnter?: boolean;
+  end: number; kind: string; text: string; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 30) return nscvCommandActivation(request);
   if (request[0] === 29) return nscvPointerIntent(request);
   if (request[0] === 28) return nscvSurfaceDismissal(request);
   if (request[0] === 27) return nscvTooltipPresentation(request);
@@ -282,6 +283,38 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Command activation. Tag 30, stage, phase, canonical key, bounded facts,
+ * and the stable little-endian u16 kind. Stage 0 checks the current retained
+ * kind. Stage 1 uses pointer phases hover/down/move/up/cancel/wheel and facts
+ * pressed-raw match/different claiming id/claiming bounds/raw bounds. Stage 2
+ * uses keyboard phases down/up/text, keys unknown/space/enter/up/down and facts
+ * navigation chord/expanded/focus moved. Result: dispatch the retained command.
+ * Native owns exact identities, geometry, current command lookup and delivery.
+ */
+function nscvCommandActivation(request: Uint8Array): Uint8Array {
+  if (request.length !== 7 || request[1]! > 2) throw new Error("invalid command activation request");
+  const stage = request[1]!, phase = request[2]!, key = request[3]!, facts = request[4]!;
+  const kind = request[5]! | request[6]! << 8;
+  if (kind > 62 || (stage === 0 ? phase !== 0 || key !== 0 || facts !== 0 :
+      stage === 1 ? phase > 5 || key !== 0 || facts > 15 : phase > 2 || key > 4 || facts > 7))
+    throw new Error("invalid command activation facts");
+  let activate = false;
+  if (stage === 0) activate = kind === 14 || kind >= 31 && kind <= 34 || kind === 38 ||
+    kind === 41 || kind === 42 || kind === 44 || kind >= 46 && kind <= 50;
+  else if (stage === 1) {
+    const down = kind === 34 || kind === 38;
+    const inside = (facts & 4) !== 0 || (facts & 2) !== 0 && (facts & 8) !== 0;
+    activate = inside && (phase === 1 && down || phase === 3 && !down && (facts & 1) !== 0);
+  } else {
+    const arrow = (kind === 34 || kind === 38) && (key === 3 || key === 4) && (facts & 2) === 0;
+    activate = phase === 0 && (facts & 1) === 0 &&
+      (key === 1 || key === 2 || arrow) && !(arrow && (facts & 4) !== 0);
+  }
+  const result = new Uint8Array(1);
+  result[0] = activate ? 1 : 0;
   return result;
 }
 

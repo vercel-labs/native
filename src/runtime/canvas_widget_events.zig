@@ -2905,7 +2905,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view_index >= self.view_count) return error.ViewNotFound;
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-            if (!canvasWidgetCommandable(widget.kind)) return;
+            const eligible = compiledCanvasCommandActivation(&self.views[view_index], 0, 0, 0, 0, widget.kind) orelse canvasWidgetCommandable(widget.kind);
+            if (!eligible) return;
             const command = self.views[view_index].canvasWidgetCommand(id) orelse return;
             try self.dispatchCommand(app, .{
                 .name = command,
@@ -2926,21 +2927,27 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // press); the release may land anywhere within the claiming
             // widget's bounds or the raw target's own bounds.
             const press = pointer_event.press_target orelse return;
-            switch (pointer_event.pointer.phase) {
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
+                const facts: u8 = @as(u8, @intFromBool(pressed_id == target.id)) |
+                    (@as(u8, @intFromBool(press.id != target.id)) << 1) |
+                    (@as(u8, @intFromBool(press.bounds.normalized().containsPoint(pointer_event.pointer.point))) << 2) |
+                    (@as(u8, @intFromBool(target.bounds.normalized().containsPoint(pointer_event.pointer.point))) << 3);
+                if (!compiledCanvasCommandActivation(&self.views[index], 1, @intFromEnum(pointer_event.pointer.phase), 0, facts, press.kind).?) return;
+            } else switch (pointer_event.pointer.phase) {
                 .down => {
                     if (!canvasWidgetCommandFiresOnPointerDown(press.kind)) return;
                     if (!canvasWidgetPressReleaseInBounds(press, target, pointer_event.pointer.point)) return;
-                    try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
                 },
                 .up => {
                     if (canvasWidgetCommandFiresOnPointerDown(press.kind)) return;
                     const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
                     if (pressed_id != target.id) return;
                     if (!canvasWidgetPressReleaseInBounds(press, target, pointer_event.pointer.point)) return;
-                    try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
                 },
                 .hover, .move, .cancel, .wheel => return,
             }
+            try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
         }
 
         fn canvasWidgetPressReleaseInBounds(press: canvas.WidgetHit, target: canvas.WidgetHit, point: geometry.PointF) bool {
@@ -2949,21 +2956,32 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         }
 
         pub fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: runtime_api.App(Runtime), keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-            if (keyboard_event.keyboard.phase != .key_down or keyboard_event.keyboard.modifiers.hasNavigationModifier()) return;
             const target = keyboard_event.target orelse return;
-            // Activation keys press any commandable target; the menu-open
-            // arrows press select/combobox triggers too — the same keymap
-            // the control-intent resolver applies for `on_press`, kept in
-            // lockstep so command-string apps open their pickers from the
-            // keyboard exactly like TEA apps.
-            const arrow_opens = (target.kind == .select or target.kind == .combobox) and
-                canvas.isWidgetMenuOpenArrowKey(keyboard_event.keyboard.key) and
-                !(target.state.expanded orelse false);
-            if (!canvas.isWidgetActivationKey(keyboard_event.keyboard.key) and !arrow_opens) return;
-            if (arrow_opens and keyboard_event.keyboard.focus_moved) return;
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const key: u8 = if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "space")) 1 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "enter")) 2 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "arrowup")) 3 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "arrowdown")) 4 else 0;
+                const facts: u8 = @as(u8, @intFromBool(keyboard_event.keyboard.modifiers.hasNavigationModifier())) |
+                    (@as(u8, @intFromBool(target.state.expanded orelse false)) << 1) |
+                    (@as(u8, @intFromBool(keyboard_event.keyboard.focus_moved)) << 2);
+                if (!compiledCanvasCommandActivation(&self.views[index], 2, @intFromEnum(keyboard_event.keyboard.phase), key, facts, target.kind).?) return;
+            } else {
+                if (keyboard_event.keyboard.phase != .key_down or keyboard_event.keyboard.modifiers.hasNavigationModifier()) return;
+                const arrow_opens = (target.kind == .select or target.kind == .combobox) and
+                    canvas.isWidgetMenuOpenArrowKey(keyboard_event.keyboard.key) and !(target.state.expanded orelse false);
+                if (!canvas.isWidgetActivationKey(keyboard_event.keyboard.key) and !arrow_opens) return;
+                if (arrow_opens and keyboard_event.keyboard.focus_moved) return;
+            }
             try dispatchCanvasWidgetCommandForId(self, app, index, target.id);
+        }
+
+        fn compiledCanvasCommandActivation(view: anytype, stage: u8, phase: u8, key: u8, facts: u8, kind: canvas.WidgetKind) ?bool {
+            const policy = view.canvas_widget_surface_scope_policy orelse return null;
+            var request = [7]u8{ 30, stage, phase, key, facts, 0, 0 };
+            std.mem.writeInt(u16, request[5..7], canvas.widgetKindCode(kind), .little);
+            var result: [1]u8 = undefined;
+            if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled command activation result");
+            return result[0] != 0;
         }
 
         /// Returns true for an auto-repeat or release belonging to the

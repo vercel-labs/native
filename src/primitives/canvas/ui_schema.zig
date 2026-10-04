@@ -603,6 +603,8 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 100, .name = "source-y", .class = .number, .group = .element },
     .{ .code = 101, .name = "source-width", .class = .number, .group = .element },
     .{ .code = 102, .name = "source-height", .class = .number, .group = .element },
+    // A command name is data, retained with the widget until activation.
+    .{ .code = 103, .name = "command", .class = .text, .group = .option, .field = "command" },
 };
 
 // ----------------------------------------------------------------- events

@@ -79,6 +79,7 @@ fn expectSameMsg(comptime MsgT: type, expected: MsgT, actual: MsgT) !void {
 fn expectSameTexts(expected: canvas.Widget, actual: canvas.Widget) !void {
     try testing.expectEqual(expected.kind, actual.kind);
     try testing.expectEqualStrings(expected.text, actual.text);
+    try testing.expectEqualStrings(expected.command, actual.command);
     try testing.expectEqual(expected.state.selected, actual.state.selected);
     try testing.expectEqual(expected.children.len, actual.children.len);
     for (expected.children, actual.children) |expected_child, actual_child| {
@@ -2495,4 +2496,27 @@ test "compiled split on-resize binds a declared float arm identically to the int
         interpreted.msgForResize(interpreted.root.id, 0.25).?,
         compiled.msgForResize(compiled.root.id, 0.25).?,
     );
+}
+
+test "compiled and interpreted command strings remain widget data beside message handlers" {
+    const ModelT = struct { command: []const u8 };
+    const MsgT = enum { pressed };
+    const Ui = canvas.Ui(MsgT);
+    const source = "<column><button command=\"run.café\" on-press=\"pressed\">Run</button><select label=\"Picker\" command=\"{command}\"/><text command=\"ignored\">Inert</text></column>";
+    const Compiled = canvas.CompiledMarkupView(ModelT, MsgT, source);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var interpreter = try markup_view.MarkupView(ModelT, MsgT).init(arena, source);
+    for ([_][]const u8{ "choose.日本", "" }) |command| {
+        const model: ModelT = .{ .command = command };
+        var interpreted_ui = Ui.init(arena);
+        const interpreted = try interpreted_ui.finalize(try interpreter.build(&interpreted_ui, &model));
+        var compiled_ui = Ui.init(arena);
+        const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+        try expectSameTree(MsgT, interpreted, compiled);
+        try testing.expectEqualStrings("run.café", compiled.root.children[0].command);
+        try testing.expectEqualStrings(command, compiled.root.children[1].command);
+        try testing.expectEqualStrings("ignored", compiled.root.children[2].command);
+    }
 }

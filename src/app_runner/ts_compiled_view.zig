@@ -13,6 +13,7 @@ const Record = struct {
     kind: enum { column, row, stack, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
+    command: []const u8 = "",
     wrap: ?bool = null,
     submitOnEnter: bool = false,
     key: ?[]const u8 = null,
@@ -171,6 +172,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
         .text = value.text,
         .placeholder = value.placeholder,
+        .command = value.command,
         .wrap = value.wrap,
         .submit_on_enter = value.submitOnEnter,
         .gap = value.gap,
@@ -405,13 +407,14 @@ test "compiled view strings belong to the native tree arena" {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var ui = Ui.init(arena.allocator());
-        const source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"café\",\"key\":\"label\"}]}";
+        const source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"café\",\"command\":\"run.café\",\"key\":\"label\"}]}";
         const bytes = try std.testing.allocator.dupe(u8, source);
         defer std.testing.allocator.free(bytes);
         const result = try decode(&ui, bytes);
         @memset(bytes, 0);
         try std.testing.expectEqualStrings("café", result.widget.text);
         try std.testing.expectEqualStrings("label", result.key.?.str);
+        try std.testing.expectEqualStrings("run.café", result.widget.command);
     } else return error.SkipZigTest;
 }
 

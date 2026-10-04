@@ -535,6 +535,8 @@ pub fn Ui(comptime Msg: type) type {
             /// this with their content argument.
             text: []const u8 = "",
             placeholder: []const u8 = "",
+            /// Command dispatched by the runtime on eligible activation.
+            command: []const u8 = "",
             value: f32 = 0,
             /// HORIZONTAL scroll offset for a horizontal-capable
             /// `scroll` container (markup `value-x`) — the sideways
@@ -3761,6 +3763,7 @@ pub fn Ui(comptime Msg: type) type {
                 .transform = options.transform,
                 .text = options.text,
                 .placeholder = options.placeholder,
+                .command = options.command,
                 .icon = options.icon,
                 .icon_placement = options.icon_placement,
                 .text_alignment = options.text_alignment,

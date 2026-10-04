@@ -1420,3 +1420,37 @@ test("pointer intent owns phase selection, focus provenance and consumed retirem
     [29, 5, 1, 0, 0, 0], [29, 5, 0, 4, 0, 0], [29, 5, 0, 0, 0, 0, 0]])
     assert.throws(() => policy(new Uint8Array(request)), /pointer intent/);
 });
+
+test("command strings preserve literal and bound text beside message handlers", () => {
+  const { model, view } = evaluate('<column><button command="run.café" on-press="increment">Run</button><list-item command="{status}"/><text command="ignored"/><button command=""/></column>');
+  const first = view();
+  assert.equal(first.nodes[1].command, "run.café");
+  assert.deepEqual(first.nodes[1].press, [1, 3]);
+  assert.equal(first.nodes[2].command, "Café\nnotes");
+  assert.equal(first.nodes[3].command, "ignored");
+  assert.equal(first.nodes[4].command, "");
+  model.status = new TextEncoder().encode("choose.日本");
+  assert.equal(view().nodes[2].command, "choose.日本");
+  assert.equal(first.nodes[2].command, "Café\nnotes");
+  assert.throws(() => compileView('<button command="{count}"/>', contract), /command requires text/);
+});
+
+test("command policy validates requests and distinguishes raw hits, claiming bounds and canonical keys", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const call = (stage: number, phase: number, key: number, facts: number, kind: number) => [...policy(new Uint8Array([30, stage, phase, key, facts, kind & 255, kind >> 8]))];
+  assert.deepEqual(call(1, 1, 0, 4, 34), [1]);
+  assert.deepEqual(call(1, 3, 0, 5, 34), [0]);
+  assert.deepEqual(call(1, 3, 0, 5, 31), [1]);
+  assert.deepEqual(call(1, 3, 0, 4, 31), [0]);
+  assert.deepEqual(call(1, 3, 0, 11, 42), [1]);
+  assert.deepEqual(call(1, 3, 0, 9, 42), [0]);
+  assert.deepEqual(call(2, 0, 3, 0, 38), [1]);
+  assert.deepEqual(call(2, 0, 3, 2, 38), [0]);
+  assert.deepEqual(call(2, 0, 3, 4, 38), [0]);
+  assert.deepEqual(call(2, 0, 2, 6, 38), [1]);
+  assert.deepEqual(call(2, 0, 1, 1, 31), [0]);
+  for (const bytes of [[30], [30, 0, 0, 0, 0, 31], [30, 0, 0, 0, 0, 31, 0, 0], [30, 3, 0, 0, 0, 31, 0], [30, 0, 1, 0, 0, 31, 0], [30, 0, 0, 1, 0, 31, 0], [30, 0, 0, 0, 1, 31, 0], [30, 1, 6, 0, 0, 31, 0], [30, 1, 0, 1, 0, 31, 0], [30, 1, 0, 0, 16, 31, 0], [30, 2, 3, 0, 0, 31, 0], [30, 2, 0, 5, 0, 31, 0], [30, 2, 0, 0, 8, 31, 0], [30, 0, 0, 0, 0, 63, 0], [30, 0, 0, 0, 0, 0, 1]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /command activation/);
+});

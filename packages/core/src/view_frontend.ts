@@ -473,7 +473,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       } else if (name === "key" || name === "global-key") {
         const expr = key(value, node, scope), prop = name === "key" ? "key" : "globalKey";
         props.push(`${prop}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
-      } else if (["label", "text", "placeholder"].includes(name)) {
+      } else if (["label", "text", "placeholder", "command"].includes(name)) {
         if (name === "text" && !["input", "search-field", "textarea", "select", "accordion", "checkbox"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header or checkbox");
         if (name === "placeholder" && !["input", "search-field", "textarea", "select"].includes(node.name)) fail(node, "placeholder requires a text-entry widget or select");
         if (name === "text" && node.text.trim()) fail(node, "text attribute cannot be combined with element text");
