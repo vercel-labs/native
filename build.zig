@@ -433,16 +433,9 @@ pub fn build(b: *std.Build) void {
     eject_components_mod.addImport("native_sdk", desktop_mod);
     const eject_components_tests = testArtifact(b, eject_components_mod);
 
-    // corewire, the contract-sidecar shim generator (tools/corewire):
-    // Core contract/mirror std-only suites, one test root per source file (tests live
-    // in the file they cover, and imported files' tests do not run
-    // under an importer's root). The conformance suite — every fixture's
-    // generated mirror validated over its frontend-emitted contract —
-    // rides the ts-core e2e block, since it needs node and the frontend
-    // toolchain.
-    const corewire_sidecar_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/sidecar.zig"));
-    const corewire_emit_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit.zig"));
-    const corewire_facade_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/emit_facade.zig"));
+    // The mirror's byte runtime stays a native unit root. Core admission
+    // and projection tests use the compiled host archive in the TypeScript
+    // tooling block below, alongside frontend-sidecar conformance.
     const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
 
     // TypeScript-core end-to-end suite: each fixture core is compiled
@@ -762,9 +755,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(eject_components_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_sidecar_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_emit_tests).step);
-    test_step.dependOn(&b.addRunArtifact(corewire_facade_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
     const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
@@ -1316,6 +1306,23 @@ pub fn build(b: *std.Build) void {
         profile_cli_tests.has_side_effects = true;
         profile_step.dependOn(&profile_cli_tests.step);
         test_step.dependOn(&profile_cli_tests.step);
+        const core_policy_step = b.step("test-corewire-policy", "Test compiled core contract policy and both projection adapters");
+        for ([_][]const u8{ "sidecar.zig", "emit.zig", "emit_facade.zig" }) |source| {
+            const policy_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
+            @import("build/corewire.zig").linkProfile(policy_mod, ts_core_artifacts.profile_archive);
+            const run = b.addRunArtifact(testArtifact(b, policy_mod));
+            core_policy_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+        }
+        const core_policy_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        core_policy_cli_tests.addFileArg(b.path("tools/corewire/core.test.ts"));
+        core_policy_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        core_policy_cli_tests.addFileInput(b.path("tools/corewire/core_cases.ts"));
+        core_policy_cli_tests.addFileInput(b.path("tools/corewire/core_goldens.json"));
+        core_policy_cli_tests.has_side_effects = true;
+        core_policy_cli_tests.setCwd(b.path("."));
+        core_policy_step.dependOn(&core_policy_cli_tests.step);
+        test_step.dependOn(&core_policy_cli_tests.step);
         const service_projection_step = b.step("test-corewire-services", "Test compiled service validation, projections, fingerprints, and owned result bytes");
         for ([_][]const u8{ "service_contract.zig", "emit_service.zig" }) |source| {
             const service_tests_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
@@ -1324,7 +1331,7 @@ pub fn build(b: *std.Build) void {
             service_projection_step.dependOn(&run.step);
             test_step.dependOn(&run.step);
         }
-        const service_projection_cli_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable });
+        const service_projection_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
         service_projection_cli_tests.addFileArg(b.path("tools/corewire/service.test.ts"));
         service_projection_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
         service_projection_cli_tests.addFileInput(b.path("tools/corewire/emit_service.ts"));

@@ -1,0 +1,2639 @@
+{
+  "minimal": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "6c4c405218fac014b871abb1843bd16a001e14b89e1254392ead39d4f30aa767",
+      "facade": "7874d79a9d4f2a6dcad6892ecd01289b05578deca414b84e21ee0e85a5393cc1",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "af6b6fbc2f73acf6ecce7b28c3cc0f89ed116a6fa77dfaa23cda3ee6a72b4860"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "wire_version--9223372036854775808": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares -9223372036854775808 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares -9223372036854775808 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "wire_version-9223372036854775807": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 9223372036854775807 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 9223372036854775807 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "wire_version-9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 9007199254740993 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 9007199254740993 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "wire_version--9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares -9007199254740993 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares -9007199254740993 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "wire_version-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "abi_version--9223372036854775808": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares -9223372036854775808 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares -9223372036854775808 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "abi_version-9223372036854775807": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 9223372036854775807 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 9223372036854775807 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "abi_version-9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "abi_version--9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares -9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares -9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "abi_version-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "snapshot_format--9223372036854775808": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares -9223372036854775808 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares -9223372036854775808 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "snapshot_format-9223372036854775807": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 9223372036854775807 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 9223372036854775807 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "snapshot_format-9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "snapshot_format--9007199254740993": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares -9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares -9007199254740993 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "snapshot_format-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\n"
+  },
+  "version-and-name-order": {
+    "status": 1,
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\ninput.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\ninput.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\ninput.json: error: msg.arms[2].name: duplicate message arm \"bump\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 7, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\ninput.json: error: abi_version: this generator binds core ABI version 2, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\ninput.json: error: abi.snapshot_format: this generator decodes snapshot format 1, the sidecar declares 0 — upgrade the SDK or pin the compiler release that matches it\ninput.json: error: msg.arms[2].name: duplicate message arm \"bump\" — V3 requires unique names here\n"
+  },
+  "duplicate-table": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.enums[0].name: duplicate type-table name \"Model\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.enums[0].name: duplicate type-table name \"Model\" — V3 requires unique names here\n"
+  },
+  "duplicate-field": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[0].fields[2].name: duplicate field name \"count\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[0].fields[2].name: duplicate field name \"count\" — V3 requires unique names here\n"
+  },
+  "duplicate-enum": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.enums[0].members[2]: duplicate enum member \"first\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.enums[0].members[2]: duplicate enum member \"first\" — V3 requires unique names here\n"
+  },
+  "duplicate-union-arm": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.unions[0].arms[2].name: duplicate union arm \"empty\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.unions[0].arms[2].name: duplicate union arm \"empty\" — V3 requires unique names here\n"
+  },
+  "duplicate-helper": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers[1].name: duplicate helper name \"total\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers[1].name: duplicate helper name \"total\" — V3 requires unique names here\n"
+  },
+  "duplicate-env": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.env_msgs[1].env: duplicate environment variable name \"HOME\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.env_msgs[1].env: duplicate environment variable name \"HOME\" — V3 requires unique names here\n"
+  },
+  "dangling-node": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n"
+  },
+  "wrong-kind-node": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Choice\" names an enum in the type table, but this reference requires a struct — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Choice\" names an enum in the type table, but this reference requires a struct — V4\n"
+  },
+  "dangling-value": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n"
+  },
+  "wrong-kind-value": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Choice\" names an enum in the type table, but this reference requires a struct — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Choice\" names an enum in the type table, but this reference requires a struct — V4\n"
+  },
+  "dangling-enum": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n"
+  },
+  "wrong-kind-enum": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Model\" names a struct in the type table, but this reference requires an enum — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Model\" names a struct in the type table, but this reference requires an enum — V4\n"
+  },
+  "dangling-union": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Missing\" names no entry in the type table (no struct, enum, or union declares it) — V4\n"
+  },
+  "wrong-kind-union": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Model\" names a struct in the type table, but this reference requires a union — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[1].type: \"Model\" names a struct in the type table, but this reference requires a union — V4\n"
+  },
+  "missing-model": {
+    "status": 1,
+    "diagnostics": "input.json: error: model: \"Missing\" names no struct in the type table — V4\ninput.json: error: types.structs[0]: \"Model\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model: \"Missing\" names no struct in the type table — V4\ninput.json: error: types.structs[0]: \"Model\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n"
+  },
+  "enum-model": {
+    "status": 1,
+    "diagnostics": "input.json: error: model: \"Choice\" names an enum in the type table, but the model root must be a struct — V4\ninput.json: error: types.structs[0]: \"Model\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\ninput.json: error: types.enums[0]: \"Choice\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model: \"Choice\" names an enum in the type table, but the model root must be a struct — V4\ninput.json: error: types.structs[0]: \"Model\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\ninput.json: error: types.enums[0]: \"Choice\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n"
+  },
+  "unreachable-record": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[1]: \"Extra\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[1]: \"Extra\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)\n"
+  },
+  "reach-diagnostic-order": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs.Model.fields[3].type: \"NoEnum\" names no entry in the type table (no struct, enum, or union declares it) — V4\ninput.json: error: types.structs.Nested.fields[0].type: \"Unknown\" names no entry in the type table (no struct, enum, or union declares it) — V4\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs.Model.fields[3].type: \"NoEnum\" names no entry in the type table (no struct, enum, or union declares it) — V4\ninput.json: error: types.structs.Nested.fields[0].type: \"Unknown\" names no entry in the type table (no struct, enum, or union declares it) — V4\n"
+  },
+  "self-cycle": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the type reference graph has a cycle (Model -> Model) — recursive state types are refused at compile time and can never be encoded (V5)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the type reference graph has a cycle (Model -> Model) — recursive state types are refused at compile time and can never be encoded (V5)\n"
+  },
+  "indirect-cycle": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the type reference graph has a cycle (Model -> Nested -> Model) — recursive state types are refused at compile time and can never be encoded (V5)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the type reference graph has a cycle (Model -> Nested -> Model) — recursive state types are refused at compile time and can never be encoded (V5)\n"
+  },
+  "shared-dag": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "432f1776e878d001896e8e2c96c33ae0956fad4140407a2a3acd8f4f7a0351ea",
+      "facade": "31a62abb6ecdfbe7094d9e7b1d1a3c5d022e0e57bec0d665845043b7f8001266",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "e41b7e295818048477602393ab6cb6000c9d06194a96c63cc98e5b2590b3b909"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "named-depth-254": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "f455b089409059a9003e0ea06664c24b8495937b6c3439121bc8599f7fccbb0b",
+      "facade": "41dd9d925e419567080f101502783143163d1687bb2ad1c1f55138de4f65f286",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "48dbb4250d8a454d724437c0650a5293b3ca9ecfb3cbaf190ddb057806072eec"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "named-depth-255": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "656fcc789348fe532d13e2296ca461b6b1a0d9021c523b9511a9cf0f9837ae11",
+      "facade": "61bdba573e23d006ce54d38af2f8655ba27dc3ff6c4c09070b341b367f2a80db",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "0eb6ac442fca626669836cc4ea80209d9b5660935f59d3707fd429af4d5018e4"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "named-depth-256": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the value tree under \"Model\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the value tree under \"Model\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n"
+  },
+  "named-depth-257": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the value tree under \"N1\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the value tree under \"N1\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n"
+  },
+  "combined-wrapper-depth": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the value tree under \"Depth6\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the value tree under \"Depth6\" expands deeper than 256 levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source\n"
+  },
+  "message-bound-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: the message union declares no arms — a core with no messages cannot dispatch; declare at least one arm\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: the message union declares no arms — a core with no messages cannot dispatch; declare at least one arm\n"
+  },
+  "enum-bound-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.enums[0]: enum \"Choice\" declares no members — a valueless enum has no mirror form; declare at least one member\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.enums[0]: enum \"Choice\" declares no members — a valueless enum has no mirror form; declare at least one member\n"
+  },
+  "union-bound-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.unions[0]: union \"Choice\" declares no arms — a valueless union has no mirror form; declare at least one arm\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.unions[0]: union \"Choice\" declares no arms — a valueless union has no mirror form; declare at least one arm\n"
+  },
+  "message-bound-256": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "1350435a151150a0e079fc270eb92638b6e77e5c2e994c73d07ef934ea92e6f0",
+      "facade": "b9fad6a8c647096ccc6613cdc322cda251cc1549e06b300730e1d6feb9b9cdfc",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "c4887c67ee212989b8defa3668b98412930340e8f0963bf7d691c70da8f5ea88"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "enum-bound-256": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "4edc4f9cc9062b322421a2015f6cba99ccb842023028ae22ec4ac74172f146eb",
+      "facade": "351ef5de3a3f9ccf6bf3ab4430ab1c6af823c493c22f05c9d24503180715bf77",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "58fdb5532b3c558c7b0938e36daab787f2023a9540d0dd05e55595571f8d9478"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "union-bound-256": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "24aa684992a8e812c8cbc8a381e71a69dbfa716916488019aa3d099a2f49acf7",
+      "facade": "943cf3bf822ad9e46649ca123ce7dd97a33bb3edb6449a7024b186ba8a6a3db8",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "b77eb5a53a8c4a54365d0357620192157c23a5cb5ab3d203d61627e6de50766a"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "message-bound-257": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: 257 arms exceed the 256-arm bound (wire tags ride a u8) — V6\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: 257 arms exceed the 256-arm bound (wire tags ride a u8) — V6\n"
+  },
+  "enum-bound-257": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.enums[0]: enum \"Choice\" has 257 members; the mirror's enums ride a u8 tag with member index = wire value (256 members at most)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.enums[0]: enum \"Choice\" has 257 members; the mirror's enums ride a u8 tag with member index = wire value (256 members at most)\n"
+  },
+  "union-bound-257": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.unions[0]: union \"Choice\" has 257 arms; encoded union values carry a one-byte declaration-order arm index (256 arms at most)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.unions[0]: union \"Choice\" has 257 arms; encoded union values carry a one-byte declaration-order arm index (256 arms at most)\n"
+  },
+  "number-bytes-equal": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms[0].payload: number_field and bytes_field are both \"same\" — the two field names must be distinct (V7)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms[0].payload: number_field and bytes_field are both \"same\" — the two field names must be distinct (V7)\n"
+  },
+  "scalar-void": {
+    "status": 1,
+    "diagnostics": "input.json: warning: msg.arms[0].payload.type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry void — bare arms use the void descriptor kind (V7)\ninput.json: error: msg.arms[0].payload.type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: msg.arms[0].payload.type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry void — bare arms use the void descriptor kind (V7)\ninput.json: error: msg.arms[0].payload.type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n"
+  },
+  "scalar-node": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry a record — record payloads use the record descriptor kind (V7)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry a record — record payloads use the record descriptor kind (V7)\n"
+  },
+  "scalar-value": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry a record — record payloads use the record descriptor kind (V7)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms[0].payload.type: a scalar descriptor cannot carry a record — record payloads use the record descriptor kind (V7)\n"
+  },
+  "void-field-plain": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n"
+  },
+  "void-field-optional": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[1].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[1].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n"
+  },
+  "void-field-slice": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[1].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[1].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: types.structs[0].fields[1].type: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n"
+  },
+  "void-helper-return": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers[0].returns: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers[0].returns: the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type\n"
+  },
+  "unbound-missing": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_unbound[0]: \"absent\" is neither a field of the model struct \"Model\" nor an exported helper (V8)\ninput.json: error: msg.unbound[0]: \"absent\" is not an arm of the message union (V8)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_unbound[0]: \"absent\" is neither a field of the model struct \"Model\" nor an exported helper (V8)\ninput.json: error: msg.unbound[0]: \"absent\" is not an arm of the message union (V8)\n"
+  },
+  "unbound-helper": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "e94b34864d177a83a470e159a95599d45a15a572cc11f7e17d1e4dfc6e9d24d2",
+      "facade": "e48eabbf42664dd6b4e922f03d43fa747d1dc08d76599d851e542c57e441a566",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "fc5e173ec036b03e7c0aa75faaf7057064c18477ce1b5fe3c138d9b7bf581d0c"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "unbound-field-shadow": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.unbound: \"label_set\" is an unbound message arm shadowed by a homonymous Model field or exported helper — the compiler resolves Model fields and helpers before message arms, so the projection's single unbound list cannot mark this arm; rename one side in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.unbound: \"label_set\" is an unbound message arm shadowed by a homonymous Model field or exported helper — the compiler resolves Model fields and helpers before message arms, so the projection's single unbound list cannot mark this arm; rename one side in the core source\n"
+  },
+  "unbound-helper-shadow": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.unbound: \"label_set\" is an unbound message arm shadowed by a homonymous Model field or exported helper — the compiler resolves Model fields and helpers before message arms, so the projection's single unbound list cannot mark this arm; rename one side in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.unbound: \"label_set\" is an unbound message arm shadowed by a homonymous Model field or exported helper — the compiler resolves Model fields and helpers before message arms, so the projection's single unbound list cannot mark this arm; rename one side in the core source\n"
+  },
+  "appearance_msg-absent": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: \"absent\" names no arm of the message union (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: \"absent\" names no arm of the message union (V9)\n"
+  },
+  "appearance_msg-bump": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: arm \"bump\" has a void payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: arm \"bump\" has a void payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n"
+  },
+  "appearance_msg-label_set": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n"
+  },
+  "chrome_msg-absent": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: \"absent\" names no arm of the message union (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: \"absent\" names no arm of the message union (V9)\n"
+  },
+  "chrome_msg-bump": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: arm \"bump\" has a void payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: arm \"bump\" has a void payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n"
+  },
+  "chrome_msg-label_set": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n"
+  },
+  "appearance-shape-and-chrome-order": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: arm \"label_set\" has a bytes payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)\n"
+  },
+  "env-absent": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.env_msgs[0].msg: \"absent\" names no arm of the message union (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.env_msgs[0].msg: \"absent\" names no arm of the message union (V9)\n"
+  },
+  "env-bump": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.env_msgs[0].msg: arm \"bump\" has a void payload descriptor, but environment channels deliver the variable's value as bytes, so the target arm's descriptor must be bytes (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.env_msgs[0].msg: arm \"bump\" has a void payload descriptor, but environment channels deliver the variable's value as bytes, so the target arm's descriptor must be bytes (V9)\n"
+  },
+  "env-label_set": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "72c481e26a2a5ec594819cfcbf4a30c7301cda8df8944933c825820813c7b9a5",
+      "facade": "d8dfef2dce7118a08b460d377baaf937bb4db908574ed38c4060f8905b9d098b",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "cf8eaf241eef8a92c28deba69c42061b7c7cf22afb455da3d98aa9a320bec684"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "channel-missing-command_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.command_msg: the channel is declared wired but \"command_msg\" is missing from abi.exports — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.command_msg: the channel is declared wired but \"command_msg\" is missing from abi.exports — presence is biconditional (V9)\n"
+  },
+  "channel-unwired-command_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports: \"command_msg\" is listed but channels.command_msg is false — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports: \"command_msg\" is listed but channels.command_msg is false — presence is biconditional (V9)\n"
+  },
+  "channel-wired-command_msg": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "19fb697c2a587c9595c78b78fb24e3f2c742c181808a63686fd722daf49749f7",
+      "facade": "9e07212581c71cac37cbf4f9449e9be0eb984f5af0a872b0021072efce884cdf",
+      "profile": "4f986f0a218e8bc3cf87ad44c07cacdc44839fa5f6be7d6504b5fc878da2d1d0",
+      "effective": "f61d3ed7aa17ab17f946ed01522f0dbb957d8df80c2cae7ac5438a1e3720e9d1"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "channel-missing-frame_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.frame_msg: the channel is declared wired but \"frame_msg\" is missing from abi.exports — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.frame_msg: the channel is declared wired but \"frame_msg\" is missing from abi.exports — presence is biconditional (V9)\n"
+  },
+  "channel-unwired-frame_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports: \"frame_msg\" is listed but channels.frame_msg is false — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports: \"frame_msg\" is listed but channels.frame_msg is false — presence is biconditional (V9)\n"
+  },
+  "channel-wired-frame_msg": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "836a0ab282830182ef13e3a2cabaeb2283b51a95d7e619a21d1de9468337e03b",
+      "facade": "e7743a38a94fe02093dc23f6a03516abf3220af75de5720ccad6ae7c6767b99b",
+      "profile": "4baa7ba4c95e3db07f3e86c8cb573db0207233d0472a3c91fea1a900cbec2672",
+      "effective": "db109c3545cc5642977af25d4a5f41588abb1405758e9226976fda955e473755"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "channel-missing-key_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.key_msg: the channel is declared wired but \"key_msg\" is missing from abi.exports — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.key_msg: the channel is declared wired but \"key_msg\" is missing from abi.exports — presence is biconditional (V9)\n"
+  },
+  "channel-unwired-key_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports: \"key_msg\" is listed but channels.key_msg is false — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports: \"key_msg\" is listed but channels.key_msg is false — presence is biconditional (V9)\n"
+  },
+  "channel-wired-key_msg": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "ab297ba33982498c4818b33b70707ed7219673c8ebbe3de73e4387b7163b9dd3",
+      "facade": "c98e100b79b4c730ea331bffd07925e0f55e7bc704f3cfc439138adf38dad360",
+      "profile": "5fa61f55977e5ac6cd1bf2fd8a5336fa2c4bab6e100d302826c34ab344c99e27",
+      "effective": "cc80341ab0d455656b34bb774da3974a3031cfa5d0eea66fffffb6bfca6129b0"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "channel-missing-pinch_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.pinch_msg: the channel is declared wired but \"pinch_msg\" is missing from abi.exports — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.pinch_msg: the channel is declared wired but \"pinch_msg\" is missing from abi.exports — presence is biconditional (V9)\n"
+  },
+  "channel-unwired-pinch_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports: \"pinch_msg\" is listed but channels.pinch_msg is false — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports: \"pinch_msg\" is listed but channels.pinch_msg is false — presence is biconditional (V9)\n"
+  },
+  "channel-wired-pinch_msg": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "af5cf87ebcef97e5b96c5e9c6efe31220305e06b70e9ae5910130e25252853f5",
+      "facade": "d051a936387158619160eef103ceea5ac35aad2a0458ed1e941c14f2cca07151",
+      "profile": "923d513598ef2d7fce002eae760f15b61af67dc9f7dcd6aecf6d4856d3daf342",
+      "effective": "0ecff96c197afe579b0ab42577ac04a74d4f40df2ced8d6e4bac798b4bdf4e14"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "channel-missing-drop_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.drop_msg: the channel is declared wired but \"drop_msg\" is missing from abi.exports — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.drop_msg: the channel is declared wired but \"drop_msg\" is missing from abi.exports — presence is biconditional (V9)\n"
+  },
+  "channel-unwired-drop_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports: \"drop_msg\" is listed but channels.drop_msg is false — presence is biconditional (V9)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports: \"drop_msg\" is listed but channels.drop_msg is false — presence is biconditional (V9)\n"
+  },
+  "channel-wired-drop_msg": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "ea16ff0a778c49f78bc56c117c04587300371575e04ade2e5befc72cfc17cc97",
+      "facade": "54123f79a2507b06bab5ae71559b88a1d82d2b40861c0a613a6708bf678091bf",
+      "profile": "12d4bb9ad60fa8cb44f2b243ad5b0a68c2fac83206ea175512aa85ac8ebc582c",
+      "effective": "eb1d6c37e4cc21111b85c445ea339be461305831bc2b474d6956586b5f3e4c70"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "abi-missing": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports[3]: expected the unconditional export \"init\" here — abi.exports lists every unconditional suffix, then the wired channel entries, in the canonical order: identity getters (abi_version, build_id), the mode-provided entries (set_panic_sink, init, collect, frame_reset), then the entry-point map (V11)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports[3]: expected the unconditional export \"init\" here — abi.exports lists every unconditional suffix, then the wired channel entries, in the canonical order: identity getters (abi_version, build_id), the mode-provided entries (set_panic_sink, init, collect, frame_reset), then the entry-point map (V11)\n"
+  },
+  "abi-unknown": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports[22]: \"unknown\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports[22]: \"unknown\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n"
+  },
+  "abi-duplicate": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports[22]: \"helper_call\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports[22]: \"helper_call\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n"
+  },
+  "abi-order": {
+    "status": 1,
+    "diagnostics": "input.json: error: abi.exports[23]: \"native_view\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: abi.exports[23]: \"native_view\" is not an export suffix of ABI version 2 (or is out of canonical order) — V11\n"
+  },
+  "abi-native-views": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "a4eb9a66361ae8681478ea32e80a33e31717f9e1e9c7183728bf8ea4e5f7e1bd",
+      "facade": "7874d79a9d4f2a6dcad6892ecd01289b05578deca414b84e21ee0e85a5393cc1",
+      "profile": "22bf52223a8bc9cbdc5f6ffb10550dd0ab2615815a5080cdbb29eaa8b446c933",
+      "effective": "330b5b72a914498fef4447846b677ebccc37265ab41ac34819905725e06b5bba"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "slot-Missing.field": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Missing.field\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Missing.field\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-Model.label": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Model.label\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Model.label\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-Model.count.extra": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Model.count.extra\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Model.count.extra\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-Msg.bump": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Msg.bump\" resolves to a slot the sidecar spells void, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Msg.bump\" resolves to a slot the sidecar spells void, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-Msg.label_set": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Msg.label_set\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Msg.label_set\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-helpers.missing.return": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"helpers.missing.return\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"helpers.missing.return\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-Model": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Model\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Model\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-.count": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \".count\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \".count\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-Model.": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: \"Model.\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: \"Model.\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "slot-missing": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: the sidecar spells \"Model.count\" i64 but attests no integer_slots entry for it — every i64 spelling has exactly one entry (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: the sidecar spells \"Model.count\" i64 but attests no integer_slots entry for it — every i64 spelling has exactly one entry (V10)\n"
+  },
+  "slot-duplicate": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[1].slot: duplicate entry for \"Model.count\" — every i64 slot has exactly one entry (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[1].slot: duplicate entry for \"Model.count\" — every i64 slot has exactly one entry (V10)\n"
+  },
+  "slot-unsigned": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "5e2965b709b2895a0fc5b26c2308f2a5c9bff6dcfbcb6ef88fd2131035a33d28",
+      "facade": "4f89cf543144d751b1f68278ea723aac84f48be148d767139453e8077d1e0b90",
+      "profile": "4c39262848a09abaf94a1afa994dbad0d7bee02360dd73a398baf0c81c4c57f4",
+      "effective": "8ca4d0df0d7a44eab450701eb95cb9d712d61aa028c807e67a5252ed376ac6d4"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "slot-dotted": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: the i64 slot at \"Model.with.dot\" involves a name containing '.', which the slot path grammar cannot address unambiguously — rename it in the core source (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: the i64 slot at \"Model.with.dot\" involves a name containing '.', which the slot path grammar cannot address unambiguously — rename it in the core source (V10)\n"
+  },
+  "slot-ambiguous": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: two distinct i64 slots spell the one path \"Model.count\" — the slot-path grammar cannot address them separately, so their attestations cannot be told apart; rename one of the colliding surfaces in the core source (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: two distinct i64 slots spell the one path \"Model.count\" — the slot-path grammar cannot address them separately, so their attestations cannot be told apart; rename one of the colliding surfaces in the core source (V10)\n"
+  },
+  "slot-target-bool": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells bool, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells bool, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-f64": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells f64, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells f64, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-bytes": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells bytes, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-enum": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells an enum, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells an enum, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-union": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells a union, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells a union, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-node": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells a record, not i64 — an attested integer class must sit on an i64 spelling (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[3].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[3].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" resolves to a slot the sidecar spells a record, not i64 — an attested integer class must sit on an i64 spelling (V10)\n"
+  },
+  "slot-target-slice": {
+    "status": 1,
+    "diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" addresses a sequence — the format-1 slot-path grammar has no slice-element form, so slice elements are never integer-attested; the emitter spells them f64 and readers exempt them from the bijection (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: integer_slots[1].slot: \"Model.target\" addresses a sequence — the format-1 slot-path grammar has no slice-element form, so slice elements are never integer-attested; the emitter spells them f64 and readers exempt them from the bijection (V10)\n"
+  },
+  "slot-target-optional": {
+    "status": 0,
+    "diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "4e91837e0ea142714b4d2b5b63b2000017b563988faa052daea7b7f828bbbdd8",
+      "facade": "615f462e43a37ce309ed2977b043363daaa8fa217dd118bedadc9e4b1db36fa5",
+      "profile": "6f860e15a5c3a980e7569ddae34e29b5cb1ee99b26a33f5ae84dc375aa0d31fc",
+      "effective": "4e6641d74e7d1f1dba532df4c18fd190b424ce1186f4cf7fc6fc35e52a595c3e"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: types.structs[0].fields[2].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[2].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "integer-message-number": {
+    "status": 0,
+    "diagnostics": "input.json: warning: msg.arms[0].payload.number_class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.bytes_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.type: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "c623f856ade6226eb20b58a85290a0ee2215968552fdf2d7139c8160df16d2a0",
+      "facade": "6dc2f7ac62a81401741c36ae53acf0c277a15fd50ceeb20963333bac1f775628",
+      "profile": "275ec218d54ba83312933d68cbf947f5b1f4e6573f2b4d90b759fe8fac8468dc",
+      "effective": "2397ebf8715b01f7de2daf94b7d319d9126ed44c39b83b8f047c4339c7ec6ae8"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: msg.arms[0].payload.number_class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.bytes_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.type: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "integer-message-number_bytes": {
+    "status": 0,
+    "diagnostics": "input.json: warning: msg.arms[0].payload.class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.type: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "3d8c870dd9a9a4de83e852c40759f8b68d3ef357adfd906f29eee0d455e6609c",
+      "facade": "a6f684134527865326725e57e43c551d30e58a561f4fd84f6867d229ce28b1cf",
+      "profile": "d390081396e708f6151f579527f14f8994bca574d47656a1bd245108ea2007f4",
+      "effective": "6c596802369dbc40308c9c2c1a2293ff65a0e6577a45ec53f4d38a7946900a53"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: msg.arms[0].payload.class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.type: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "integer-message-scalar": {
+    "status": 1,
+    "diagnostics": "input.json: warning: msg.arms[0].payload.class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.bytes_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: msg.arms: arm \"bump\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: warning: msg.arms[0].payload.class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_class: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.number_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: msg.arms[0].payload.bytes_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: error: msg.arms: arm \"bump\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)\n"
+  },
+  "helper-param-index-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"total\" declares extra parameters — the generated dispatch surface carries model-only helpers (no producer emits parameters today); drop them in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"total\" declares extra parameters — the generated dispatch surface carries model-only helpers (no producer emits parameters today); drop them in the core source\n"
+  },
+  "helper-param-index-+0": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[+0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[+0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n"
+  },
+  "helper-param-index-00": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[00]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[00]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n"
+  },
+  "helper-param-index-0_": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[0_]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[0_]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "helper-param-index-_0": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[_0]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[_0]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "helper-param-index-0__0": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[0__0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[0__0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n"
+  },
+  "helper-param-index-+_0": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[+_0]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[+_0]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "helper-param-index-1": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[1]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[1]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "helper-param-index-999999999999999999999": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[999999999999999999999]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[999999999999999999999]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "helper-param-index--0": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-0]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n"
+  },
+  "helper-param-index--00": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-00]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-00]\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)\n"
+  },
+  "helper-param-index--1": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-1]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots[3].slot: \"helpers.total.params[-1]\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"Msg.<arm>\" or \"Msg.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)\n"
+  },
+  "mirror-name-std": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"std\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"std\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-rt": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"rt\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"rt\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-view_unbound": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"view_unbound\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"view_unbound\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-msg_tags": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"msg_tags\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"msg_tags\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-p0": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"p0\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"p0\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-FrameEvent": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "8511727d0903746e04f19e75f030f04a35c65402f2d18a483bfb2cb0d56e43af",
+      "facade": "688f85d3665f38618ede2a655833c5e8f27e7d2afd51dee39d3375ddbfd06b69",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "1a2d30e5099f830d9b101f4a3644e6fc7645ca401b15978954244953b94363bc"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "mirror-name-nativeView": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "aced549908aa61d4c99c1f509b547eac02dc1c073703a36a83d870cbdc61f6ca",
+      "facade": "bd8e4624d18be296398f21932dca049e49cbff871c898b72ca4ba42a581c3da1",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "03ba18eda088ee4510ac300e3a733d95870e6afa2c02aa623d7f17b444583d17"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "mirror-name-nativeTextPolicy": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "b91d636adade5b2e2026534726b26e3ae580a1f43c46ed23752cb2c5081e8481",
+      "facade": "aa3c8e2a4d594043475c8da1e67c472bdcd1072f523b6e614de9925688c23dc8",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "d8425ef0cc15612c93b1c4a28f3c79f68d4294619af0f7c241c10ad0acbc0f42"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "mirror-name-UpdateResult": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"UpdateResult\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"UpdateResult\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-name-Model": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[1].name: duplicate type-table name \"Model\" — V3 requires unique names here\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[1].name: duplicate type-table name \"Model\" — V3 requires unique names here\n"
+  },
+  "mirror-name-Msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.name: message union name \"Msg\" collides with another declaration of the generated shim; rename the union in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.name: message union name \"Msg\" collides with another declaration of the generated shim; rename the union in the core source\n"
+  },
+  "mirror-view-reserved": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"nativeView\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"nativeView\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-policy-reserved": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"nativeTextPolicy\" collides with a declaration the generated shim itself must make; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"nativeTextPolicy\" collides with a declaration the generated shim itself must make; rename the type in the core source\n"
+  },
+  "mirror-helper-field": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"label\" collides with the model field of the same name — the mirror declares helpers as model methods, one member namespace; rename one in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"label\" collides with the model field of the same name — the mirror declares helpers as model methods, one member namespace; rename one in the core source\n"
+  },
+  "mirror-helper-type": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"Nested\" shadows the type of the same name inside the model struct, where field types resolve; rename one in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"Nested\" shadows the type of the same name inside the model struct, where field types resolve; rename one in the core source\n"
+  },
+  "record-plan-generated-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n"
+  },
+  "record-plan-generated-1": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n"
+  },
+  "record-plan-generated-2": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "7ac8dfc02a3360c35b854117441508d591a5ab1c0af174a778c7eca0479cb672",
+      "facade": "432eafe72e8d67dd982121b964bd72083c1d275ce77b40566bc6d26cb00c11ae",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "16d7e9c33c5b17f492930ea28f5ea4b7164d28d0cf61abf80a56817bf6cd5087"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "record-plan-authored-0": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "71542c50ec51a34a163b096ca71cebe97c25ce02935e004b2bedaa7f02c1d1b5",
+      "facade": "cc027495f4ce66f79dc12784924ef2b24430e01111aa2c25d25978e5c8184c73",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "59c6c8b218f367e76e8ea1d98f8346e4a75bc0c51055ad7318ab5d30dec94286"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "record-plan-authored-1": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "f405ed5455beb07207c07ec2b67a58777b2cb7decd420175b24bd86a3addaf5f",
+      "facade": "96aaf2d9c9d1f13ddc10bcb9f683582aa52f7f45a0442d763652380f05d4f099",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "ae587e3509130ff98869ca92bc390dde444fce607dccb1eea5e38f591c0121aa"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "record-plan-authored-2": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "8acc5cc4bdd0090db3b1e41ada609576e76ae038adbbf2e456fd239a6d99a688",
+      "facade": "e9af6d769be620f2a12d11ed432b8a2b3bde05f12831d177edfe34f5ac33e51f",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "5c2a2fbeda247acb4f55710ae9953aaf4f8acee7793544bbb9247240cadea866"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "record-shared-pattern": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"insert\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\ninput.json: error: types: compiler-generated table type \"Msg_insert\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n"
+  },
+  "record-node-arm": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"insert\": record \"Nested\" is stored by reference in the model graph, and the compiled core keeps that storage when the record doubles as an arm payload — a fact the record payload family cannot carry; keep the arm's payload a value-stored record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"insert\": record \"Nested\" is stored by reference in the model graph, and the compiled core keeps that storage when the record doubles as an arm payload — a fact the record payload family cannot carry; keep the arm's payload a value-stored record\n"
+  },
+  "record-model-arm": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"root\": record \"Model\" is stored by reference in the model graph, and the compiled core keeps that storage when the record doubles as an arm payload — a fact the record payload family cannot carry; keep the arm's payload a value-stored record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"root\": record \"Model\" is stored by reference in the model graph, and the compiled core keeps that storage when the record doubles as an arm payload — a fact the record payload family cannot carry; keep the arm's payload a value-stored record\n"
+  },
+  "record-scalar-node-storage": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"maybe\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"maybe\": ABI version 1 has no dispatch entry for this scalar shape (bool, number, and bytes scalars only)\n"
+  },
+  "scroll-ts-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "18b389cd5616ad1f3748a9da2d70bc792363e37936c1e5dcf91aa2114aa1ed99",
+      "facade": "d1789c842069eac80c56ecda07bfe97a2257d124a9df77c070781711e2e96473",
+      "profile": "3f7332ccf965f2f1f52cd066c3b6e204f4fd866d6ede92375cb721b2a08cc7f0",
+      "effective": "032ac077aef342f13facfd9fb236c3ecaef72759f51bb2d4f7abe0f263e9c359"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "scroll-ts-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: \"Msg_insert.offsetX\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.offsetY\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocityX\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocityY\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: \"Msg_insert.offsetX\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.offsetY\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocityX\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocityY\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\n"
+  },
+  "scroll-canvas-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "deeb1d2e7a076bb7f27a7d271b4ce77be71c7f546482c20b15fabe1256b17658",
+      "facade": "1a727966025c7a8e4336602b04d4add3ca5b4830fbdf6f13f317dc53b3e2bf87",
+      "profile": "0f43184b2acc21f1f462169ad4d431346de8a34f3b125706a37b88b419277530",
+      "effective": "559520b54054b9e690f2b69d5e49748b62aa58f1c9c123a51fed5931a490693a"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "scroll-canvas-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: \"Msg_insert.offset_x\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.offset_y\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocity_x\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocity_y\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: \"Msg_insert.offset_x\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.offset_y\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocity_x\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\ninput.json: error: integer_slots: \"Msg_insert.velocity_y\" is a signed scroll-state axis (offsets and velocities go negative during rubber-banding and upward flicks) — the u64 class cannot carry those values; keep offset and velocity fields i64 or f64\n"
+  },
+  "scroll-old-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "61e6638044828a0f208a10e080bcfd0d9139f8ccfc28acabe05348be99a800f5",
+      "facade": "82c57935e90dd266775cfd9f974ce2483b2d03be4106da4dbbaf835a3ec7afbb",
+      "profile": "c12b8d2ac753137c27ac245e6bd4934a72416e6a2830d6d55a2169263d21d0a3",
+      "effective": "23e1910dc1b8c092e1364892b38585a66014d11e5aabf0afc3bf7727430fdeb2"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "scroll-old-true": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "8b0629e6dd52b9414625027edb60c96f5156f76a0e4fdd888c3acfb8470b7b4b",
+      "facade": "05fa6cf9cdd033217f988a875ea8371c1e9138344a89f0012486b7d492fd12ce",
+      "profile": "d8db3ad1599c39e6a3562c38b52f747b158953055651930a24da7fa880e93672",
+      "effective": "2890beed9d6cc5d7a5c6e5b6075549e17d61c3b16ba4d8e222ed9039c6612476"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "scroll-mixed-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "d7eae851e88b74cca41d626625bf159712ddeaeb38cb4fec5638609ad24a94b1",
+      "facade": "4c5c886a84df5c148124d3950bbaf03ca04a5454071ca62181fcafd72c829228",
+      "profile": "070317e31fc5e6ce1dab7487037c4868a45698bf1801124c9f96c652222dc4f1",
+      "effective": "ad295ba81a3a8ed891ca331f9cb6f3e62f7a16450a56a68d28fd2ba3b580aa82"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "scroll-mixed-true": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "1e904313ccedcd81a69f9e427005957cf0cbb61ab78e9b049cda97c869fd719e",
+      "facade": "4932be94147f207c3c2159602f99f4ab1a36846dbf456a73ef7a7455362b5d8c",
+      "profile": "30403a9c5d5f89e6ffadbe2a5307863ee9bdccc2ad3386b8413e9b2fcbc833be",
+      "effective": "54152f23189324922e921a1dada03ffdd29e58813a5dc8c6d13cd638be53ecca"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "facade-name-": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[0].fields[2].type.name: expected a non-empty string\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[0].fields[2].type.name: expected a non-empty string\n"
+  },
+  "facade-name-_": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"_\" is the discard spelling in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"_\" is the discard spelling in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-1Type": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"1Type\" starts with a digit — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"1Type\" starts with a digit — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-with-dash": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"with-dash\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"with-dash\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-$Type": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"$Type\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"$Type\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-struct": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"struct\" is a keyword in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"struct\" is a keyword in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-return": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"return\" is a keyword in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"return\" is a keyword in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-f64": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"f64\" is a primitive type name in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"f64\" is a primitive type name in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-u7": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"u7\" is a primitive type name in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"u7\" is a primitive type name in the compiled module — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-name-Uint8Array": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"Uint8Array\" shadows the ambient byte type every encoder in the generated facade uses; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"Uint8Array\" shadows the ambient byte type every encoder in the generated facade uses; rename the type in the core source\n"
+  },
+  "facade-name-Buffer": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"Buffer\" shadows the ambient buffer type the generated f64 codec uses; rename the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"Buffer\" shadows the ambient buffer type the generated f64 codec uses; rename the type in the core source\n"
+  },
+  "facade-name-init": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"init\" collides with a declaration the generated facade itself must make; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"init\" collides with a declaration the generated facade itself must make; rename it in the core source\n"
+  },
+  "facade-name-nsc_core_test": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"nsc_core_test\" collides with the facade's reserved nsc name space; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"nsc_core_test\" collides with the facade's reserved nsc name space; rename it in the core source\n"
+  },
+  "facade-name-nscfValue": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"nscfValue\" collides with the facade's reserved nsc name space; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"nscfValue\" collides with the facade's reserved nsc name space; rename it in the core source\n"
+  },
+  "facade-name-é": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: type name \"é\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: type name \"é\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end (TypeScript source, then the compiled module, which takes identifiers verbatim); rename it in the core source\n"
+  },
+  "facade-helper-Math": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"Math\" shadows an ambient value the generated facade calls; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"Math\" shadows an ambient value the generated facade calls; rename it in the core source\n"
+  },
+  "facade-helper-String": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"String\" shadows an ambient value the generated facade calls; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"String\" shadows an ambient value the generated facade calls; rename it in the core source\n"
+  },
+  "facade-helper-Error": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"Error\" shadows an ambient value the generated facade calls; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"Error\" shadows an ambient value the generated facade calls; rename it in the core source\n"
+  },
+  "facade-helper-dispatch_void": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"dispatch_void\" collides with a declaration the generated facade itself must export; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"dispatch_void\" collides with a declaration the generated facade itself must export; rename it in the core source\n"
+  },
+  "facade-helper-abi_frame_msg": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"abi_frame_msg\" collides with a declaration the generated facade itself must export; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"abi_frame_msg\" collides with a declaration the generated facade itself must export; rename it in the core source\n"
+  },
+  "facade-helper-$helper": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"$helper\" is not declarable as an exported function in both pipeline languages; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"$helper\" is not declarable as an exported function in both pipeline languages; rename it in the core source\n"
+  },
+  "facade-helper-nscfHelp": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"nscfHelp\" takes the facade's reserved nsc name space; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"nscfHelp\" takes the facade's reserved nsc name space; rename it in the core source\n"
+  },
+  "facade-helper-with-dash": {
+    "status": 1,
+    "diagnostics": "input.json: error: model_helpers: helper \"with-dash\" is not declarable as an exported function in both pipeline languages; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: model_helpers: helper \"with-dash\" is not declarable as an exported function in both pipeline languages; rename it in the core source\n"
+  },
+  "facade-missing-origin": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: the model declaration carries no authored type-origin fact — this sidecar predates facade metadata; regenerate it with the current compiler before requesting --facade, --profile, or --check\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the model declaration carries no authored type-origin fact — this sidecar predates facade metadata; regenerate it with the current compiler before requesting --facade, --profile, or --check\n"
+  },
+  "facade-missing-member": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"label_set\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"label_set\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\n"
+  },
+  "facade-kind-member": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"label_set\" names its payload member \"kind\", the discriminator's own spelling — the constructed arm object would declare it twice; rename the member in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"label_set\" names its payload member \"kind\", the discriminator's own spelling — the constructed arm object would declare it twice; rename the member in the core source\n"
+  },
+  "facade-kind-flattened": {
+    "status": 1,
+    "diagnostics": "input.json: error: msg.arms: arm \"insert\" flattens a field spelled \"kind\" beside the message discriminator of the same name; rename the field in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: msg.arms: arm \"insert\" flattens a field spelled \"kind\" beside the message discriminator of the same name; rename the field in the core source\n"
+  },
+  "facade-generic": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: compiler-generated table type \"Box__f64\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: compiler-generated table type \"Box__f64\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n"
+  },
+  "facade-private-record": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "2b0e1ed312e9d53761ed919fccdf55f923393cb294af5a0a81e30350dc841565",
+      "facade": "d357fb82f1036922b1b4d51f572dd5da02d8a7ea03257b654191f5eff1ad410f",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "c8c04b76b135a651663aa560b078c003d910c7a8270592bd609e0e24232a6e77"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "facade-other-origin": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "fff756d287695585876524f2457c96e1f286e349814e8e4e438ec70b454a4d86",
+      "facade": "341617692a8ffa46aae14c33e5044e2d44ddf3071e73269a0ccf35507d54757e",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "c88b77ffd2a7f94149fac34b32756143297de3c1cff8c4c73bef325fc5fb55b7"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "facade-value-scalars": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "7d1ac25a1c0c26d0fa0077d753079709f280b8becc9cb4822bd5d09e50967415",
+      "facade": "d5d4e4ef3ad6f153b45bd9e1ca51286335343822c22802b7a5ca363e9a6506e0",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "3e4dd8d24c30ec88a6c7c3b342f4392ab95cd102ae4581f9e8e97c6cc072660b"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "facade-value-heap": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: \"Nested\" is a value-stored record the model keeps, but field \"flag\" is not a scalar — the compiled projection commits value records shallowly, so heap-backed fields would dangle across frames; store \"Nested\" by reference in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: \"Nested\" is a value-stored record the model keeps, but field \"flag\" is not a scalar — the compiled projection commits value records shallowly, so heap-backed fields would dangle across frames; store \"Nested\" by reference in the core source\n"
+  },
+  "facade-value-sequence": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: a model sequence holds \"Nested\" by value — sequences the model keeps carry reference-stored records (the compiled projection has no by-value sequence commit); store \"Nested\" by reference in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: a model sequence holds \"Nested\" by value — sequences the model keeps carry reference-stored records (the compiled projection has no by-value sequence commit); store \"Nested\" by reference in the core source\n"
+  },
+  "facade-mixed-storage": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"inline\" is a keyword in the compiled module — the facade must stay declarable end to end; rename it in the core source\ninput.json: error: types: \"Nested\" is stored by reference at one site and by value at another — the projection states storage once per declaration, so one record cannot say both; split the type in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"inline\" is a keyword in the compiled module — the facade must stay declarable end to end; rename it in the core source\ninput.json: error: types: \"Nested\" is stored by reference at one site and by value at another — the projection states storage once per declaration, so one record cannot say both; split the type in the core source\n"
+  },
+  "facade-nested-optional": {
+    "status": 1,
+    "diagnostics": "input.json: error: types.structs[0].fields[1].type: a nested optional has no TypeScript projection — one null carries one absence level, and the source language cannot author a second; flatten the state in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types.structs[0].fields[1].type: a nested optional has no TypeScript projection — one null carries one absence level, and the source language cannot author a second; flatten the state in the core source\n"
+  },
+  "facade-optional-slice": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "89cfe04dacd8fb0996a0460964b5128bd730a667c9edfa6d66010f374a9189f0",
+      "facade": "3bcb89a726f12e6a05b8aeb3c1ba999f22fefc38a1292d3769fa3487da9b8c84",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "6bb0d569e167d5b2237bd49f27cb69741cac1d846fbbc7f6d505923a52246700"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "appearance-false-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "6f1a3bdb4f8ce0290ad86235090634a26239bb71035fcfa13651dde9ba6d9843",
+      "facade": "7e5b6923acba9056ca3693107d013d9c2eb50ef2f188c106b5951367f874ee1c",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "2cce753475c029ffc73cc60d7cf1f1ee129523876c5fb255eebf45cd8507a071"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "appearance-false-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: the appearance arm must carry exactly { colorScheme: a light/dark enum, reduceMotion: bool, highContrast: bool } — the host builds this record by field name\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: the appearance arm must carry exactly { colorScheme: a light/dark enum, reduceMotion: bool, highContrast: bool } — the host builds this record by field name\n"
+  },
+  "appearance-true-false": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: arm \"insert\" carries the named record \"Msg_insert\", which the projection cannot flatten into the arm (the host fills the event's fields directly on the arm) — declare the event's fields inline on the arm in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: arm \"insert\" carries the named record \"Msg_insert\", which the projection cannot flatten into the arm (the host fills the event's fields directly on the arm) — declare the event's fields inline on the arm in the core source\n"
+  },
+  "appearance-true-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.appearance_msg: the appearance arm must carry exactly { colorScheme: a light/dark enum, reduceMotion: bool, highContrast: bool } — the host builds this record by field name\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.appearance_msg: the appearance arm must carry exactly { colorScheme: a light/dark enum, reduceMotion: bool, highContrast: bool } — the host builds this record by field name\n"
+  },
+  "chrome-false-false-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "0de029b48d7eb010dc08c1d0b172d92e82561a7f3af3116d4abceac911be0d27",
+      "facade": "1bf41e3e0097987b179e904f511432f1a94528703b4e5416dfee9a6335c91ea6",
+      "profile": "ec0568fef7d863619d2b111661db31fe8e8e53dc0d131da2a9cf5a033c45b707",
+      "effective": "ee84a39065a847b4e3bcb83d919058a6b28b14597c1107665fd5d30a110de55e"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "chrome-false-false-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n"
+  },
+  "chrome-false-true-false": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\n"
+  },
+  "chrome-false-true-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\ninput.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\ninput.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n"
+  },
+  "chrome-true-false-false": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: arm \"insert\" carries the named record \"Msg_insert\", which the projection cannot flatten into the arm (the host fills the event's fields directly on the arm) — declare the event's fields inline on the arm in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: arm \"insert\" carries the named record \"Msg_insert\", which the projection cannot flatten into the arm (the host fills the event's fields directly on the arm) — declare the event's fields inline on the arm in the core source\n"
+  },
+  "chrome-true-false-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n"
+  },
+  "chrome-true-true-false": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\n"
+  },
+  "chrome-true-true-true": {
+    "status": 1,
+    "diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\ninput.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: channels.chrome_msg: the chrome arm must carry exactly { insets: top/right/bottom/left numbers, buttons: x/y/width/height numbers, tabsProjected: bool } — the host builds this record by field name\ninput.json: error: integer_slots: \"Buttons.x\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\ninput.json: error: integer_slots: \"Buttons.y\" is the window-control cluster's position, reported in signed content coordinates — the u64 class cannot carry it; keep buttons x and y i64 or f64\n"
+  },
+  "flattened-union-record": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "b9c624eb4609c7d5218bd5c2bebbbed2848c2baf175f94d1840a85a15a08693a",
+      "facade": "a45a7e9954584a8b76bad71db9c67c9d427a2ab77ee6381bf327624cac0a9825",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "6b2fd655f928415ca0de8b0ffb97c886cbdf08ad727072764ccb8563b58d3b65"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "nested-synthesized-record": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: compiler-generated table type \"Model_nested\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: compiler-generated table type \"Model_nested\" has no authored TypeScript declaration the facade can name — generic instantiations cannot cross the compiled-core contract surface yet; replace the contract-facing generic with an authored concrete record\n"
+  },
+  "integer-helper-return": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "3bf4a036a163db21da7562e6c3abb28babeea14adb3287686b7a07d4d72b75df",
+      "facade": "19e03e6b2b341100acb3289aad30dd75a34f8c211f9023417d436ed0ecf127d7",
+      "profile": "89da3a9e0cbecccd40f4e2fcb727a6d7d8fdea3554c9dd481e160047528ea112",
+      "effective": "8f76bf39c4ebdc431c00154e4627155fbecf34872644ec2006f42f80c8ba814a"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "additive-fields-and-demotion": {
+    "status": 0,
+    "diagnostics": "input.json: warning: future_contract: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].future_table: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[0].future_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "2898c7c9f55f1a0882066c1175a61eb3b2cb032fc13c24fab0f7eb6a577b92d6"
+    },
+    "check_status": 0,
+    "check_diagnostics": "input.json: warning: future_contract: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].future_table: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[0].future_field: unknown field ignored (an emitter newer than this reader may emit additive facts)\n"
+  },
+  "f64-demotion": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "6111494343efbc7fad7979c620125d3cc9a6767e9ad4ccfefbfe510cd448a8a1",
+      "facade": "867131eb9ba622881bfee52b16f0ad915cb6220930079fd29f72699b10e14e94",
+      "profile": "56dc6924d22b611bc74d5afe0a7b525f00ed73a66f7bc15c52a67e1a85c5745a",
+      "effective": "8c3b3524a5ed4ba3d6eb3937f9d8fae0a6789b6f1a6ccf179d931a9974b2c784"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "f64-missing": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Model.absent names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 2,
+    "check_diagnostics": "corewire: --f64-slot Model.absent names no attested integer slot of this contract — a misspelling would silently demote nothing; check the contract's integer_slots\n"
+  },
+  "f64-message": {
+    "status": 2,
+    "diagnostics": "corewire: --f64-slot Msg.bump does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 2,
+    "check_diagnostics": "corewire: --f64-slot Msg.bump does not name a record field slot (Container.field) — only record-field slots demote today; a message-arm or helper slot demotion needs its own emitter support\n"
+  },
+  "legacy-mirror": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "6c4c405218fac014b871abb1843bd16a001e14b89e1254392ead39d4f30aa767"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: the model declaration carries no authored type-origin fact — this sidecar predates facade metadata; regenerate it with the current compiler before requesting --facade, --profile, or --check\ninput.json: error: msg.arms: arm \"label_set\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\n"
+  }
+}

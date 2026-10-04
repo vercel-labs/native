@@ -6,6 +6,9 @@ pub fn profileArchive(b: *std.Build, sdk: *std.Build, node: []const u8) std.Buil
     _ = source.addCopyFile(sdk.path("tools/corewire/emit_profile.ts"), "emit_profile.ts");
     _ = source.addCopyFile(sdk.path("tools/corewire/emit_service.ts"), "emit_service.ts");
     _ = source.addCopyFile(sdk.path("tools/corewire/service_templates.ts"), "service_templates.ts");
+    for ([_][]const u8{ "core_contract.ts", "core_projection.ts", "core_vocabulary.ts", "core_policy.ts" }) |file| {
+        _ = source.addCopyFile(sdk.path(b.fmt("tools/corewire/{s}", .{file})), file);
+    }
     _ = source.addCopyFile(sdk.path("tools/corewire/profile_library.json"), "profile_library.json");
     const compile = b.addSystemCommand(&.{node});
     compile.setName("native corewire projections (scriptc)");

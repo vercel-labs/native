@@ -3,6 +3,8 @@
 // Fixed key order and whitespace preserve the existing profile bytes.
 
 import { generateServices as serviceGenerate, validateServices as serviceValidate } from "./emit_service.ts";
+import { evaluateCorePolicy } from "./core_policy.ts";
+export function corePolicy(input: string, phase: string): string { return evaluateCorePolicy(input, phase); }
 export function generateServices(input: string, projection: string, optimization: string): string {
   return serviceGenerate(input, projection, optimization);
 }
