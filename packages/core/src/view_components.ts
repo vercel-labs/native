@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 28) return nscvSurfaceDismissal(request);
   if (request[0] === 27) return nscvTooltipPresentation(request);
   if (request[0] === 26) return nscvTooltipReconcile(request);
   if (request[0] === 25) return nscvTooltipPointer(request);
@@ -246,6 +247,40 @@ function nscvTooltipPresentation(request: Uint8Array): Uint8Array {
   if (request.length !== 3 || request[2]! > 3) throw new Error("invalid tooltip presentation facts");
   const result = new Uint8Array(1);
   result[0] = request[2] === 1 ? (stage === 1 ? 5 : 14) : 0;
+  return result;
+}
+
+/** Surface dismissal. Tag 28, stage, native containment facts.
+ * 0: present/hidden -> dismiss. 1: route-in-surface/anchored/anchor-present/
+ * route-in-anchor -> outside dismissal. 2: focus-in-surface -> return focus.
+ * 3: ring/hover/press descendants AFTER focus return -> clear ring (1),
+ * keyboard provenance (2), hover (4), cursor (8), and press (16).
+ * 4: u16 listener count and descendant bytes -> copied keep flags, at most
+ * the native 32-entry hover depth. Native retains identities and commits.
+ */
+function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
+  if (request.length < 3 || request[1]! > 4) throw new Error("invalid surface dismissal request");
+  const stage = request[1]!;
+  if (stage === 4) {
+    if (request.length < 4) throw new Error("invalid surface dismissal request");
+    const count = request[2]! | request[3]! << 8;
+    if (count > 32 || request.length !== 4 + count) throw new Error("invalid surface dismissal count");
+    const result = new Uint8Array(count);
+    for (let index = 0; index < count; index++) {
+      const descendant = request[4 + index]!;
+      if (descendant > 1) throw new Error("invalid surface dismissal facts");
+      result[index] = descendant === 0 ? 1 : 0;
+    }
+    return result;
+  }
+  const limit = stage === 0 ? 3 : stage === 1 ? 15 : stage === 2 ? 1 : 7;
+  if (request.length !== 3 || request[2]! > limit) throw new Error("invalid surface dismissal facts");
+  const facts = request[2]!;
+  const result = new Uint8Array(1);
+  result[0] = stage === 0 ? (facts === 1 ? 1 : 0) :
+    stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
+    stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
+      ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
   return result;
 }
 

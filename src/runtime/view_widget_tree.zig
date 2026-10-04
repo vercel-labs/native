@@ -579,6 +579,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // tooltip intent machine keeps owning tooltip dismissal.
             const surface_index = focused_surface_index orelse
                 canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .interactive) orelse return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const anchor = if (canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))
+                    self.widget_layout_nodes[surface_index].parent_index
+                else
+                    null;
+                const facts = @as(u8, @intFromBool(self.canvasWidgetRouteDescendsFromIndex(route, surface_index))) |
+                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))) << 1) |
+                    (@as(u8, @intFromBool(anchor != null)) << 2) |
+                    (@as(u8, @intFromBool(if (anchor) |index| self.canvasWidgetRouteDescendsFromIndex(route, index) else false)) << 3);
+                if (compiledCanvasSurfaceDismissalAction(policy, 1, facts) == 0) return null;
+                return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+            }
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
             // Clicking the ANCHOR region of an anchored surface (the
             // trigger, or the stack that wraps trigger + surface) is the
@@ -594,6 +606,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn dismissCanvasWidgetSurfaceAtIndex(self: *RuntimeView, surface_index: usize) anyerror!?CanvasWidgetSurfaceDismissal {
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const present = surface_index < self.widget_layout_node_count;
+                const facts = @as(u8, @intFromBool(present)) |
+                    (@as(u8, @intFromBool(present and self.widget_layout_nodes[surface_index].widget.semantics.hidden)) << 1);
+                if (compiledCanvasSurfaceDismissalAction(policy, 0, facts) == 0) return null;
+            }
             if (surface_index >= self.widget_layout_node_count) return null;
             const surface = self.widget_layout_nodes[surface_index].widget;
             if (surface.semantics.hidden) return null;
@@ -641,7 +659,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     }
                 }
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) {
+            const focus_descends = self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index);
+            const return_focus = if (self.canvas_widget_surface_scope_policy) |policy|
+                compiledCanvasSurfaceDismissalAction(policy, 2, @intFromBool(focus_descends)) != 0
+            else
+                focus_descends;
+            if (return_focus) {
                 // A dismissal that swallows the focus returns it to the
                 // surface's own trigger when the surface is anchored (the
                 // Escape-closes-the-picker flow keeps the keyboard on the
@@ -654,22 +677,48 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // reveal — here or at a later layout adoption.
                 self.canvas_widget_focus_visible_keyboard = false;
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index)) {
-                self.canvas_widget_focus_visible_id = 0;
-                self.canvas_widget_focus_visible_keyboard = false;
-            }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index)) {
-                self.canvas_widget_hovered_id = 0;
-                self.canvas_widget_cursor = .arrow;
-            }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index)) self.canvas_widget_pressed_id = 0;
+            // Query the current ring only AFTER focus return. The returned
+            // anchor can live outside the hidden surface; an earlier fact
+            // would erase its newly returned ring.
+            const cleanup_facts = @as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index))) |
+                (@as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index))) << 1) |
+                (@as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index))) << 2);
+            const cleanup = if (self.canvas_widget_surface_scope_policy) |policy|
+                compiledCanvasSurfaceDismissalAction(policy, 3, cleanup_facts)
+            else
+                @as(u8, if ((cleanup_facts & 1) != 0) 3 else 0) |
+                    @as(u8, if ((cleanup_facts & 2) != 0) 12 else 0) |
+                    @as(u8, if ((cleanup_facts & 4) != 0) 16 else 0);
+            if ((cleanup & 1) != 0) self.canvas_widget_focus_visible_id = 0;
+            if ((cleanup & 2) != 0) self.canvas_widget_focus_visible_keyboard = false;
+            if ((cleanup & 4) != 0) self.canvas_widget_hovered_id = 0;
+            if ((cleanup & 8) != 0) self.canvas_widget_cursor = .arrow;
+            if ((cleanup & 16) != 0) self.canvas_widget_pressed_id = 0;
             // Hover-Msg listeners inside the dismissed surface owe their
             // leave edge — the surface is gone from under the pointer;
             // listeners outside it keep standing (the wash rule).
             {
+                var listener_actions: [canvas.max_widget_depth]u8 = undefined;
+                if (self.canvas_widget_surface_scope_policy) |policy| {
+                    const count = self.canvas_widget_hover_msg_chain_len;
+                    var request: [4 + canvas.max_widget_depth]u8 = undefined;
+                    request[0..2].* = .{ 28, 4 };
+                    std.mem.writeInt(u16, request[2..4], @intCast(count), .little);
+                    for (self.canvas_widget_hover_msg_chain[0..count], 0..) |id, index|
+                        request[4 + index] = @intFromBool(self.canvasWidgetIdDescendsFromIndex(id, surface_index));
+                    if (policy(request[0 .. 4 + count], listener_actions[0..count]) != count)
+                        @panic("invalid compiled surface listener result");
+                    for (listener_actions[0..count]) |action| {
+                        if (action > 1) @panic("invalid compiled surface listener action");
+                    }
+                }
                 var kept: usize = 0;
-                for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
-                    if (self.canvasWidgetIdDescendsFromIndex(id, surface_index)) continue;
+                for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len], 0..) |id, index| {
+                    const keep = if (self.canvas_widget_surface_scope_policy != null)
+                        listener_actions[index] != 0
+                    else
+                        !self.canvasWidgetIdDescendsFromIndex(id, surface_index);
+                    if (!keep) continue;
                     self.canvas_widget_hover_msg_chain[kept] = id;
                     kept += 1;
                 }
@@ -679,6 +728,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return .{ .id = surface.id, .dirty = dirty };
+        }
+
+        fn compiledCanvasSurfaceDismissalAction(policy: *const fn ([]const u8, []u8) usize, stage: u8, facts: u8) u8 {
+            const request = [3]u8{ 28, stage, facts };
+            var output: [1]u8 = undefined;
+            if (policy(&request, &output) != output.len or output[0] > @as(u8, if (stage == 3) 31 else 1))
+                @panic("invalid compiled surface dismissal result");
+            return output[0];
         }
 
         /// Which anchored dismissible surfaces a lookup means to see. A

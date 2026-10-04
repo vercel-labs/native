@@ -1357,3 +1357,27 @@ test("tooltip presentation preserves authored nodes and asymmetric stale slots",
     [27, 0, 0, 0, 0], [27, 0, 1, 4, 0], [27, 0, 1, 0, 16], [27, 1, 4], [27, 2, 4], [27, 1, 0, 0]])
     assert.throws(() => policy(new Uint8Array(bytes)), /tooltip presentation/);
 });
+
+test("surface dismissal preserves trigger shielding and post-return cleanup", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<tooltip anchor="below">Hint</tooltip>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const action = (stage: number, facts: number) => Array.from(policy(new Uint8Array([28, stage, facts])));
+  for (let facts = 0; facts < 4; facts++) assert.deepEqual(action(0, facts), [facts === 1 ? 1 : 0]);
+  for (let facts = 0; facts < 16; facts++)
+    assert.deepEqual(action(1, facts), [(facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0]);
+  assert.deepEqual(action(2, 0), [0]); assert.deepEqual(action(2, 1), [1]);
+  assert.deepEqual(action(3, 0), [0]); // Returned ring lives outside the surface.
+  assert.deepEqual(action(3, 1), [3]); // A surviving internal ring spends keyboard provenance.
+  assert.deepEqual(action(3, 2), [12]); // Hover cleanup also restores the arrow cursor.
+  assert.deepEqual(action(3, 4), [16]); assert.deepEqual(action(3, 7), [31]);
+  const request = new Uint8Array(36);
+  request.set([28, 4, 32, 0]);
+  for (let index = 0; index < 32; index++) request[4 + index] = index % 2;
+  assert.deepEqual(Array.from(policy(request)), Array.from({ length: 32 }, (_, index) => index % 2 === 0 ? 1 : 0));
+  assert.deepEqual(Array.from(policy(new Uint8Array([28, 4, 0, 0]))), []);
+  for (const bytes of [[28], [28, 4, 0], [28, 5, 0], [28, 0, 4], [28, 1, 16], [28, 2, 2],
+    [28, 3, 8], [28, 0, 0, 0], [28, 4, 33, 0], [28, 4, 1, 0], [28, 4, 1, 0, 2]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /surface dismissal/);
+});

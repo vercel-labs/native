@@ -6748,3 +6748,344 @@ test "compiled tooltip presentation preserves rejection boundaries for every ret
     }
     core.rt.frameReset();
 }
+
+test "compiled surface dismissal preserves borrowed cycle bytes and full listener capacity" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    for (0..4) |stage| {
+        const limit: usize = if (stage == 0) 4 else if (stage == 1) 16 else if (stage == 2) 2 else 8;
+        for (0..limit) |facts| {
+            var result: [1]u8 = undefined;
+            try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 28, @intCast(stage), @intCast(facts) }, &result));
+            const expected: u8 = switch (stage) {
+                0 => @intFromBool(facts == 1),
+                1 => @intFromBool(facts & 1 == 0 and facts & 14 != 14),
+                2 => @intCast(facts),
+                else => @as(u8, if (facts & 1 != 0) 3 else 0) | @as(u8, if (facts & 2 != 0) 12 else 0) | @as(u8, if (facts & 4 != 0) 16 else 0),
+            };
+            try std.testing.expectEqual(expected, result[0]);
+            try std.testing.expectEqualSlices(u8, copy, borrowed);
+        }
+    }
+    var request: [4 + canvas.max_widget_depth]u8 = undefined;
+    request[0..4].* = .{ 28, 4, canvas.max_widget_depth, 0 };
+    var result: [canvas.max_widget_depth]u8 = undefined;
+    for (0..16) |cycle| {
+        for (request[4..], 0..) |*fact, index| fact.* = @intCast((index + cycle) % 2);
+        try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&request, &result));
+        for (result, 0..) |keep, index| try std.testing.expectEqual(@as(u8, @intFromBool((index + cycle) % 2 == 0)), keep);
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    }
+    var empty: [0]u8 = .{};
+    try std.testing.expectEqual(@as(usize, 0), core.nativeSurfaceScopePolicy(&.{ 28, 4, 0, 0 }, &empty));
+    core.rt.frameReset();
+    for (result, 0..) |keep, index| try std.testing.expectEqual(@as(u8, @intFromBool((index + 15) % 2 == 0)), keep);
+}
+
+test "compiled surface dismissal preserves complete cleanup and semantics failure boundaries" {
+    const Dismissal = struct { id: canvas.ObjectId, dirty: geometry.RectF };
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const Probe = struct {
+        var stages: [8]u8 = undefined;
+        var len: usize = 0;
+        fn policy(request: []const u8, response: []u8) usize {
+            if (request[0] == 28) {
+                stages[len] = request[1];
+                len += 1;
+            }
+            return core.nativeSurfaceScopePolicy(request, response);
+        }
+    };
+    const State = struct {
+        ids: [8]u64,
+        clocks: [4]u64,
+        keyboard: bool,
+        from_focus: bool,
+        cursor: native_sdk.platform.Cursor,
+        chain: [canvas.max_widget_depth]canvas.ObjectId,
+        chain_len: usize,
+        nodes: [6]canvas.WidgetLayoutNode,
+        semantics: [6]canvas.WidgetSemanticsNode,
+        semantic_len: usize,
+        dirty: [8]geometry.RectF,
+        dirty_len: usize,
+        fn read(v: anytype, runtime: anytype) @This() {
+            var state: @This() = undefined;
+            state.ids = .{ v.canvas_widget_focused_id, v.canvas_widget_focus_visible_id, v.canvas_widget_hovered_id, v.canvas_widget_pressed_id, v.canvas_tooltip_armed_id, v.canvas_tooltip_armed_owner_id, v.canvas_tooltip_shown_id, v.canvas_tooltip_shown_owner_id };
+            state.clocks = .{ v.canvas_tooltip_deadline_ns, v.canvas_tooltip_warm_until_ns, v.canvas_tooltip_transit_deadline_ns, v.widget_revision };
+            state.keyboard = v.canvas_widget_focus_visible_keyboard;
+            state.from_focus = v.canvas_tooltip_shown_from_focus;
+            state.cursor = v.canvas_widget_cursor;
+            state.chain_len = v.canvas_widget_hover_msg_chain_len;
+            @memcpy(&state.chain, &v.canvas_widget_hover_msg_chain);
+            @memcpy(&state.nodes, v.widget_layout_nodes[0..6]);
+            state.semantic_len = v.widget_semantics_node_count;
+            @memcpy(state.semantics[0..state.semantic_len], v.widget_semantics_nodes[0..state.semantic_len]);
+            state.dirty_len = runtime.dirty_region_count;
+            @memcpy(state.dirty[0..state.dirty_len], runtime.dirty_regions[0..state.dirty_len]);
+            return state;
+        }
+        fn expect(expected: @This(), actual: @This()) !void {
+            try std.testing.expectEqualDeep(expected.ids, actual.ids);
+            try std.testing.expectEqualDeep(expected.clocks, actual.clocks);
+            try std.testing.expectEqual(expected.keyboard, actual.keyboard);
+            try std.testing.expectEqual(expected.from_focus, actual.from_focus);
+            try std.testing.expectEqual(expected.cursor, actual.cursor);
+            try std.testing.expectEqual(expected.chain_len, actual.chain_len);
+            try std.testing.expectEqualDeep(expected.chain, actual.chain);
+            try std.testing.expectEqualDeep(expected.nodes, actual.nodes);
+            try std.testing.expectEqual(expected.semantic_len, actual.semantic_len);
+            try std.testing.expectEqualDeep(expected.semantics[0..expected.semantic_len], actual.semantics[0..actual.semantic_len]);
+            try std.testing.expectEqual(expected.dirty_len, actual.dirty_len);
+            try std.testing.expectEqualDeep(expected.dirty[0..expected.dirty_len], actual.dirty[0..actual.dirty_len]);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "surface-dismissal-parity", .source = native_sdk.WebViewSource.html("<h1>Surfaces</h1>"), .event_fn = NoEvents.event });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const v = &harness.runtime.views[0];
+    const base: canvas.ObjectId = 0xffff_ffff_ffff_ff00;
+    const ids = [_]canvas.ObjectId{ 0, base + 3, base + 5, std.math.maxInt(u64) };
+    const kinds = [_]canvas.WidgetKind{ .dropdown_menu, .popover, .tooltip, .dialog };
+    var comparisons: usize = 0;
+    for (kinds) |kind| for (0..4) |variant| for (0..64) |slots| {
+        var expected: State = undefined;
+        var expected_result: ?Dismissal = null;
+        for (0..2) |backend| {
+            core.rt.frameReset();
+            const content = [_]canvas.Widget{.{ .id = base + 3, .kind = .button, .text = "Inside" }};
+            const children = [_]canvas.Widget{
+                .{ .id = base + 1, .kind = .button, .text = "Anchor", .state = .{ .disabled = variant == 1 } },
+                .{ .id = base + 2, .kind = .dropdown_menu, .text = "Surface", .layout = .{ .anchor = if (variant == 2) null else .{ .placement = .below } }, .children = &content },
+                .{ .id = base + 4, .kind = .button, .text = "Outside" },
+                .{ .id = base + 5, .kind = .button, .text = "Other" },
+            };
+            var nodes: [6]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .id = base, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+            v.canvas_widget_surface_scope_policy = null;
+            v.canvas_widget_tooltip_policy = null;
+            v.canvas_widget_focus_return_policy = null;
+            v.canvas_widget_focused_id = 0;
+            v.canvas_tooltip_armed_id = 0;
+            v.canvas_tooltip_shown_id = 0;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            try std.testing.expectEqual(@as(usize, 6), v.widget_layout_node_count);
+            v.widget_layout_nodes[2].widget.kind = kind;
+            v.widget_layout_nodes[2].widget.semantics.hidden = false;
+            v.canvas_widget_focused_id = ids[slots % 4];
+            v.canvas_widget_focus_visible_id = ids[(slots / 4) % 4];
+            v.canvas_widget_hovered_id = ids[(slots / 16) % 4];
+            v.canvas_widget_pressed_id = ids[(slots + 1) % 4];
+            v.canvas_widget_focus_visible_keyboard = true;
+            v.canvas_widget_cursor = .pointing_hand;
+            v.canvas_tooltip_armed_id = base + 2;
+            v.canvas_tooltip_armed_owner_id = base + 1;
+            v.canvas_tooltip_shown_id = base + 2;
+            v.canvas_tooltip_shown_owner_id = base + 1;
+            v.canvas_tooltip_shown_from_focus = true;
+            v.canvas_tooltip_deadline_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_warm_until_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_transit_deadline_ns = std.math.maxInt(u64);
+            for (&v.canvas_widget_hover_msg_chain, 0..) |*id, index| id.* = ids[index % ids.len];
+            v.canvas_widget_hover_msg_chain_len = canvas.max_widget_depth;
+            v.widget_revision = 100;
+            harness.runtime.dirty_region_count = 0;
+            if (variant == 3) v.widget_layout_nodes[5].depth = canvas.max_widget_depth;
+            v.canvas_widget_surface_scope_policy = if (backend == 0) null else Probe.policy;
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+            v.canvas_widget_focus_return_policy = if (backend == 0) null else core.nativeFocusReturnPolicy;
+            Probe.len = 0;
+            var result: ?Dismissal = null;
+            if (variant == 3) {
+                try std.testing.expectError(error.WidgetDepthExceeded, v.dismissCanvasWidgetSurfaceAtIndex(2));
+                try std.testing.expectEqual(@as(u64, 100), v.widget_revision);
+                try std.testing.expect(v.widget_layout_nodes[2].widget.semantics.hidden);
+            } else {
+                const dismissed = try v.dismissCanvasWidgetSurfaceAtIndex(2);
+                result = if (dismissed) |value| .{ .id = value.id, .dirty = value.dirty } else null;
+                try std.testing.expect(result != null);
+                try std.testing.expectEqual(@as(u64, 101), v.widget_revision);
+            }
+            if (backend == 0) {
+                expected = State.read(v, &harness.runtime);
+                expected_result = result;
+            } else {
+                try State.expect(expected, State.read(v, &harness.runtime));
+                try std.testing.expectEqualDeep(expected_result, result);
+                try std.testing.expectEqualSlices(u8, &.{ 0, 2, 3, 4 }, Probe.stages[0..Probe.len]);
+                comparisons += 1;
+            }
+            v.widget_layout_nodes[5].depth = nodes[5].depth;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 1024), comparisons);
+    // The same callback and copied listener storage survive view compaction.
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "second", v.widgetLayoutTree());
+    harness.runtime.views[1].canvas_widget_surface_scope_policy = Probe.policy;
+    harness.runtime.views[1].canvas_widget_focus_return_policy = core.nativeFocusReturnPolicy;
+    harness.runtime.views[1].canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+    try harness.runtime.closeView(1, "canvas");
+    const compacted = &harness.runtime.views[0];
+    try std.testing.expect(compacted.canvas_widget_surface_scope_policy == Probe.policy);
+    const compacted_surface = compacted.canvasWidgetNodeIndexById(base + 2).?;
+    compacted.widget_layout_nodes[compacted_surface].widget.semantics.hidden = false;
+    const return_id = compacted.canvasWidgetAnchorTriggerFocusId(compacted_surface) orelse 0;
+    compacted.canvas_widget_focused_id = base + 3;
+    compacted.canvas_widget_focus_visible_id = base + 3;
+    compacted.canvas_widget_focus_visible_keyboard = true;
+    compacted.canvas_widget_hovered_id = base + 3;
+    compacted.canvas_widget_pressed_id = base + 3;
+    compacted.canvas_widget_cursor = .pointing_hand;
+    compacted.canvas_widget_hover_msg_chain[0..2].* = .{ base + 3, base + 5 };
+    compacted.canvas_widget_hover_msg_chain_len = 2;
+    Probe.len = 0;
+    const dismissed = (try compacted.dismissCanvasWidgetSurfaceAtIndex(compacted_surface)).?;
+    try std.testing.expectEqual(base + 2, dismissed.id);
+    try std.testing.expectEqual(return_id, compacted.canvas_widget_focused_id);
+    try std.testing.expectEqual(return_id, compacted.canvas_widget_focus_visible_id);
+    try std.testing.expect(!compacted.canvas_widget_focus_visible_keyboard);
+    try std.testing.expectEqual(@as(u64, 0), compacted.canvas_widget_hovered_id);
+    try std.testing.expectEqual(@as(u64, 0), compacted.canvas_widget_pressed_id);
+    try std.testing.expectEqual(native_sdk.platform.Cursor.arrow, compacted.canvas_widget_cursor);
+    try std.testing.expectEqual(@as(usize, 1), compacted.canvas_widget_hover_msg_chain_len);
+    try std.testing.expectEqual(base + 5, compacted.canvas_widget_hover_msg_chain[0]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 2, 3, 4 }, Probe.stages[0..Probe.len]);
+    core.rt.frameReset();
+}
+
+test "compiled outside dismissal preserves anchor toggles, shielding and all callers" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "outside-dismissal-parity", .source = native_sdk.WebViewSource.html("<h1>Outside</h1>"), .event_fn = NoEvents.event });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const v = &harness.runtime.views[0];
+    const base: canvas.ObjectId = 0xffff_ffff_ffff_ff00;
+    var comparisons: usize = 0;
+    for (0..9) |variant| for (0..7) |focus| for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8, std.math.maxInt(usize) }) |route_target| for (0..6) |caller| {
+        var expected_ids: [12]u64 = undefined;
+        var expected_keyboard: bool = false;
+        var expected_cursor: native_sdk.platform.Cursor = .arrow;
+        var expected_from_focus: bool = false;
+        var expected_chain: [canvas.max_widget_depth]canvas.ObjectId = undefined;
+        var expected_chain_len: usize = 0;
+        var expected_nodes: [8]canvas.WidgetLayoutNode = undefined;
+        var expected_semantics: [8]canvas.WidgetSemanticsNode = undefined;
+        var expected_semantic_len: usize = 0;
+        var expected_dismissed: ?canvas.ObjectId = null;
+        var expected_dirty: ?geometry.RectF = null;
+        for (0..2) |backend| {
+            core.rt.frameReset();
+            const items = [_]canvas.Widget{
+                .{ .id = base + 3, .kind = .menu_item, .text = "Inside" },
+                .{ .id = base + 4, .kind = .popover, .text = "Nested shield", .semantics = .{ .hidden = variant & 1 == 0 } },
+            };
+            const anchor = [_]canvas.Widget{
+                .{ .id = base + 2, .kind = .button, .text = "Trigger" },
+                .{ .id = base + 5, .kind = .dropdown_menu, .text = "Menu", .layout = .{ .anchor = if (variant & 2 == 0) .{ .placement = .below } else null }, .children = &items },
+                .{ .id = base + 6, .kind = .tooltip, .text = "Hint", .layout = .{ .anchor = .{ .placement = .above } }, .layer = 500 },
+            };
+            const body = [_]canvas.Widget{
+                .{ .id = base + 1, .kind = .stack, .children = &anchor },
+                .{ .id = base + 7, .kind = .button, .text = "Outside" },
+            };
+            var nodes: [8]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .id = base, .kind = .stack, .children = &body }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+            v.canvas_widget_surface_scope_policy = null;
+            v.canvas_widget_focus_return_policy = null;
+            v.canvas_widget_tooltip_policy = null;
+            v.canvas_widget_focused_id = 0;
+            v.canvas_tooltip_shown_id = 0;
+            v.canvas_tooltip_armed_id = 0;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            v.widget_layout_nodes[3].widget.semantics.hidden = variant & 4 != 0;
+            v.widget_layout_nodes[6].widget.semantics.hidden = false;
+            // Compare first-match full-width aliases on a raw retained tree.
+            if (variant == 7) v.widget_layout_nodes[7].widget.id = base + 2;
+            if (variant == 8) v.widget_layout_nodes[3].widget.id = 0;
+            const focused_id: canvas.ObjectId = switch (focus) {
+                0 => 0,
+                1 => base + 2,
+                2 => base + 3,
+                3 => base + 4,
+                4 => base + 7,
+                5 => std.math.maxInt(u64),
+                else => base + 6,
+            };
+            v.canvas_widget_focused_id = focused_id;
+            v.canvas_widget_focus_visible_id = focused_id;
+            v.canvas_widget_focus_visible_keyboard = true;
+            v.canvas_widget_hovered_id = base + 3;
+            v.canvas_widget_pressed_id = base + 3;
+            v.canvas_widget_cursor = .pointing_hand;
+            for (&v.canvas_widget_hover_msg_chain, 0..) |*id, index| id.* = if (index % 2 == 0) base + 3 else base + 7;
+            v.canvas_widget_hover_msg_chain_len = canvas.max_widget_depth;
+            v.canvas_tooltip_armed_id = base + 6;
+            v.canvas_tooltip_armed_owner_id = base + 2;
+            v.canvas_tooltip_shown_id = base + 6;
+            v.canvas_tooltip_shown_owner_id = base + 2;
+            v.canvas_tooltip_shown_from_focus = true;
+            v.canvas_tooltip_deadline_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_warm_until_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_transit_deadline_ns = std.math.maxInt(u64);
+            v.widget_revision = 100;
+            v.canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+            v.canvas_widget_focus_return_policy = if (backend == 0) null else core.nativeFocusReturnPolicy;
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+            const route = [_]canvas.WidgetEventRouteEntry{.{ .phase = .target, .node_index = route_target, .id = if (route_target < nodes.len) nodes[route_target].widget.id else 0, .kind = .button, .bounds = geometry.RectF.init(0, 0, 10, 10) }};
+            const result = switch (caller) {
+                0 => try v.dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, if (route_target == 0) &.{} else &route),
+                1 => try v.dismissCanvasWidgetSurfaceFromEscape(focused_id),
+                2 => try v.dismissCanvasWidgetMenuSurfaceForFocusDeparture(focused_id),
+                3 => try v.dismissCanvasWidgetSurfaceForTarget(focused_id),
+                4 => try v.dismissCanvasWidgetSurfaceForTargetIndex(route_target),
+                else => try v.dismissCanvasWidgetSurfaceAtIndex(route_target),
+            };
+            const ids = [12]u64{ v.canvas_widget_focused_id, v.canvas_widget_focus_visible_id, v.canvas_widget_hovered_id, v.canvas_widget_pressed_id, v.widget_revision, v.canvas_tooltip_armed_id, v.canvas_tooltip_armed_owner_id, v.canvas_tooltip_shown_id, v.canvas_tooltip_shown_owner_id, v.canvas_tooltip_deadline_ns, v.canvas_tooltip_warm_until_ns, v.canvas_tooltip_transit_deadline_ns };
+            const dismissed = if (result) |value| value.id else null;
+            const dirty = if (result) |value| value.dirty else null;
+            if (backend == 0) {
+                expected_ids = ids;
+                expected_keyboard = v.canvas_widget_focus_visible_keyboard;
+                expected_cursor = v.canvas_widget_cursor;
+                expected_from_focus = v.canvas_tooltip_shown_from_focus;
+                expected_chain = v.canvas_widget_hover_msg_chain;
+                expected_chain_len = v.canvas_widget_hover_msg_chain_len;
+                @memcpy(&expected_nodes, v.widgetLayoutTree().nodes);
+                expected_semantic_len = v.widgetSemantics().len;
+                @memcpy(expected_semantics[0..expected_semantic_len], v.widgetSemantics());
+                expected_dismissed = dismissed;
+                expected_dirty = dirty;
+            } else {
+                try std.testing.expectEqualDeep(expected_ids, ids);
+                try std.testing.expectEqual(expected_keyboard, v.canvas_widget_focus_visible_keyboard);
+                try std.testing.expectEqual(expected_cursor, v.canvas_widget_cursor);
+                try std.testing.expectEqual(expected_from_focus, v.canvas_tooltip_shown_from_focus);
+                try std.testing.expectEqualDeep(expected_chain, v.canvas_widget_hover_msg_chain);
+                try std.testing.expectEqual(expected_chain_len, v.canvas_widget_hover_msg_chain_len);
+                try std.testing.expectEqualDeep(expected_nodes, v.widget_layout_nodes[0..8].*);
+                try std.testing.expectEqualDeep(expected_semantics[0..expected_semantic_len], v.widgetSemantics());
+                try std.testing.expectEqual(expected_dismissed, dismissed);
+                try std.testing.expectEqualDeep(expected_dirty, dirty);
+                comparisons += 1;
+            }
+            v.widget_layout_nodes[7].widget.id = base + 7;
+            v.widget_layout_nodes[3].widget.id = base + 5;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 3780), comparisons);
+    core.rt.frameReset();
+}
