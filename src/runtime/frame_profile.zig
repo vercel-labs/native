@@ -26,6 +26,10 @@ pub const max_frame_profile_samples: usize = 128;
 
 /// The instrumented stage boundaries, in pipeline order.
 pub const FrameProfileStage = enum {
+    /// Effect completion dequeue plus every update/applyMsg in that
+    /// bounded completion batch. Rebuilds caused by the batch remain in
+    /// their existing rebuild/layout stages.
+    effects,
     /// App build fn + tree finalize (`UiApp.rebuild`'s view build).
     rebuild,
     /// Widget tree layout (`layoutWidgetTreeWithTokens`).
@@ -172,10 +176,15 @@ test "frame profile is inert while disabled" {
 
 test "frame profile records stage durations in microseconds" {
     var profile = FrameProfile{ .enabled = true };
+    profile.recordNs(.effects, 750_000);
     profile.recordNs(.layout, 1_500); // 1.5 us -> 1
     profile.recordNs(.layout, 2_000_000); // 2 ms -> 2000
     profile.recordNs(.encode, 42_000);
     try std.testing.expect(profile.hasSamples());
+
+    const effects_stats = profile.stats(.effects);
+    try std.testing.expectEqual(@as(u64, 750), effects_stats.p50_us);
+    try std.testing.expectEqual(@as(u64, 1), effects_stats.total);
 
     const layout_stats = profile.stats(.layout);
     try std.testing.expectEqual(@as(usize, 2), layout_stats.window_len);
