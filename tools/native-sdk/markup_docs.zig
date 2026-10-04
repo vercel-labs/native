@@ -102,6 +102,7 @@ pub const structure_docs = [_]Doc{
 };
 
 pub const attribute_docs = [_]Doc{
+    .{ .name = "command", .doc = "Command name retained with a widget and dispatched by the runtime when the control activates; a literal or one {binding}. Message handlers remain independent." },
     .{ .name = "text", .doc = "Text value for text-bearing elements; a literal or one {binding}." },
     .{ .name = "placeholder", .doc = "Hint text shown while a text entry is empty." },
     .{ .name = "value", .doc = "Value for slider/progress/text entry; a literal or one {binding}." },

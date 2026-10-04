@@ -2500,7 +2500,7 @@ test "compiled split on-resize binds a declared float arm identically to the int
 
 test "compiled and interpreted command strings remain widget data beside message handlers" {
     const ModelT = struct { command: []const u8 };
-    const MsgT = enum { pressed };
+    const MsgT = union(enum) { pressed: void };
     const Ui = canvas.Ui(MsgT);
     const source = "<column><button command=\"run.café\" on-press=\"pressed\">Run</button><select label=\"Picker\" command=\"{command}\"/><text command=\"ignored\">Inert</text></column>";
     const Compiled = canvas.CompiledMarkupView(ModelT, MsgT, source);
