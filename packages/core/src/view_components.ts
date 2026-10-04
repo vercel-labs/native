@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 22) return nscvFocusReturn(request);
   if (request[0] === 21) return nscvSurfaceScope(request);
   if (request[0] === 20) return nscvTabFocus(request);
   if (request[0] === 15) return nscvKeyboardControl(request);
@@ -177,6 +178,43 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
       chosen = entries[targetScope] === 65535 ? target : entries[targetScope]!;
     } else chosen = target;
     break;
+  }
+  const result = new Uint8Array(2);
+  result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+/** Focus return. Tag 22, mode (surface/focused descendant), count u16,
+ * subject index u16. Three-byte nodes: eligible/anchored/dismissible flags,
+ * parent u16. Native supplies exact visibility eligibility and keeps IDs.
+ * Result is one u16 retained index; 65535 means no focus return.
+ */
+function nscvFocusReturn(request: Uint8Array): Uint8Array {
+  if (request.length < 6 || request[1]! > 1) throw new Error("invalid focus return request");
+  const count = request[2]! | request[3]! << 8, subject = request[4]! | request[5]! << 8;
+  if (count > 1024 || request.length !== 6 + count * 3 || subject !== 65535 && subject >= count)
+    throw new Error("invalid focus return table");
+  const flags: number[] = [], parents: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 6 + i * 3, bits = request[at]!, parent = request[at + 1]! | request[at + 2]! << 8;
+    if (bits > 7 || parent !== 65535 && parent >= i) throw new Error("invalid focus return node");
+    flags.push(bits); parents.push(parent);
+  }
+  let surface = subject, chosen = 65535;
+  if (request[1] === 1 && subject !== 65535) {
+    surface = parents[subject]!;
+    while (surface !== 65535 && (flags[surface]! & 6) !== 6) surface = parents[surface]!;
+  }
+  if (surface !== 65535 && (flags[surface]! & 2) !== 0) {
+    const anchor = parents[surface]!;
+    if (anchor !== 65535) {
+      if ((flags[anchor]! & 1) !== 0) chosen = anchor;
+      else {
+        for (let i = 0; i < count; i++) {
+          if (i !== surface && parents[i] === anchor && (flags[i]! & 1) !== 0) { chosen = i; break; }
+        }
+      }
+    }
   }
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;

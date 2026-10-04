@@ -838,6 +838,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Portable anchored-surface selection; native retains paint
             /// facts, identities and dismissal/focus side effects.
             surface_scope_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
+            /// Portable return-target selection for dismissed/unmounted surfaces.
+            focus_return_policy: ?*const fn (request: []const u8, output: []u8) usize = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
             /// window identity alongside. Rebuilt for every open window
@@ -5420,6 +5422,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         if (view.window_id == window_id and std.mem.eql(u8, view.label, label)) {
                             view.canvas_widget_tab_focus_policy = self.options.tab_focus_policy;
                             view.canvas_widget_surface_scope_policy = self.options.surface_scope_policy;
+                            view.canvas_widget_focus_return_policy = self.options.focus_return_policy;
                             break;
                         }
                     }

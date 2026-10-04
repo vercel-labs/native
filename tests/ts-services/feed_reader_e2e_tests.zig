@@ -384,6 +384,7 @@ test "boot parses the built-in sample through the real service child and the mar
     try h.settleBoot();
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_surface_scope_policy == core.nativeSurfaceScopePolicy);
+    try std.testing.expect(h.harness.runtime.views[0].canvas_widget_focus_return_policy == core.nativeFocusReturnPolicy);
 
     const model = Bridge.model();
     try std.testing.expectEqual(@as(usize, 3), model.items.len);
@@ -5219,6 +5220,194 @@ test "compiled Tab traversal matches complete native retained targets" {
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
     try std.testing.expect(harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
     try std.testing.expectEqualDeep(expected, harness.runtime.views[0].canvasWidgetRovingTabTarget(null, .forward));
+}
+
+test "compiled focus return matches native anchors and nearest old-tree ancestry" {
+    const Reference = struct {
+        fn anchor(layout: canvas.WidgetLayoutTree, surface: usize) ?usize {
+            if (surface >= layout.nodes.len or !canvas.widgetIsAnchored(layout.nodes[surface].widget)) return null;
+            const parent = layout.nodes[surface].parent_index orelse return null;
+            if (layout.focusTargetById(layout.nodes[parent].widget.id) != null) return parent;
+            for (layout.nodes, 0..) |node, index| {
+                if (node.parent_index == parent and index != surface and layout.focusTargetById(node.widget.id) != null) return index;
+            }
+            return null;
+        }
+        fn focused(layout: canvas.WidgetLayoutTree, subject: usize) ?usize {
+            var current = layout.nodes[subject].parent_index;
+            while (current) |index| {
+                const widget = layout.nodes[index].widget;
+                if (canvas.widgetIsAnchored(widget) and canvas.widgetKindDismissibleSurface(widget.kind)) return anchor(layout, index);
+                current = layout.nodes[index].parent_index;
+            }
+            return null;
+        }
+    };
+    const kinds = [_]canvas.WidgetKind{ .stack, .button, .popover, .dropdown_menu, .tooltip, .dialog, .menu_item };
+    var comparisons: usize = 0;
+    for (0..64) |variant| {
+        core.rt.frameReset();
+        var nodes: [32]canvas.WidgetLayoutNode = undefined;
+        for (&nodes, 0..) |*node, index| {
+            const parent: ?usize = if (index == 0) null else (variant * 5 + index * 3) % index;
+            const frame = geometry.RectF.init(if ((index + variant) % 7 == 0) 900 else 0, 0, 100, 28);
+            node.* = .{ .widget = .{
+                .id = 0xfedc_ba98_7654_3200 + index,
+                .kind = kinds[(variant + index * 3) % kinds.len],
+                .frame = frame,
+                .state = .{ .disabled = (variant + index) % 5 == 0 },
+                .semantics = .{ .hidden = (variant + index) % 11 == 0, .focusable = (variant + index) % 3 == 0 },
+                .layout = .{ .anchor = if ((variant + index) % 3 == 0) null else .{ .placement = .below } },
+            }, .frame = frame, .parent_index = parent, .depth = if (parent) |p| nodes[p].depth + 1 else 0 };
+        }
+        const layout = canvas.WidgetLayoutTree{ .nodes = &nodes, .root_bounds = geometry.RectF.init(0, 0, 640, 480) };
+        var request: [6 + nodes.len * 3]u8 = undefined;
+        request[0] = 22;
+        std.mem.writeInt(u16, request[2..4], nodes.len, .little);
+        for (nodes, 0..) |node, index| {
+            const at = 6 + index * 3;
+            request[at] = @as(u8, @intFromBool(layout.focusTargetById(node.widget.id) != null)) |
+                (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 1) |
+                (@as(u8, @intFromBool(canvas.widgetKindDismissibleSurface(node.widget.kind))) << 2);
+            std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |p| @intCast(p) else std.math.maxInt(u16), .little);
+        }
+        for (0..nodes.len) |subject| {
+            std.mem.writeInt(u16, request[4..6], @intCast(subject), .little);
+            for (0..2) |mode| {
+                request[1] = @intCast(mode);
+                const expected = if (mode == 0) Reference.anchor(layout, subject) else Reference.focused(layout, subject);
+                var output: [2]u8 = undefined;
+                try std.testing.expectEqual(output.len, core.nativeFocusReturnPolicy(&request, &output));
+                try std.testing.expectEqual(if (expected) |index| @as(u16, @intCast(index)) else std.math.maxInt(u16), std.mem.readInt(u16, &output, .little));
+                comparisons += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4096), comparisons);
+}
+
+test "compiled focus return preserves retained dismissal, unmount and compaction" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const CountPolicy = struct {
+        var calls: usize = 0;
+        var mode: u8 = 255;
+        fn run(request: []const u8, output: []u8) usize {
+            calls += 1;
+            mode = request[1];
+            return core.nativeFocusReturnPolicy(request, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "focus-return-parity", .source = native_sdk.WebViewSource.html("<h1>Focus</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    const item_id: canvas.ObjectId = 0xffff_ffff_ffff_ff04;
+    for (0..32) |variant| {
+        core.rt.frameReset();
+        const content = [_]canvas.Widget{.{ .id = item_id, .kind = .menu_item, .frame = geometry.RectF.init(8, 8, 100, 28) }};
+        const children = [_]canvas.Widget{
+            .{ .id = 0xffff_ffff_ffff_ff02, .kind = .button, .frame = geometry.RectF.init(8, 8, 100, 28), .state = .{ .disabled = variant & 1 != 0 } },
+            .{ .id = 0xffff_ffff_ffff_ff03, .kind = .dropdown_menu, .layout = .{ .anchor = .{ .placement = .below } }, .frame = geometry.RectF.init(8, 40, 220, 100), .children = &content },
+            .{ .id = 0xffff_ffff_ffff_ff05, .kind = .button, .frame = geometry.RectF.init(300, 8, 100, 28), .semantics = .{ .hidden = variant & 4 != 0 }, .state = .{ .disabled = variant & 8 != 0 } },
+        };
+        const body = [_]canvas.Widget{.{ .id = 0xffff_ffff_ffff_ff01, .kind = .stack, .frame = geometry.RectF.init(0, 0, 640, 480), .semantics = .{ .focusable = variant & 2 != 0, .hidden = variant & 16 != 0 }, .children = &children }};
+        var nodes: [6]canvas.WidgetLayoutNode = undefined;
+        const root = canvas.Widget{ .id = 0xffff_ffff_ffff_ff00, .kind = .stack, .children = &body };
+        const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        view.canvas_widget_focused_id = 0;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        for (0..7) |surface| {
+            view.canvas_widget_focus_return_policy = null;
+            const expected = view.canvasWidgetAnchorTriggerFocusId(surface);
+            view.canvas_widget_focus_return_policy = CountPolicy.run;
+            try std.testing.expectEqual(expected, view.canvasWidgetAnchorTriggerFocusId(surface));
+        }
+        // Raw retained queries preserve first-match ID facts even when
+        // an alias is present. Adoption independently rejects duplicates.
+        const alias_index = view.canvasWidgetNodeIndexById(children[2].id).?;
+        view.widget_layout_nodes[alias_index].widget.id = children[0].id;
+        for (0..7) |surface| {
+            view.canvas_widget_focus_return_policy = null;
+            const expected = view.canvasWidgetAnchorTriggerFocusId(surface);
+            view.canvas_widget_focus_return_policy = CountPolicy.run;
+            try std.testing.expectEqual(expected, view.canvasWidgetAnchorTriggerFocusId(surface));
+        }
+        view.widget_layout_nodes[alias_index].widget.id = children[2].id;
+        view.canvas_widget_focus_return_policy = null;
+        const surface_index = view.canvasWidgetNodeIndexById(children[1].id).?;
+        const expected = view.canvasWidgetAnchorTriggerFocusId(surface_index) orelse 0;
+        // Explicit dismissal uses the copied return index, preserving full IDs.
+        view.canvas_widget_focus_return_policy = CountPolicy.run;
+        view.canvas_widget_focused_id = item_id;
+        view.canvas_widget_focus_visible_id = item_id;
+        CountPolicy.calls = 0;
+        const visible = !view.widget_layout_nodes[surface_index].widget.semantics.hidden;
+        _ = try view.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+        const dismissed_focus = if (visible) expected else item_id;
+        try std.testing.expectEqual(dismissed_focus, view.canvas_widget_focused_id);
+        try std.testing.expectEqual(dismissed_focus, view.canvas_widget_focus_visible_id);
+        try std.testing.expect(!view.canvas_widget_focus_visible_keyboard);
+        try std.testing.expectEqual(@as(usize, @intFromBool(visible)), CountPolicy.calls);
+        if (visible) try std.testing.expectEqual(@as(u8, 0), CountPolicy.mode);
+        // Unmount capture walks the old tree before adoption, then revalidates.
+        view.canvas_widget_focused_id = 0;
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        view.canvas_widget_focused_id = item_id;
+        view.canvas_widget_focus_visible_id = item_id;
+        CountPolicy.calls = 0;
+        const remaining = [_]canvas.Widget{ children[0], children[2] };
+        const closed_body = [_]canvas.Widget{.{ .id = body[0].id, .kind = .stack, .frame = body[0].frame, .semantics = body[0].semantics, .children = &remaining }};
+        const closed_layout = try canvas.layoutWidgetTree(.{ .id = root.id, .kind = .stack, .children = &closed_body }, layout.root_bounds.?, &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", closed_layout);
+        try std.testing.expectEqual(expected, view.canvas_widget_focused_id);
+        try std.testing.expectEqual(expected, view.canvas_widget_focus_visible_id);
+        try std.testing.expect(!view.canvas_widget_focus_visible_keyboard);
+        try std.testing.expectEqual(@as(usize, 1), CountPolicy.calls);
+        try std.testing.expectEqual(@as(u8, 1), CountPolicy.mode);
+    }
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "second", view.widgetLayoutTree());
+    harness.runtime.views[1].canvas_widget_focus_return_policy = core.nativeFocusReturnPolicy;
+    try harness.runtime.closeView(1, "canvas");
+    try std.testing.expect(harness.runtime.views[0].canvas_widget_focus_return_policy == core.nativeFocusReturnPolicy);
+}
+
+test "compiled focus return accepts full capacity and preserves borrowed cycle bytes" {
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    const capacity = native_sdk.runtime.max_canvas_widget_nodes_per_view;
+    var request: [6 + capacity * 3]u8 = undefined;
+    request[0] = 22;
+    request[1] = 1;
+    std.mem.writeInt(u16, request[2..4], capacity, .little);
+    std.mem.writeInt(u16, request[4..6], capacity - 1, .little);
+    for (0..capacity) |index| {
+        const at = 6 + index * 3;
+        request[at] = if (index == 0) 1 else 6;
+        std.mem.writeInt(u16, request[at + 1 ..][0..2], if (index == 0) std.math.maxInt(u16) else @intCast(index - 1), .little);
+    }
+    var output: [2]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeFocusReturnPolicy(&request, &output));
+    try std.testing.expectEqual(std.math.maxInt(u16), std.mem.readInt(u16, &output, .little));
+    std.mem.writeInt(u16, request[4..6], 2, .little);
+    for (0..16) |_| {
+        try std.testing.expectEqual(output.len, core.nativeFocusReturnPolicy(&request, &output));
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, &output, .little));
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    }
+    core.rt.frameReset();
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, &output, .little));
+    try std.testing.expectEqual(output.len, core.nativeFocusReturnPolicy(&.{ 22, 0, 0, 0, 255, 255 }, &output));
+    try std.testing.expectEqual(std.math.maxInt(u16), std.mem.readInt(u16, &output, .little));
+    core.rt.frameReset();
 }
 
 test "compiled surface plans match native walks over exact retained paint facts" {

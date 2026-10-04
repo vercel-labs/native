@@ -1016,6 +1016,59 @@ test("shared step intents preserve raw boundary actions, axis facts and callback
 });
 
 
+test("focus return preserves immediate anchors, old-tree ancestry and null shielding", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!, none = 65535;
+  type Node = { flags: number; parent: number };
+  const request = (nodes: Node[], subject: number, mode: number) => {
+    const bytes = new Uint8Array(6 + nodes.length * 3), data = new DataView(bytes.buffer);
+    bytes[0] = 22; bytes[1] = mode; data.setUint16(2, nodes.length, true); data.setUint16(4, subject, true);
+    nodes.forEach((n, i) => { const at = 6 + i * 3; bytes[at] = n.flags; data.setUint16(at + 1, n.parent, true); });
+    return bytes;
+  };
+  const reference = (nodes: Node[], subject: number, mode: number) => {
+    let surface = subject;
+    if (mode === 1 && subject !== none) {
+      surface = nodes[subject]!.parent;
+      while (surface !== none && (nodes[surface]!.flags & 6) !== 6) surface = nodes[surface]!.parent;
+    }
+    if (surface === none || !(nodes[surface]!.flags & 2)) return none;
+    const anchor = nodes[surface]!.parent;
+    if (anchor === none) return none;
+    if (nodes[anchor]!.flags & 1) return anchor;
+    const child = nodes.findIndex((n, i) => i !== surface && n.parent === anchor && !!(n.flags & 1));
+    return child < 0 ? none : child;
+  };
+  const compare = (nodes: Node[], subject: number, mode: number) => {
+    const result = policy(request(nodes, subject, mode)); assert.equal(result.length, 2);
+    const actual = new DataView(result.buffer, result.byteOffset, result.byteLength).getUint16(0, true);
+    assert.equal(actual, reference(nodes, subject, mode)); return actual;
+  };
+  const rows = [{flags:0,parent:none},{flags:1,parent:0},{flags:6,parent:0},{flags:1,parent:2},{flags:1,parent:0}];
+  assert.equal(compare(rows, 2, 0), 1); assert.equal(compare(rows, 3, 1), 1);
+  assert.equal(compare([{flags:1,parent:none},...rows.slice(1)],2,0),0);
+  // A focusable grandchild is not an immediate sibling fallback.
+  assert.equal(compare([{flags:0,parent:none},{flags:0,parent:0},{flags:1,parent:1},{flags:6,parent:0},{flags:1,parent:3}],4,1),none);
+  // The nearest anchored dismissible surface shields an outer return target.
+  assert.equal(compare([{flags:1,parent:none},{flags:6,parent:0},{flags:0,parent:1},{flags:6,parent:2},{flags:1,parent:3}],4,1),none);
+  for (let variant = 0; variant < 128; variant++) {
+    const nodes: Node[] = [];
+    for (let i = 0; i < 32; i++) nodes.push({flags:(variant * 3 + i * 5) & 7,parent:i===0 ? none : (variant * 7 + i * 3) % i});
+    for (let subject = 0; subject < nodes.length; subject++) for (const mode of [0,1]) compare(nodes,subject,mode);
+    compare(nodes,none,0); compare(nodes,none,1);
+  }
+  compare([],none,0);
+  compare(Array.from({length:1024},(_,i)=>({flags: i===0 ? 1 : 6,parent:i===0 ? none : i-1})),1023,1);
+  const valid=request(rows,3,1), copied=policy(valid); policy(request([],none,0)); assert.deepEqual([...copied],[...policy(valid)]);
+  for (let length=0;length<valid.length;length++) assert.throws(()=>policy(valid.subarray(0,length)),/policy|focus return/);
+  for (const mutate of [
+    (b:Uint8Array)=>{b[1]=2;},(b:Uint8Array)=>{b[2]=1;b[3]=4;},(b:Uint8Array)=>{b[4]=32;},
+    (b:Uint8Array)=>{b[6]=8;},(b:Uint8Array)=>{b[7]=0;b[8]=0;},(b:Uint8Array)=>{b[10]=1;b[11]=0;},
+  ]) {const bad=valid.slice();mutate(bad);assert.throws(()=>policy(bad),/focus return/);}
+  assert.throws(()=>policy(new Uint8Array([...valid,0])),/focus return/);
+});
+
 test("surface scopes preserve shielding, visibility, paint order and menu ownership", () => {
   const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
   runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });

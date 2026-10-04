@@ -410,6 +410,12 @@ pub fn focusWidgetTarget(layout: anytype, current_id: ?ObjectId, direction: Widg
 
 pub fn focusWidgetTargetById(layout: anytype, id: ObjectId, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
     const index = widgetIndexById(layout, id) orelse return null;
+    return focusWidgetTargetAtIndex(layout, index, scroll_semantics_fn);
+}
+
+/// Exact visible-focus capability for a retained index, without an ID scan.
+pub fn focusWidgetTargetAtIndex(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (index >= layout.nodes.len) return null;
     return focusTargetFromLayoutNode(layout, index, scroll_semantics_fn);
 }
 

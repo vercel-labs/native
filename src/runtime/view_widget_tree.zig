@@ -263,14 +263,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var focus_return_id: canvas.ObjectId = 0;
             if (self.canvas_widget_focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id)) |focused_index| {
-                    var current: ?usize = self.widget_layout_nodes[focused_index].parent_index;
-                    while (current) |ancestor_index| {
-                        const ancestor = self.widget_layout_nodes[ancestor_index].widget;
-                        if (canvas.widgetIsAnchored(ancestor) and canvasWidgetDismissibleSurfaceKind(ancestor.kind)) {
-                            focus_return_id = self.canvasWidgetAnchorTriggerFocusId(ancestor_index) orelse 0;
-                            break;
+                    if (self.canvas_widget_focus_return_policy) |policy| {
+                        focus_return_id = compiledCanvasWidgetFocusReturn(self, policy, focused_index, true) orelse 0;
+                    } else {
+                        var current: ?usize = self.widget_layout_nodes[focused_index].parent_index;
+                        while (current) |ancestor_index| {
+                            const ancestor = self.widget_layout_nodes[ancestor_index].widget;
+                            if (canvas.widgetIsAnchored(ancestor) and canvasWidgetDismissibleSurfaceKind(ancestor.kind)) {
+                                focus_return_id = self.canvasWidgetAnchorTriggerFocusId(ancestor_index) orelse 0;
+                                break;
+                            }
+                            current = self.widget_layout_nodes[ancestor_index].parent_index;
                         }
-                        current = self.widget_layout_nodes[ancestor_index].parent_index;
                     }
                 }
             }
@@ -974,6 +978,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// OUTSIDE the surface (the select trigger in the stack pattern).
         pub fn canvasWidgetAnchorTriggerFocusId(self: *const RuntimeView, surface_index: usize) ?canvas.ObjectId {
             if (surface_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_focus_return_policy) |policy|
+                return compiledCanvasWidgetFocusReturn(self, policy, surface_index, false);
             if (!canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget)) return null;
             const anchor_index = self.widget_layout_nodes[surface_index].parent_index orelse return null;
             const anchor_id = self.widget_layout_nodes[anchor_index].widget.id;
@@ -1220,6 +1226,44 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 }
             }
             return result;
+        }
+
+        fn compiledCanvasWidgetFocusReturn(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            subject: usize,
+            from_focused: bool,
+        ) ?canvas.ObjectId {
+            const layout = self.widgetLayoutTree();
+            var request: [6 + max_canvas_widget_nodes_per_view * 3]u8 = undefined;
+            request[0] = 22;
+            request[1] = @intFromBool(from_focused);
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], @intCast(subject), .little);
+            // Reuse the native ID index so facts keep first-match ID
+            // semantics without a full ID scan for every retained node.
+            const Entry = struct { id: canvas.ObjectId, index: usize };
+            var entries: [max_canvas_widget_nodes_per_view]Entry = undefined;
+            for (layout.nodes, 0..) |node, index| entries[index] = .{ .id = node.widget.id, .index = index };
+            var ids: canvas_widget_runtime.CanvasWidgetIdIndex(Entry) = .{};
+            ids.build(entries[0..layout.nodes.len]);
+            for (layout.nodes, 0..) |node, index| {
+                const at = 6 + index * 3;
+                const eligible = if (ids.first(node.widget.id)) |first| layout.focusTargetAtIndex(first.index) != null else false;
+                request[at] = @as(u8, @intFromBool(eligible)) |
+                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 1) |
+                    (@as(u8, @intFromBool(canvasWidgetDismissibleSurfaceKind(node.widget.kind))) << 2);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+            }
+            var result: [2]u8 = undefined;
+            if (policy(request[0 .. 6 + layout.nodes.len * 3], &result) != result.len)
+                @panic("invalid compiled focus return result");
+            const selected = std.mem.readInt(u16, &result, .little);
+            if (selected == std.math.maxInt(u16)) return null;
+            if (selected >= layout.nodes.len) @panic("invalid compiled focus return index");
+            const id = layout.nodes[selected].widget.id;
+            if (layout.focusTargetById(id) == null) @panic("ineligible compiled focus return target");
+            return id;
         }
 
         pub fn canvasWidgetFocusTargetInScope(

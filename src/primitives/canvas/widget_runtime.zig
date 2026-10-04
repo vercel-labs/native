@@ -162,6 +162,11 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.focusWidgetTargetById(self, id, widgetScrollSemantics);
     }
 
+    /// Native visible-focus capability; includes ancestor clipping.
+    pub fn focusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+        return widget_routing.focusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
+    }
+
     pub fn logicalFocusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
         return widget_routing.logicalFocusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
     }

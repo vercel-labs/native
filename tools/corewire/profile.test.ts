@@ -175,6 +175,9 @@ test("compiled profiles preserve the optional Native primary and window view sig
   const surfaceWrapper = mirror.match(/pub fn nativeSurfaceScopePolicy\([\s\S]*?\n}/)![0];
   assert.match(surfaceWrapper, /abi.native_text_policy\(/);
   assert.doesNotMatch(surfaceWrapper, /abi.frame_reset/);
+  const returnWrapper = mirror.match(/pub fn nativeFocusReturnPolicy\([\s\S]*?\n}/)![0];
+  assert.match(returnWrapper, /abi.native_text_policy\(/);
+  assert.doesNotMatch(returnWrapper, /abi.frame_reset/);
   assert.match(mirror, /pub fn nativeTimerPolicy\(request:/);
   assert.match(mirror, /pub fn nativeDbPolicy\(request:/);
   assert.match(mirror, /pub fn nativeEffectPolicy\(request:/);

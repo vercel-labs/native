@@ -2825,6 +2825,10 @@ test "widget focus target lookup validates focusable ids" {
     try std.testing.expect(layout.focusTargetById(4) == null);
     try std.testing.expect(layout.focusTargetById(99) == null);
 
+    for (layout.nodes, 0..) |node, index| {
+        try std.testing.expectEqualDeep(layout.focusTargetById(node.widget.id), layout.focusTargetAtIndex(index));
+    }
+    try std.testing.expect(layout.focusTargetAtIndex(layout.nodes.len) == null);
     const target = layout.focusTargetById(3).?;
     try std.testing.expectEqual(@as(ObjectId, 3), target.id);
     try std.testing.expectEqual(WidgetKind.button, target.kind);

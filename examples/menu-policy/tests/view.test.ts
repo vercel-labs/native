@@ -169,3 +169,42 @@ test("anchored menu dismissal survives unrelated focus, direct actions and empty
     }
   } finally { await app.close(); }
 });
+test("focus returns after explicit dismissal, model removal and selected commits", async () => {
+  const app = await NativeApp.start({ width: 800, height: 420 });
+  try {
+    let s = await app.snapshot();
+    const view = button(s, "Reset").view, snapshots = [s];
+    const save = () => snapshots.push(s);
+    const returned = (name: string) => {
+      assert.equal(s.widgets.some(w => w.role === "menuitem"), false);
+      assert.equal(button(s, name).focused, true); save();
+    };
+    for (const action of ["escape", "dismiss", "reset", "enter", "space"] as const) {
+      s = await app.click(button(s, "Choose queue")); save();
+      s = await app.key(view, "arrowdown");
+      assert.equal(item(s, "Review café").focused, true); save();
+      if (action === "dismiss") s = await app.action(menu(s, "Queues"), "dismiss");
+      else if (action === "reset") s = await app.action(button(s, "Reset"), "press");
+      else s = await app.key(view, action);
+      returned(action === "reset" ? "Reset" : "Choose queue");
+      assert.equal(s.model.selected, 2);
+    }
+    s = await app.click(button(s, "Open actions")); save();
+    s = await app.key(view, "arrowdown"); save();
+    assert.equal(item(s, "Duplicate").focused, true);
+    s = await app.action(button(s, "Reset"), "press"); returned("Reset");
+    // Assistive activation focuses its own target before rebuilding.
+    s = await app.click(button(s, "Choose queue")); save();
+    s = await app.action(button(s, "Reverse"), "focus"); save();
+    s = await app.action(button(s, "Reset"), "press"); returned("Reset");
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, s.model);
+    assert.deepEqual(replay.snapshot.widgets, s.widgets); snapshots.push(replay.snapshot);
+    const reference = process.env.NATIVE_SDK_TEST_VIEW_REFERENCE;
+    if (reference) {
+      const values = snapshots.map(({viewBackend, ...snapshot}) => snapshot);
+      if (backend === "zig") writeFileSync(`${reference}.return.json`, JSON.stringify(values));
+      else assert.deepEqual(values, JSON.parse(readFileSync(`${reference}.return.json`, "utf8")));
+    }
+  } finally { await app.close(); }
+});
