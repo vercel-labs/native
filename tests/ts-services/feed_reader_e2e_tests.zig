@@ -8782,3 +8782,325 @@ test "compiled keyboard focus generic group walk consumes exact identity facts a
     try std.testing.expect(Spy.calls >= 2);
     core.rt.frameReset();
 }
+
+const DragObservation = struct {
+    pointer: PointerIntentState,
+    ids: [3]u64,
+    points: [3]geometry.PointF,
+    delta: geometry.OffsetF,
+    flags: [2]bool,
+    hit: ?canvas.WidgetHit,
+    entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry,
+    count: usize,
+    fn read(view: anytype, harness: anytype) @This() {
+        var result: @This() = undefined;
+        result.pointer = PointerIntentState.read(view, harness);
+        result.ids = .{ view.canvas_widget_drag_source_id, view.canvas_widget_drag_pointer_id, view.canvas_widget_drag_landing_source_id };
+        result.points = .{ view.canvas_widget_drag_start_point, view.canvas_widget_drag_source_origin, view.canvas_widget_drag_landing_origin };
+        result.delta = view.canvas_widget_drag_delta;
+        result.flags = .{ view.canvas_widget_drag_source_attached, view.canvas_widget_drag_layout_motion_armed };
+        result.hit = view.canvas_widget_drag_source_hit;
+        result.count = view.canvas_widget_drag_route_len;
+        @memcpy(result.entries[0..result.count], view.canvas_widget_drag_route_entries[0..result.count]);
+        return result;
+    }
+    fn expect(a: @This(), b: @This()) !void {
+        try PointerIntentState.expect(a.pointer, b.pointer);
+        inline for (.{ "ids", "points", "delta", "flags", "hit", "count" }) |field| try std.testing.expectEqualDeep(@field(a, field), @field(b, field));
+        try std.testing.expectEqualDeep(a.entries[0..a.count], b.entries[0..b.count]);
+    }
+    fn seed(view: anytype, harness: anytype, id: u64, pointer: u64, mask: usize, hit: canvas.WidgetHit, entries: []const canvas.WidgetEventRouteEntry) void {
+        view.canvas_widget_drag_source_id = if (mask & 1 != 0) id else 0;
+        view.canvas_widget_pressed_id = if (mask & 2 != 0) id else 0;
+        view.canvas_widget_drag_pointer_id = pointer;
+        view.canvas_widget_drag_start_point = geometry.PointF.init(10, 20);
+        view.canvas_widget_drag_source_origin = geometry.PointF.init(12, 16);
+        view.canvas_widget_drag_landing_source_id = id;
+        view.canvas_widget_drag_landing_origin = geometry.PointF.init(19, 24);
+        view.canvas_widget_drag_delta = geometry.OffsetF.init(7, 8);
+        view.canvas_widget_drag_source_attached = mask & 1 != 0;
+        view.canvas_widget_drag_layout_motion_armed = mask & 8 != 0;
+        view.canvas_widget_drag_source_hit = if (mask & 4 != 0) hit else null;
+        view.canvas_widget_drag_route_len = if (mask & 4 != 0) entries.len else 0;
+        @memcpy(view.canvas_widget_drag_route_entries[0..view.canvas_widget_drag_route_len], entries[0..view.canvas_widget_drag_route_len]);
+        view.gpu_canvas_frame_requested = false;
+        harness.runtime.dirty_region_count = 0;
+        harness.null_platform.gpu_surface_frame_request_count = 0;
+    }
+};
+
+test "compiled drag protocol preserves float slop, every continuation and borrowed cycle bytes" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const original = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(original);
+    var first: [1]u8 = undefined;
+    var request = [_]u8{0} ** 16;
+    request[0] = 35;
+    try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&request, &first));
+    const values = [_]f32{ 0, 5.9999995, 6, -6, 6.0000005, -5.9999995, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) };
+    for (0..9) |stage| for (0..5) |phase| for (0..16) |facts| for (values) |dx| for (values) |dy| {
+        if ((stage == 1 or stage == 5 or stage == 6 or stage == 7) and (phase == 0 or phase == 4)) continue;
+        const max: usize = switch (stage) {
+            0, 1 => 7,
+            6, 8 => 15,
+            7 => 3,
+            4 => 0,
+            else => 1,
+        };
+        if (facts > max) continue;
+        request[1..4].* = .{ @intCast(stage), @intCast(phase), @intCast(facts) };
+        std.mem.writeInt(u32, request[8..12], @bitCast(dx), .little);
+        std.mem.writeInt(u32, request[12..16], @bitCast(dy), .little);
+        const crossed = @abs(dx) >= 6.0 or @abs(dy) >= 6.0;
+        const expected: u8 = switch (stage) {
+            0 => if (phase == 0) (if (facts & 1 == 0) @as(u8, 1) else 0) else if (phase == 4 or facts & 2 == 0) 0 else if (facts & 1 == 0 and phase != 1) 2 else if (facts & 5 == 0) 0 else if (facts & 1 != 0) 19 else 3,
+            1 => if (facts & 2 == 0) (if (facts & 5 == 5) @as(u8, 37) else if (facts & 1 != 0) 36 else 4) else if (facts & 1 == 0 and !crossed) 6 else if (phase == 1) (if (facts & 1 != 0) @as(u8, 7) else 71) else 8,
+            2 => @intFromBool(phase == 0 and facts == 1),
+            3 => if (facts == 1) 3 else 0,
+            4 => @intFromBool(crossed),
+            5 => if (facts == 0 or (phase == 1 and !crossed)) 0 else if (phase == 1) 1 else 2,
+            6 => blk: {
+                if (phase == 1) break :blk if (facts & 3 == 3) 5 else 0;
+                const template: u8 = if (facts & 1 != 0) 1 else if (facts & 12 == 12) 2 else 0;
+                const size: u8 = if (facts & 2 != 0) 4 else if (facts & 4 != 0) 8 else 0;
+                break :blk if (template == 0) (if (facts & 4 != 0) @as(u8, 32) else 0) else if (size == 0) 0 else template | size;
+            },
+            7 => if (phase == 1) (if (facts & 1 != 0) @as(u8, 3) else 0) else @as(u8, @intCast(facts & 1)) | @as(u8, if (facts & 2 != 0) 4 else 0),
+            8 => @intFromBool(facts == 15),
+            else => unreachable,
+        };
+        var result: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&request, &result));
+        try std.testing.expectEqual(expected, result[0]);
+        try std.testing.expectEqualSlices(u8, original, borrowed);
+    };
+    request = @splat(0);
+    request[0] = 35;
+    request[1] = 2;
+    for (0..5) |phase| for (0..2) |key| for (0..32) |modifiers| {
+        request[2..5].* = .{ @intCast(phase), @intCast(key), @intCast(modifiers) };
+        var result: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&request, &result));
+        try std.testing.expectEqual(@as(u8, @intFromBool(phase == 0 and key == 1 and modifiers == 0)), result[0]);
+    };
+    try std.testing.expectEqual(@as(u8, 1), first[0]);
+    core.rt.frameReset();
+    try std.testing.expectEqual(@as(u8, 1), first[0]);
+}
+
+test "compiled drag routing preserves complete state, exact identities and orphan borrowed routes" {
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "drag-routing", .source = native_sdk.WebViewSource.html("<h1>Drag</h1>") });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 240, 120) });
+    const child = [_]canvas.Widget{.{ .id = 2, .kind = .button, .frame = geometry.RectF.init(12, 16, 96, 32), .text = "Drag", .semantics = .{ .actions = .{ .drag = true } } }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &child }, geometry.RectF.init(0, 0, 240, 120), &nodes));
+    const view = &harness.runtime.views[0];
+    const kinds = [_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_drag, .pointer_up, .pointer_cancel, .pointer_move, .scroll };
+    const ids = [_]u64{ 2, 9007199254740993, std.math.maxInt(u64) };
+    const values = [_]f32{ 0, 5.9999995, 6, -6, 30 };
+    for (ids) |id| {
+        view.widget_layout_nodes[1].widget.id = id;
+        view.widget_layout_nodes[1].widget.state.disabled = false;
+        var capture_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+        const capture = try view.widgetLayoutTree().routeDragEvent(.{ .source_id = id, .point = .{} }, &capture_entries);
+        const hit = capture.target.?;
+        for (0..3) |eligibility| for (0..16) |mask| for (ids) |pointer| for ([_]bool{ false, true }) |same_pointer| for (kinds) |kind| for (values) |dx| {
+            view.widget_layout_nodes[1].widget.state.disabled = eligibility == 1;
+            view.widget_layout_nodes[1].widget.id = if (eligibility == 2) id ^ 1 else id;
+            const input: native_sdk.platform.GpuSurfaceInputEvent = .{ .window_id = 1, .label = "canvas", .kind = kind, .pointer_id = if (same_pointer) pointer else pointer ^ 1, .x = 10 + dx, .y = 20, .delta_x = 99 };
+            var expected_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+            var actual_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+            DragObservation.seed(view, harness, id, pointer, mask, hit, capture.entries);
+            view.canvas_widget_surface_scope_policy = null;
+            const expected = try harness.runtime.routeCanvasWidgetDragInput(input, &expected_entries);
+            const state = DragObservation.read(view, harness);
+            DragObservation.seed(view, harness, id, pointer, mask, hit, capture.entries);
+            view.canvas_widget_surface_scope_policy = core.nativeSurfaceScopePolicy;
+            const actual = try harness.runtime.routeCanvasWidgetDragInput(input, &actual_entries);
+            try std.testing.expectEqualDeep(expected, actual);
+            try DragObservation.expect(state, DragObservation.read(view, harness));
+            if (actual) |event| try std.testing.expect(event.route.ptr == &actual_entries or event.route.ptr == &view.canvas_widget_drag_route_entries);
+        };
+    }
+    var output: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+    try std.testing.expectError(error.ViewNotFound, harness.runtime.routeCanvasWidgetDragInput(.{ .window_id = 1, .label = "missing", .kind = .pointer_up }, &output));
+    core.rt.frameReset();
+}
+
+const DragConsumerModel = struct { changes: u32 = 0, ends: u32 = 0, cancels: u32 = 0, mounted: bool = true, remove_on_change: bool = false, token: []const u8 = "Café\x00日本" };
+const DragConsumerMsg = union(enum) {
+    clicked,
+    dragged: struct { sourceId: u64 = 1, phase: u32 = 0, x: f32 = 0, y: f32 = 0, viewWidth: f32 = 0, viewHeight: f32 = 0, token: []const u8 = "" },
+};
+const DragConsumer = native_sdk.UiApp(DragConsumerModel, DragConsumerMsg);
+const DragConsumerFunctions = struct {
+    fn update(model: *DragConsumerModel, msg: DragConsumerMsg) void {
+        switch (msg) {
+            .clicked => {},
+            .dragged => |drag| {
+                std.debug.assert(std.mem.eql(u8, drag.token, model.token));
+                switch (drag.phase) {
+                    0 => {
+                        model.changes += 1;
+                        if (model.remove_on_change) model.mounted = false;
+                    },
+                    1 => model.ends += 1,
+                    2 => model.cancels += 1,
+                    else => unreachable,
+                }
+            },
+        }
+    }
+    fn view(ui: *DragConsumer.Ui, model: *const DragConsumerModel) DragConsumer.Ui.Node {
+        if (!model.mounted) return ui.panel(.{}, @as([]const DragConsumer.Ui.Node, &.{}));
+        return ui.button(.{ .key = .{ .str = "drag" }, .on_drag = .{ .dragged = .{ .sourceId = 9007199254740993, .token = model.token } }, .height = 60 }, "Drag");
+    }
+};
+
+test "compiled drag app coordination preserves captured terminal messages across rebuild and unmount" {
+    var reference: [4][3]u32 = undefined;
+    for ([_]bool{ false, true }) |compiled| for (0..4) |scenario| {
+        const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const state = try DragConsumer.create(std.heap.page_allocator, .{ .name = "drag-consumer", .scene = app_scene, .canvas_label = canvas_label, .view = DragConsumerFunctions.view, .update = DragConsumerFunctions.update, .surface_scope_policy = if (compiled) core.nativeSurfaceScopePolicy else null });
+        defer state.destroy();
+        state.model.remove_on_change = scenario == 1;
+        try harness.start(state.app());
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(640, 480), .scale_factor = 1, .frame_index = 1 } });
+        const target = harness.runtime.views[0].widgetLayoutTree().nodes[0].widget.id;
+        const point = geometry.PointF.init(100, 30);
+        const pointer: u64 = std.math.maxInt(u64);
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_down, .pointer_id = pointer, .x = point.x, .y = point.y } });
+        _ = target;
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_drag, .pointer_id = pointer, .x = point.x + (if (scenario == 0) @as(f32, 5) else 30), .y = point.y } });
+        // Unrelated release cannot consume the active contact's terminal capture.
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_up, .pointer_id = pointer ^ 1, .x = point.x + 30, .y = point.y } });
+        if (scenario == 2) {
+            try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .key_down, .key = "escape" } });
+        } else {
+            try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = if (scenario == 3) .pointer_cancel else .pointer_up, .pointer_id = pointer, .x = point.x + 2, .y = point.y } });
+        }
+        const actual: [3]u32 = .{ state.model.changes, state.model.ends, state.model.cancels };
+        if (!compiled) reference[scenario] = actual else try std.testing.expectEqualDeep(reference[scenario], actual);
+        try std.testing.expectEqual(@as(u32, if (scenario == 0) 0 else 1), state.model.changes);
+        try std.testing.expectEqual(@as(u32, if (scenario == 1 or scenario == 2 or scenario == 3) 1 else 0), state.model.cancels);
+        try std.testing.expectEqual(@as(u64, 0), state.drag_msg_source_id);
+        try std.testing.expect(state.drag_msg_template == null);
+    };
+    core.rt.frameReset();
+}
+
+test "compiled drag consumers obey forced admission promotion and Escape decisions" {
+    const Spy = struct {
+        var stage: u8 = 0;
+        var action: u8 = 0;
+        var calls: [9]usize = @splat(0);
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request.len == 16 and request[0] == 35) {
+                calls[request[1]] += 1;
+                if (request[1] == stage) {
+                    output[0] = action;
+                    return 1;
+                }
+            }
+            return core.nativeSurfaceScopePolicy(request, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "drag-ownership", .source = native_sdk.WebViewSource.html("<h1>Drag</h1>") };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 240, 120) });
+    var nodes: [1]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try canvas.layoutWidgetTree(.{ .id = 9007199254740993, .kind = .button, .text = "Drag", .semantics = .{ .actions = .{ .drag = true } } }, geometry.RectF.init(0, 0, 240, 120), &nodes));
+    const v = &harness.runtime.views[0];
+    v.canvas_widget_surface_scope_policy = Spy.policy;
+    var entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+    const id: u64 = 9007199254740993;
+    v.canvas_widget_pressed_id = id;
+    v.canvas_widget_drag_pointer_id = 77;
+    Spy.stage = 0;
+    Spy.action = 0;
+    _ = try harness.runtime.routeCanvasWidgetDragInput(.{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .pointer_id = 42, .x = 10, .y = 20 }, &entries);
+    try std.testing.expectEqual(@as(u64, 77), v.canvas_widget_drag_pointer_id);
+    Spy.action = 1;
+    _ = try harness.runtime.routeCanvasWidgetDragInput(.{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .pointer_id = 42, .x = 10, .y = 20 }, &entries);
+    try std.testing.expectEqual(@as(u64, 42), v.canvas_widget_drag_pointer_id);
+    Spy.stage = 1;
+    Spy.action = 6;
+    const low = try harness.runtime.routeCanvasWidgetDragInput(.{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .pointer_id = 42, .x = 40, .y = 20 }, &entries);
+    try std.testing.expect(low != null);
+    try std.testing.expectEqual(@as(u64, 0), v.canvas_widget_drag_source_id);
+    Spy.action = 71;
+    _ = try harness.runtime.routeCanvasWidgetDragInput(.{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .pointer_id = 42, .x = 11, .y = 20 }, &entries);
+    try std.testing.expectEqual(id, v.canvas_widget_drag_source_id);
+    Spy.stage = 2;
+    Spy.action = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "escape", .timestamp_ns = 123456 } });
+    try std.testing.expectEqual(id, v.canvas_widget_drag_source_id);
+    Spy.action = 1;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "escape", .modifiers = .{ .control = true }, .timestamp_ns = 123457 } });
+    try std.testing.expectEqual(@as(u64, 0), v.canvas_widget_drag_source_id);
+    try std.testing.expect(Spy.calls[0] > 0 and Spy.calls[1] > 0 and Spy.calls[2] > 0 and Spy.calls[3] > 0);
+    core.rt.frameReset();
+}
+
+test "compiled drag app delivery consumes message capture and terminal fallback decisions" {
+    const Spy = struct {
+        var stage: u8 = 255;
+        var action: u8 = 0;
+        var calls: [9]usize = @splat(0);
+        fn policy(request: []const u8, output: []u8) usize {
+            if (request.len == 16 and request[0] == 35) {
+                calls[request[1]] += 1;
+                if (request[1] == stage) {
+                    output[0] = action;
+                    return 1;
+                }
+            }
+            return core.nativeSurfaceScopePolicy(request, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try DragConsumer.create(std.heap.page_allocator, .{ .name = "drag-delivery-ownership", .scene = app_scene, .canvas_label = canvas_label, .view = DragConsumerFunctions.view, .update = DragConsumerFunctions.update, .surface_scope_policy = Spy.policy });
+    defer state.destroy();
+    try harness.start(state.app());
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(640, 480), .scale_factor = 1, .frame_index = 1 } });
+    var input: native_sdk.platform.GpuSurfaceInputEvent = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_down, .x = 100, .y = 30 };
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = input });
+    input.kind = .pointer_drag;
+    input.x = 130;
+    Spy.stage = 5;
+    Spy.action = 0;
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = input });
+    try std.testing.expectEqual(@as(u32, 0), state.model.changes);
+    try std.testing.expect(state.drag_msg_template == null);
+    Spy.stage = 7;
+    Spy.action = 1;
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = input });
+    try std.testing.expectEqual(@as(u32, 1), state.model.changes);
+    try std.testing.expect(state.drag_msg_template == null);
+    Spy.stage = 255;
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = input });
+    try std.testing.expectEqual(@as(u32, 2), state.model.changes);
+    try std.testing.expect(state.drag_msg_template != null);
+    Spy.stage = 6;
+    Spy.action = 0;
+    input.kind = .pointer_up;
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_input = input });
+    try std.testing.expectEqual(@as(u32, 0), state.model.ends);
+    try std.testing.expect(state.drag_msg_template != null);
+    try std.testing.expect(Spy.calls[5] > 0 and Spy.calls[6] > 0 and Spy.calls[7] > 0 and Spy.calls[8] > 0);
+    core.rt.frameReset();
+}

@@ -1589,3 +1589,47 @@ test("compiled generic groups preserve sibling traversal, logical list targets a
   }
   for (const bytes of [[34, 10], [34, 10, 4, 31, 9, 0, 0, 0, 0], [34, 10, 0, 63, 9, 0, 0, 0, 0], [34, 10, 0, 31, 64, 0, 0, 0, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0, 0, 0, 64, 0], [34, 10, 0, 31, 9, 0, 0, 1, 0, 0, 0, 31, 8]]) assert.throws(() => exports.native_text_policy!(new Uint8Array(bytes)), /keyboard group/);
 });
+
+
+test("drag coordination owns capture, slop, orphan cancellation and message delivery", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const request = (stage: number, phase: number, facts: number, dx = 0, dy = 0, modifiers = 0) => {
+    const bytes = new Uint8Array(16); bytes.set([35, stage, phase, facts, modifiers]);
+    const view = new DataView(bytes.buffer); view.setFloat32(8, dx, true); view.setFloat32(12, dy, true); return bytes;
+  };
+  const decide = (stage: number, phase: number, facts: number, dx = 0, dy = 0, modifiers = 0) => [...policy(request(stage, phase, facts, dx, dy, modifiers))];
+  for (let phase = 0; phase <= 4; phase++) for (let facts = 0; facts < 8; facts++) {
+    const expected = phase === 0 ? (facts & 1 ? 0 : 1) : phase === 4 || !(facts & 2) ? 0 : !(facts & 1) && phase !== 1 ? 2 : facts & 5 ? 3 | (facts & 1 ? 16 : 0) : 0;
+    assert.deepEqual(decide(0, phase, facts), [expected]);
+  }
+  const deltas = [0, 5.999999523162842, 6, -6, 6.000000476837158, -5.999999523162842, Infinity, -Infinity, NaN];
+  for (const dx of deltas) for (const dy of deltas) {
+    const crossed = Math.abs(dx) >= 6 || Math.abs(dy) >= 6;
+    assert.deepEqual(decide(4, 4, 0, dx, dy), [crossed ? 1 : 0]);
+    for (let phase = 1; phase <= 3; phase++) for (let facts = 0; facts < 8; facts++) {
+      const expected = !(facts & 2) ? ((facts & 5) === 5 ? 5 : 4) | (facts & 1 ? 32 : 0) : !(facts & 1) && !crossed ? 6 : phase === 1 ? 7 | (facts & 1 ? 0 : 64) : 8;
+      assert.deepEqual(decide(1, phase, facts, dx, dy), [expected]);
+    }
+    for (let phase = 1; phase <= 3; phase++) for (let source = 0; source <= 1; source++)
+      assert.deepEqual(decide(5, phase, source, dx, dy), [!source || phase === 1 && !crossed ? 0 : phase === 1 ? 1 : 2]);
+  }
+  for (let phase = 0; phase <= 4; phase++) for (let key = 0; key <= 1; key++) for (let mods = 0; mods < 32; mods++)
+    assert.deepEqual(decide(2, phase, key, 0, 0, mods), [phase === 0 && key === 1 && mods === 0 ? 1 : 0]);
+  for (let phase = 1; phase <= 3; phase++) for (let facts = 0; facts < 16; facts++) {
+    const template = facts & 1 ? 1 : (facts & 12) === 12 ? 2 : 0, size = facts & 2 ? 4 : facts & 4 ? 8 : 0;
+    assert.deepEqual(decide(6, phase, facts), [phase === 1 ? (facts & 3) === 3 ? 5 : 0 : !template ? facts & 4 ? 32 : 0 : size ? template | size : 0]);
+  }
+  for (let phase = 1; phase <= 3; phase++) for (let facts = 0; facts < 4; facts++)
+    assert.deepEqual(decide(7, phase, facts), [phase === 1 ? facts & 1 ? 3 : 0 : (facts & 1) | (facts & 2 ? 4 : 0)]);
+  for (let facts = 0; facts < 16; facts++) assert.deepEqual(decide(8, 4, facts), [facts === 15 ? 1 : 0]);
+  assert.deepEqual(decide(3, 4, 1), [3]); assert.deepEqual(decide(3, 4, 0), [0]);
+  for (const offset of [1, 2, 3, 4, 5, 6, 7]) {
+    const bytes = request(1, 1, 3); bytes[offset] = 255;
+    assert.throws(() => policy(bytes), /drag coordination/);
+  }
+  for (const bytes of [new Uint8Array(0), new Uint8Array([35]), new Uint8Array(15), new Uint8Array(17), request(1, 0, 0), request(1, 4, 0), request(4, 4, 1)])
+    assert.throws(() => policy(bytes), /drag coordination|text policy/);
+  const retained = policy(request(0, 0, 0)); for (let i = 0; i < 100; i++) policy(request(1, 1, 3, 8)); assert.deepEqual([...retained], [1]);
+});

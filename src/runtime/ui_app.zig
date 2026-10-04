@@ -40,6 +40,7 @@ const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_events = @import("canvas_widget_events.zig");
+const drag_policy = @import("canvas_drag_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
 const terminal_session = @import("terminal_session.zig");
@@ -6386,19 +6387,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// point, and view dimensions so it can preview a semantic insertion
         /// during motion, commit it on release, or restore it on cancel.
         fn handleWidgetDrag(self: *Self, runtime: *Runtime, drag_event: core.CanvasWidgetDragEvent) anyerror!void {
-            // The runtime promotes a source only after this slop, so terminal
-            // phases are always real drags and must dispatch even when the
-            // pointer returned near its origin before release. Change events
-            // below slop remain on the low-level channel to own text motion,
-            // but declarative apps do not hear them.
-            if (drag_event.drag.phase == .change and
-                !canvas_widget_events.canvasWidgetDragCrossedSlop(drag_event.drag.delta)) return;
-            const source = drag_event.source orelse return;
-            // Once drag wins the pointer gesture it also owns its delayed
-            // interpretation. An element may declare both on-hold and on-drag;
-            // leaving the down-armed timer live would dispatch the hold Msg in
-            // the middle of a stationary drag and then dispatch drag end too.
-            if (drag_event.drag.phase == .change) self.disarmHold(runtime);
+            const policy = self.options.surface_scope_policy;
+            const phase = drag_policy.dragPhase(drag_event.drag.phase);
+            const admission = drag_policy.decide(policy, .{ .stage = .delivery, .phase = phase, .facts = @intFromBool(drag_event.source != null), .delta = drag_event.drag.delta });
+            if (admission == 0) return;
+            const source = drag_event.source.?;
+            if (admission == 1) self.disarmHold(runtime);
             const tree = self.treeForViewLabel(drag_event.view_label);
             const live_template = if (tree) |value| value.msgFor(source.id, .drag) else null;
             const layout: ?canvas.WidgetLayoutTree = runtime.canvasWidgetLayout(drag_event.window_id, drag_event.view_label) catch null;
@@ -6406,31 +6400,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 const root = root_value.normalized();
                 break :blk geometry.SizeF.init(root.width, root.height);
             } else null else null;
-
-            if (drag_event.drag.phase == .change) {
-                const template = live_template orelse return;
-                const view_size = live_view_size orelse return;
-                const msg = Ui.Tree.msgForDragTemplate(template, drag_event.drag, view_size) orelse return;
-                // Capture before dispatch: this very Msg may rebuild the tree
-                // without its source or handler.
-                try self.captureWidgetDragMsg(drag_event, template, view_size);
-                try self.dispatch(runtime, drag_event.window_id, msg);
+            const captured = if (admission == 2) self.widgetDragCaptureMatches(drag_event.window_id, drag_event.view_label, source.id) else false;
+            const resolve = drag_policy.decide(policy, .{ .stage = .resolve, .phase = phase, .facts = @as(u8, if (live_template != null) 1 else 0) | @as(u8, if (live_view_size != null) 2 else 0) |
+                @as(u8, if (captured) 4 else 0) | @as(u8, if (self.drag_msg_template != null) 8 else 0) });
+            if (resolve == 32) {
+                self.clearWidgetDragMsgCapture();
                 return;
             }
-
-            const captured = self.widgetDragCaptureMatches(drag_event.window_id, drag_event.view_label, source.id);
-            const maybe_template: ?MsgT = live_template orelse if (captured) self.drag_msg_template else null;
-            const template = maybe_template orelse {
-                if (captured) self.clearWidgetDragMsgCapture();
-                return;
-            };
-            const view_size = live_view_size orelse if (captured) self.drag_msg_view_size else return;
-            const msg = Ui.Tree.msgForDragTemplate(template, drag_event.drag, view_size) orelse {
-                if (captured) self.clearWidgetDragMsgCapture();
-                return;
-            };
-            defer if (captured) self.clearWidgetDragMsgCapture();
-            try self.dispatch(runtime, drag_event.window_id, msg);
+            if (resolve == 0) return;
+            const template = if (resolve & 1 != 0) live_template.? else self.drag_msg_template.?;
+            const view_size = if (resolve & 4 != 0) live_view_size.? else self.drag_msg_view_size;
+            const msg = Ui.Tree.msgForDragTemplate(template, drag_event.drag, view_size);
+            const action = drag_policy.decide(policy, .{ .stage = .message, .phase = phase, .facts = @as(u8, if (msg != null) 1 else 0) | @as(u8, if (captured) 2 else 0) });
+            defer if (action & 4 != 0) self.clearWidgetDragMsgCapture();
+            if (action & 1 == 0) return;
+            // Copy before dispatch: the resulting Msg may remove its source.
+            if (action & 2 != 0) try self.captureWidgetDragMsg(drag_event, template, view_size);
+            try self.dispatch(runtime, drag_event.window_id, msg.?);
         }
 
         fn captureWidgetDragMsg(self: *Self, drag_event: core.CanvasWidgetDragEvent, template: MsgT, view_size: geometry.SizeF) anyerror!void {
@@ -6451,10 +6437,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn widgetDragCaptureMatches(self: *const Self, window_id: platform.WindowId, view_label: []const u8, source_id: canvas.ObjectId) bool {
-            return self.drag_msg_template != null and
-                self.drag_msg_window_id == window_id and
-                self.drag_msg_source_id == source_id and
-                std.mem.eql(u8, self.drag_msg_view_label_storage[0..self.drag_msg_view_label_len], view_label);
+            return drag_policy.decide(self.options.surface_scope_policy, .{ .stage = .capture_match, .facts = @as(u8, if (self.drag_msg_template != null) 1 else 0) | @as(u8, if (self.drag_msg_window_id == window_id) 2 else 0) |
+                @as(u8, if (self.drag_msg_source_id == source_id) 4 else 0) |
+                @as(u8, if (std.mem.eql(u8, self.drag_msg_view_label_storage[0..self.drag_msg_view_label_len], view_label)) 8 else 0) }) != 0;
         }
 
         fn clearWidgetDragMsgCapture(self: *Self) void {

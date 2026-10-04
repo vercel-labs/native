@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 35) return nscvDragCoordination(request);
   if (request[0] === 34) return nscvKeyboardFocus(request);
   if (request[0] === 33) return nscvKeyboardParticipation(request);
   if (request[0] === 32) return nscvSelectionPress(request);
@@ -288,6 +289,56 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
   return result;
+}
+
+/** Drag coordination, operation 35. Sixteen copied bytes: stage (0..8),
+ * phase (down/change/end/cancel/other = 0..4), stage-specific capability and
+ * exact-equality facts, modifier bits, three reserved zero bytes, and two
+ * LE f32 motion deltas. One copied decision byte. Native executes actions,
+ * owns routes and message storage, and reports query/packing outcomes.
+ * Admission: stop/begin/click-end/query = 0..3, bit16 selects active source.
+ * Route: abandon/cancel/observe/promote/finish = 4..8, bit32 clears press,
+ * bit64 initializes the promoted source origin.
+ * Delivery: stop/change/terminal = 0..2. Resolve: live/captured template
+ * bits1/2, live/captured size bits4/8, bit32 clears missing capture.
+ * Message: dispatch/capture/clear = bits1/2/4. Escape/slop/match are bools.
+ */
+function nscvDragCoordination(request: Uint8Array): Uint8Array {
+  if (request.length !== 16 || request[1]! > 8 || request[2]! > 4 || request[4]! > 31 ||
+      request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid drag coordination request");
+  const stage = request[1]!, phase = request[2]!, facts = request[3]!, modifiers = request[4]!;
+  const maxFacts = stage === 0 || stage === 1 ? 7 : stage === 6 || stage === 8 ? 15 : stage === 7 ? 3 : stage === 4 ? 0 : 1;
+  if (facts > maxFacts || ((stage === 1 || stage === 5 || stage === 6 || stage === 7) && (phase < 1 || phase > 3)))
+    throw new Error("invalid drag coordination facts");
+  const bytes = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const crossed = Math.abs(bytes.getFloat32(8, true)) >= 6 || Math.abs(bytes.getFloat32(12, true)) >= 6;
+  let decision = 0;
+  if (stage === 0) {
+    if (phase === 0) decision = (facts & 1) === 0 ? 1 : 0;
+    else if (phase !== 4 && (facts & 2) !== 0) {
+      if ((facts & 1) === 0 && phase !== 1) decision = 2;
+      else if ((facts & 5) !== 0) decision = 3 | ((facts & 1) !== 0 ? 16 : 0);
+    }
+  } else if (stage === 1) {
+    if ((facts & 2) === 0) decision = ((facts & 5) === 5 ? 5 : 4) | ((facts & 1) !== 0 ? 32 : 0);
+    else if ((facts & 1) === 0 && !crossed) decision = 6;
+    else decision = phase === 1 ? 7 | ((facts & 1) === 0 ? 64 : 0) : 8;
+  } else if (stage === 2) decision = phase === 0 && facts === 1 && modifiers === 0 ? 1 : 0;
+  else if (stage === 3) decision = facts === 1 ? 3 : 0;
+  else if (stage === 4) decision = crossed ? 1 : 0;
+  else if (stage === 5) {
+    if (facts !== 0 && (phase !== 1 || crossed)) decision = phase === 1 ? 1 : 2;
+  } else if (stage === 6) {
+    if (phase === 1) decision = (facts & 3) === 3 ? 5 : 0;
+    else {
+      const template = (facts & 1) !== 0 ? 1 : (facts & 12) === 12 ? 2 : 0;
+      const size = (facts & 2) !== 0 ? 4 : (facts & 4) !== 0 ? 8 : 0;
+      decision = template === 0 ? ((facts & 4) !== 0 ? 32 : 0) : size !== 0 ? template | size : 0;
+    }
+  } else if (stage === 7) decision = phase === 1 ? ((facts & 1) !== 0 ? 3 : 0) : (facts & 1) | ((facts & 2) !== 0 ? 4 : 0);
+  else decision = facts === 15 ? 1 : 0;
+  const result = new Uint8Array(1); result[0] = decision; return result;
 }
 
 /** Keyboard focus coordinator, operation 34. Ten copied bytes: stage,

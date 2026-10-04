@@ -1,3 +1,4 @@
+const drag_policy = @import("canvas_drag_policy.zig");
 const keyboard_focus = @import("canvas_keyboard_focus_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
@@ -309,12 +310,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const previous_render_state = self.views[index].canvasWidgetRenderState();
 
-            if (input_event.kind == .pointer_down) {
+            const policy = self.views[index].canvas_widget_surface_scope_policy;
+            const active_source = self.views[index].canvas_widget_drag_source_id;
+            const admission = drag_policy.decide(policy, .{ .stage = .admission, .phase = drag_policy.inputPhase(input_event.kind), .facts = @as(u8, if (active_source != 0) 1 else 0) | @as(u8, if (input_event.pointer_id == self.views[index].canvas_widget_drag_pointer_id) 2 else 0) |
+                @as(u8, if (self.views[index].canvas_widget_pressed_id != 0) 4 else 0) });
+            if (admission == 0) return null;
+            if (admission == 1) {
                 // A live drag belongs to the pointer that crossed slop. A
                 // second contact may still run the ordinary pointer pipeline,
                 // but it cannot silently erase the first contact's preview or
                 // strand the app after its phase-0 Msg.
-                if (self.views[index].canvas_widget_drag_source_id != 0) return null;
                 self.views[index].canvas_widget_drag_source_id = 0;
                 self.views[index].canvas_widget_drag_source_attached = false;
                 self.views[index].canvas_widget_drag_pointer_id = input_event.pointer_id;
@@ -332,22 +337,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 }
                 return null;
             }
-            if (input_event.kind != .pointer_drag and input_event.kind != .pointer_up and input_event.kind != .pointer_cancel) return null;
-            // Pointer capture is per sequence. An unrelated touch/pen/mouse
-            // edge must not move or terminate the candidate/live drag.
-            if (input_event.pointer_id != self.views[index].canvas_widget_drag_pointer_id) return null;
-
-            const active_source = self.views[index].canvas_widget_drag_source_id;
-            // A release/cancel belongs to the drag channel only after motion
-            // crossed the slop and installed an active source. Until then it
-            // is the terminal edge of an ordinary click (or an abandoned
-            // press), so it must not arm a landing from the zero origin.
-            if (active_source == 0 and input_event.kind != .pointer_drag) {
+            if (admission == 2) {
                 self.views[index].canvas_widget_drag_pointer_id = 0;
                 return null;
             }
-            const candidate_source = if (active_source != 0) active_source else self.views[index].canvas_widget_pressed_id;
-            if (candidate_source == 0) return null;
+            const candidate_source = if (admission & 16 != 0) active_source else self.views[index].canvas_widget_pressed_id;
 
             const point = geometry.PointF.init(input_event.x, input_event.y);
             const phase: canvas.WidgetDragPhase = switch (input_event.kind) {
@@ -367,7 +361,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 ),
             };
             const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
-            if (route.target == null) {
+            const action = drag_policy.decide(policy, .{ .stage = .route, .phase = drag_policy.dragPhase(phase), .delta = drag.delta, .facts = @as(u8, if (active_source != 0) 1 else 0) | @as(u8, if (route.target != null) 2 else 0) |
+                @as(u8, if (self.views[index].canvas_widget_drag_source_hit != null) 4 else 0) });
+            if (action & 15 == 4 or action & 15 == 5) {
                 // A source removed, hidden, or disabled after a live change
                 // still owes the consumer one terminal phase. Its last valid
                 // hit/route are POD snapshots owned by the view, so they stay
@@ -381,14 +377,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 self.views[index].canvas_widget_drag_delta = .{};
                 self.views[index].canvas_widget_drag_source_hit = null;
                 self.views[index].canvas_widget_drag_route_len = 0;
-                if (active_source != 0) self.views[index].canvas_widget_pressed_id = 0;
+                if (action & 32 != 0) self.views[index].canvas_widget_pressed_id = 0;
                 self.views[index].canvas_widget_drag_landing_source_id = 0;
                 self.views[index].canvas_widget_drag_landing_origin = .{};
                 const next_render_state = self.views[index].canvasWidgetRenderState();
                 if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
                     try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
                 }
-                if (active_source != 0 and captured_source != null) {
+                if (action & 15 == 5) {
                     drag.source_id = captured_source.?.id;
                     drag.phase = .cancel;
                     return .{
@@ -407,7 +403,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // pointer-drag fidelity. Do not promote it into runtime drag state:
             // UiApp filters these change messages, and a matching release
             // remains a press because no active source was installed.
-            if (active_source == 0 and !canvasWidgetDragCrossedSlop(drag.delta)) {
+            if (action == 6) {
                 return .{
                     .window_id = input_event.window_id,
                     .view_label = self.views[index].label,
@@ -427,10 +423,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // phases where the source itself moves into (or back from) the
             // reserved slot.
             self.views[index].canvas_widget_drag_layout_motion_armed = true;
-            if (phase == .change) {
+            if (action & 15 == 7) {
                 self.views[index].canvas_widget_drag_landing_source_id = 0;
                 self.views[index].canvas_widget_drag_landing_origin = .{};
-                if (active_source == 0) {
+                if (action & 64 != 0) {
                     const source_bounds = route.target.?.bounds.normalized();
                     self.views[index].canvas_widget_drag_source_origin = geometry.PointF.init(source_bounds.x, source_bounds.y);
                 }
@@ -473,16 +469,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// app's phase-2 rebuild can therefore restore the source slot while
         /// the card under the pointer eases back into it.
         pub fn routeCanvasWidgetDragCancelFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
-            if (input_event.kind != .key_down or !canvasWidgetEscapeKey(input_event.key)) return null;
-            const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
-            if (modifiers.shift or modifiers.hasNavigationModifier()) return null;
+            const policy = if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |view_index| self.views[view_index].canvas_widget_surface_scope_policy else null;
+            if (drag_policy.decide(policy, .{ .stage = .escape, .phase = if (input_event.kind == .key_down) 0 else 4, .facts = @intFromBool(canvasWidgetEscapeKey(input_event.key)), .modifiers = drag_policy.modifiers(input_event.modifiers) }) == 0) return null;
 
             try validateRuntimeViewParent(self, input_event.window_id);
             try validateViewLabel(input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const source_id = self.views[index].canvas_widget_drag_source_id;
-            if (source_id == 0) return null;
+            if (drag_policy.decide(policy, .{ .stage = .source, .facts = @intFromBool(source_id != 0) }) == 0) return null;
 
             const previous_render_state = self.views[index].canvasWidgetRenderState();
             const delta = self.views[index].canvas_widget_drag_delta;
@@ -497,7 +492,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .delta = delta,
             };
             const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
-            if (route.target == null) {
+            const action = drag_policy.decide(policy, .{ .stage = .route, .phase = 3, .delta = delta, .facts = 1 | @as(u8, if (route.target != null) 2 else 0) | @as(u8, if (self.views[index].canvas_widget_drag_source_hit != null) 4 else 0) });
+            if (action & 15 == 4 or action & 15 == 5) {
                 const captured_source = self.views[index].canvas_widget_drag_source_hit;
                 const captured_route = self.views[index].canvas_widget_drag_route_entries[0..self.views[index].canvas_widget_drag_route_len];
                 self.views[index].canvas_widget_drag_source_id = 0;
@@ -514,7 +510,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
                     try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
                 }
-                if (captured_source) |source| {
+                if (action & 15 == 5) {
+                    const source = captured_source.?;
                     drag.source_id = source.id;
                     return .{
                         .window_id = input_event.window_id,
