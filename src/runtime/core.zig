@@ -1017,6 +1017,7 @@ pub const Runtime = struct {
     const updateCanvasWidgetControlFromKeyboard = CanvasWidgetEventMethods.updateCanvasWidgetControlFromKeyboard;
     const dismissCanvasWidgetSurfaceFromPointerInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromPointerInput;
     const dismissCanvasWidgetSurfaceFromKeyboardInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromKeyboardInput;
+    pub const updateCanvasWidgetClickCountFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetClickCountFromPointer;
     pub const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
     pub const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
     pub const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;

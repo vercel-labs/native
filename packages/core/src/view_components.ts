@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 31) return nscvClickSequence(request);
   if (request[0] === 30) return nscvCommandActivation(request);
   if (request[0] === 29) return nscvPointerIntent(request);
   if (request[0] === 28) return nscvSurfaceDismissal(request);
@@ -283,6 +284,31 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Click sequence coordination. Tag 31, pointer phase, retained count and
+ * bounded facts: primary button/nonzero previous time/same pointer/same target/
+ * ordered time/within interval/within horizontal slop/within vertical slop.
+ * Result: preserve (0), reset chain (1), record down (2), or stamp move/up (3),
+ * plus the selected count. Native retains exact u64 clocks and identities,
+ * geometry and storage. Reset never changes the routed event or saved point.
+ */
+function nscvClickSequence(request: Uint8Array): Uint8Array {
+  if (request.length !== 4 || request[1]! > 5 || request[2]! > 3)
+    throw new Error("invalid click sequence request");
+  const phase = request[1]!, previous = request[2]!, facts = request[3]!;
+  const result = new Uint8Array(2);
+  if (phase === 1) {
+    if ((facts & 1) === 0) result[0] = 1;
+    else {
+      result[0] = 2;
+      result[1] = previous !== 0 && facts === 255 ? Math.min(previous + 1, 3) : 1;
+    }
+  } else if (phase === 2 || phase === 3) {
+    result[0] = 3;
+    result[1] = Math.max(previous, 1);
+  }
   return result;
 }
 

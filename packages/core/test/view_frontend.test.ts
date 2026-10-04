@@ -1454,3 +1454,16 @@ test("command policy validates requests and distinguishes raw hits, claiming bou
   for (const bytes of [[30], [30, 0, 0, 0, 0, 31], [30, 0, 0, 0, 0, 31, 0, 0], [30, 3, 0, 0, 0, 31, 0], [30, 0, 1, 0, 0, 31, 0], [30, 0, 0, 1, 0, 31, 0], [30, 0, 0, 0, 1, 31, 0], [30, 1, 6, 0, 0, 31, 0], [30, 1, 0, 1, 0, 31, 0], [30, 1, 0, 0, 16, 31, 0], [30, 2, 3, 0, 0, 31, 0], [30, 2, 0, 5, 0, 31, 0], [30, 2, 0, 0, 8, 31, 0], [30, 0, 0, 0, 0, 63, 0], [30, 0, 0, 0, 0, 0, 1]])
     assert.throws(() => policy(new Uint8Array(bytes)), /command activation/);
 });
+
+
+test("click sequence policy preserves continuation counts, primary chain rules and three-click saturation", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  for (let phase = 0; phase < 6; phase++) for (let previous = 0; previous <= 3; previous++) for (let facts = 0; facts < 256; facts++) {
+    const expected = phase === 1 ? (facts & 1) === 0 ? [1, 0] : [2, previous > 0 && facts === 255 ? Math.min(previous + 1, 3) : 1] : phase === 2 || phase === 3 ? [3, Math.max(previous, 1)] : [0, 0];
+    assert.deepEqual([...policy(new Uint8Array([31, phase, previous, facts]))], expected);
+  }
+  for (const request of [[31], [31, 1, 1], [31, 1, 1, 255, 0], [31, 6, 0, 0], [31, 1, 4, 255]])
+    assert.throws(() => policy(new Uint8Array(request)), /click sequence/);
+});

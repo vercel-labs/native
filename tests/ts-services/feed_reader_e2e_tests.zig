@@ -7929,3 +7929,114 @@ test "compiled command activation preserves callbacks, partial failures and inpu
     };
     core.rt.frameReset();
 }
+
+test "compiled click sequence keeps borrowed core bytes and copied results independent" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const original = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(original);
+    var first: [2]u8 = undefined;
+    try std.testing.expectEqual(first.len, core.nativeSurfaceScopePolicy(&.{ 31, 1, 1, 255 }, &first));
+    try std.testing.expectEqualSlices(u8, &.{ 2, 2 }, &first);
+    var result: [2]u8 = undefined;
+    for (0..6) |phase| for (0..4) |previous| for (0..256) |facts| {
+        try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 31, @intCast(phase), @intCast(previous), @intCast(facts) }, &result));
+        const expected: [2]u8 = if (phase == 1) (if (facts & 1 == 0) .{ 1, 0 } else .{ 2, if (previous != 0 and facts == 255) @intCast(@min(previous + 1, 3)) else 1 }) else if (phase == 2 or phase == 3) .{ 3, @intCast(@max(previous, 1)) } else .{ 0, 0 };
+        try std.testing.expectEqualSlices(u8, &expected, &result);
+        try std.testing.expectEqualSlices(u8, original, borrowed);
+        try std.testing.expectEqualSlices(u8, &.{ 2, 2 }, &first);
+    };
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &.{ 2, 2 }, &first);
+}
+
+test "compiled click sequence consumers match native clocks, identities, geometry and all retained state" {
+    const ClickState = struct {
+        count: u8,
+        timestamp: u64,
+        point: [2]u32,
+        pointer: u64,
+        target: u64,
+        fn read(v: anytype) @This() {
+            return .{ .count = v.canvas_widget_click_count, .timestamp = v.canvas_widget_click_timestamp_ns, .point = .{ @bitCast(v.canvas_widget_click_point.x), @bitCast(v.canvas_widget_click_point.y) }, .pointer = v.canvas_widget_click_pointer_id, .target = v.canvas_widget_click_target_id };
+        }
+    };
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "click-sequence-parity", .source = native_sdk.WebViewSource.html("<h1>Clicks</h1>") };
+    const widgets = [_]canvas.Widget{.{ .id = 7, .kind = .button, .text = "Clicks" }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .panel, .children = &widgets }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+    }
+    const identities = [_]u64{ 0, 7, 9007199254740993, std.math.maxInt(u64) };
+    const clocks = [_]struct { before: u64, now: u64 }{
+        .{ .before = 0, .now = 0 },                                           .{ .before = 0, .now = 1 },                               .{ .before = 1, .now = 0 },
+        .{ .before = 1, .now = 1 },                                           .{ .before = 1, .now = 500000001 },                       .{ .before = 1, .now = 500000002 },
+        .{ .before = 9007199254740993, .now = 9007199254740993 },             .{ .before = 9007199254740993, .now = 9007199754740993 }, .{ .before = std.math.maxInt(u64) - 500000000, .now = std.math.maxInt(u64) },
+        .{ .before = std.math.maxInt(u64), .now = std.math.maxInt(u64) - 1 },
+    };
+    const points = [_]geometry.PointF{ .{}, .{ .x = 4, .y = -4 }, .{ .x = 4.000001, .y = 0 }, .{ .x = 0, .y = -4.000001 }, .{ .x = -0.0, .y = 0 }, .{ .x = std.math.nan(f32), .y = 0 }, .{ .x = std.math.inf(f32), .y = 0 }, .{ .x = std.math.floatMax(f32), .y = -std.math.floatMax(f32) } };
+    var comparisons: usize = 0;
+    for (0..4) |previous| for (std.enums.values(canvas.WidgetPointerPhase)) |phase| for ([_]u8{ 0, 1, 2, 255 }) |button| for (clocks) |clock| for (identities, 0..) |identity, identity_index| for (0..4) |target_case| for (points) |point| {
+        var expected_click: ClickState = undefined;
+        var expected_retained: PointerIntentState = undefined;
+        var expected_event: runtime_ns.CanvasWidgetPointerEvent = undefined;
+        for (harnesses, 0..) |harness, backend| {
+            const view = &harness.runtime.views[0];
+            view.canvas_widget_click_count = @intCast(previous);
+            view.canvas_widget_click_timestamp_ns = clock.before;
+            view.canvas_widget_click_point = .{};
+            view.canvas_widget_click_pointer_id = identity;
+            view.canvas_widget_click_target_id = identity;
+            const hit: canvas.WidgetHit = .{ .id = identity, .kind = .button, .index = 1, .depth = 1, .bounds = nodes[1].frame, .state = .{} };
+            var raw = hit;
+            raw.id = identities[(identity_index + 1) % identities.len];
+            var event: runtime_ns.CanvasWidgetPointerEvent = .{ .view_label = "canvas", .pointer = .{ .phase = phase, .pointer_id = if (target_case == 3) raw.id else identity, .point = point, .click_count = 19 }, .target = if (target_case == 2) null else raw, .press_target = if (target_case == 0) hit else null };
+            harness.runtime.updateCanvasWidgetClickCountFromPointer(.{ .label = "canvas", .kind = .pointer_down, .timestamp_ns = clock.now, .button = button }, &event);
+            // Preserve even nonfinite geometry byte-for-byte in the event;
+            // only its click count is changed by this consumer.
+            const stamped = event.pointer.click_count;
+            event.pointer.click_count = 19;
+            try std.testing.expectEqual(@as(u32, @bitCast(point.x)), @as(u32, @bitCast(event.pointer.point.x)));
+            try std.testing.expectEqual(@as(u32, @bitCast(point.y)), @as(u32, @bitCast(event.pointer.point.y)));
+            event.pointer.point = .{};
+            event.pointer.click_count = stamped;
+            if (backend == 0) {
+                expected_click = ClickState.read(view);
+                expected_retained = PointerIntentState.read(view, harness);
+                expected_event = event;
+            } else {
+                try std.testing.expectEqualDeep(expected_click, ClickState.read(view));
+                try PointerIntentState.expect(expected_retained, PointerIntentState.read(view, harness));
+                try std.testing.expectEqualDeep(expected_event, event);
+                comparisons += 1;
+            }
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 122880), comparisons);
+    for (harnesses) |harness| {
+        var missing: runtime_ns.CanvasWidgetPointerEvent = .{ .view_label = "missing", .pointer = .{ .phase = .down, .point = .{}, .click_count = 19 } };
+        const before = ClickState.read(&harness.runtime.views[0]);
+        harness.runtime.updateCanvasWidgetClickCountFromPointer(.{ .label = "canvas", .kind = .pointer_down }, &missing);
+        try std.testing.expectEqualDeep(before, ClickState.read(&harness.runtime.views[0]));
+        try std.testing.expectEqual(@as(u8, 19), missing.pointer.click_count);
+        harness.runtime.views[0].kind = .webview;
+        missing.view_label = "canvas";
+        harness.runtime.updateCanvasWidgetClickCountFromPointer(.{ .label = "canvas", .kind = .pointer_down }, &missing);
+        try std.testing.expectEqualDeep(before, ClickState.read(&harness.runtime.views[0]));
+        try std.testing.expectEqual(@as(u8, 19), missing.pointer.click_count);
+        harness.runtime.views[0].kind = .gpu_surface;
+    }
+    core.rt.frameReset();
+}

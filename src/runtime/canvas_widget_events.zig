@@ -560,6 +560,47 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         pub fn updateCanvasWidgetClickCountFromPointer(self: *Runtime, input_event: GpuSurfaceInputEvent, pointer_event: *CanvasWidgetPointerEvent) void {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
+            if (self.views[index].canvas_widget_surface_scope_policy) |policy| {
+                const view = &self.views[index];
+                const point = pointer_event.pointer.point;
+                const target_id: canvas.ObjectId = if (pointer_event.press_target) |target| target.id else if (pointer_event.target) |target| target.id else 0;
+                var facts: u8 = @intFromBool(input_event.button == 0);
+                if (pointer_event.pointer.phase == .down and input_event.button == 0) {
+                    const ordered = input_event.timestamp_ns >= view.canvas_widget_click_timestamp_ns;
+                    facts |= (@as(u8, @intFromBool(view.canvas_widget_click_timestamp_ns != 0)) << 1) |
+                        (@as(u8, @intFromBool(pointer_event.pointer.pointer_id == view.canvas_widget_click_pointer_id)) << 2) |
+                        (@as(u8, @intFromBool(target_id == view.canvas_widget_click_target_id)) << 3) |
+                        (@as(u8, @intFromBool(ordered)) << 4) |
+                        (@as(u8, @intFromBool(ordered and input_event.timestamp_ns - view.canvas_widget_click_timestamp_ns <= canvas_widget_multi_click_interval_ns)) << 5) |
+                        (@as(u8, @intFromBool(@abs(point.x - view.canvas_widget_click_point.x) <= canvas_widget_multi_click_slop)) << 6) |
+                        (@as(u8, @intFromBool(@abs(point.y - view.canvas_widget_click_point.y) <= canvas_widget_multi_click_slop)) << 7);
+                }
+                const request = [4]u8{ 31, @intFromEnum(pointer_event.pointer.phase), view.canvas_widget_click_count, facts };
+                var result: [2]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 3 or result[1] > 3 or
+                    ((result[0] == 0 or result[0] == 1) and result[1] != 0) or
+                    ((result[0] == 2 or result[0] == 3) and result[1] == 0)) @panic("invalid compiled click sequence result");
+                switch (result[0]) {
+                    0 => {},
+                    1 => {
+                        view.canvas_widget_click_count = 0;
+                        view.canvas_widget_click_timestamp_ns = 0;
+                        view.canvas_widget_click_pointer_id = 0;
+                        view.canvas_widget_click_target_id = 0;
+                    },
+                    2 => {
+                        view.canvas_widget_click_count = result[1];
+                        view.canvas_widget_click_timestamp_ns = input_event.timestamp_ns;
+                        view.canvas_widget_click_point = point;
+                        view.canvas_widget_click_pointer_id = pointer_event.pointer.pointer_id;
+                        view.canvas_widget_click_target_id = target_id;
+                        pointer_event.pointer.click_count = result[1];
+                    },
+                    3 => pointer_event.pointer.click_count = result[1],
+                    else => unreachable,
+                }
+                return;
+            }
             switch (pointer_event.pointer.phase) {
                 .down => {
                     if (input_event.button != 0) {
