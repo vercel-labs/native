@@ -5780,6 +5780,14 @@ test "compiled tooltip binding preserves prospective pruning and full-width alia
             try std.testing.expectEqual(expected_id, view.canvasWidgetOwnedTooltipIdForOwner(nodes[owner].widget.id));
             comparisons += 2;
             const seed = State{ .armed = if (expected) |t| nodes[t].widget.id else 0xffff_ffff_ffff_ffff, .armed_owner = nodes[owner].widget.id, .deadline = 100, .shown = nodes[(owner + variant) % nodes.len].widget.id, .shown_owner = nodes[owner].widget.id, .from_focus = variant & 2 != 0, .warm = 200, .transit = 300 };
+            var reference_nodes = nodes;
+            var compiled_nodes = nodes;
+            view.canvas_widget_tooltip_policy = null;
+            view.applyCanvasTooltipVisibilityToNodesForShownId(&reference_nodes, seed.shown);
+            view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+            view.applyCanvasTooltipVisibilityToNodesForShownId(&compiled_nodes, seed.shown);
+            try std.testing.expectEqualDeep(reference_nodes, compiled_nodes);
+            comparisons += 1;
             seed.write(view);
             view.canvas_widget_tooltip_policy = null;
             const surviving = view.canvasTooltipShownIdSurvivingLayout(layout);
@@ -5795,7 +5803,7 @@ test "compiled tooltip binding preserves prospective pruning and full-width alia
             comparisons += 2;
         }
     }
-    try std.testing.expectEqual(@as(usize, 4096), comparisons);
+    try std.testing.expectEqual(@as(usize, 5120), comparisons);
     view.widget_layout_node_count = 0;
     view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
     try std.testing.expectEqual(@as(?usize, null), view.canvasWidgetOwnedTooltipIndex(0));
@@ -6493,6 +6501,248 @@ test "compiled tooltip reconciliation stops after a failed visibility capability
                 if (cause == 0) try std.testing.expect(!Probe.stages[1] and !Probe.stages[2] and !Probe.stages[3]);
                 if (cause == 1) try std.testing.expect(!Probe.stages[5] and !Probe.stages[6] and !Probe.stages[9]);
                 if (cause == 2) try std.testing.expect(!Probe.stages[9]); // Hover failed before focus.
+            }
+        }
+    }
+    core.rt.frameReset();
+}
+
+test "compiled tooltip presentation copies full-capacity and pruning results without resetting borrowed bytes" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    const capacity = runtime_ns.max_canvas_widget_nodes_per_view;
+    var request: [4 + capacity]u8 = undefined;
+    request[0..4].* = .{ 27, 0, 0, 4 };
+    for (request[4..], 0..) |*fact, index| fact.* = @intCast(index % 16);
+    var output: [capacity]u8 = undefined;
+    const expected = [_]u8{ 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1 };
+    for (0..16) |_| {
+        @memset(&output, 255);
+        try std.testing.expectEqual(output.len, core.nativeTooltipPolicy(&request, &output));
+        for (output, 0..) |action, index| try std.testing.expectEqual(expected[index % 16], action);
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    }
+    for (1..3) |stage| {
+        for (0..4) |facts| {
+            var result: [1]u8 = .{255};
+            try std.testing.expectEqual(result.len, core.nativeTooltipPolicy(&.{ 27, @intCast(stage), @intCast(facts) }, &result));
+            try std.testing.expectEqual(@as(u8, if (facts == 1) (if (stage == 1) 5 else 14) else 0), result[0]);
+            try std.testing.expectEqualSlices(u8, copy, borrowed);
+        }
+    }
+    var empty: [0]u8 = .{};
+    try std.testing.expectEqual(@as(usize, 0), core.nativeTooltipPolicy(&.{ 27, 0, 0, 0 }, &empty));
+    core.rt.frameReset();
+    for (output, 0..) |action, index| try std.testing.expectEqual(expected[index % 16], action);
+}
+
+test "compiled tooltip pruning preserves asymmetric stale slots and native-width clocks" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const State = struct {
+        slots: [8]u64,
+        from_focus: bool,
+        apex: geometry.PointF,
+        fn read(v: anytype) @This() {
+            return .{ .slots = .{ v.canvas_tooltip_armed_id, v.canvas_tooltip_armed_owner_id, v.canvas_tooltip_deadline_ns, v.canvas_tooltip_shown_id, v.canvas_tooltip_shown_owner_id, v.canvas_tooltip_warm_until_ns, v.canvas_tooltip_transit_deadline_ns, v.widget_revision }, .from_focus = v.canvas_tooltip_shown_from_focus, .apex = v.canvas_tooltip_pointer_from };
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "tooltip-prune", .source = native_sdk.WebViewSource.html("<h1>Tooltip</h1>"), .event_fn = NoEvents.event });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const v = &harness.runtime.views[0];
+    const owner: canvas.ObjectId = 0xffff_ffff_ffff_ff02;
+    const hint: canvas.ObjectId = 0xffff_ffff_ffff_ff03;
+    const hints = [_]canvas.Widget{.{ .id = hint, .kind = .tooltip, .text = "Hint", .layout = .{ .anchor = .{ .placement = .above } } }};
+    const children = [_]canvas.Widget{.{ .id = owner, .kind = .button, .text = "Run", .children = &hints }};
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const ids = [_]canvas.ObjectId{ 0, hint, 0xffff_ffff_ffff_ffff };
+    const clocks = [_]u64{ 0, 1, 0x8000_0000_0000_0000, std.math.maxInt(u64) };
+    var comparisons: usize = 0;
+    for (ids) |armed| for (ids) |shown| for (clocks) |clock| for ([_]bool{ false, true }) |from_focus| {
+        var expected: State = undefined;
+        var expected_nodes: [3]canvas.WidgetLayoutNode = undefined;
+        var expected_semantics: [3]canvas.WidgetSemanticsNode = undefined;
+        var expected_count: usize = 0;
+        for (0..2) |backend| {
+            core.rt.frameReset();
+            @memcpy(v.widget_layout_nodes[0..nodes.len], &nodes);
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else core.nativeTooltipPolicy;
+            v.canvas_tooltip_armed_id = armed;
+            v.canvas_tooltip_armed_owner_id = owner;
+            v.canvas_tooltip_deadline_ns = clock;
+            v.canvas_tooltip_shown_id = shown;
+            v.canvas_tooltip_shown_owner_id = owner;
+            v.canvas_tooltip_shown_from_focus = from_focus;
+            v.canvas_tooltip_warm_until_ns = clock;
+            v.canvas_tooltip_transit_deadline_ns = clock;
+            v.canvas_tooltip_pointer_from = .{ .x = 17, .y = 29 };
+            const seed = State.read(v);
+            const prospective = v.canvasTooltipShownIdSurvivingLayout(layout);
+            try std.testing.expectEqualDeep(seed, State.read(v));
+            try std.testing.expectEqual(if (shown == hint) hint else @as(canvas.ObjectId, 0), prospective);
+            v.pruneCanvasTooltipIntentForLayout(layout);
+            v.applyCanvasTooltipVisibility();
+            try v.refreshCanvasWidgetSemantics();
+            if (armed == ids[2] and shown == hint) {
+                try std.testing.expectEqual(@as(u64, 0), v.canvas_tooltip_deadline_ns);
+                try std.testing.expectEqual(clock, v.canvas_tooltip_transit_deadline_ns);
+                try std.testing.expectEqual(hint, v.canvas_tooltip_shown_id);
+            }
+            if (armed == hint and shown == ids[2]) {
+                try std.testing.expectEqual(clock, v.canvas_tooltip_deadline_ns);
+                try std.testing.expectEqual(hint, v.canvas_tooltip_armed_id);
+                try std.testing.expectEqual(@as(u64, 0), v.canvas_tooltip_transit_deadline_ns);
+            }
+            if (armed == 0 and shown == 0) try std.testing.expectEqualDeep(seed, State.read(v));
+            if (backend == 0) {
+                expected = State.read(v);
+                @memcpy(&expected_nodes, v.widgetLayoutTree().nodes);
+                expected_count = v.widgetSemantics().len;
+                @memcpy(expected_semantics[0..expected_count], v.widgetSemantics());
+            } else {
+                try std.testing.expectEqualDeep(expected, State.read(v));
+                try std.testing.expectEqualDeep(expected_nodes, v.widget_layout_nodes[0..nodes.len].*);
+                try std.testing.expectEqualDeep(expected_semantics[0..expected_count], v.widgetSemantics());
+                comparisons += 1;
+            }
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 72), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled tooltip presentation preserves rejection boundaries for every retained pool" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const Probe = struct {
+        var armed_queries: usize = 0;
+        fn policy(request: []const u8, response: []u8) usize {
+            if (request[0] == 27 and request[1] == 1) armed_queries += 1;
+            return core.nativeTooltipPolicy(request, response);
+        }
+    };
+    const State = struct {
+        slots: [9]u64,
+        from_focus: bool,
+        nodes: usize,
+        semantics: usize,
+        text: usize,
+        fn read(v: anytype) @This() {
+            return .{ .slots = .{ v.canvas_tooltip_armed_id, v.canvas_tooltip_armed_owner_id, v.canvas_tooltip_deadline_ns, v.canvas_tooltip_shown_id, v.canvas_tooltip_shown_owner_id, v.canvas_tooltip_warm_until_ns, v.canvas_tooltip_transit_deadline_ns, v.widget_revision, v.canvas_widget_layout_adoptions }, .from_focus = v.canvas_tooltip_shown_from_focus, .nodes = v.widget_layout_node_count, .semantics = v.widget_semantics_node_count, .text = v.widget_text_len };
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "tooltip-reject", .source = native_sdk.WebViewSource.html("<h1>Tooltip</h1>"), .event_fn = NoEvents.event });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const v = &harness.runtime.views[0];
+    const owner: canvas.ObjectId = 0xffff_ffff_ffff_ff02;
+    const hint: canvas.ObjectId = 0xffff_ffff_ffff_ff03;
+    const hints = [_]canvas.Widget{.{ .id = hint, .kind = .tooltip, .text = "Hint", .layout = .{ .anchor = .{ .placement = .above } } }};
+    const children = [_]canvas.Widget{.{ .id = owner, .kind = .button, .text = "Run", .children = &hints }};
+    var good_nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const good = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &good_nodes);
+    const spans = try std.testing.allocator.alloc(canvas.TextSpan, 1025);
+    defer std.testing.allocator.free(spans);
+    @memset(spans, .{});
+    const menus = try std.testing.allocator.alloc(canvas.WidgetContextMenuItem, 513);
+    defer std.testing.allocator.free(menus);
+    @memset(menus, .{ .label = "" });
+    const series = try std.testing.allocator.alloc(canvas.ChartSeries, 65);
+    defer std.testing.allocator.free(series);
+    @memset(series, .{});
+    const points = try std.testing.allocator.alloc(f32, 16385);
+    defer std.testing.allocator.free(points);
+    @memset(points, 0);
+    const labels = try std.testing.allocator.alloc([]const u8, 513);
+    defer std.testing.allocator.free(labels);
+    @memset(labels, "");
+    const text = try std.testing.allocator.alloc(u8, runtime_ns.max_canvas_widget_text_bytes_per_view + 1);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    const many = try std.testing.allocator.alloc(canvas.WidgetLayoutNode, runtime_ns.max_canvas_widget_nodes_per_view + 1);
+    defer std.testing.allocator.free(many);
+    for (many, 0..) |*node, index| node.* = .{ .widget = .{ .id = 100 + index, .kind = .stack }, .frame = geometry.RectF.init(0, 0, 1, 1), .depth = 0 };
+    const errors = [_]anyerror{ error.WidgetNodeLimitReached, error.WidgetAnchoredSurfaceLimitReached, error.WidgetSpanLimitReached, error.WidgetContextMenuLimitReached, error.WidgetChartSeriesLimitReached, error.WidgetChartPointsLimitReached, error.WidgetChartLabelsLimitReached, error.WidgetTextTooLarge, error.InvalidCommand };
+    for (errors, 0..) |expected_error, cause| {
+        var rejected_nodes: [17]canvas.WidgetLayoutNode = undefined;
+        @memcpy(&rejected_nodes, many[0..rejected_nodes.len]);
+        var rejected = canvas.WidgetLayoutTree{ .nodes = rejected_nodes[0..1], .root_bounds = good.root_bounds };
+        const widget = &rejected_nodes[0].widget;
+        switch (cause) {
+            0 => rejected.nodes = many,
+            1 => {
+                rejected.nodes = &rejected_nodes;
+                for (&rejected_nodes) |*node| node.widget.layout.anchor = .{ .placement = .above };
+            },
+            2 => widget.spans = spans,
+            3 => widget.context_menu = menus,
+            4 => widget.chart.series = series,
+            5 => widget.chart.series = &.{.{ .values = points }},
+            6 => widget.chart.x_labels = labels,
+            7 => widget.text = text,
+            8 => widget.command = "bad/command",
+            else => unreachable,
+        }
+        var expected: State = undefined;
+        var expected_nodes: [3]canvas.WidgetLayoutNode = undefined;
+        var expected_semantics: [3]canvas.WidgetSemanticsNode = undefined;
+        var expected_text: [64]u8 = undefined;
+        var expected_dirty: [8]geometry.RectF = undefined;
+        var expected_dirty_count: usize = 0;
+        for (0..2) |backend| {
+            core.rt.frameReset();
+            v.canvas_widget_tooltip_policy = null;
+            v.canvas_tooltip_armed_id = 0;
+            v.canvas_tooltip_shown_id = 0;
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", good);
+            v.canvas_widget_tooltip_policy = if (backend == 0) null else Probe.policy;
+            v.canvas_tooltip_armed_id = hint;
+            v.canvas_tooltip_armed_owner_id = owner;
+            v.canvas_tooltip_deadline_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_shown_id = hint;
+            v.canvas_tooltip_shown_owner_id = owner;
+            v.canvas_tooltip_shown_from_focus = true;
+            v.canvas_tooltip_warm_until_ns = std.math.maxInt(u64);
+            v.canvas_tooltip_transit_deadline_ns = std.math.maxInt(u64);
+            v.widget_revision = 100;
+            v.canvas_widget_layout_adoptions = 100;
+            v.applyCanvasTooltipVisibility();
+            try v.refreshCanvasWidgetSemantics();
+            harness.runtime.dirty_region_count = 0;
+            Probe.armed_queries = 0;
+            const before = State.read(v);
+            try std.testing.expectError(expected_error, harness.runtime.setCanvasWidgetLayout(1, "canvas", rejected));
+            // The invalid-command backstop follows the destructive boundary;
+            // budget rejection precedes it and leaves the painted tree intact.
+            if (cause < 8) try std.testing.expectEqualDeep(before, State.read(v));
+            try std.testing.expectEqual(@as(usize, 0), Probe.armed_queries);
+            if (backend == 0) {
+                expected = State.read(v);
+                @memcpy(expected_nodes[0..expected.nodes], v.widgetLayoutTree().nodes);
+                @memcpy(expected_semantics[0..expected.semantics], v.widgetSemantics());
+                @memcpy(expected_text[0..expected.text], v.widget_text_bytes[0..expected.text]);
+                expected_dirty_count = harness.runtime.dirty_region_count;
+                @memcpy(expected_dirty[0..expected_dirty_count], harness.runtime.dirty_regions[0..expected_dirty_count]);
+            } else {
+                try std.testing.expectEqualDeep(expected, State.read(v));
+                try std.testing.expectEqualDeep(expected_nodes[0..expected.nodes], v.widgetLayoutTree().nodes);
+                try std.testing.expectEqualDeep(expected_semantics[0..expected.semantics], v.widgetSemantics());
+                try std.testing.expectEqualSlices(u8, expected_text[0..expected.text], v.widget_text_bytes[0..expected.text]);
+                try std.testing.expectEqualDeep(expected_dirty[0..expected_dirty_count], harness.runtime.dirty_regions[0..harness.runtime.dirty_region_count]);
             }
         }
     }

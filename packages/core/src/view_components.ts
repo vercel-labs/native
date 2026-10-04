@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 27) return nscvTooltipPresentation(request);
   if (request[0] === 26) return nscvTooltipReconcile(request);
   if (request[0] === 25) return nscvTooltipPointer(request);
   if (request[0] === 24) return nscvTooltipIntent(request);
@@ -215,6 +216,36 @@ function nscvTooltipReconcile(request: Uint8Array): Uint8Array {
   else if (stage === 10) action = (facts & 1) !== 0 && ((facts & 2) !== 0 || (facts & 4) !== 0 && (facts & 8) === 0) ? 1 : 0;
   else action = facts;
   const result = new Uint8Array(1); result[0] = action;
+  return result;
+}
+
+/** Tooltip presentation and adoption. Tag 27, stage.
+ * Stage 0: little-endian u16 count and one fact byte per node (tooltip,
+ * anchored, identity present, shown identity match). Results: 0 keep authored
+ * visibility, 1 show, 2 hide. Batch at the native 1024-node limit.
+ * Stages 1/2: armed/shown slot presence and binding survival; one-byte actions
+ * clear armed (1), clear shown (2), clear warmth (4), clear transit (8).
+ * A prospective shown query only reads the verdict; native commits the live
+ * prune after adoption succeeds, armed before shown. IDs and clocks stay native.
+ */
+function nscvTooltipPresentation(request: Uint8Array): Uint8Array {
+  if (request.length < 3 || request[1]! > 2) throw new Error("invalid tooltip presentation request");
+  const stage = request[1]!;
+  if (stage === 0) {
+    if (request.length < 4) throw new Error("invalid tooltip presentation request");
+    const count = request[2]! | request[3]! << 8;
+    if (count > 1024 || request.length !== 4 + count) throw new Error("invalid tooltip presentation count");
+    const result = new Uint8Array(count);
+    for (let index = 0; index < count; index++) {
+      const facts = request[4 + index]!;
+      if (facts > 15) throw new Error("invalid tooltip presentation facts");
+      result[index] = (facts & 3) !== 3 ? 0 : (facts & 12) === 12 ? 1 : 2;
+    }
+    return result;
+  }
+  if (request.length !== 3 || request[2]! > 3) throw new Error("invalid tooltip presentation facts");
+  const result = new Uint8Array(1);
+  result[0] = request[2] === 1 ? (stage === 1 ? 5 : 14) : 0;
   return result;
 }
 

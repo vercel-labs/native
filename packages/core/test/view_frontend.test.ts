@@ -1334,3 +1334,26 @@ test("tooltip reconciliation selects fresh stages and rejects malformed facts", 
     [26, 1, 6], [26, 3, 6], [26, 11, 4], [26, 2, 8], [26, 4, 4], [26, 6, 8], [26, 7, 4], [26, 8, 4], [26, 9, 16], [26, 10, 16]])
     assert.throws(() => policy(new Uint8Array(bytes)), /tooltip reconciliation/);
 });
+
+test("tooltip presentation preserves authored nodes and asymmetric stale slots", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<tooltip anchor="above">Hint</tooltip>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const request = new Uint8Array(20);
+  request.set([27, 0, 16, 0]);
+  for (let index = 0; index < 16; index++) request[4 + index] = index;
+  assert.deepEqual(Array.from(policy(request)), [0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1]);
+  assert.deepEqual(Array.from(policy(new Uint8Array([27, 0, 0, 0]))), []);
+  for (const stage of [1, 2]) {
+    for (const facts of [0, 2, 3]) assert.deepEqual(Array.from(policy(new Uint8Array([27, stage, facts]))), [0]);
+  }
+  assert.deepEqual(Array.from(policy(new Uint8Array([27, 1, 1]))), [5]); // Dead arm clears warmth, retaining transit.
+  assert.deepEqual(Array.from(policy(new Uint8Array([27, 2, 1]))), [14]); // Dead shown slot retains any surviving arm.
+  const full = new Uint8Array(1028);
+  full.set([27, 0, 0, 4]); full.fill(15, 4);
+  assert.deepEqual(Array.from(policy(full)), Array(1024).fill(1));
+  for (const bytes of [[27], [27, 0], [27, 0, 0], [27, 3, 0], [27, 0, 1, 0],
+    [27, 0, 0, 0, 0], [27, 0, 1, 4, 0], [27, 0, 1, 0, 16], [27, 1, 4], [27, 2, 4], [27, 1, 0, 0]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /tooltip presentation/);
+});

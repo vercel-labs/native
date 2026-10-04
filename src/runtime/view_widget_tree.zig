@@ -855,7 +855,30 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// tree stamped visible and cleared registers (an unhideable
         /// tooltip).
         pub fn applyCanvasTooltipVisibilityToNodesForShownId(self: *const RuntimeView, nodes: []canvas.WidgetLayoutNode, shown_id: canvas.ObjectId) void {
-            _ = self;
+            if (self.canvas_widget_tooltip_policy) |policy| {
+                if (nodes.len > max_canvas_widget_nodes_per_view) @panic("tooltip presentation exceeds native view budget");
+                var request: [4 + max_canvas_widget_nodes_per_view]u8 = undefined;
+                request[0] = 27;
+                request[1] = 0;
+                std.mem.writeInt(u16, request[2..4], @intCast(nodes.len), .little);
+                for (nodes, 0..) |node, index| {
+                    request[4 + index] = @as(u8, @intFromBool(node.widget.kind == .tooltip)) |
+                        (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 1) |
+                        (@as(u8, @intFromBool(node.widget.id != 0)) << 2) |
+                        (@as(u8, @intFromBool(node.widget.id == shown_id)) << 3);
+                }
+                var output: [max_canvas_widget_nodes_per_view]u8 = undefined;
+                const actions = output[0..nodes.len];
+                if (policy(request[0 .. 4 + nodes.len], actions) != actions.len)
+                    @panic("invalid compiled tooltip presentation result");
+                for (actions) |action| {
+                    if (action > 2) @panic("invalid compiled tooltip visibility action");
+                }
+                for (nodes, actions) |*node, action| {
+                    if (action != 0) node.widget.semantics.hidden = action == 2;
+                }
+                return;
+            }
             for (nodes) |*node| {
                 if (node.widget.kind != .tooltip) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
@@ -891,6 +914,23 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// leaves both the old tree and the registers that can hide its
         /// tooltip intact.
         pub fn pruneCanvasTooltipIntentForLayout(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
+            if (compiledCanvasTooltipPrune(self, layout, .armed)) |armed| {
+                if ((armed & 1) != 0) {
+                    self.canvas_tooltip_armed_id = 0;
+                    self.canvas_tooltip_armed_owner_id = 0;
+                    self.canvas_tooltip_deadline_ns = 0;
+                }
+                if ((armed & 4) != 0) self.canvas_tooltip_warm_until_ns = 0;
+                const shown = compiledCanvasTooltipPrune(self, layout, .shown).?;
+                if ((shown & 2) != 0) {
+                    self.canvas_tooltip_shown_id = 0;
+                    self.canvas_tooltip_shown_owner_id = 0;
+                    self.canvas_tooltip_shown_from_focus = false;
+                }
+                if ((shown & 4) != 0) self.canvas_tooltip_warm_until_ns = 0;
+                if ((shown & 8) != 0) self.canvas_tooltip_transit_deadline_ns = 0;
+                return;
+            }
             if (self.canvas_tooltip_armed_id != 0 and !canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_armed_id, self.canvas_tooltip_armed_owner_id, false)) {
                 self.canvas_tooltip_armed_id = 0;
                 self.canvas_tooltip_armed_owner_id = 0;
@@ -920,9 +960,27 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// the OLD tree with the registers that own its stamps: the
         /// tooltip that is still painted is still hideable.
         pub fn canvasTooltipShownIdSurvivingLayout(self: *const RuntimeView, layout: canvas.WidgetLayoutTree) canvas.ObjectId {
+            if (compiledCanvasTooltipPrune(self, layout, .shown)) |actions|
+                return if ((actions & 2) != 0) 0 else self.canvas_tooltip_shown_id;
             if (self.canvas_tooltip_shown_id == 0) return 0;
             if (!canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) return 0;
             return self.canvas_tooltip_shown_id;
+        }
+
+        const CanvasTooltipPruneSlot = enum(u8) { armed = 1, shown = 2 };
+
+        fn compiledCanvasTooltipPrune(self: *const RuntimeView, layout: canvas.WidgetLayoutTree, slot: CanvasTooltipPruneSlot) ?u8 {
+            const policy = self.canvas_widget_tooltip_policy orelse return null;
+            const id = if (slot == .armed) self.canvas_tooltip_armed_id else self.canvas_tooltip_shown_id;
+            const owner = if (slot == .armed) self.canvas_tooltip_armed_owner_id else self.canvas_tooltip_shown_owner_id;
+            const present = id != 0;
+            const alive = present and canvasTooltipIntentBindingAlive(self, layout, id, owner, slot == .shown and self.canvas_tooltip_shown_from_focus);
+            const facts = @as(u8, @intFromBool(present)) | (@as(u8, @intFromBool(alive)) << 1);
+            const request = [3]u8{ 27, @intFromEnum(slot), facts };
+            var output: [1]u8 = undefined;
+            if (policy(&request, &output) != output.len or (output[0] != 0 and output[0] != @as(u8, if (slot == .armed) 5 else 14)))
+                @panic("invalid compiled tooltip pruning result");
+            return output[0];
         }
 
         /// Both ends of a tooltip intent slot are still live: the
