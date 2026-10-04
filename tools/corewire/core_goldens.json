@@ -2635,5 +2635,332 @@
     },
     "check_status": 1,
     "check_diagnostics": "input.json: error: types: the model declaration carries no authored type-origin fact — this sidecar predates facade metadata; regenerate it with the current compiler before requesting --facade, --profile, or --check\ninput.json: error: msg.arms: arm \"label_set\" carries one payload but no authored member-name fact — this sidecar predates facade metadata; regenerate it with the current compiler\n"
+  },
+  "emission-identity-0000000000000000": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "0597aca91502a80f21901fc9abea5db7e0ff34439b0fbc834b4e9f56b52eb089",
+      "facade": "0932b05f37373081e3912440a0cc093d9bda97789d30e5b140a97deaf6a1e579",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "a3449800ddba825b1c60272ad74a084358d95258ec3fd30461a73eee30ed1974"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-identity-0020000000000001": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "64a5d9409addbba20a533c751f2d4b2be016dc8132380d565be5cbfc0a4339af",
+      "facade": "277aa3b5117f0f24f955f71d0fbe6aea399a2999adbf467335431c1e483b69c7",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "bf0c7854595c8006bc95a0c15dba7c5c1af6a238653250c72713e1c97f89dbdf"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-identity-ffffffffffffffff": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "2b28b852581a7028eb44b7969e20f7ed7005781e16ff039d06ec371ffd8ad0ed",
+      "facade": "890039e7bde27e41d3f6aee01ccf64d18532d2fecf0b90fc08a517d6f1ac17e4",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "550c9e9f8e9b62228e67beba8175ff630490e59e3d0078bb9f2a8309047b2dfc"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-entry-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: entry: expected a non-empty string\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: entry: expected a non-empty string\n"
+  },
+  "emission-entry-1": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "50b5e8e71c26024503695df9bd32a0bc860b7cc7ec8fc6089e37dc3e82ba4112",
+      "facade": "014f0395c279050f0b75a99c2cba1a55bc0c3e165699292d5f2ef17fd9c98f78",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "8c9ddb9e9b63877803b941661b8df3354416f9b1c0628461cef7fd6d6c2ca9a6"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-entry-2": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "2b948b0950b55e11a4a10b485b800aab269c2f029c83c09bdf8fc6a6a8597409",
+      "facade": "a4b90add5e75c852fe20f2b58422efc2f274751aaef26eb8b3138301a9b16d97",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "3c41d8c2bc6466c3cfa9dc8444fb26433dd1e8839764d7b269ccaa9756f5dbb6"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-entry-3": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "183a61f58c775a0e7624e93fda069d66b6abc320ef572055eeda8c79a5d3bc68",
+      "facade": "a261f7f9ea74ed0ec6969f2713118df0d3ddf9c22a26b835dcdd7b69e28206f8",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "02169b2db5a00d608abc88bef61b761d03f643fd1dca2b846da3fae5d19db417"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-entry-4": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "348ce0ffca5315e88dc6984cec473f62049f2f258660555d535011272f92a634",
+      "facade": "f1b39d0c3fb2e2b4ec941ea996aef7d4ef772fd074be6f3c4a51704439c6158f",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "21978c9801529c308f796d25fcb0ea4a3b3c966d42663e24d4af804a233f9fe8"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-entry-5": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "19186fa21be61299b1be5e88f1bf29a2a8cde1097349ba9c9f60611309d73522",
+      "facade": "e94093ff9b1a985a70dbde03bc71201ed199ae7a59bb8e8b46d228434f75f060",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "3a648b045b0b31f251ea3c4d99baf844ce397ac2ed8bb12ebb9765054b140bdc"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-comment-utf8": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "4a7f1ea8e424f7ec5474f901e9632e0b94fe0e45e3b2e15fecd9aa8a5426e887",
+      "facade": "b4d236b7c093a8dfd337aa63088f57607f300f8500597cdb3fa800837a090f22",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "162b9b194deb2d3d4f92addfe6c96b240ba07956594830d2dc2ce45ad196324e"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-property-0": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"error\" is a keyword in the compiled module — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"error\" is a keyword in the compiled module — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-0": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "42716dcd3a0ef6a50aa89e4799a75b7ca5958ebdc2e71342c67c0798be1d93a7"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"error\" is a keyword in the compiled module — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-1": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"_\" is the discard spelling in the compiled module — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"_\" is the discard spelling in the compiled module — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-1": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "4c82493b07a6c9866bce75dbfc050c069112285092db915f4b1f4c702eaaf03e"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"_\" is the discard spelling in the compiled module — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-2": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"with.dot\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"with.dot\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-2": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "946a5246e87b7a2ceeac05f04185838fb5423424de50374d56f5aadcf597cc00"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"with.dot\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-3": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"é\"\\\t\r\n\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"é\"\\\t\r\n\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-3": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "77fbf0824c15ce712c24996cef5c1cfc5a2c893f5547e503e52e38bade4800f4"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"é\"\\\t\r\n\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-4": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"雪🙂\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"雪🙂\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-4": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "796089576a38559b5cbf1562f7df8b8db0a67d1ee77f04b58cb1a11da7a7a664"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"雪🙂\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-5": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"$$\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"$$\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-5": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "aab526acf139359abb9871de9a71744d8bff53d1282841adec1c32f771d6cb88"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"$$\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-property-6": {
+    "status": 1,
+    "diagnostics": "input.json: error: types: field \"\u0000\u007f\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n",
+    "hashes": {
+      "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "profile": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
+      "effective": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"\u0000\u007f\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-mirror-property-6": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "64cfa817b523d61936ed07e0557f5f85b67b571953fde9c7584f115bfe71245e"
+    },
+    "check_status": 1,
+    "check_diagnostics": "input.json: error: types: field \"\u0000\u007f\" uses characters outside the compiled module's identifier set (letters, digits, underscore) — the facade must stay declarable end to end; rename it in the core source\n"
+  },
+  "emission-environment-utf8": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "c882a6f581a64d2b973d15a09e3d04f74ce1ad003f5d7ff0c843ef9f76921beb",
+      "facade": "3b1415e33c64b340eaaf774e090032431a16c67dcdb3a3249da9ab7f99ddb86a",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "cb7c3f919146d5250cb5adb24edb308e21decdd59d246fe048d9282b50d66dd5"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-origin-0": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "1291c7d763c22a73956f568f4a2f8d4c9bc5fd34faee042727a5da2acd1d5f3f",
+      "facade": "c81f30814a0733703b01dde4592fd5cdeb00dcc952f88d203576d569f1ec3aa5",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "fa8a178359f60ed5e4b00c8b3a86584ae4372dc4b83f6fb4be5be7b95f344b09"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-origin-1": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "1291c7d763c22a73956f568f4a2f8d4c9bc5fd34faee042727a5da2acd1d5f3f",
+      "facade": "908801794c961eed4a3c803745b7d2ba8761b5edc9f459c3b1993b5aea81e0eb",
+      "profile": "25ef09eac6f95685974f27d7972afa7ab0ee9005be81a9f2968c08e5a2d46a76",
+      "effective": "8017bc61abf085a977155fc7d07da2f4390395c9b2ffb0b807f74a22efd7517e"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-text-input-false": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "e1ebb55b707453ae3dd3d0f6a2a828596d32415aeefc0bea278c0fbaf1eaf7ff",
+      "facade": "584254381cec34d0de1eda7c1f0e32ff87fec74b804a8e72fc06081dbf14184c",
+      "profile": "3c72963bbcf9218c4b813b50e4989fe5c3f2795d152860f7063f3d15db12ea93",
+      "effective": "ef229e315b2fb6f337ebae7cdd5c4609c79db605852690e808144d112096eb94"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
+  },
+  "emission-text-input-true": {
+    "status": 0,
+    "diagnostics": "",
+    "hashes": {
+      "mirror": "9e9abd984068cbde95dbb93eba284e5f82ff508fe84c855686857e296fac87a9",
+      "facade": "24bb6ffa3c4befa759b8fd9088cd644cb2975dbb81eb660baa528b6684a6d154",
+      "profile": "b758e0ad2622a890cd35c07ed93c7b96664d47448ced10ffa283e0d0248d42f6",
+      "effective": "eab3600eebe27cb2d8d7ca7fa284bc6387e6d7e2963c1c28e200b09399655a98"
+    },
+    "check_status": 0,
+    "check_diagnostics": ""
   }
 }

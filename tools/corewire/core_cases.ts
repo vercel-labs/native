@@ -187,5 +187,30 @@ export function coreCases(): CoreCase[] {
   add("f64-missing", () => {}, ["Model.absent"]);
   add("f64-message", c => { c.msg.arms[0].payload = { kind: "number", class: "i64" }; c.msg.arms[0].member = "value"; c.integer_slots.push({ slot: "Msg.bump", class: "i64" }); }, ["Msg.bump"]);
   add("legacy-mirror", c => { c.types.structs[0].origin = null; c.msg.arms[1].member = null; }, undefined, true);
+  for (const identity of ["0000000000000000", "0020000000000001", "ffffffffffffffff"]) add(`emission-identity-${identity}`, c => {
+    c.build_id = identity; c.model_fingerprint = identity;
+  });
+  for (const [index, entry] of ["", "/", "src///core.ts///", "core.ts", "src\\core.ts", "///src//π.ts//"].entries()) add(`emission-entry-${index}`, c => { c.entry = entry; });
+  add("emission-comment-utf8", c => { c.entry = "src/雪🙂\n\r\t\u0000\u007f\u2028\u2029.ts"; c.compiler_version = "0.2.2\n\u2028\u2029"; });
+  for (const [index, name] of ["error", "_", "with.dot", "é\"\\\t\r\n", "雪🙂", "$$", "\u0000\u007f"].entries()) {
+    add(`emission-property-${index}`, c => { c.types.structs[0].fields[1].name = name; });
+    add(`emission-mirror-property-${index}`, c => { c.types.structs[0].fields[1].name = name; }, undefined, true);
+  }
+  add("emission-environment-utf8", c => { c.channels.env_msgs = [{ env: "APP_雪🙂\"\\\t\u0001", msg: "label_set" }]; });
+  for (const [index, origin] of ["src/shared.ts", "src/é\"\\\t\r\n\u2028\u2029.ts"].entries()) add(`emission-origin-${index}`, c => {
+    record(c, "Other", "node", origin); enumeration(c); c.types.enums[0].origin = origin;
+  });
+  for (const unsigned of [false, true]) add(`emission-text-input-${unsigned}`, c => {
+    c.types.enums.push({ name: "CaretDirection", origin: "src/events.ts", exported: true, members: ["previous", "next", "previous_word", "next_word", "start", "end"] });
+    c.types.structs.push(
+      { name: "CaretMove", origin: "src/events.ts", exported: true, fields: [{ name: "direction", type: { kind: "enum", name: "CaretDirection" } }, { name: "extend", type: { kind: "bool" } }] },
+      { name: "Selection", origin: "src/events.ts", exported: true, fields: [{ name: "anchor", type: { kind: "i64" } }, { name: "focus", type: { kind: "i64" } }] },
+      { name: "Composition", origin: "src/events.ts", exported: true, fields: [{ name: "text", type: { kind: "bytes" } }, { name: "cursor", type: { kind: "optional", inner: { kind: "i64" } } }] },
+    );
+    for (const slot of ["Selection.anchor", "Selection.focus", "Composition.cursor"]) c.integer_slots.push({ slot, class: unsigned && slot !== "Composition.cursor" ? "u64" : "i64" });
+    const tags = ["insert_text", "delete_backward", "delete_forward", "delete_word_backward", "delete_word_forward", "delete_to_start", "delete_to_line_start", "clear", "move_caret", "set_selection", "set_composition", "commit_composition", "cancel_composition"];
+    c.types.unions.push({ name: "TextInput", origin: "src/events.ts", exported: true, arms: tags.map(name => ({ name, member: name === "insert_text" || name === "set_composition" ? "text" : name === "move_caret" ? "move" : name === "set_selection" ? "selection" : null, payload: name === "insert_text" ? { kind: "bytes" } : name === "move_caret" ? { kind: "value", name: "CaretMove" } : name === "set_selection" ? { kind: "value", name: "Selection" } : name === "set_composition" ? { kind: "value", name: "Composition" } : { kind: "void" } })) });
+    c.msg.arms.push({ name: "edit", member: "event", payload: { kind: "union", name: "TextInput" } });
+  });
   return out;
 }

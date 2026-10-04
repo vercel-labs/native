@@ -4,6 +4,11 @@
 
 import { generateServices as serviceGenerate, validateServices as serviceValidate } from "./emit_service.ts";
 import { evaluateCorePolicy } from "./core_policy.ts";
+import { emitMirror } from "./emit_mirror.ts";
+import { emitFacade } from "./emit_facade.ts";
+import type { EmissionInput } from "./core_emission.ts";
+export function generateMirror(input: string): string { return JSON.stringify(emitMirror(JSON.parse(input) as EmissionInput)); }
+export function generateFacade(input: string): string { return JSON.stringify(emitFacade(JSON.parse(input) as EmissionInput)); }
 export function corePolicy(input: string, phase: string): string { return evaluateCorePolicy(input, phase); }
 export function generateServices(input: string, projection: string, optimization: string): string {
   return serviceGenerate(input, projection, optimization);
