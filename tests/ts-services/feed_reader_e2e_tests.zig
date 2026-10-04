@@ -383,6 +383,7 @@ test "boot parses the built-in sample through the real service child and the mar
     defer h.destroy();
     try h.settleBoot();
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
+    try std.testing.expect(h.harness.runtime.views[0].canvas_widget_surface_scope_policy == core.nativeSurfaceScopePolicy);
 
     const model = Bridge.model();
     try std.testing.expectEqual(@as(usize, 3), model.items.len);
@@ -5218,6 +5219,232 @@ test "compiled Tab traversal matches complete native retained targets" {
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
     try std.testing.expect(harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
     try std.testing.expectEqualDeep(expected, harness.runtime.views[0].canvasWidgetRovingTabTarget(null, .forward));
+}
+
+test "compiled surface plans match native walks over exact retained paint facts" {
+    const Reference = struct {
+        fn inScope(kind: canvas.WidgetKind, scope: u8) bool {
+            if (!canvas.widgetKindDismissibleSurface(kind)) return false;
+            return scope == 0 or (scope == 1 and kind != .tooltip) or (scope == 2 and (kind == .menu_surface or kind == .dropdown_menu));
+        }
+        fn child(layout: canvas.WidgetLayoutTree, anchor: usize, scope: u8) ?usize {
+            var winner: ?usize = null;
+            for (layout.nodes, 0..) |node, index| {
+                if (node.parent_index != anchor or !canvas.widgetIsAnchored(node.widget) or node.widget.semantics.hidden or !inScope(node.widget.kind, scope)) continue;
+                if (winner == null or canvas.widgetPaintOrderLess(
+                    canvas.widgetLayoutWindowSurfaceOrder(layout, winner.?, .{}),
+                    canvas.widgetLayoutWindowSurfaceOrder(layout, index, .{}),
+                )) winner = index;
+            }
+            return winner;
+        }
+        fn target(layout: canvas.WidgetLayoutTree, index: usize, scope: u8) ?usize {
+            var cursor: ?usize = index;
+            while (cursor) |at| {
+                const widget = layout.nodes[at].widget;
+                if (canvas.widgetKindDismissibleSurface(widget.kind) and !widget.semantics.hidden)
+                    return if (inScope(widget.kind, scope)) at else null;
+                if (child(layout, at, scope)) |found| return found;
+                cursor = layout.nodes[at].parent_index;
+            }
+            return null;
+        }
+        fn topmost(layout: canvas.WidgetLayoutTree, scope: u8) ?usize {
+            var winner: ?usize = null;
+            for (layout.nodes, 0..) |node, index| {
+                if (!canvas.widgetIsAnchored(node.widget) or !inScope(node.widget.kind, scope)) continue;
+                var cursor: ?usize = index;
+                var hidden = false;
+                while (cursor) |at| {
+                    if (layout.nodes[at].widget.semantics.hidden) {
+                        hidden = true;
+                        break;
+                    }
+                    cursor = layout.nodes[at].parent_index;
+                }
+                if (hidden) continue;
+                if (winner == null or canvas.widgetPaintOrderLess(
+                    canvas.widgetLayoutWindowSurfaceOrder(layout, winner.?, .{}),
+                    canvas.widgetLayoutWindowSurfaceOrder(layout, index, .{}),
+                )) winner = index;
+            }
+            return winner;
+        }
+        fn owned(layout: canvas.WidgetLayoutTree, index: usize) ?usize {
+            if (child(layout, index, 2)) |found| return found;
+            const parent = layout.nodes[index].parent_index orelse return null;
+            const found = child(layout, parent, 2) orelse return null;
+            return if (found == index) null else found;
+        }
+        fn expectIndex(expected: ?usize, bytes: []const u8, at: usize) !void {
+            const value = std.mem.readInt(u16, bytes[at..][0..2], .little);
+            try std.testing.expectEqual(if (expected) |index| @as(u16, @intCast(index)) else std.math.maxInt(u16), value);
+        }
+    };
+    const kinds = [_]canvas.WidgetKind{ .stack, .button, .popover, .menu_surface, .dropdown_menu, .tooltip, .dialog, .drawer, .sheet };
+    const layers = [_]?i32{ null, 0, -1, 1, std.math.minInt(i32), std.math.maxInt(i32) };
+    var comparisons: usize = 0;
+    for (0..96) |variant| {
+        core.rt.frameReset();
+        var nodes: [32]canvas.WidgetLayoutNode = undefined;
+        for (&nodes, 0..) |*node, index| {
+            const parent: ?usize = if (index == 0) null else (variant * 5 + index * 3) % index;
+            const frame = geometry.RectF.init(0, 0, 100, 28);
+            node.* = .{ .widget = .{
+                .id = 0xfedc_ba98_7654_3200 + index,
+                .kind = kinds[(variant + index * 7) % kinds.len],
+                .frame = frame,
+                .layer = layers[(variant * 3 + index) % layers.len],
+                .semantics = .{ .hidden = (variant + index) % 7 == 0 },
+                .layout = .{ .anchor = if ((variant + index) % 3 == 0) null else .{ .placement = .below } },
+            }, .frame = frame, .parent_index = parent, .depth = if (parent) |p| nodes[p].depth + 1 else 0 };
+        }
+        const layout = canvas.WidgetLayoutTree{ .nodes = &nodes, .root_bounds = geometry.RectF.init(0, 0, 640, 480) };
+        for (0..3) |scope| {
+            var request: [4 + nodes.len * 7]u8 = undefined;
+            request[0] = 21;
+            request[1] = @intCast(scope);
+            std.mem.writeInt(u16, request[2..4], nodes.len, .little);
+            for (nodes, 0..) |node, index| {
+                const at = 4 + index * 7;
+                const kind: u8 = if (!canvas.widgetKindDismissibleSurface(node.widget.kind)) 0 else switch (node.widget.kind) {
+                    .tooltip => 3,
+                    .menu_surface, .dropdown_menu => 2,
+                    else => 1,
+                };
+                request[at] = kind | (@as(u8, @intFromBool(node.widget.semantics.hidden)) << 2) | (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 3);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |p| @intCast(p) else std.math.maxInt(u16), .little);
+                std.mem.writeInt(i32, request[at + 3 ..][0..4], canvas.widgetLayoutWindowSurfaceOrder(layout, index, .{}).layer, .little);
+            }
+            var output: [2 + nodes.len * 6]u8 = undefined;
+            try std.testing.expectEqual(output.len, core.nativeSurfaceScopePolicy(&request, &output));
+            try Reference.expectIndex(Reference.topmost(layout, @intCast(scope)), &output, 0);
+            comparisons += 1;
+            for (0..nodes.len) |index| {
+                try Reference.expectIndex(Reference.child(layout, index, @intCast(scope)), &output, 2 + index * 6);
+                try Reference.expectIndex(Reference.target(layout, index, @intCast(scope)), &output, 2 + index * 6 + 2);
+                try Reference.expectIndex(if (scope == 2) Reference.owned(layout, index) else null, &output, 2 + index * 6 + 4);
+                comparisons += 3;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 27936), comparisons);
+}
+
+test "compiled surface callbacks preserve retained consumers, compaction and single Tab batch" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const CountPolicy = struct {
+        var calls: usize = 0;
+        fn run(request: []const u8, output: []u8) usize {
+            calls += 1;
+            return core.nativeSurfaceScopePolicy(request, output);
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "surface-policy-parity", .source = native_sdk.WebViewSource.html("<h1>Surfaces</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    for (0..32) |variant| {
+        core.rt.frameReset();
+        const content = [_]canvas.Widget{
+            .{ .id = 0xffff_ffff_ffff_ff03, .kind = .button, .frame = geometry.RectF.init(8, 8, 100, 28) },
+            .{ .id = 0xffff_ffff_ffff_ff04, .kind = .button, .frame = geometry.RectF.init(8, 48, 100, 28), .state = .{ .disabled = variant & 1 != 0 } },
+        };
+        const body = [_]canvas.Widget{
+            .{ .id = 0xffff_ffff_ffff_ff01, .kind = .button, .frame = geometry.RectF.init(8, 8, 100, 28) },
+            .{ .id = 0xffff_ffff_ffff_ff02, .kind = if (variant & 2 != 0) .popover else .dropdown_menu, .layout = .{ .anchor = .{ .placement = .below } }, .frame = geometry.RectF.init(16, 16, 220, 180), .children = &content },
+            .{ .id = 0xffff_ffff_ffff_ff05, .kind = .tooltip, .layout = .{ .anchor = .{ .placement = .below } }, .frame = geometry.RectF.init(16, 16, 100, 28), .layer = if (variant & 4 != 0) -100 else 500 },
+            .{ .id = 0xffff_ffff_ffff_ff06, .kind = .button, .frame = geometry.RectF.init(400, 20, 100, 28) },
+        };
+        var nodes: [7]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 0xffff_ffff_ffff_ff00, .kind = .stack, .children = &body, .semantics = .{ .hidden = variant & 8 != 0 } }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        // Visibility stamping is a native tooltip capability. Compare
+        // these exact retained facts, including a visible tooltip sibling.
+        view.widget_layout_nodes[5].widget.semantics.hidden = variant & 16 != 0;
+        for (0..8) |index| {
+            view.canvas_widget_surface_scope_policy = null;
+            const child = view.canvasWidgetAnchoredDismissibleChildIndex(index);
+            const target = view.canvasWidgetDismissibleSurfaceIndexForTarget(index);
+            const owned = view.canvasWidgetOwnedMenuSurfaceIndex(index);
+            const topmost = view.canvasWidgetTopmostAnchoredDismissibleIndex();
+            view.canvas_widget_surface_scope_policy = CountPolicy.run;
+            try std.testing.expectEqual(child, view.canvasWidgetAnchoredDismissibleChildIndex(index));
+            try std.testing.expectEqual(target, view.canvasWidgetDismissibleSurfaceIndexForTarget(index));
+            try std.testing.expectEqual(owned, view.canvasWidgetOwnedMenuSurfaceIndex(index));
+            try std.testing.expectEqual(topmost, view.canvasWidgetTopmostAnchoredDismissibleIndex());
+            const id: ?canvas.ObjectId = if (index == 7) null else 0xffff_ffff_ffff_ff00 + index;
+            for ([_]canvas.WidgetFocusDirection{ .forward, .backward }) |direction| {
+                view.canvas_widget_surface_scope_policy = null;
+                view.canvas_widget_tab_focus_policy = null;
+                const expected = view.canvasWidgetRovingTabTarget(id, direction);
+                view.canvas_widget_surface_scope_policy = CountPolicy.run;
+                view.canvas_widget_tab_focus_policy = core.nativeTabFocusPolicy;
+                CountPolicy.calls = 0;
+                try std.testing.expectEqualDeep(expected, view.canvasWidgetRovingTabTarget(id, direction));
+                try std.testing.expectEqual(@as(usize, 1), CountPolicy.calls);
+            }
+        }
+    }
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "second", view.widgetLayoutTree());
+    harness.runtime.views[1].canvas_widget_surface_scope_policy = core.nativeSurfaceScopePolicy;
+    const expected = harness.runtime.views[1].canvasWidgetTopmostAnchoredDismissibleIndex();
+    try harness.runtime.closeView(1, "canvas");
+    try std.testing.expect(harness.runtime.views[0].canvas_widget_surface_scope_policy == core.nativeSurfaceScopePolicy);
+    try std.testing.expectEqual(expected, harness.runtime.views[0].canvasWidgetTopmostAnchoredDismissibleIndex());
+}
+
+test "compiled surface plans accept the complete retained capacity and empty trees" {
+    const capacity = native_sdk.runtime.max_canvas_widget_nodes_per_view;
+    var request: [4 + capacity * 7]u8 = undefined;
+    request[0] = 21;
+    request[1] = 2;
+    std.mem.writeInt(u16, request[2..4], capacity, .little);
+    for (0..capacity) |index| {
+        const at = 4 + index * 7;
+        request[at] = if (index == 0) 0 else 10;
+        std.mem.writeInt(u16, request[at + 1 ..][0..2], if (index == 0) std.math.maxInt(u16) else @intCast(index - 1), .little);
+        std.mem.writeInt(i32, request[at + 3 ..][0..4], @intCast(index), .little);
+    }
+    var output: [2 + capacity * 6]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeSurfaceScopePolicy(&request, &output));
+    try std.testing.expectEqual(@as(u16, capacity - 1), std.mem.readInt(u16, output[0..2], .little));
+    for (0..capacity) |index| {
+        const at = 2 + index * 6;
+        const child: u16 = if (index + 1 < capacity) @intCast(index + 1) else std.math.maxInt(u16);
+        try std.testing.expectEqual(child, std.mem.readInt(u16, output[at..][0..2], .little));
+        try std.testing.expectEqual(if (index == 0) @as(u16, 1) else @as(u16, @intCast(index)), std.mem.readInt(u16, output[at + 2 ..][0..2], .little));
+        try std.testing.expectEqual(child, std.mem.readInt(u16, output[at + 4 ..][0..2], .little));
+    }
+    core.rt.frameReset();
+    var empty: [2]u8 = undefined;
+    try std.testing.expectEqual(empty.len, core.nativeSurfaceScopePolicy(&.{ 21, 0, 0, 0 }, &empty));
+    try std.testing.expectEqual(std.math.maxInt(u16), std.mem.readInt(u16, &empty, .little));
+    core.rt.frameReset();
+}
+
+test "compiled surface plans preserve borrowed cycle commands and copied results" {
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    const request = [_]u8{ 21, 2, 2, 0, 0, 255, 255, 0, 0, 0, 0, 10, 0, 0, 255, 255, 255, 127 };
+    var output: [14]u8 = undefined;
+    for (0..16) |_| {
+        try std.testing.expectEqual(output.len, core.nativeSurfaceScopePolicy(&request, &output));
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+        try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, output[0..2], .little));
+    }
+    core.rt.frameReset();
+    _ = core.initialModel();
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, output[0..2], .little));
 }
 
 test "compiled Tab plans preserve dispatch arena ownership and copied results" {

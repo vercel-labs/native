@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 21) return nscvSurfaceScope(request);
   if (request[0] === 20) return nscvTabFocus(request);
   if (request[0] === 15) return nscvKeyboardControl(request);
   if (request[0] === 16) return nscvSemanticControl(request);
@@ -180,6 +181,59 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;
   return result;
+}
+
+/** Anchored surface selection. Header: tag 21, scope (any/interactive/menu),
+ * count u16. Seven-byte nodes: kind (none/interactive/menu/tooltip) plus
+ * hidden bit 4 and anchored bit 8, parent u16, effective paint layer i32.
+ * Result: topmost index, then child/target/owned-menu index tables (u16).
+ * Native retains opaque identities, geometry and dismissal side effects.
+ */
+function nscvSurfaceScope(request: Uint8Array): Uint8Array {
+  if (request.length < 4 || request[1]! > 2) throw new Error("invalid surface scope request");
+  const count = request[2]! | request[3]! << 8, scope = request[1]!;
+  if (count > 1024 || request.length !== 4 + 7 * count) throw new Error("invalid surface scope table");
+  const flags: number[] = [], parents: number[] = [], layers: number[] = [];
+  const hidden: boolean[] = [], children: number[] = [], targets: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 4 + i * 7, bits = request[at]!, parent = request[at + 1]! | request[at + 2]! << 8;
+    if (bits > 15 || parent !== 65535 && parent >= i) throw new Error("invalid surface scope node");
+    const layer = request[at + 3]! | request[at + 4]! << 8 | request[at + 5]! << 16 | request[at + 6]! << 24;
+    flags.push(bits); parents.push(parent); layers.push(layer); children.push(65535); targets.push(65535);
+    hidden.push((bits & 4) !== 0 || parent !== 65535 && hidden[parent]!);
+  }
+  let topmost = 65535;
+  for (let i = 0; i < count; i++) {
+    const bits = flags[i]!;
+    if ((bits & 12) !== 8 || !nscvSurfaceInScope(bits & 3, scope)) continue;
+    const parent = parents[i]!;
+    if (parent !== 65535) {
+      const previous = children[parent]!;
+      if (previous === 65535 || layers[previous]! <= layers[i]!) children[parent] = i;
+    }
+    if (!hidden[i] && (topmost === 65535 || layers[topmost]! <= layers[i]!)) topmost = i;
+  }
+  const result = new Uint8Array(2 + count * 6);
+  result[0] = topmost & 255; result[1] = topmost >>> 8;
+  for (let i = 0; i < count; i++) {
+    const bits = flags[i]!, parent = parents[i]!;
+    // An out-of-scope visible ancestor shields the rest of its chain.
+    const target = (bits & 3) !== 0 && (bits & 4) === 0
+      ? nscvSurfaceInScope(bits & 3, scope) ? i : 65535
+      : children[i] !== 65535 ? children[i]! : parent === 65535 ? 65535 : targets[parent]!;
+    targets[i] = target;
+    const sibling = parent === 65535 ? 65535 : children[parent]!;
+    const owned = scope !== 2 ? 65535 : children[i] !== 65535 ? children[i]! : sibling === i ? 65535 : sibling;
+    const at = 2 + i * 6;
+    result[at] = children[i]! & 255; result[at + 1] = children[i]! >>> 8;
+    result[at + 2] = target & 255; result[at + 3] = target >>> 8;
+    result[at + 4] = owned & 255; result[at + 5] = owned >>> 8;
+  }
+  return result;
+}
+
+function nscvSurfaceInScope(kind: number, scope: number): boolean {
+  return kind !== 0 && (scope === 0 || scope === 1 && kind !== 3 || scope === 2 && kind === 2);
 }
 
 function nscvTabDescendant(parents: readonly number[], node: number, surface: number): boolean {

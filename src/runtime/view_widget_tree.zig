@@ -720,6 +720,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// it to a menu further out.
         fn canvasWidgetSurfaceIndexForTargetInScope(self: *const RuntimeView, target_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             if (target_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 2 + target_index * 6 + 2);
+            }
             var current: ?usize = target_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return null;
@@ -744,6 +748,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// out-of-scope sibling mounted later (the tooltip above the
         /// menu) never masks the surface the caller asked for.
         fn canvasWidgetAnchoredChildIndexInScope(self: *const RuntimeView, anchor_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
+            if (anchor_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 2 + anchor_index * 6);
+            }
             var found: ?usize = null;
             var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
@@ -766,6 +775,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// in the composed select/combobox pattern.
         pub fn canvasWidgetOwnedMenuSurfaceIndex(self: *const RuntimeView, trigger_index: usize) ?usize {
             if (trigger_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, .menu);
+                return surfacePlanIndex(&plan, 2 + trigger_index * 6 + 4);
+            }
             if (canvasWidgetAnchoredMenuChildIndex(self, trigger_index)) |surface_index| return surface_index;
             const parent_index = self.widget_layout_nodes[trigger_index].parent_index orelse return null;
             const surface_index = canvasWidgetAnchoredMenuChildIndex(self, parent_index) orelse return null;
@@ -983,6 +996,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         fn canvasWidgetTopmostAnchoredSurfaceIndexInScope(self: *const RuntimeView, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 0);
+            }
             var found: ?usize = null;
             var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
@@ -1110,6 +1127,12 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             request[1] = @intFromBool(direction == .backward);
             std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
             std.mem.writeInt(u16, request[4..6], if (current_index) |index| @intCast(index) else absent, .little);
+            // A single surface plan supplies every node's scope. Do not
+            // call the compiled whole-tree policy once for each node.
+            const surface_plan = if (self.canvas_widget_surface_scope_policy) |surface_policy|
+                compiledCanvasWidgetSurfacePlan(self, surface_policy, .interactive)
+            else
+                null;
             for (layout.nodes, 0..) |node, index| {
                 const at = 6 + index * 7;
                 const visible = layout.focusTargetById(node.widget.id) != null;
@@ -1121,7 +1144,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     (@as(u8, @intFromBool(canvas_widget_runtime.canvasWidgetSelectableSelected(node.widget))) << 4);
                 std.mem.writeInt(u16, request[at + 1 ..][0..2], @intCast(node.depth), .little);
                 std.mem.writeInt(u16, request[at + 3 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else absent, .little);
-                const surface = canvasWidgetSurfaceIndexForTargetInScope(self, index, .interactive);
+                const surface = if (surface_plan) |*plan|
+                    surfacePlanIndex(plan, 2 + index * 6 + 2)
+                else
+                    canvasWidgetSurfaceIndexForTargetInScope(self, index, .interactive);
                 std.mem.writeInt(u16, request[at + 5 ..][0..2], if (surface) |owner| @intCast(owner) else absent, .little);
             }
             var result: [2]u8 = undefined;
@@ -1136,6 +1162,64 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             else
                 layout.focusTargetById(layout.nodes[selected].widget.id);
             return target orelse @panic("ineligible compiled Tab focus target");
+        }
+
+        const SurfacePlan = [2 + max_canvas_widget_nodes_per_view * 6]u8;
+
+        fn surfacePlanIndex(plan: *const SurfacePlan, at: usize) ?usize {
+            const index = std.mem.readInt(u16, plan[at..][0..2], .little);
+            return if (index == std.math.maxInt(u16)) null else index;
+        }
+
+        fn compiledCanvasWidgetSurfacePlan(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            comptime scope: CanvasWidgetAnchoredSurfaceScope,
+        ) SurfacePlan {
+            const layout = self.widgetLayoutTree();
+            var request: [4 + max_canvas_widget_nodes_per_view * 7]u8 = undefined;
+            request[0] = 21;
+            request[1] = switch (scope) {
+                .any => 0,
+                .interactive => 1,
+                .menu => 2,
+            };
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            for (layout.nodes, 0..) |node, index| {
+                const at = 4 + index * 7;
+                const kind: u8 = if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) 0 else switch (node.widget.kind) {
+                    .tooltip => 3,
+                    .menu_surface, .dropdown_menu => 2,
+                    else => 1,
+                };
+                const anchored = canvas.widgetIsAnchored(node.widget);
+                request[at] = kind | (@as(u8, @intFromBool(node.widget.semantics.hidden)) << 2) |
+                    (@as(u8, @intFromBool(anchored)) << 3);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+                // Only anchored surfaces participate in paint-order
+                // comparisons; ordinary nodes need no ancestor layer walk.
+                const layer = if (kind != 0 and anchored) canvas.widgetLayoutWindowSurfaceOrder(layout, index, self.widget_tokens).layer else 0;
+                std.mem.writeInt(i32, request[at + 3 ..][0..4], layer, .little);
+            }
+            var result: SurfacePlan = undefined;
+            const length = 2 + layout.nodes.len * 6;
+            if (policy(request[0 .. 4 + layout.nodes.len * 7], result[0..length]) != length)
+                @panic("invalid compiled surface scope result");
+            // Every selected index is copied and checked before native
+            // consumers dereference it. No ABI pointer outlives this call.
+            var at: usize = 0;
+            while (at < length) : (at += 2) {
+                if (surfacePlanIndex(&result, at)) |index| {
+                    if (index >= layout.nodes.len) @panic("invalid compiled surface scope index");
+                    const widget = layout.nodes[index].widget;
+                    if (!canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope) or widget.semantics.hidden)
+                        @panic("ineligible compiled surface scope index");
+                    if (at == 0 or (at - 2) % 6 != 2) {
+                        if (!canvas.widgetIsAnchored(widget)) @panic("unanchored compiled surface scope index");
+                    }
+                }
+            }
+            return result;
         }
 
         pub fn canvasWidgetFocusTargetInScope(

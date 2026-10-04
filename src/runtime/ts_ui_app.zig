@@ -415,6 +415,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");
                 stamped.tab_focus_policy = core.nativeTabFocusPolicy;
             }
+            if (comptime @hasDecl(core, "nativeSurfaceScopePolicy")) {
+                if (options.surface_scope_policy != null) @panic("TsUiApp owns surface_scope_policy - remove custom surface policy wiring");
+                stamped.surface_scope_policy = core.nativeSurfaceScopePolicy;
+            }
             if (comptime @hasDecl(core, "nativePressHoldPolicy")) {
                 if (options.press_hold_policy != null) @panic("TsUiApp owns press_hold_policy - remove custom hold policy wiring");
                 stamped.press_hold_policy = core.nativePressHoldPolicy;

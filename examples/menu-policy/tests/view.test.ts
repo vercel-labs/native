@@ -129,3 +129,43 @@ test("menu entry, traversal, committed choice, dismissal, identities and replay 
     compare(snapshots);
   } finally { await app.close(); }
 });
+
+test("anchored menu dismissal survives unrelated focus, direct actions and empty content", async () => {
+  const app = await NativeApp.start({ width: 800, height: 420 });
+  try {
+    let s = await app.snapshot();
+    const view = button(s, "Reset").view, snapshots = [s];
+    const save = () => snapshots.push(s);
+    const closed = () => {
+      assert.equal(s.model.pickerOpen, false);
+      assert.equal(s.model.selected, 2);
+      assert.equal(s.model.presses, 0);
+      assert.equal(s.widgets.some(w => w.role === "menuitem"), false);
+      save();
+    };
+    s = await app.click(button(s, "Choose queue")); save();
+    s = await app.action(button(s, "Reset"), "focus"); save();
+    s = await app.key(view, "escape"); closed();
+    s = await app.click(button(s, "Choose queue")); save();
+    s = await app.action(menu(s, "Queues"), "dismiss"); closed();
+    s = await app.click(button(s, "Choose queue")); save();
+    s = await app.action(button(s, "Reset"), "focus"); save();
+    const outside = { x: 790, y: 410 }, trigger = button(s, "Choose queue");
+    await app.pointer(trigger, "down", outside);
+    s = await app.pointer(trigger, "up", outside); closed();
+    s = await app.click(button(s, "Empty")); save();
+    s = await app.click(button(s, "Choose queue")); save();
+    assert.equal(s.widgets.some(w => w.role === "menuitem"), false);
+    s = await app.action(button(s, "Reset"), "focus"); save();
+    s = await app.key(view, "escape"); closed();
+    const replay = await app.verifyReplay();
+    assert.deepEqual(replay.snapshot.model, s.model);
+    assert.deepEqual(replay.snapshot.widgets, s.widgets); snapshots.push(replay.snapshot);
+    const reference = process.env.NATIVE_SDK_TEST_VIEW_REFERENCE;
+    if (reference) {
+      const values = snapshots.map(({ viewBackend, ...snapshot }) => snapshot);
+      if (backend === "zig") writeFileSync(`${reference}.scopes.json`, JSON.stringify(values));
+      else assert.deepEqual(values, JSON.parse(readFileSync(`${reference}.scopes.json`, "utf8")));
+    }
+  } finally { await app.close(); }
+});

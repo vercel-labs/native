@@ -449,6 +449,8 @@ pub const RuntimeView = struct {
     /// Optional compiled traversal for this retained view. A function
     /// pointer survives window compaction without retaining arena data.
     canvas_widget_tab_focus_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable anchored-surface ownership over native retained facts.
+    canvas_widget_surface_scope_policy: ?*const fn ([]const u8, []u8) usize = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the

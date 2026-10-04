@@ -1016,6 +1016,71 @@ test("shared step intents preserve raw boundary actions, axis facts and callback
 });
 
 
+test("surface scopes preserve shielding, visibility, paint order and menu ownership", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!, none = 65535;
+  type Node = { flags: number; parent: number; layer: number };
+  const node = (flags: number, parent = none, layer = 0): Node => ({ flags, parent, layer });
+  const request = (nodes: Node[], scope: number) => {
+    const bytes = new Uint8Array(4 + nodes.length * 7), data = new DataView(bytes.buffer);
+    bytes[0] = 21; bytes[1] = scope; data.setUint16(2, nodes.length, true);
+    nodes.forEach((n, i) => { const at = 4 + i * 7; bytes[at] = n.flags; data.setUint16(at + 1, n.parent, true); data.setInt32(at + 3, n.layer, true); });
+    return bytes;
+  };
+  // Independent reference follows the native per-query walks/scans.
+  const reference = (nodes: Node[], scope: number): number[] => {
+    const inScope = (i: number) => { const kind = nodes[i]!.flags & 3; return kind !== 0 && (scope === 0 || scope === 1 && kind !== 3 || scope === 2 && kind === 2); };
+    const top = (indices: number[]) => indices.reduce((a, b) => a === none || nodes[a]!.layer < nodes[b]!.layer || nodes[a]!.layer === nodes[b]!.layer && a < b ? b : a, none);
+    const indices = nodes.map((_, i) => i);
+    const child = (anchor: number) => top(indices.filter(i => nodes[i]!.parent === anchor && (nodes[i]!.flags & 12) === 8 && inScope(i)));
+    const hidden = (i: number) => { for (let at = i; at !== none; at = nodes[at]!.parent) if (nodes[at]!.flags & 4) return true; return false; };
+    const target = (i: number) => {
+      for (let at = i; at !== none; at = nodes[at]!.parent) {
+        const bits = nodes[at]!.flags;
+        if ((bits & 3) !== 0 && (bits & 4) === 0) return inScope(at) ? at : none;
+        const owned = child(at); if (owned !== none) return owned;
+      }
+      return none;
+    };
+    return [top(indices.filter(i => (nodes[i]!.flags & 8) !== 0 && inScope(i) && !hidden(i))), ...indices.flatMap(i => {
+      const direct = child(i), sibling = nodes[i]!.parent === none ? none : child(nodes[i]!.parent);
+      return [direct, target(i), scope !== 2 ? none : direct !== none ? direct : sibling === i ? none : sibling];
+    })];
+  };
+  const compare = (nodes: Node[], scope: number) => {
+    const result = policy(request(nodes, scope));
+    assert.equal(result.length, 2 + nodes.length * 6);
+    const data = new DataView(result.buffer, result.byteOffset, result.byteLength);
+    assert.deepEqual(Array.from({ length: result.length / 2 }, (_, i) => data.getUint16(i * 2, true)), reference(nodes, scope));
+    return result;
+  };
+  const coexist = [node(0), node(0, 0), node(10, 0, -2147483648), node(11, 0, 2147483647), node(1, 0), node(0, 4)];
+  for (const scope of [0, 1, 2]) compare(coexist, scope);
+  assert.equal(new DataView(compare(coexist, 2).buffer).getUint16(2 + 5 * 6 + 2, true), none); // Popover shields outer menu.
+  const concealed = [node(4), node(10, 0), node(11, 0)];
+  assert.equal(new DataView(compare(concealed, 2).buffer).getUint16(0, true), none);
+  assert.equal(new DataView(compare(concealed, 2).buffer).getUint16(2, true), 1); // Child lookup checks its own visibility.
+  for (let variant = 0; variant < 192; variant++) {
+    const nodes: Node[] = [node(variant & 4)];
+    for (let i = 1; i < 32; i++) nodes.push(node((variant * 13 + i * 7) & 15, (variant * 5 + i * 3) % i, [0, -1, 1, -2147483648, 2147483647][(variant + i) % 5]!));
+    for (const scope of [0, 1, 2]) compare(nodes, scope);
+  }
+  compare([], 0);
+  compare(Array.from({ length: 1024 }, (_, i) => node(10, i === 0 ? none : i - 1, i)), 2);
+  const valid = request(coexist, 0), copied = policy(valid);
+  compare(concealed, 2); assert.deepEqual([...copied], [...policy(valid)]);
+  for (let length = 0; length < valid.length; length++) assert.throws(() => policy(valid.subarray(0, length)), /policy|surface scope/);
+  for (const mutate of [
+    (b: Uint8Array) => { b[1] = 3; },
+    (b: Uint8Array) => { b[2] = 1; b[3] = 4; },
+    (b: Uint8Array) => { b[4] = 16; },
+    (b: Uint8Array) => { b[5] = 0; b[6] = 0; },
+    (b: Uint8Array) => { b[12] = 1; b[13] = 0; },
+  ]) { const bad = valid.slice(); mutate(bad); assert.throws(() => policy(bad), /surface scope/); }
+  assert.throws(() => policy(new Uint8Array([...valid, 0])), /surface scope/);
+});
+
 test("Tab traversal preserves wrapping, nested radio stops, logical entries and scope traps", () => {
   const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
   runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
