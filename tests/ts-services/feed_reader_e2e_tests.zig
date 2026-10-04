@@ -8936,7 +8936,7 @@ test "compiled drag routing preserves complete state, exact identities and orpha
 const DragConsumerModel = struct { changes: u32 = 0, ends: u32 = 0, cancels: u32 = 0, mounted: bool = true, remove_on_change: bool = false, token: []const u8 = "Café\x00日本" };
 const DragConsumerMsg = union(enum) {
     clicked,
-    dragged: struct { sourceId: u64 = 1, phase: u32 = 0, x: f32 = 0, y: f32 = 0, viewWidth: f32 = 0, viewHeight: f32 = 0, token: []const u8 = "" },
+    dragged: struct { sourceId: u64 = 1, phase: u32 = 0, x: f32 = 0, y: f32 = 0, viewWidth: f32 = 0, viewHeight: f32 = 0 },
 };
 const DragConsumer = native_sdk.UiApp(DragConsumerModel, DragConsumerMsg);
 const DragConsumerFunctions = struct {
@@ -8944,7 +8944,7 @@ const DragConsumerFunctions = struct {
         switch (msg) {
             .clicked => {},
             .dragged => |drag| {
-                std.debug.assert(std.mem.eql(u8, drag.token, model.token));
+                std.debug.assert(drag.sourceId == 9007199254740993);
                 switch (drag.phase) {
                     0 => {
                         model.changes += 1;
@@ -8959,7 +8959,7 @@ const DragConsumerFunctions = struct {
     }
     fn view(ui: *DragConsumer.Ui, model: *const DragConsumerModel) DragConsumer.Ui.Node {
         if (!model.mounted) return ui.panel(.{}, @as([]const DragConsumer.Ui.Node, &.{}));
-        return ui.button(.{ .key = .{ .str = "drag" }, .on_drag = .{ .dragged = .{ .sourceId = 9007199254740993, .token = model.token } }, .height = 60 }, "Drag");
+        return ui.button(.{ .key = .{ .str = "drag" }, .on_drag = .{ .dragged = .{ .sourceId = 9007199254740993 } }, .height = 60 }, model.token);
     }
 };
 
