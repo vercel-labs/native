@@ -997,6 +997,7 @@ pub const Runtime = struct {
     pub const advanceCanvasTooltipIntentForFrame = CanvasWidgetEventMethods.advanceCanvasTooltipIntentForFrame;
     pub const reconcileCanvasTooltipIntent = CanvasWidgetEventMethods.reconcileCanvasTooltipIntent;
     pub const captureCanvasTooltipAdoptionBindings = CanvasWidgetEventMethods.captureCanvasTooltipAdoptionBindings;
+    pub const canvasWidgetPressTargetForRoute = CanvasWidgetEventMethods.canvasWidgetPressTargetForRoute;
     pub const routeCanvasWidgetPointerInput = CanvasWidgetEventMethods.routeCanvasWidgetPointerInput;
     pub const routeCanvasWidgetKeyboardInput = CanvasWidgetEventMethods.routeCanvasWidgetKeyboardInput;
     pub const routeCanvasWidgetTextInput = CanvasWidgetEventMethods.routeCanvasWidgetTextInput;

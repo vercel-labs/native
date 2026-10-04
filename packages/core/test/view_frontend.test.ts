@@ -1467,3 +1467,20 @@ test("click sequence policy preserves continuation counts, primary chain rules a
   for (const request of [[31], [31, 1, 1], [31, 1, 1, 255, 0], [31, 6, 0, 0], [31, 1, 4, 255]])
     assert.throws(() => policy(new Uint8Array(request)), /click sequence/);
 });
+
+
+test("selection press policy preserves text, group and terminal release precedence", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  for (let phase = 0; phase < 6; phase++) for (let kind = 0; kind <= 62; kind++) for (let facts = 0; facts < 128; facts++) {
+    let expected = (facts & 1) !== 0;
+    if (phase === 3 && (facts & 2) !== 0) {
+      if (kind === 62 && (facts & 64) !== 0) expected = false;
+      if (kind === 26 && (facts & 4) !== 0 && ((facts & 24) === 24 || (facts & 32) !== 0)) expected = false;
+    }
+    assert.deepEqual([...policy(new Uint8Array([32, phase, facts, kind, 0]))], [expected ? 1 : 0]);
+  }
+  for (const request of [[32], [32, 3, 0, 26], [32, 3, 0, 26, 0, 0], [32, 6, 0, 26, 0], [32, 3, 128, 26, 0], [32, 3, 0, 63, 0], [32, 3, 0, 0, 1]])
+    assert.throws(() => policy(new Uint8Array(request)), /selection press/);
+});

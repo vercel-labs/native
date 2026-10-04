@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 32) return nscvSelectionPress(request);
   if (request[0] === 31) return nscvClickSequence(request);
   if (request[0] === 30) return nscvCommandActivation(request);
   if (request[0] === 29) return nscvPointerIntent(request);
@@ -284,6 +285,25 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Selection-aware press routing. Tag 32, pointer phase, native facts and
+ * stable little-endian u16 raw kind. Facts: press/raw present, selected-text
+ * identity match, group present/noncollapsed, bounded text range noncollapsed,
+ * and terminal selection active. Result: keep the press target. Native retains
+ * exact identities, range bounds, grids, hits and borrowed route storage.
+ */
+function nscvSelectionPress(request: Uint8Array): Uint8Array {
+  if (request.length !== 5 || request[1]! > 5 || request[2]! > 127)
+    throw new Error("invalid selection press request");
+  const phase = request[1]!, facts = request[2]!;
+  const kind = request[3]! | request[4]! << 8;
+  if (kind > 62) throw new Error("invalid selection press kind");
+  const selection = kind === 62 ? (facts & 64) !== 0 :
+    kind === 26 && (facts & 4) !== 0 && ((facts & 24) === 24 || (facts & 32) !== 0);
+  const result = new Uint8Array(1);
+  result[0] = (facts & 1) !== 0 && !(phase === 3 && (facts & 2) !== 0 && selection) ? 1 : 0;
   return result;
 }
 

@@ -8040,3 +8040,118 @@ test "compiled click sequence consumers match native clocks, identities, geometr
     }
     core.rt.frameReset();
 }
+
+test "compiled selection press preserves borrowed core bytes and copied decisions" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const original = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(original);
+    var first: [1]u8 = undefined;
+    try std.testing.expectEqual(first.len, core.nativeSurfaceScopePolicy(&.{ 32, 3, 7, 26, 0 }, &first));
+    try std.testing.expectEqual(@as(u8, 1), first[0]);
+    var result: [1]u8 = undefined;
+    for (0..6) |phase| for (0..63) |kind| for (0..128) |facts| {
+        try std.testing.expectEqual(result.len, core.nativeSurfaceScopePolicy(&.{ 32, @intCast(phase), @intCast(facts), @intCast(kind), 0 }, &result));
+        var expected = facts & 1 != 0;
+        if (phase == 3 and facts & 2 != 0) {
+            if (kind == 62 and facts & 64 != 0) expected = false;
+            if (kind == 26 and facts & 4 != 0 and (facts & 24 == 24 or facts & 32 != 0)) expected = false;
+        }
+        try std.testing.expectEqual(@as(u8, @intFromBool(expected)), result[0]);
+        try std.testing.expectEqualSlices(u8, original, borrowed);
+        try std.testing.expectEqual(@as(u8, 1), first[0]);
+    };
+    core.rt.frameReset();
+    try std.testing.expectEqual(@as(u8, 1), first[0]);
+}
+
+test "compiled selection press consumers match native hits, exact identities and bounded ranges" {
+    const reference = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    const harnesses = [_]@TypeOf(reference){ reference, compiled };
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "selection-press-parity", .source = native_sdk.WebViewSource.html("<h1>Selection</h1>") };
+    for (harnesses, 0..) |harness, backend| {
+        harness.null_platform.gpu_surfaces = true;
+        try harness.start(app);
+        _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+        harness.runtime.views[0].canvas_widget_surface_scope_policy = if (backend == 0) null else core.nativeSurfaceScopePolicy;
+    }
+    var grid: canvas.TerminalGrid = .{ .background = canvas.Color.rgba(0, 0, 0, 1), .foreground = canvas.Color.rgba(1, 1, 1, 1), .cursor_color = canvas.Color.rgba(1, 1, 1, 1), .selection_color = canvas.Color.rgba(0, 0.5, 1, 1) };
+    const identities = [_]u64{ 7, 9007199254740993, std.math.maxInt(u64) };
+    const selections = [_]?canvas.TextSelection{ null, .{}, .{ .anchor = 2, .focus = 8 }, .{ .anchor = 8, .focus = 2 }, .{ .anchor = 8, .focus = 100 }, .{ .anchor = 100, .focus = std.math.maxInt(usize) } };
+    var comparisons: usize = 0;
+    for ([_]canvas.WidgetKind{ .text, .terminal, .input, .button }) |kind| for (identities, 0..) |identity, id_index| for (selections) |selection| for ([_]bool{ false, true }) |grid_present| {
+        const children = [_]canvas.Widget{.{ .id = identity, .kind = kind, .text = "alpha café", .text_selection = selection, .terminal = .{ .grid = if (grid_present) &grid else null }, .frame = geometry.RectF.init(20, 20, 180, 40) }};
+        var nodes: [2]canvas.WidgetLayoutNode = undefined;
+        const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+        for (harnesses) |harness| _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+        for (std.enums.values(canvas.WidgetPointerPhase)) |phase| for (0..64) |mask| for (0..3) |raw_case| {
+            grid.selection_active = mask & 32 != 0;
+            const raw: canvas.WidgetHit = .{ .id = if (raw_case == 1) identities[(id_index + 1) % identities.len] else identity, .kind = kind, .index = 1, .depth = 1, .bounds = nodes[1].frame, .state = .{} };
+            const press: canvas.WidgetHit = .{ .id = std.math.maxInt(u64) - 1, .kind = .list_item, .index = 0, .depth = 0, .bounds = nodes[0].frame, .state = .{} };
+            const route: canvas.WidgetEventRoute = .{ .target = if (raw_case == 2) null else raw, .press_target = if (mask & 1 != 0) press else null };
+            var expected: ?canvas.WidgetHit = null;
+            for (harnesses, 0..) |harness, backend| {
+                const view = &harness.runtime.views[0];
+                view.canvas_widget_selected_text_id = if (mask & 2 != 0) raw.id else identities[(id_index + 1) % identities.len];
+                view.canvas_widget_selected_text_group_id = if (mask & 4 != 0) std.math.maxInt(u64) else 0;
+                view.canvas_widget_selected_text_group_anchor = if (mask & 8 != 0) std.math.maxInt(usize) else 9007199254740993;
+                view.canvas_widget_selected_text_group_focus = if (mask & 16 != 0) view.canvas_widget_selected_text_group_anchor else 9007199254740994;
+                const before = PointerIntentState.read(view, harness);
+                const selected_before = .{ view.canvas_widget_selected_text_id, view.canvas_widget_selected_text_group_id, view.canvas_widget_selected_text_group_anchor, view.canvas_widget_selected_text_group_focus };
+                const result = harness.runtime.canvasWidgetPressTargetForRoute(0, .{ .phase = phase, .point = .{ .x = 30, .y = 30 } }, route);
+                try PointerIntentState.expect(before, PointerIntentState.read(view, harness));
+                try std.testing.expectEqualDeep(selected_before, .{ view.canvas_widget_selected_text_id, view.canvas_widget_selected_text_group_id, view.canvas_widget_selected_text_group_anchor, view.canvas_widget_selected_text_group_focus });
+                if (backend == 0) expected = result else {
+                    try std.testing.expectEqualDeep(expected, result);
+                    comparisons += 1;
+                }
+            }
+        };
+    };
+    try std.testing.expectEqual(@as(usize, 165888), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled selection press decisions own the consumer and preserve borrowed routes" {
+    const Spy = struct {
+        var decision: u8 = 0;
+        var calls: usize = 0;
+        var request: [5]u8 = undefined;
+        fn policy(input: []const u8, output: []u8) usize {
+            std.debug.assert(input.len == request.len and output.len == 1);
+            @memcpy(&request, input);
+            output[0] = decision;
+            calls += 1;
+            return 1;
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    try harness.start(.{ .context = &context, .name = "selection-press-owner", .source = native_sdk.WebViewSource.html("<h1>Selection</h1>") });
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const children = [_]canvas.Widget{.{ .id = 7, .kind = .text, .text = "alpha café", .text_selection = .{ .anchor = 0, .focus = 8 }, .frame = geometry.RectF.init(20, 20, 180, 40) }};
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 1, .kind = .list_item, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    harness.runtime.views[0].canvas_widget_selected_text_id = 7;
+    harness.runtime.views[0].canvas_widget_surface_scope_policy = Spy.policy;
+    var entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined;
+    Spy.calls = 0;
+    for ([_]u8{ 0, 1 }) |decision| {
+        Spy.decision = decision;
+        const event = (try harness.runtime.routeCanvasWidgetPointerInput(.{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 30, .y = 30 }, &entries)).?;
+        try std.testing.expectEqual(@as(u64, 7), event.target.?.id);
+        try std.testing.expectEqual(decision != 0, event.press_target != null);
+        if (decision != 0) try std.testing.expectEqual(@as(u64, 1), event.press_target.?.id);
+        try std.testing.expect(event.route.ptr == &entries);
+        try std.testing.expectEqualSlices(u8, &.{ 32, 3, 39, 26, 0 }, &Spy.request);
+    }
+    try std.testing.expectEqual(@as(usize, 2), Spy.calls);
+}

@@ -96,12 +96,40 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// made stays live for copy). A plain click collapses the
         /// selection on `.down`, so it reaches `.up` collapsed and the
         /// press lands normally.
-        fn canvasWidgetPressTargetForRoute(
+        pub fn canvasWidgetPressTargetForRoute(
             self: *const Runtime,
             view_index: usize,
             pointer: canvas.WidgetPointerEvent,
             route: canvas.WidgetEventRoute,
         ) ?canvas.WidgetHit {
+            const view = &self.views[view_index];
+            if (view.canvas_widget_surface_scope_policy) |policy| {
+                var facts: u8 = @intFromBool(route.press_target != null);
+                var kind: u16 = 0;
+                if (route.target) |raw| {
+                    kind = canvas.widgetKindCode(raw.kind);
+                    facts |= 2 | (@as(u8, @intFromBool(view.canvas_widget_selected_text_id == raw.id)) << 2) |
+                        (@as(u8, @intFromBool(view.canvas_widget_selected_text_group_id != 0)) << 3) |
+                        (@as(u8, @intFromBool(view.canvas_widget_selected_text_group_anchor != view.canvas_widget_selected_text_group_focus)) << 4);
+                    // Resolve only the storage capability described by the raw hit.
+                    if (raw.kind == .text or raw.kind == .terminal) {
+                        if (view.widgetLayoutTree().findById(raw.id)) |node| {
+                            if (raw.kind == .text) {
+                                if (node.widget.text_selection) |selection| {
+                                    facts |= @as(u8, @intFromBool(!selection.isCollapsed(node.widget.text.len))) << 5;
+                                }
+                            } else if (node.widget.terminal.grid) |grid| {
+                                facts |= @as(u8, @intFromBool(grid.selection_active)) << 6;
+                            }
+                        }
+                    }
+                }
+                var request = [5]u8{ 32, @intFromEnum(pointer.phase), facts, 0, 0 };
+                std.mem.writeInt(u16, request[3..5], kind, .little);
+                var result: [1]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled selection press result");
+                return if (result[0] != 0) route.press_target else null;
+            }
             const press_target = route.press_target orelse return null;
             if (pointer.phase != .up) return press_target;
             const raw = route.target orelse return press_target;
