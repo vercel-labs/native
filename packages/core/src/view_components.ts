@@ -21,6 +21,7 @@ type NscViewNode = {
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
+  hoverEnter?: number[]; hoverLeave?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;
 };
 
@@ -40,6 +41,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 36) return nscvHoverCoordination(request);
   if (request[0] === 35) return nscvDragCoordination(request);
   if (request[0] === 34) return nscvKeyboardFocus(request);
   if (request[0] === 33) return nscvKeyboardParticipation(request);
@@ -289,6 +291,73 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
   return result;
+}
+
+/** Hover coordination, operation 36. Six-byte headers contain stage, two
+ * arguments, capability/equality facts and a reserved zero byte. Diff stage 1
+ * carries mirror then standing identities as exact eight-byte LE records;
+ * they are compared bytewise, never narrowed to a JavaScript number. Its
+ * copied plan is identical/entering/leave-count, standing-to-mirror indices
+ * and innermost-first leave indices (255 = absent or reserved).
+ * Unwind stage 7 carries entering flags and returns kept position indices.
+ * Scalar stages select the standing view, refresh eligibility, copy/retry/
+ * refusal, captured/live leave resolution, current-tree entry and bounded
+ * reentrant drain continuation. Native supplies capability outcomes and
+ * owns capture arenas, synchronous dispatch and fallible host effects.
+ */
+function nscvHoverCoordination(request: Uint8Array): Uint8Array {
+  if (request.length < 6 || request[1]! > 9 || request[5] !== 0)
+    throw new Error("invalid hover coordination request");
+  const stage = request[1]!, a = request[2]!, b = request[3]!, facts = request[4]!;
+  if (stage === 1) {
+    if (a > 1 || b > 32 || facts > 32 || request.length !== 6 + (b + facts) * 8)
+      throw new Error("invalid hover diff request");
+    const same = (left: number, right: number): boolean => {
+      for (let byte = 0; byte < 8; byte++) if (request[6 + left * 8 + byte] !== request[6 + right * 8 + byte]) return false;
+      return true;
+    };
+    const result = new Uint8Array(3 + facts + b);
+    for (let i = 3; i < result.length; i++) result[i] = 255;
+    let identical = a === 1 && b === facts, entering = false, leaves = 0;
+    for (let position = 0; position < facts; position++) {
+      let retained = 255;
+      if (a === 1) for (let index = 0; index < b; index++) if (same(index, b + position)) { retained = index; break; }
+      result[3 + position] = retained;
+      if (retained === 255) entering = true;
+      if (retained !== position) identical = false;
+    }
+    for (let index = b - 1; index >= 0; index--) {
+      let retained = false;
+      if (a === 1) for (let position = 0; position < facts; position++) if (same(index, b + position)) { retained = true; break; }
+      if (!retained) { result[3 + facts + leaves] = index; leaves++; }
+    }
+    result[0] = identical ? 1 : 0; result[1] = entering ? 1 : 0; result[2] = leaves; return result;
+  }
+  if (stage === 7) {
+    if (a > b || b > 32 || facts !== 0 || request.length !== 6 + b) throw new Error("invalid hover unwind request");
+    const result = new Uint8Array(1 + b); let kept = 0;
+    for (let i = 1; i < result.length; i++) result[i] = 255;
+    for (let i = 0; i < b; i++) {
+      if (request[6 + i]! > 1) throw new Error("invalid hover entering flag");
+      if (i >= a && request[6 + i] === 1) continue;
+      result[1 + kept] = i; kept++;
+    }
+    result[0] = kept; return result;
+  }
+  const maxFacts = stage === 0 || stage === 2 || stage === 5 || stage === 6 ? 15 : stage === 3 || stage === 4 || stage === 8 ? 3 : 1;
+  if (request.length !== 6 || facts > maxFacts ||
+      (stage === 4 ? a > 1 || b > 2 : stage === 9 ? a > 64 || b !== 0 : a !== 0 || b !== 0))
+    throw new Error("invalid hover coordination facts");
+  let decision = 0;
+  if (stage === 0) decision = (facts & 3) !== 3 ? 0 : (facts & 4) !== 0 ? 2 : (facts & 8) === 0 ? 1 : 0;
+  else if (stage === 2) decision = (facts & 13) === 13 && (facts & 2) === 0 ? 1 : 0;
+  else if (stage === 3) decision = (facts & 3) === 2 ? 1 : 0;
+  else if (stage === 4) decision = b === 0 ? 1 : b === 2 ? 4 : a === 1 ? 2 : facts === 0 ? 3 : 0;
+  else if (stage === 5) decision = (facts & 1) !== 0 ? 0 : (facts & 2) !== 0 ? 1 : (facts & 12) === 12 ? 2 : 3;
+  else if (stage === 6) decision = (facts & 1) === 0 ? 0 : (facts & 2) === 0 ? 1 : (facts & 12) !== 12 ? 2 : 3;
+  else if (stage === 8) decision = facts === 1 ? 1 : 0;
+  else decision = a < 64 && facts === 1 ? 1 : 0;
+  const result = new Uint8Array(1); result[0] = decision; return result;
 }
 
 /** Drag coordination, operation 35. Sixteen copied bytes: stage (0..8),

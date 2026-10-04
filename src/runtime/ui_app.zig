@@ -41,6 +41,7 @@ const canvas_frame = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_events = @import("canvas_widget_events.zig");
 const drag_policy = @import("canvas_drag_policy.zig");
+const hover_policy = @import("canvas_hover_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
 const terminal_session = @import("terminal_session.zig");
@@ -5314,19 +5315,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
         }
 
-        /// Cap on hover-Msg drain passes per runtime event: each pass
-        /// delivers one coalesced containment transition, and the Msgs
-        /// it dispatches can rebuild the tree and move the standing
-        /// chain again (an enter handler that unmounts the hovered
-        /// element owes an immediate leave — the second pass delivers
-        /// it). The cap exists ONLY as a flap guard (an app whose enter
-        /// mounts and whose leave unmounts, forever), sized far past
-        /// any honest cascade — even one where every enter replaces the
-        /// listener under a stationary pointer — so a finite sequence
-        /// always settles within one drain; residue past the cap
-        /// delivers on the next event's drain.
-        const hover_msg_drain_passes: usize = 64;
-
         /// Refresh every standing capture from the mirror view's live
         /// tree when the trees moved underneath: called at EVERY
         /// rebuild commit — two dispatches in one cycle (payload A to
@@ -5337,64 +5325,54 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// (allocation) after attempting every entry, leaving the
         /// generation behind so the next commit or drain retries.
         fn refreshHoverLeaveCaptures(self: *Self) ?anyerror {
-            if (self.hover_msg_chain_len == 0) return null;
-            if (self.hover_msg_captured_generation == self.build_generation) return null;
-            if (!self.hoverTreeCurrentFor(self.hover_msg_window_id, self.hoverMsgViewLabel())) return null;
-            const mirror_tree = self.hoverTreeFor(self.hover_msg_window_id, self.hoverMsgViewLabel()) orelse return null;
+            const mirror_tree = self.hoverTreeFor(self.hover_msg_window_id, self.hoverMsgViewLabel());
+            if (hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .refresh, .facts = @as(u8, if (self.hover_msg_chain_len != 0) 1 else 0) | @as(u8, if (self.hover_msg_captured_generation == self.build_generation) 2 else 0) |
+                @as(u8, if (self.hoverTreeCurrentFor(self.hover_msg_window_id, self.hoverMsgViewLabel())) 4 else 0) | @as(u8, if (mirror_tree != null) 8 else 0) }) == 0) return null;
             var first_error: ?anyerror = null;
             var refreshed = true;
             for (0..self.hover_msg_chain_len) |position| {
                 // A refused entry's pair is disabled (its enter never
                 // dispatched); a rebind only takes effect on re-entry.
-                if (self.hover_msg_slots[position] == hover_msg_slot_refused) continue;
-                const leave_msg = mirror_tree.msgFor(self.hover_msg_chain[position], .hover_leave) orelse continue;
+                const leave_msg = if (mirror_tree) |tree| tree.msgFor(self.hover_msg_chain[position], .hover_leave) else null;
+                if (hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .refresh_entry, .facts = @as(u8, if (self.hover_msg_slots[position] == hover_msg_slot_refused) 1 else 0) | @as(u8, if (leave_msg != null) 2 else 0) }) == 0) continue;
                 // Copy-then-swap: the replacement lands in a FRESH slot
                 // (the pool sizing guarantees one is free) and the old
                 // capture releases only after it succeeded — a failed
                 // allocation must never destroy the still-valid capture
                 // it was refreshing.
                 const fresh = self.claimHoverSlot() orelse {
-                    refreshed = false;
-                    ui_app_log.warn("hover-leave capture refresh failed: no free capture slot - retrying at the next rebuild or drain", .{});
-                    if (first_error == null) first_error = error.OutOfMemory;
-                    continue;
-                };
-                self.captureHoverLeave(fresh, leave_msg) catch |err| {
-                    self.releaseHoverSlot(fresh);
-                    switch (err) {
-                        error.OutOfMemory => {
-                            // Transient: keep the old capture, retry at
-                            // the next commit or drain — the generation
-                            // stays behind — and surface the failure
-                            // LOUD: if the element unmounts before a
-                            // retry lands, its refreshed leave is lost,
-                            // and that must never be silent.
-                            refreshed = false;
-                            ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
-                            if (first_error == null) first_error = err;
-                        },
-                        error.HoverCapturePayloadUnsupported => {
-                            // A rebind to an unownable payload. An
-                            // entry with a standing capture keeps it
-                            // quietly (the promise the enter earned);
-                            // an entry that never had one — entered
-                            // with no leave bound, then given one no
-                            // copy can own — is marked so the
-                            // degradation is WARNED once, not silent,
-                            // and not re-warned every generation.
-                            if (self.hover_msg_slots[position] == hover_msg_slot_none) {
-                                self.hover_msg_slots[position] = hover_msg_slot_unowned;
-                                ui_app_log.warn("on_hover_leave rebind cannot be owned (a single-item pointer): the standing element's leave degrades to live-tree resolution, and an unmount loses it - bind a slice or scalar payload instead", .{});
-                            }
-                        },
+                    if (self.hoverCaptureDecision(0, 0, self.hover_msg_slots[position]) == 1) {
+                        refreshed = false;
+                        ui_app_log.warn("hover-leave capture refresh failed: no free capture slot - retrying at the next rebuild or drain", .{});
+                        if (first_error == null) first_error = error.OutOfMemory;
                     }
                     continue;
                 };
-                self.releaseHoverSlot(self.hover_msg_slots[position]);
-                self.hover_msg_slots[position] = fresh;
+                self.captureHoverLeave(fresh, leave_msg.?) catch |err| {
+                    self.releaseHoverSlot(fresh);
+                    const action = self.hoverCaptureDecision(0, if (err == error.OutOfMemory) 0 else 1, self.hover_msg_slots[position]);
+                    if (action == 1) {
+                        refreshed = false;
+                        ui_app_log.warn("hover-leave capture refresh failed: {t} - retrying at the next rebuild or drain; an unmount before a successful retry loses the newly bound leave", .{err});
+                        if (first_error == null) first_error = err;
+                    } else if (action == 3) {
+                        self.hover_msg_slots[position] = hover_msg_slot_unowned;
+                        ui_app_log.warn("on_hover_leave rebind cannot be owned (a single-item pointer): the standing element's leave degrades to live-tree resolution, and an unmount loses it - bind a slice or scalar payload instead", .{});
+                    }
+                    continue;
+                };
+                if (self.hoverCaptureDecision(0, 2, self.hover_msg_slots[position]) == 4) {
+                    self.releaseHoverSlot(self.hover_msg_slots[position]);
+                    self.hover_msg_slots[position] = fresh;
+                } else self.releaseHoverSlot(fresh);
             }
             if (refreshed) self.hover_msg_captured_generation = self.build_generation;
             return first_error;
+        }
+
+        fn hoverCaptureDecision(self: *const Self, context: u8, outcome: u8, slot: u8) u8 {
+            const kind: u8 = if (slot == hover_msg_slot_none) 0 else if (slot == hover_msg_slot_refused) 1 else if (slot == hover_msg_slot_unowned) 2 else 3;
+            return hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .capture, .a = context, .b = outcome, .facts = kind });
         }
 
         /// The mirror-view adoption count for the tracked publication
@@ -5626,8 +5604,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// dispatches, which is what "discrete edges, never per-move"
         /// means under a fast pointer.
         fn drainHoverMsgs(self: *Self, runtime: *Runtime) anyerror!void {
-            if (!self.installed) return;
-            if (self.hover_msg_draining) return;
+            if (hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .drain, .facts = @as(u8, if (self.installed) 1 else 0) | @as(u8, if (self.hover_msg_draining) 2 else 0) }) == 0) return;
             self.hover_msg_draining = true;
             defer self.hover_msg_draining = false;
             // A pass's error degrades WITHOUT aborting the drain: its
@@ -5638,12 +5615,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // degraded handling every event handler gets.
             var first_error: ?anyerror = null;
             var passes: usize = 0;
-            while (passes < hover_msg_drain_passes) : (passes += 1) {
+            while (hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .continuation, .a = @intCast(passes), .facts = 1 }) != 0) : (passes += 1) {
                 const progressed = self.stepHoverMsgs(runtime) catch |err| blk: {
                     if (first_error == null) first_error = err;
                     break :blk true;
                 };
-                if (!progressed) break;
+                if (hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .continuation, .a = @intCast(passes + 1), .facts = @intFromBool(progressed) }) == 0) break;
             }
             if (first_error) |err| return err;
         }
@@ -5661,15 +5638,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn stepHoverMsgs(self: *Self, runtime: *Runtime) anyerror!bool {
             var standing_index: ?usize = null;
             for (runtime.views[0..runtime.view_count], 0..) |*view, index| {
-                if (view.kind != .gpu_surface) continue;
-                if (view.canvas_widget_hover_msg_chain_len == 0) continue;
-                const is_mirror = view.window_id == self.hover_msg_window_id and
-                    std.mem.eql(u8, view.label, self.hoverMsgViewLabel());
-                if (is_mirror) {
-                    standing_index = index;
-                    break;
-                }
-                if (standing_index == null) standing_index = index;
+                const is_mirror = view.window_id == self.hover_msg_window_id and std.mem.eql(u8, view.label, self.hoverMsgViewLabel());
+                const action = hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .view, .facts = @as(u8, if (view.kind == .gpu_surface) 1 else 0) | @as(u8, if (view.canvas_widget_hover_msg_chain_len != 0) 2 else 0) |
+                    @as(u8, if (is_mirror) 4 else 0) | @as(u8, if (standing_index != null) 8 else 0) });
+                if (action != 0) standing_index = index;
+                if (action == 2) break;
             }
 
             // The standing chain and the view identity it belongs to
@@ -5720,28 +5693,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // A view change retains nothing (one pointer, one view).
             var retained_slots: [canvas.max_widget_depth]u8 = undefined;
             var entering_at: [canvas.max_widget_depth]bool = undefined;
-            var entering_any = false;
-            var identical = same_view and standing_len == mirror_len;
-            for (standing_chain[0..standing_len], 0..) |id, position| {
-                var slot: u8 = hover_msg_slot_none;
-                var retained = false;
-                if (same_view) {
-                    for (self.hover_msg_chain[0..mirror_len], 0..) |mirror_id, mirror_position| {
-                        if (mirror_id != id) continue;
-                        slot = self.hover_msg_slots[mirror_position];
-                        retained = true;
-                        if (mirror_position != position) identical = false;
-                        break;
-                    }
-                }
-                retained_slots[position] = slot;
-                entering_at[position] = !retained;
-                if (!retained) {
-                    entering_any = true;
-                    identical = false;
-                }
+            const plan = hover_policy.plan(self.options.surface_scope_policy, same_view, self.hover_msg_chain[0..mirror_len], standing_chain[0..standing_len]);
+            for (0..standing_len) |position| {
+                const retained = plan.retained[position];
+                retained_slots[position] = if (retained == 255) hover_msg_slot_none else self.hover_msg_slots[retained];
+                entering_at[position] = retained == 255;
             }
-            if (identical) {
+            if (plan.identical) {
                 if (first_error) |err| return err;
                 return false;
             }
@@ -5757,26 +5715,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // while the leaves this transition owes still dispatch
             // below — their Msgs are owned captures, not tree lookups,
             // and a broken destination must never withhold them.
-            const destination_ready = !entering_any or
-                (self.hoverTreeCurrentFor(standing_window, standing_label) and self.hoverTreeFor(standing_window, standing_label) != null);
-            if (!destination_ready) {
-                var any_leaving = false;
-                for (self.hover_msg_chain[0..mirror_len]) |id| {
-                    const still_standing = same_view and blk: {
-                        for (standing_chain[0..standing_len]) |candidate| {
-                            if (candidate == id) break :blk true;
-                        }
-                        break :blk false;
-                    };
-                    if (!still_standing) {
-                        any_leaving = true;
-                        break;
-                    }
-                }
-                // Nothing deliverable now: enters wait for a current
-                // tree, retained entries stay put.
-                if (!any_leaving) return false;
-            }
+            const destination_ready = hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .enter, .facts = 1 |
+                @as(u8, if (plan.entering) 2 else 0) | @as(u8, if (self.hoverTreeCurrentFor(standing_window, standing_label)) 4 else 0) |
+                @as(u8, if (self.hoverTreeFor(standing_window, standing_label) != null) 8 else 0) }) != 2;
+            // Deferred enters stay outside the mirror, but owned leaves still deliver.
+            if (!destination_ready and plan.leave_count == 0) return false;
 
             // The leaves this pass owes — mirror ids absent from the
             // standing chain — innermost-first. Their captured Msgs own
@@ -5791,21 +5734,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             @memcpy(leave_label_storage[0..leave_label_len], self.hover_msg_view_label_storage[0..leave_label_len]);
             var leave_ids: [canvas.max_widget_depth]canvas.ObjectId = undefined;
             var leave_slots: [canvas.max_widget_depth]u8 = undefined;
-            var leave_count: usize = 0;
-            var index = mirror_len;
-            while (index > 0) {
-                index -= 1;
-                const id = self.hover_msg_chain[index];
-                const still_standing = same_view and blk: {
-                    for (standing_chain[0..standing_len]) |candidate| {
-                        if (candidate == id) break :blk true;
-                    }
-                    break :blk false;
-                };
-                if (still_standing) continue;
-                leave_ids[leave_count] = id;
-                leave_slots[leave_count] = self.hover_msg_slots[index];
-                leave_count += 1;
+            const leave_count = plan.leave_count;
+            for (plan.leaving[0..leave_count], 0..) |index, position| {
+                leave_ids[position] = self.hover_msg_chain[index];
+                leave_slots[position] = self.hover_msg_slots[index];
             }
 
             // Commit the mirror before dispatching so a mid-dispatch
@@ -5839,18 +5771,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // — and the first error propagates after the batch, into
             // the same degraded handling every event handler gets.
             for (leave_ids[0..leave_count], leave_slots[0..leave_count]) |id, slot| {
-                // A refused entry never entered: it owes nothing on
-                // exit.
-                if (slot == hover_msg_slot_refused) continue;
-                // The capture wins (leave answers what enter announced);
-                // an unowned capture falls back to the live tree while
-                // its element still stands there.
                 const captured: ?MsgT = if (slot >= hover_msg_slot_count) null else self.hover_msg_leave_msgs[slot];
-                const msg = captured orelse blk: {
-                    if (!self.hoverTreeCurrentFor(leave_window, leave_label_storage[0..leave_label_len])) break :blk null;
-                    const live = self.hoverTreeFor(leave_window, leave_label_storage[0..leave_label_len]) orelse break :blk null;
-                    break :blk live.msgFor(id, .hover_leave);
-                } orelse {
+                const live = self.hoverTreeFor(leave_window, leave_label_storage[0..leave_label_len]);
+                const resolution = hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .leave, .facts = @as(u8, if (slot == hover_msg_slot_refused) 1 else 0) | @as(u8, if (captured != null) 2 else 0) |
+                    @as(u8, if (self.hoverTreeCurrentFor(leave_window, leave_label_storage[0..leave_label_len])) 4 else 0) | @as(u8, if (live != null) 8 else 0) });
+                if (resolution == 0) continue;
+                const msg = (if (resolution == 1) captured else if (resolution == 2) live.?.msgFor(id, .hover_leave) else null) orelse {
                     self.releaseHoverSlot(slot);
                     continue;
                 };
@@ -5863,69 +5789,47 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 self.releaseHoverSlot(slot);
             }
             for (standing_chain[0..standing_len], 0..) |id, position| {
-                if (!destination_ready) break;
-                if (!entering_at[position]) continue;
-                if (!self.hoverTreeCurrentFor(standing_window, standing_label)) {
-                    // An earlier edge's failed rebuild left this tree
-                    // stale mid-batch: the same deferral as above — drop
-                    // the unentered tail from the mirror and retry after
-                    // a rebuild lands.
+                const live = self.hoverTreeFor(standing_window, standing_label);
+                const admission = hover_policy.decide(self.options.surface_scope_policy, .{ .stage = .enter, .facts = @as(u8, if (destination_ready) 1 else 0) | @as(u8, if (entering_at[position]) 2 else 0) |
+                    @as(u8, if (self.hoverTreeCurrentFor(standing_window, standing_label)) 4 else 0) | @as(u8, if (live != null) 8 else 0) });
+                if (admission == 0) break;
+                if (admission == 1) continue;
+                if (admission == 2) {
                     self.unwindHoverEnters(&entering_at, position);
                     break;
                 }
-                // Resolve from the LIVE tree per edge: an earlier edge
-                // in this batch may have rebuilt the view (payload
-                // bytes are only promised for their own dispatch), and
-                // its update may even have unmounted this element — a
-                // vanished handler then dispatches no enter and owes no
-                // leave. The paired leave is captured BEFORE the enter
-                // dispatches, from the same tree that resolved it, so
-                // an enter whose own handler unmounts the element still
-                // has its leave to deliver.
-                const live = self.hoverTreeFor(standing_window, standing_label) orelse {
-                    // A failed rebuild cleared the tree mid-batch: drop
-                    // the not-yet-entered ids from the mirror so the
-                    // next drain retries them once the tree returns (the
-                    // entering-with-no-tree deferral above then holds
-                    // the line instead of consuming enters as silence).
-                    self.unwindHoverEnters(&entering_at, position);
-                    break;
-                };
-                const enter_msg = live.msgFor(id, .hover_enter);
-                if (live.msgFor(id, .hover_leave)) |leave_msg| {
+                // Resolve each edge from the current tree; own its paired leave before dispatch.
+                const enter_msg = live.?.msgFor(id, .hover_enter);
+                if (live.?.msgFor(id, .hover_leave)) |leave_msg| {
                     const slot = self.claimHoverSlot() orelse {
                         // Pool pressure degrades like allocation
                         // pressure: defer this id and the entering tail
                         // to the next drain.
-                        self.unwindHoverEnters(&entering_at, position);
-                        if (first_error == null) first_error = error.OutOfMemory;
+                        if (self.hoverCaptureDecision(1, 0, self.hover_msg_slots[position]) == 1) {
+                            self.unwindHoverEnters(&entering_at, position);
+                            if (first_error == null) first_error = error.OutOfMemory;
+                        }
                         break;
                     };
-                    self.captureHoverLeave(slot, leave_msg) catch |err| switch (err) {
-                        error.OutOfMemory => {
-                            // Transient: an enter whose paired leave
-                            // cannot be owned must not dispatch — defer
-                            // this id and the rest of the entering tail
-                            // to the next drain instead of breaking the
-                            // pairing guarantee.
-                            self.releaseHoverSlot(slot);
+                    self.captureHoverLeave(slot, leave_msg) catch |err| {
+                        self.releaseHoverSlot(slot);
+                        const action = self.hoverCaptureDecision(1, if (err == error.OutOfMemory) 0 else 1, self.hover_msg_slots[position]);
+                        if (action == 1) {
                             self.unwindHoverEnters(&entering_at, position);
                             if (first_error == null) first_error = error.OutOfMemory;
                             break;
-                        },
-                        error.HoverCapturePayloadUnsupported => {
-                            // Permanent: no copy can own this payload
-                            // (a single-item pointer), so the PAIR is
-                            // disabled — the enter is refused too,
-                            // once, loudly, and the entry settles as
-                            // refused instead of retrying every drain.
-                            self.releaseHoverSlot(slot);
+                        }
+                        if (action == 2) {
                             self.releaseHoverSlot(self.hover_msg_slots[position]);
                             self.hover_msg_slots[position] = hover_msg_slot_refused;
                             ui_app_log.warn("on_hover_leave payload cannot be owned (a single-item pointer): the hover pair is disabled for this element - bind a slice or scalar payload instead", .{});
-                            continue;
-                        },
+                        }
+                        continue;
                     };
+                    if (self.hoverCaptureDecision(1, 2, self.hover_msg_slots[position]) != 4) {
+                        self.releaseHoverSlot(slot);
+                        continue;
+                    }
                     // A mid-batch rebuild's capture refresh can have
                     // filled this position's slot already (an earlier
                     // edge's dispatch rebuilt): release it before the
@@ -5953,20 +5857,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// sees them as entering again and retries. Their positions hold
         /// no capture slots yet, so nothing needs releasing.
         fn unwindHoverEnters(self: *Self, entering_at: *const [canvas.max_widget_depth]bool, from: usize) void {
-            var kept: usize = 0;
+            const compaction = hover_policy.unwind(self.options.surface_scope_policy, entering_at[0..self.hover_msg_chain_len], from);
+            // Release discarded claims before compacting the native id/slot storage.
+            var kept_position: usize = 0;
             for (0..self.hover_msg_chain_len) |position| {
-                if (position >= from and entering_at[position]) {
-                    // A mid-batch capture refresh can have filled this
-                    // never-entered position's slot: release it so an
-                    // unwound enter never leaks its claim.
-                    self.releaseHoverSlot(self.hover_msg_slots[position]);
-                    continue;
-                }
+                if (kept_position < compaction.len and compaction.kept[kept_position] == position) kept_position += 1 else self.releaseHoverSlot(self.hover_msg_slots[position]);
+            }
+            for (compaction.kept[0..compaction.len], 0..) |position, kept| {
                 self.hover_msg_chain[kept] = self.hover_msg_chain[position];
                 self.hover_msg_slots[kept] = self.hover_msg_slots[position];
-                kept += 1;
             }
-            self.hover_msg_chain_len = kept;
+            self.hover_msg_chain_len = compaction.len;
         }
 
         /// Re-render the house video chrome from the moved channel

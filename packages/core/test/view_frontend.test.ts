@@ -1633,3 +1633,60 @@ test("drag coordination owns capture, slop, orphan cancellation and message deli
     assert.throws(() => policy(bytes), /drag coordination|text policy/);
   const retained = policy(request(0, 0, 0)); for (let i = 0; i < 100; i++) policy(request(1, 1, 3, 8)); assert.deepEqual([...retained], [1]);
 });
+
+
+test("hover coordination preserves exact identity set diffs, edge order, retries and owned results", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<button/>', contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const plan = (same: boolean, mirror: bigint[], standing: bigint[]) => {
+    const input = new Uint8Array(6 + 8 * (mirror.length + standing.length)); input.set([36, 1, same ? 1 : 0, mirror.length, standing.length, 0]);
+    const bytes = new DataView(input.buffer); [...mirror, ...standing].forEach((id, index) => bytes.setBigUint64(6 + index * 8, id, true));
+    const retained = standing.map(id => same ? mirror.indexOf(id) : -1);
+    const leaves = mirror.map((id, index) => ({ id, index })).reverse().filter(({ id }) => !same || !standing.includes(id)).map(({ index }) => index);
+    const expected = [same && mirror.length === standing.length && retained.every((index, position) => index === position) ? 1 : 0, retained.includes(-1) ? 1 : 0, leaves.length,
+      ...retained.map(index => index < 0 ? 255 : index), ...leaves, ...Array(mirror.length - leaves.length).fill(255)];
+    const output = policy(input); assert.deepEqual([...output], expected); return output;
+  };
+  const ids = [0n, 1n, 9007199254740992n, 9007199254740993n, 0xffffffffffffffffn, 0xfffffffffffffffen];
+  for (let mask = 0; mask < 64; mask++) for (let next = 0; next < 64; next++) for (const same of [false, true]) {
+    const mirror = ids.filter((_, i) => mask & 1 << i), standing = ids.filter((_, i) => next & 1 << i).reverse(); plan(same, mirror, standing);
+  }
+  const deep = Array.from({ length: 32 }, (_, i) => 0xffffffffffffffffn - BigInt(i));
+  const retained = plan(true, deep, deep); plan(true, deep, deep.slice().reverse()); plan(false, deep, deep);
+  plan(true, [], []); assert.equal(retained[0], 1);
+  const decide = (stage: number, facts: number, a = 0, b = 0) => policy(new Uint8Array([36, stage, a, b, facts, 0]))[0];
+  for (let facts = 0; facts < 16; facts++) {
+    assert.equal(decide(0, facts), (facts & 3) !== 3 ? 0 : facts & 4 ? 2 : facts & 8 ? 0 : 1);
+    assert.equal(decide(2, facts), (facts & 13) === 13 && !(facts & 2) ? 1 : 0);
+    assert.equal(decide(5, facts), facts & 1 ? 0 : facts & 2 ? 1 : (facts & 12) === 12 ? 2 : 3);
+    assert.equal(decide(6, facts), !(facts & 1) ? 0 : !(facts & 2) ? 1 : (facts & 12) !== 12 ? 2 : 3);
+  }
+  for (let facts = 0; facts < 4; facts++) {
+    assert.equal(decide(3, facts), facts === 2 ? 1 : 0); assert.equal(decide(8, facts), facts === 1 ? 1 : 0);
+    for (let context = 0; context < 2; context++) for (let outcome = 0; outcome < 3; outcome++) assert.equal(decide(4, facts, context, outcome), outcome === 0 ? 1 : outcome === 2 ? 4 : context === 1 ? 2 : facts === 0 ? 3 : 0);
+  }
+  for (let pass = 0; pass <= 64; pass++) for (let progress = 0; progress < 2; progress++) assert.equal(decide(9, progress, pass), pass < 64 && progress ? 1 : 0);
+  for (let len = 0; len <= 32; len++) for (let from = 0; from <= len; from++) {
+    const flags = Array.from({ length: len }, (_, i) => i % 3 === 0 ? 1 : 0), kept = flags.map((flag, i) => ({ flag, i })).filter(({ flag, i }) => i < from || !flag).map(({ i }) => i);
+    assert.deepEqual([...policy(new Uint8Array([36, 7, from, len, 0, 0, ...flags]))], [kept.length, ...kept, ...Array(len - kept.length).fill(255)]);
+  }
+  for (const bytes of [[36], [36, 10, 0, 0, 0, 0], [36, 0, 1, 0, 0, 0], [36, 0, 0, 0, 16, 0], [36, 0, 0, 0, 0, 1], [36, 1, 2, 0, 0, 0], [36, 1, 0, 33, 0, 0], [36, 1, 0, 1, 0, 0], [36, 4, 2, 0, 0, 0], [36, 4, 0, 3, 0, 0], [36, 7, 1, 0, 0, 0], [36, 7, 0, 1, 0, 0, 2], [36, 9, 65, 0, 1, 0]]) assert.throws(() => policy(new Uint8Array(bytes)), /hover/);
+  assert.equal(retained[0], 1);
+});
+
+test("compiled hover handlers preserve typed byte envelopes on nested keyed listeners", () => {
+  const input: ViewContract = { ...contract, msg: { arms: [
+    { name: "enter", payload: { kind: "void" } }, { name: "leave", member: "text", payload: { kind: "bytes" } },
+  ] } };
+  const model = { status: new TextEncoder().encode("Café\0日本"), count: 1 };
+  const exports: { native_view?: () => Uint8Array } = {};
+  const generated = compileView('<panel key="{count}" on-hover-enter="enter" on-hover-leave="leave:{status}"><button on-hover-enter="enter">Nested</button></panel>', input);
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: model, nscfPackMsg: (msg: { kind: string; text?: Uint8Array }) => new Uint8Array([1, msg.kind === "enter" ? 0 : 1, ...msg.text ?? []]),
+  });
+  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]); assert.deepEqual(view()[0].hoverEnter, [1, 0]); assert.deepEqual(view()[1].hoverEnter, [1, 0]);
+  model.status = new TextEncoder().encode("Rebound"); assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]);
+  assert.throws(() => compileView('<panel on-hover-leave="leave"/>', input), /matching scalar/);
+});

@@ -9104,3 +9104,262 @@ test "compiled drag app delivery consumes message capture and terminal fallback 
     try std.testing.expect(Spy.calls[5] > 0 and Spy.calls[6] > 0 and Spy.calls[7] > 0 and Spy.calls[8] > 0);
     core.rt.frameReset();
 }
+
+test "compiled hover plans preserve full-width set identity, leave ordering and borrowed core bytes" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const original = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(original);
+    const ids = [_]u64{ 0, 1, 9007199254740992, 9007199254740993, std.math.maxInt(u64), std.math.maxInt(u64) - 1 };
+    for (0..64) |mask| for (0..64) |next| for ([_]bool{ false, true }) |same| {
+        var mirror: [32]u64 = undefined;
+        var standing: [32]u64 = undefined;
+        var m: usize = 0;
+        var n: usize = 0;
+        for (ids, 0..) |id, i| if (mask & (@as(usize, 1) << @intCast(i)) != 0) {
+            mirror[m] = id;
+            m += 1;
+        };
+        var i: usize = ids.len;
+        while (i > 0) {
+            i -= 1;
+            if (next & (@as(usize, 1) << @intCast(i)) != 0) {
+                standing[n] = ids[i];
+                n += 1;
+            }
+        }
+        var input: [518]u8 = undefined;
+        input[0..6].* = .{ 36, 1, @intFromBool(same), @intCast(m), @intCast(n), 0 };
+        var offset: usize = 6;
+        for (mirror[0..m]) |id| {
+            std.mem.writeInt(u64, input[offset..][0..8], id, .little);
+            offset += 8;
+        }
+        for (standing[0..n]) |id| {
+            std.mem.writeInt(u64, input[offset..][0..8], id, .little);
+            offset += 8;
+        }
+        var expected: [67]u8 = @splat(255);
+        var identical = same and m == n;
+        var entering = false;
+        var leaves: usize = 0;
+        for (standing[0..n], 0..) |id, position| {
+            if (same) for (mirror[0..m], 0..) |candidate, index| if (candidate == id) {
+                expected[3 + position] = @intCast(index);
+                break;
+            };
+            if (expected[3 + position] == 255) entering = true;
+            if (expected[3 + position] != position) identical = false;
+        }
+        i = m;
+        while (i > 0) {
+            i -= 1;
+            var retained = false;
+            if (same) for (standing[0..n]) |id| if (id == mirror[i]) {
+                retained = true;
+                break;
+            };
+            if (!retained) {
+                expected[3 + n + leaves] = @intCast(i);
+                leaves += 1;
+            }
+        }
+        expected[0..3].* = .{ @intFromBool(identical), @intFromBool(entering), @intCast(leaves) };
+        var result: [67]u8 = undefined;
+        try std.testing.expectEqual(3 + m + n, core.nativeSurfaceScopePolicy(input[0..offset], &result));
+        try std.testing.expectEqualSlices(u8, expected[0 .. 3 + m + n], result[0 .. 3 + m + n]);
+        try std.testing.expectEqualSlices(u8, original, borrowed);
+    };
+    for (0..10) |stage| {
+        if (stage == 1 or stage == 7) continue;
+        for (0..65) |a| for (0..3) |b| for (0..16) |facts| {
+            const max: usize = if (stage == 0 or stage == 2 or stage == 5 or stage == 6) 15 else if (stage == 3 or stage == 4 or stage == 8) 3 else 1;
+            if (facts > max or (if (stage == 4) a > 1 else if (stage == 9) b != 0 else a != 0 or b != 0)) continue;
+            const expected: u8 = switch (stage) {
+                0 => if (facts & 3 != 3) 0 else if (facts & 4 != 0) 2 else if (facts & 8 == 0) 1 else 0,
+                2 => @intFromBool(facts & 1 != 0 and facts & 2 == 0 and facts & 12 == 12),
+                3 => @intFromBool(facts == 2),
+                4 => if (b == 0) 1 else if (b == 2) 4 else if (a == 1) 2 else if (facts == 0) 3 else 0,
+                5 => if (facts & 1 != 0) 0 else if (facts & 2 != 0) 1 else if (facts & 12 == 12) 2 else 3,
+                6 => if (facts & 1 == 0) 0 else if (facts & 2 == 0) 1 else if (facts & 12 != 12) 2 else 3,
+                8 => @intFromBool(facts == 1),
+                9 => @intFromBool(a < 64 and facts == 1),
+                else => unreachable,
+            };
+            var result: [1]u8 = undefined;
+            const input = [_]u8{ 36, @intCast(stage), @intCast(a), @intCast(b), @intCast(facts), 0 };
+            try std.testing.expectEqual(@as(usize, 1), core.nativeSurfaceScopePolicy(&input, &result));
+            try std.testing.expectEqual(expected, result[0]);
+            try std.testing.expectEqualSlices(u8, original, borrowed);
+        };
+    }
+    for (0..33) |len| for (0..len + 1) |from| {
+        var input: [38]u8 = @splat(0);
+        input[0..6].* = .{ 36, 7, @intCast(from), @intCast(len), 0, 0 };
+        var expected: [33]u8 = @splat(255);
+        var kept: usize = 0;
+        for (0..len) |i| {
+            input[6 + i] = @intFromBool(i % 3 == 0);
+            if (i >= from and i % 3 == 0) continue;
+            expected[1 + kept] = @intCast(i);
+            kept += 1;
+        }
+        expected[0] = @intCast(kept);
+        var result: [33]u8 = undefined;
+        try std.testing.expectEqual(1 + len, core.nativeSurfaceScopePolicy(input[0 .. 6 + len], &result));
+        try std.testing.expectEqualSlices(u8, expected[0 .. 1 + len], result[0 .. 1 + len]);
+    };
+    core.rt.frameReset();
+}
+
+const HoverConsumerModel = struct {
+    log: [64]u16 = @splat(0),
+    len: usize = 0,
+    outer: bool = true,
+    mounted: bool = true,
+    vanish: bool = false,
+    version: u16 = 0,
+};
+const HoverConsumerMsg = union(enum) { enter: u16, leave: struct { id: u16, text: []const u8 }, version: u16, outer: bool, mounted: bool };
+const HoverConsumer = native_sdk.UiApp(HoverConsumerModel, HoverConsumerMsg);
+const HoverConsumerFunctions = struct {
+    fn update(model: *HoverConsumerModel, msg: HoverConsumerMsg) void {
+        switch (msg) {
+            .enter => |id| {
+                if (model.len < model.log.len) {
+                    model.log[model.len] = id;
+                    model.len += 1;
+                }
+                if (model.vanish and id == 2) model.mounted = false;
+            },
+            .leave => |value| {
+                std.debug.assert(std.mem.eql(u8, value.text, "Café\x00日本"));
+                if (model.len < model.log.len) {
+                    model.log[model.len] = value.id;
+                    model.len += 1;
+                }
+            },
+            .version => |v| model.version = v,
+            .outer => |v| model.outer = v,
+            .mounted => |v| model.mounted = v,
+        }
+    }
+    fn view(ui: *HoverConsumer.Ui, model: *const HoverConsumerModel) HoverConsumer.Ui.Node {
+        const text = ui.arena.dupe(u8, "Café\x00日本") catch unreachable;
+        const rows = if (model.mounted) ui.column(.{ .gap = 0 }, .{
+            ui.row(.{ .height = 40, .on_hover_enter = .{ .enter = 2 }, .on_hover_leave = .{ .leave = .{ .id = 102 + model.version, .text = text } } }, .{ui.text(.{}, text)}),
+            ui.row(.{ .height = 40, .on_hover_enter = .{ .enter = 3 }, .on_hover_leave = .{ .leave = .{ .id = 103 + model.version, .text = text } } }, .{ui.text(.{}, "Second")}),
+        }) else ui.column(.{}, @as([]const HoverConsumer.Ui.Node, &.{}));
+        return ui.panel(.{ .height = 120, .on_hover_enter = if (model.outer) .{ .enter = 1 } else null, .on_hover_leave = if (model.outer) .{ .leave = .{ .id = 101 + model.version, .text = text } } else null }, .{rows});
+    }
+    fn move(h: anytype, app: native_sdk.App, y: f32) !void {
+        try h.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_move, .x = 40, .y = y, .pointer_id = std.math.maxInt(u64) } });
+    }
+};
+
+test "compiled hover consumer preserves complete mirror, capture refresh, nested edges and self-unmount" {
+    var expected: [4]HoverConsumerModel = undefined;
+    for ([_]bool{ false, true }) |compiled| for (0..4) |scenario| {
+        const h = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+        defer h.destroy(std.testing.allocator);
+        h.null_platform.gpu_surfaces = true;
+        const state = try HoverConsumer.create(std.heap.page_allocator, .{ .name = "hover-consumer", .scene = app_scene, .canvas_label = canvas_label, .view = HoverConsumerFunctions.view, .update = HoverConsumerFunctions.update, .surface_scope_policy = if (compiled) core.nativeSurfaceScopePolicy else null });
+        defer state.destroy();
+        state.model.vanish = scenario == 3;
+        try h.start(state.app());
+        try h.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(640, 480), .scale_factor = 1, .frame_index = 1 } });
+        try HoverConsumerFunctions.move(h, state.app(), 20);
+        if (scenario == 0) {
+            try HoverConsumerFunctions.move(h, state.app(), 60);
+            try HoverConsumerFunctions.move(h, state.app(), 100);
+        }
+        if (scenario == 1) {
+            try state.dispatch(&h.runtime, 1, .{ .version = 10 });
+            try state.dispatch(&h.runtime, 1, .{ .mounted = false });
+        }
+        if (scenario == 2) {
+            try state.dispatch(&h.runtime, 1, .{ .outer = false });
+            try HoverConsumerFunctions.move(h, state.app(), 60);
+        }
+        try HoverConsumerFunctions.move(h, state.app(), 200);
+        try std.testing.expectEqual(@as(usize, 0), state.hover_msg_chain_len);
+        for (state.hover_msg_slot_used) |used| try std.testing.expect(!used);
+        if (compiled) try std.testing.expectEqualDeep(expected[scenario], state.model) else expected[scenario] = state.model;
+        switch (scenario) {
+            0 => try std.testing.expectEqualSlices(u16, &.{ 1, 2, 102, 3, 103, 101 }, state.model.log[0..state.model.len]),
+            1 => try std.testing.expectEqualSlices(u16, &.{ 1, 2, 112, 111 }, state.model.log[0..state.model.len]),
+            2 => try std.testing.expectEqualSlices(u16, &.{ 1, 2, 101, 102, 3, 103 }, state.model.log[0..state.model.len]),
+            3 => try std.testing.expectEqualSlices(u16, &.{ 1, 2, 102, 101 }, state.model.log[0..state.model.len]),
+            else => unreachable,
+        }
+    };
+    core.rt.frameReset();
+}
+
+test "hover consumers obey compiled drain entry capture-refresh and leave-resolution decisions" {
+    const Spy = struct {
+        var stage: u8 = 255;
+        var action: u8 = 0;
+        var calls: usize = 0;
+        fn policy(input: []const u8, output: []u8) usize {
+            if (input[0] == 36 and input[1] == stage) {
+                calls += 1;
+                std.debug.assert(output.len == 1);
+                output[0] = action;
+                return 1;
+            }
+            return core.nativeSurfaceScopePolicy(input, output);
+        }
+    };
+    const h = try native_sdk.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
+    defer h.destroy(std.testing.allocator);
+    h.null_platform.gpu_surfaces = true;
+    const state = try HoverConsumer.create(std.heap.page_allocator, .{ .name = "hover-policy-ownership", .scene = app_scene, .canvas_label = canvas_label, .view = HoverConsumerFunctions.view, .update = HoverConsumerFunctions.update, .surface_scope_policy = Spy.policy });
+    defer state.destroy();
+    Spy.stage = 8;
+    Spy.action = 0;
+    Spy.calls = 0;
+    defer {
+        Spy.stage = 255;
+        core.rt.frameReset();
+    }
+    try h.start(state.app());
+    try h.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(640, 480), .scale_factor = 1, .frame_index = 1 } });
+    try HoverConsumerFunctions.move(h, state.app(), 20);
+    try std.testing.expect(Spy.calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), state.model.len);
+    try std.testing.expectEqual(@as(usize, 0), state.hover_msg_chain_len);
+    Spy.stage = 6;
+    Spy.action = 1;
+    Spy.calls = 0;
+    try HoverConsumerFunctions.move(h, state.app(), 21);
+    try std.testing.expect(Spy.calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), state.model.len);
+    try std.testing.expectEqual(@as(usize, 2), state.hover_msg_chain_len);
+    Spy.stage = 255;
+    try HoverConsumerFunctions.move(h, state.app(), 200);
+    try std.testing.expectEqual(@as(usize, 0), state.hover_msg_chain_len);
+    state.model.len = 0;
+    try HoverConsumerFunctions.move(h, state.app(), 20);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2 }, state.model.log[0..state.model.len]);
+    Spy.stage = 2;
+    Spy.action = 0;
+    Spy.calls = 0;
+    try state.dispatch(&h.runtime, 1, .{ .version = 10 });
+    try state.dispatch(&h.runtime, 1, .{ .mounted = false });
+    try HoverConsumerFunctions.move(h, state.app(), 200);
+    try std.testing.expect(Spy.calls > 0);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2, 102, 101 }, state.model.log[0..state.model.len]);
+    Spy.stage = 255;
+    try state.dispatch(&h.runtime, 1, .{ .mounted = true });
+    state.model.len = 0;
+    try HoverConsumerFunctions.move(h, state.app(), 20);
+    Spy.stage = 5;
+    Spy.action = 3;
+    Spy.calls = 0;
+    try HoverConsumerFunctions.move(h, state.app(), 200);
+    try std.testing.expect(Spy.calls > 0);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 2 }, state.model.log[0..state.model.len]);
+    for (state.hover_msg_slot_used) |used| try std.testing.expect(!used);
+}
