@@ -1041,12 +1041,21 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // transition resolution, per cause.
             switch (cause) {
                 .pointer => |event| {
+                    const phase: u8 = switch (event.phase) {
+                        .hover => 0,
+                        .down => 1,
+                        .move => 2,
+                        .up => 3,
+                        .cancel => 4,
+                        .wheel => 5,
+                    };
                     const had_pointer_shown = view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus;
                     // Hover transitions step the machine (a pointer
                     // gliding within one trigger is free); the armed
                     // delay itself fires on presented-frame timestamps
                     // in advanceCanvasTooltipIntentForFrame.
-                    if (view.canvas_widget_hovered_id != event.next_hovered_id) {
+                    const hover_changed = view.canvas_widget_hovered_id != event.next_hovered_id;
+                    if (canvasTooltipReconcileNeeded(view, .hover_change, @intFromBool(hover_changed), hover_changed)) {
                         try updateCanvasTooltipIntentForHoverChange(self, view_index, event.next_hovered_id, event.point);
                     }
                     // While a pointer-shown tooltip is up, EVERY move
@@ -1055,7 +1064,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // usually changes no hover target (the tooltip is
                     // deliberately not hit-tested), so the transition
                     // gate above cannot see it.
-                    if (event.phase == .hover or event.phase == .move) {
+                    const travels = event.phase == .hover or event.phase == .move;
+                    if (canvasTooltipReconcileNeeded(view, .pointer_travel, phase, travels)) {
                         try updateCanvasTooltipIntentForPointerTravel(self, view_index, event.next_hovered_id, event.point);
                         // Content-hold release reprocessing: when this
                         // move hid the held tooltip (travel left both
@@ -1071,7 +1081,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         // pointer is honestly on that trigger NOW.
                         // Idempotent when the transition above already
                         // armed it.
-                        if (had_pointer_shown and view.canvas_tooltip_shown_id == 0 and event.next_hovered_id != 0) {
+                        const release_facts: u8 = @as(u8, @intFromBool(had_pointer_shown)) |
+                            (@as(u8, @intFromBool(view.canvas_tooltip_shown_id != 0)) << 1) |
+                            (@as(u8, @intFromBool(event.next_hovered_id != 0)) << 2);
+                        if (canvasTooltipReconcileNeeded(view, .content_release, release_facts, had_pointer_shown and view.canvas_tooltip_shown_id == 0 and event.next_hovered_id != 0)) {
                             try updateCanvasTooltipIntentForHoverChange(self, view_index, event.next_hovered_id, event.point);
                         }
                     }
@@ -1080,7 +1093,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // alike (after the hover step above, so a down that
                     // also moved the hover cannot re-arm or warm past
                     // the press).
-                    if (event.phase == .down) {
+                    const down = event.phase == .down;
+                    if (canvasTooltipReconcileNeeded(view, .press, phase, down)) {
                         try updateCanvasTooltipIntentForPress(self, view_index);
                     }
                 },
@@ -1090,7 +1104,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // still dismisses ("pointer-down dismisses" is
                     // documented for ANY down — shadcn's Base UI-backed
                     // default; macOS help tags vanish on any click).
-                    if (event.down) try updateCanvasTooltipIntentForPress(self, view_index);
+                    if (canvasTooltipReconcileNeeded(view, .press, if (event.down) 1 else 3, event.down))
+                        try updateCanvasTooltipIntentForPress(self, view_index);
                 },
                 // `.pointer_cancel` — the pointer LEAVING the view —
                 // short-circuits ahead of any transition gate: its
@@ -1166,9 +1181,39 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // an app that receives no further input. The per-frame pump
             // in planCanvasFrameForView takes over from the first
             // planned frame.
-            if (view.canvasTooltipIntentArmed()) {
+            const frame_facts: u8 = @as(u8, @intFromBool(view.canvas_tooltip_armed_id != 0)) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_transit_deadline_ns != 0)) << 1);
+            if (canvasTooltipReconcileNeeded(view, .frame, frame_facts, view.canvasTooltipIntentArmed())) {
                 self.invalidateFor(.state, view.frame);
             }
+        }
+
+        const CanvasTooltipReconcileStage = enum(u8) {
+            hover_change,
+            pointer_travel,
+            content_release,
+            press,
+            point_source,
+            adoption_point,
+            moved_hover,
+            hover_binding_owner,
+            changed_binding,
+            focus_binding_owner,
+            reseed,
+            frame,
+        };
+
+        fn compiledCanvasTooltipReconcileAction(view: anytype, stage: CanvasTooltipReconcileStage, facts: u8) ?u8 {
+            const policy = view.canvas_widget_tooltip_policy orelse return null;
+            const request = [3]u8{ 26, @intFromEnum(stage), facts };
+            var response: [1]u8 = undefined;
+            if (policy(&request, &response) != response.len or response[0] > @as(u8, if (stage == .point_source) 2 else 1))
+                @panic("invalid compiled tooltip reconciliation action");
+            return response[0];
+        }
+
+        fn canvasTooltipReconcileNeeded(view: anytype, stage: CanvasTooltipReconcileStage, facts: u8, native_reference: bool) bool {
+            return if (compiledCanvasTooltipReconcileAction(view, stage, facts)) |action| action != 0 else native_reference;
         }
 
         /// How a content-moved reconcile treats the transition step:
@@ -1206,7 +1251,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // 2. Hover re-hit-test from the stored position (the wheel
             // passes its live point; whichever is used is the truth the
             // rest of this reconcile measures against).
-            const effective_point = live_point orelse view.canvas_last_pointer_position orelse {
+            const point_facts: u8 = @as(u8, @intFromBool(live_point != null)) |
+                (@as(u8, @intFromBool(view.canvas_last_pointer_position != null)) << 1);
+            const point_source = compiledCanvasTooltipReconcileAction(view, .point_source, point_facts) orelse
+                @as(u8, if (live_point != null) 1 else if (view.canvas_last_pointer_position != null) 2 else 0);
+            const selected_point = switch (point_source) {
+                0 => null,
+                1 => live_point orelse @panic("missing compiled tooltip live point"),
+                2 => view.canvas_last_pointer_position orelse @panic("missing compiled tooltip stored point"),
+                else => unreachable,
+            };
+            const effective_point = selected_point orelse {
                 view.reconcileCanvasWidgetRenderStateAfterScroll(null);
                 try closeCanvasTooltipPointerIntent(self, view_index);
                 // A keyboard-only session has no pointer to place, but
@@ -1268,21 +1323,13 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // 4. Transition resolution. Scroll transitions run
             // point-blind (no corridor — see the mode doc above);
             // adoption's pass the stored point through.
-            const transition_point: ?geometry.PointF = switch (cause) {
-                .scroll => null,
-                .adoption => effective_point,
-            };
-            if (next_hovered_id != previous_hovered_id) {
-                try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
-            } else if (held_released and next_hovered_id != 0) {
-                // Content-hold release reprocessing, the content-moved
-                // shape: the hold broke while the hover id stayed put
-                // on a trigger the pointer had reached THROUGH the
-                // tooltip's frame. That id was recorded under stale
-                // ownership — the frame claimed the hover — so it never
-                // stepped the machine; reprocess it as a fresh
-                // transition so the trigger under the pointer arms (or
-                // warm-shows) per the normal rules.
+            const adoption = cause == .adoption;
+            const transition_point: ?geometry.PointF = if (canvasTooltipReconcileNeeded(view, .adoption_point, @intFromBool(adoption), adoption)) effective_point else null;
+            const hover_changed = next_hovered_id != previous_hovered_id;
+            const transition_facts: u8 = @as(u8, @intFromBool(hover_changed)) |
+                (@as(u8, @intFromBool(held_released)) << 1) |
+                (@as(u8, @intFromBool(next_hovered_id != 0)) << 2);
+            if (canvasTooltipReconcileNeeded(view, .moved_hover, transition_facts, hover_changed or (held_released and next_hovered_id != 0))) {
                 try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
             }
             // Binding-change step, adoption only: the transition gate
@@ -1332,9 +1379,13 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // pointer activity keeps the instant-show courtesy.
             switch (cause) {
                 .adoption => |bindings| {
-                    if (bindings.hovered_owner_id != 0 and next_hovered_id == bindings.hovered_owner_id) {
+                    const owner_facts: u8 = @as(u8, @intFromBool(bindings.hovered_owner_id != 0)) |
+                        (@as(u8, @intFromBool(next_hovered_id == bindings.hovered_owner_id)) << 1);
+                    if (canvasTooltipReconcileNeeded(view, .hover_binding_owner, owner_facts, bindings.hovered_owner_id != 0 and next_hovered_id == bindings.hovered_owner_id)) {
                         const adopted_tooltip_id = view.canvasWidgetOwnedTooltipIdForOwner(next_hovered_id);
-                        if (adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.hovered_tooltip_id) {
+                        const binding_facts: u8 = @as(u8, @intFromBool(adopted_tooltip_id != 0)) |
+                            (@as(u8, @intFromBool(adopted_tooltip_id != bindings.hovered_tooltip_id)) << 1);
+                        if (canvasTooltipReconcileNeeded(view, .changed_binding, binding_facts, adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.hovered_tooltip_id)) {
                             try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
                         }
                     }
@@ -1345,8 +1396,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // Whichever position drove this reconcile re-seeds the
             // corridor apex for whatever the step armed or warm-showed,
             // so a later leave fans out from the truth.
-            if (next_hovered_id != 0 and (view.canvas_tooltip_armed_owner_id == next_hovered_id or
-                (view.canvas_tooltip_shown_owner_id == next_hovered_id and !view.canvas_tooltip_shown_from_focus)))
+            const reseed_facts: u8 = @as(u8, @intFromBool(next_hovered_id != 0)) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_armed_owner_id == next_hovered_id)) << 1) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_shown_owner_id == next_hovered_id)) << 2) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 3);
+            if (canvasTooltipReconcileNeeded(view, .reseed, reseed_facts, next_hovered_id != 0 and (view.canvas_tooltip_armed_owner_id == next_hovered_id or
+                (view.canvas_tooltip_shown_owner_id == next_hovered_id and !view.canvas_tooltip_shown_from_focus))))
             {
                 view.canvas_tooltip_pointer_from = effective_point;
             }
@@ -1370,11 +1425,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// rebuild path must stay silent).
         fn reconcileCanvasTooltipIntentForAdoptedFocusBinding(self: *Runtime, view_index: usize, bindings: CanvasTooltipAdoptionBindingSnapshot) anyerror!void {
             const view = &self.views[view_index];
-            if (bindings.focus_visible_owner_id == 0) return;
-            if (!view.focused or !view.canvas_widget_focus_visible_keyboard) return;
-            if (view.canvas_widget_focus_visible_id != bindings.focus_visible_owner_id) return;
+            const owner_facts: u8 = @as(u8, @intFromBool(bindings.focus_visible_owner_id != 0)) |
+                (@as(u8, @intFromBool(view.focused)) << 1) |
+                (@as(u8, @intFromBool(view.canvas_widget_focus_visible_keyboard)) << 2) |
+                (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == bindings.focus_visible_owner_id)) << 3);
+            if (!canvasTooltipReconcileNeeded(view, .focus_binding_owner, owner_facts, bindings.focus_visible_owner_id != 0 and view.focused and view.canvas_widget_focus_visible_keyboard and
+                view.canvas_widget_focus_visible_id == bindings.focus_visible_owner_id)) return;
             const adopted_tooltip_id = view.canvasWidgetOwnedTooltipIdForOwner(bindings.focus_visible_owner_id);
-            if (adopted_tooltip_id == 0 or adopted_tooltip_id == bindings.focus_visible_tooltip_id) return;
+            const binding_facts: u8 = @as(u8, @intFromBool(adopted_tooltip_id != 0)) |
+                (@as(u8, @intFromBool(adopted_tooltip_id != bindings.focus_visible_tooltip_id)) << 1);
+            if (!canvasTooltipReconcileNeeded(view, .changed_binding, binding_facts, adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.focus_visible_tooltip_id)) return;
             try updateCanvasTooltipIntentForFocusVisibleChange(self, view_index, bindings.focus_visible_owner_id);
         }
 

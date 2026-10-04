@@ -1302,3 +1302,35 @@ test("tooltip pointer policy preserves warmth boundaries, content holds and fram
     [25, 0, 0, 16], [25, 1, 32, 0], [25, 2, 16, 0], [25, 3, 4, 0], [25, 4, 16, 0]])
     assert.throws(() => policy(new Uint8Array(bytes)), /tooltip pointer/);
 });
+
+
+test("tooltip reconciliation selects fresh stages and rejects malformed facts", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<tooltip anchor="above">Hint</tooltip>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const action = (stage: number, facts: number) => Array.from(policy(new Uint8Array([26, stage, facts])));
+  for (const stage of [0, 5]) {
+    assert.deepEqual(action(stage, 0), [0]); assert.deepEqual(action(stage, 1), [1]);
+  }
+  for (let phase = 0; phase < 6; phase++) {
+    assert.deepEqual(action(1, phase), [phase === 0 || phase === 2 ? 1 : 0]);
+    assert.deepEqual(action(3, phase), [phase === 1 ? 1 : 0]);
+  }
+  for (let facts = 0; facts < 4; facts++) assert.deepEqual(action(11, facts), [facts === 0 ? 0 : 1]);
+  assert.deepEqual(action(2, 5), [1]); // Release reprocesses only after travel hid the pointer tooltip.
+  assert.deepEqual(action(2, 7), [0]); assert.deepEqual(action(2, 1), [0]);
+  assert.deepEqual(action(4, 0), [0]); assert.deepEqual(action(4, 2), [2]);
+  assert.deepEqual(action(4, 3), [1]); // Live wheel point wins over a stale stored position.
+  assert.deepEqual(action(6, 1), [1]); assert.deepEqual(action(6, 6), [1]);
+  assert.deepEqual(action(6, 2), [0]); assert.deepEqual(action(6, 4), [0]);
+  for (const stage of [7, 8]) for (let facts = 0; facts < 4; facts++)
+    assert.deepEqual(action(stage, facts), [facts === 3 ? 1 : 0]);
+  for (let facts = 0; facts < 16; facts++) assert.deepEqual(action(9, facts), [facts === 15 ? 1 : 0]);
+  assert.deepEqual(action(10, 3), [1]); assert.deepEqual(action(10, 5), [1]);
+  assert.deepEqual(action(10, 13), [0]); assert.deepEqual(action(10, 11), [1]);
+  assert.deepEqual(action(10, 2), [0]);
+  for (const bytes of [[26], [26, 0], [26, 0, 0, 0], [26, 12, 0], [26, 0, 2],
+    [26, 1, 6], [26, 3, 6], [26, 11, 4], [26, 2, 8], [26, 4, 4], [26, 6, 8], [26, 7, 4], [26, 8, 4], [26, 9, 16], [26, 10, 16]])
+    assert.throws(() => policy(new Uint8Array(bytes)), /tooltip reconciliation/);
+});

@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 26) return nscvTooltipReconcile(request);
   if (request[0] === 25) return nscvTooltipPointer(request);
   if (request[0] === 24) return nscvTooltipIntent(request);
   if (request[0] === 23) return nscvTooltipBinding(request);
@@ -184,6 +185,36 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
   }
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+/** Tooltip coordination. Tag 26, stage, bounded native facts; one-byte result.
+ * Stages: 0 hover delta, 1 travel phase, 2 released pointer hold (had/shown/target),
+ * 3 press phase (0 hover, 1 down, 2 move, 3 up, 4 cancel, 5 wheel), 4 point source (live/stored; result 0 none, 1 live, 2 stored),
+ * 5 adoption point, 6 moved hover (delta/released/target), 7 stable hovered owner
+ * (present/same), 8 binding delta (present/changed), 9 surviving keyboard owner
+ * (present/focused/keyboard/same), 10 apex reseed (target/armed/shown/focus-owned),
+ * 11 frame request (armed/transit present). Other results are 0 skip or 1 invoke the native capability.
+ * Query each stage only after earlier fallible commits have succeeded.
+ * Native keeps identities, clocks, geometry, storage and visibility commits.
+ */
+function nscvTooltipReconcile(request: Uint8Array): Uint8Array {
+  if (request.length !== 3 || request[1]! > 11) throw new Error("invalid tooltip reconciliation request");
+  const stage = request[1]!, facts = request[2]!;
+  const limit = stage === 2 || stage === 6 ? 7 : stage === 4 || stage === 7 || stage === 8 ? 3 : stage === 9 || stage === 10 ? 15 : stage === 1 || stage === 3 ? 5 : stage === 11 ? 3 : 1;
+  if (facts > limit) throw new Error("invalid tooltip reconciliation facts");
+  let action = 0;
+  if (stage === 1) action = facts === 0 || facts === 2 ? 1 : 0;
+  else if (stage === 3) action = facts === 1 ? 1 : 0;
+  else if (stage === 11) action = facts !== 0 ? 1 : 0;
+  else if (stage === 2) action = (facts & 1) !== 0 && (facts & 2) === 0 && (facts & 4) !== 0 ? 1 : 0;
+  else if (stage === 4) action = (facts & 1) !== 0 ? 1 : (facts & 2) !== 0 ? 2 : 0;
+  else if (stage === 6) action = (facts & 1) !== 0 || (facts & 6) === 6 ? 1 : 0;
+  else if (stage === 7 || stage === 8) action = facts === 3 ? 1 : 0;
+  else if (stage === 9) action = facts === 15 ? 1 : 0;
+  else if (stage === 10) action = (facts & 1) !== 0 && ((facts & 2) !== 0 || (facts & 4) !== 0 && (facts & 8) === 0) ? 1 : 0;
+  else action = facts;
+  const result = new Uint8Array(1); result[0] = action;
   return result;
 }
 
