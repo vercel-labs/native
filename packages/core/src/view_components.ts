@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 33) return nscvKeyboardParticipation(request);
   if (request[0] === 32) return nscvSelectionPress(request);
   if (request[0] === 31) return nscvClickSequence(request);
   if (request[0] === 30) return nscvCommandActivation(request);
@@ -285,6 +286,22 @@ function nscvSurfaceDismissal(request: Uint8Array): Uint8Array {
     stage === 1 ? ((facts & 1) === 0 && (facts & 14) !== 14 ? 1 : 0) :
     stage === 2 ? facts : ((facts & 1) !== 0 ? 3 : 0) |
       ((facts & 2) !== 0 ? 12 : 0) | ((facts & 4) !== 0 ? 16 : 0);
+  return result;
+}
+
+/** Five bytes: operation 33, stage (0 quiet routing/navigation, 1 explicit
+ * keyboard-action ring entry), facts (1 nonzero identity, 2 exact ring match,
+ * 4 retained node present, 8 treeitem role), and stable LE u16 widget kind.
+ * Native supplies identity comparisons and retained facts; the one-byte
+ * decision owns plain-row transparency and explicit keyboard participation.
+ */
+function nscvKeyboardParticipation(request: Uint8Array): Uint8Array {
+  if (request.length !== 5 || request[1]! > 1 || request[2]! > 15 ||
+      request[3]! > 62 || request[4] !== 0) throw new Error("invalid keyboard participation request");
+  const facts = request[2]!, plainRow = request[3] === 42 && (facts & 8) === 0;
+  const decision = plainRow && (facts & 6) === 4 && (request[1] === 1 || (facts & 1) !== 0);
+  const result = new Uint8Array(1);
+  result[0] = decision ? 1 : 0;
   return result;
 }
 

@@ -1484,3 +1484,16 @@ test("selection press policy preserves text, group and terminal release preceden
   for (const request of [[32], [32, 3, 0, 26], [32, 3, 0, 26, 0, 0], [32, 6, 0, 26, 0], [32, 3, 128, 26, 0], [32, 3, 0, 63, 0], [32, 3, 0, 0, 1]])
     assert.throws(() => policy(new Uint8Array(request)), /selection press/);
 });
+
+test("compiled keyboard participation preserves quiet plain rows and explicit ring entry", () => {
+  const generated = compileView('<button on-press="increment">Run</button>', contract);
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  for (let stage = 0; stage < 2; stage++) for (let kind = 0; kind <= 62; kind++) for (let facts = 0; facts < 16; facts++) {
+    const expected = kind === 42 && (facts & 8) === 0 && (facts & 4) !== 0 && (facts & 2) === 0 && (stage === 1 || (facts & 1) !== 0);
+    assert.deepEqual([...policy(new Uint8Array([33, stage, facts, kind, 0]))], [expected ? 1 : 0]);
+  }
+  for (const request of [[33], [33, 0, 0, 42], [33, 0, 0, 42, 0, 0], [33, 2, 0, 42, 0], [33, 0, 16, 42, 0], [33, 0, 0, 63, 0], [33, 0, 0, 42, 1]])
+    assert.throws(() => policy(new Uint8Array(request)), /keyboard participation/);
+});

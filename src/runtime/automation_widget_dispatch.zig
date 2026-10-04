@@ -565,17 +565,13 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             // The escalation deliberately skips the tooltip machine —
             // it is still programmatic focus (no reveal), and the focus
             // MOVE above already hid any focus-owned tooltip.
-            if (self.views[view_index].canvasWidgetNodeIndexById(id)) |node_index| {
-                const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-                const plain_list_row = widget.kind == .list_item and widget.semantics.role != .treeitem;
-                if (plain_list_row and self.views[view_index].canvas_widget_focus_visible_id != id) {
-                    const previous_state = self.views[view_index].canvasWidgetRenderState();
-                    self.views[view_index].canvas_widget_focus_visible_id = id;
-                    // Still programmatic (no reveal — see the comment
-                    // above), so no keyboard provenance either.
-                    self.views[view_index].canvas_widget_focus_visible_keyboard = false;
-                    try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
-                }
+            if (self.canvasWidgetKeyboardFocusParticipation(view_index, id, 1)) {
+                const previous_state = self.views[view_index].canvasWidgetRenderState();
+                self.views[view_index].canvas_widget_focus_visible_id = id;
+                // Still programmatic (no reveal — see the comment
+                // above), so no keyboard provenance either.
+                self.views[view_index].canvas_widget_focus_visible_keyboard = false;
+                try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
             }
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
                 .window_id = self.views[view_index].window_id,

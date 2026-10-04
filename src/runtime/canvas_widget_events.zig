@@ -569,10 +569,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// treeitem role: ARIA tree rows carry a roving-focus keymap by
         /// design and keep every key they have today.
         fn canvasWidgetQuietListRowFocus(self: *const Runtime, index: usize, focused_id: canvas.ObjectId) bool {
-            if (focused_id == 0) return false;
-            if (self.views[index].canvas_widget_focus_visible_id == focused_id) return false;
-            const node_index = self.views[index].canvasWidgetNodeIndexById(focused_id) orelse return false;
-            const widget = self.views[index].widget_layout_nodes[node_index].widget;
+            return canvasWidgetKeyboardFocusParticipation(self, index, focused_id, 0);
+        }
+
+        /// Shared keyboard participation for routed focus and explicit
+        /// keyboard actions. Exact ids and retained nodes stay native;
+        /// compiled views own the classification through copied bytes.
+        pub fn canvasWidgetKeyboardFocusParticipation(self: *const Runtime, index: usize, id: canvas.ObjectId, stage: u8) bool {
+            const view = &self.views[index];
+            if (view.canvas_widget_surface_scope_policy) |policy| {
+                var facts: u8 = @as(u8, @intFromBool(id != 0)) |
+                    (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 1);
+                var kind: u16 = 0;
+                if (view.canvasWidgetNodeIndexById(id)) |node_index| {
+                    const widget = view.widget_layout_nodes[node_index].widget;
+                    facts |= 4 | (@as(u8, @intFromBool(widget.semantics.role == .treeitem)) << 3);
+                    kind = canvas.widgetKindCode(widget.kind);
+                }
+                var request = [5]u8{ 33, stage, facts, 0, 0 };
+                std.mem.writeInt(u16, request[3..5], kind, .little);
+                var result: [1]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled keyboard participation result");
+                return result[0] != 0;
+            }
+            if (stage == 0 and id == 0) return false;
+            if (view.canvas_widget_focus_visible_id == id) return false;
+            const node_index = view.canvasWidgetNodeIndexById(id) orelse return false;
+            const widget = view.widget_layout_nodes[node_index].widget;
             return widget.kind == .list_item and widget.semantics.role != .treeitem;
         }
 
