@@ -1187,3 +1187,56 @@ test("Tab traversal preserves wrapping, nested radio stops, logical entries and 
   ]) { const bad = valid.slice(); mutation(bad); assert.throws(() => policy(bad), /Tab focus/); }
   assert.throws(() => policy(new Uint8Array([...valid, 0])), /Tab focus/);
 });
+
+test("tooltip bindings preserve last-mounted ownership, hidden-independent discovery and granted survival", () => {
+  const exports: { native_text_policy?: (request: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView('<stack><button/><tooltip anchor="above">Hint</tooltip></stack>', contract),
+    { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports });
+  const policy = exports.native_text_policy!;
+  const query = (nodes: readonly (readonly [number, number])[], owner: number, tooltip = 65535, mode = 0, eligibility = 0): number => {
+    const wire = new Uint8Array(9 + nodes.length * 3);
+    wire.set([23, mode, nodes.length & 255, nodes.length >>> 8, owner & 255, owner >>> 8, tooltip & 255, tooltip >>> 8, eligibility]);
+    nodes.forEach(([anchored, parent], i) => wire.set([anchored, parent & 255, parent >>> 8], 9 + i * 3));
+    const result = policy(wire); assert.equal(result.length, 2);
+    return result[0]! | result[1]! << 8;
+  };
+  const nodes: readonly (readonly [number, number])[] = [[0, 65535], [0, 0], [1, 0], [1, 0], [0, 1], [1, 1], [0, 0]];
+  assert.equal(query(nodes, 1), 5); // Direct child wins over later sibling.
+  assert.equal(query(nodes, 4), 5); // Fallback to parent's child.
+  assert.equal(query(nodes, 6), 3); // Last mounted, independent of paint order or hidden stamps.
+  assert.equal(query(nodes, 3), 3); // Tooltip subjects preserve the native self-binding fallback.
+  assert.equal(query(nodes, 1, 3, 1, 3), 65535); // A displaced tooltip loses its binding.
+  assert.equal(query(nodes, 1, 5, 1, 1), 5);
+  assert.equal(query(nodes, 1, 5, 2, 1), 65535);
+  assert.equal(query(nodes, 1, 5, 2, 2), 5);
+  assert.equal(query(nodes, 1, 5, 1, 2), 65535);
+  assert.equal(query(nodes, 1, 4, 1, 3), 65535);
+  assert.equal(query(nodes, 65535), 65535);
+  assert.equal(query([], 65535), 65535);
+  const capacity = Array.from({ length: 1024 }, (_, i) => [i === 1023 ? 1 : 0, i === 0 ? 65535 : 0] as const);
+  assert.equal(query(capacity, 1), 1023);
+  assert.throws(() => query([...capacity, [0, 0]], 1), /tooltip binding table/);
+  for (const wire of [[23], [23, 3, 0, 0, 255, 255, 255, 255, 0], [23, 0, 0, 0, 0, 0, 255, 255, 0],
+    [23, 0, 0, 0, 255, 255, 0, 0, 0], [23, 0, 0, 0, 255, 255, 255, 255, 4],
+    [23, 0, 1, 0, 0, 0, 255, 255, 0, 2, 255, 255],
+    [23, 0, 1, 0, 0, 0, 255, 255, 0, 1, 0, 0],
+    [23, 0, 1, 0, 0, 0, 255, 255, 0]])
+    assert.throws(() => policy(new Uint8Array(wire)), /tooltip binding/);
+});
+
+test("compiled tooltips retain anchored delay overrides and static visibility", () => {
+  const { model, view } = evaluate('<stack><button>Run</button><tooltip key="hint" anchor="above" anchor-alignment="end" anchor-offset="8" tooltip-delay="{count}">Hint {count}</tooltip><tooltip>Static hint</tooltip></stack>');
+  assert.deepEqual(view().nodes[2], { end: 3, kind: "tooltip", text: "Hint 7", key: "hint", anchor: "above", anchorAlignment: "end", anchorOffset: 8, tooltipDelay: 7 });
+  assert.deepEqual(view().nodes[3], { end: 4, kind: "tooltip", text: "Static hint" });
+  for (const value of [0, 2147483647]) { model.count = value; assert.equal(view().nodes[2].tooltipDelay, value); }
+  for (const value of [-1, 1.5, 2147483648, NaN, Infinity]) {
+    model.count = value; assert.throws(view, /tooltip delay/);
+  }
+  for (const source of ['<button tooltip-delay="0"/>', '<tooltip tooltip-delay="0"/>', '<tooltip anchor="above" tooltip-delay="-1"/>',
+    '<tooltip anchor="above" tooltip-delay="1.5"/>', '<tooltip anchor="above" tooltip-delay="2147483648"/>',
+    '<tooltip anchor="above" tooltip-delay="{stampedMs}"/>', '<tooltip><text>Mixed</text></tooltip>', '<badge anchor="above"/>'])
+    assert.throws(() => compileView(source, contract), /compiled TypeScript view/);
+  assert.equal(evaluate('<tooltip anchor="below" tooltip-delay="0">Instant</tooltip>').view().nodes[0].tooltipDelay, 0);
+  assert.equal(evaluate('<tooltip anchor="below" tooltip-delay="007">Leading zero</tooltip>').view().nodes[0].tooltipDelay, 7);
+  assert.equal(evaluate('<tooltip anchor="below">Default</tooltip>').view().nodes[0].tooltipDelay, undefined);
+});

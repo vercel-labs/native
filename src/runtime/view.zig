@@ -453,6 +453,8 @@ pub const RuntimeView = struct {
     canvas_widget_surface_scope_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable focus return; native keeps IDs and focus effects.
     canvas_widget_focus_return_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable tooltip ownership and binding survival over retained facts.
+    canvas_widget_tooltip_policy: ?*const fn ([]const u8, []u8) usize = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the

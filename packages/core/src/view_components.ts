@@ -21,7 +21,7 @@ type NscViewNode = {
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
-  anchor?: string; anchorAlignment?: string; anchorOffset?: number;
+  anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;
 };
 
 function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
@@ -40,6 +40,7 @@ function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
  * 7 Home, 8 End, 9 A. Native retains insert bytes and geometry.
  */
 export function native_text_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 23) return nscvTooltipBinding(request);
   if (request[0] === 22) return nscvFocusReturn(request);
   if (request[0] === 21) return nscvSurfaceScope(request);
   if (request[0] === 20) return nscvTabFocus(request);
@@ -178,6 +179,40 @@ function nscvTabFocus(request: Uint8Array): Uint8Array {
       chosen = entries[targetScope] === 65535 ? target : entries[targetScope]!;
     } else chosen = target;
     break;
+  }
+  const result = new Uint8Array(2);
+  result[0] = chosen & 255; result[1] = chosen >>> 8;
+  return result;
+}
+
+/** Tooltip binding. Tag 23, mode (ownership/pointer binding/focus binding),
+ * count/owner/tooltip u16, granted pointer/focus eligibility bits. Each node
+ * supplies anchored-tooltip bit and parent u16. Hidden stamps deliberately
+ * do not affect ownership; the last mounted direct child wins, then the
+ * owner's parent's child. Result is a u16 index or 65535 for no live binding.
+ * Native retains full-width IDs, geometry, intent registers and adoption.
+ */
+function nscvTooltipBinding(request: Uint8Array): Uint8Array {
+  if (request.length < 9 || request[1]! > 2 || request[8]! > 3)
+    throw new Error("invalid tooltip binding request");
+  const count = request[2]! | request[3]! << 8;
+  const owner = request[4]! | request[5]! << 8, tooltip = request[6]! | request[7]! << 8;
+  if (count > 1024 || request.length !== 9 + count * 3 ||
+      owner !== 65535 && owner >= count || tooltip !== 65535 && tooltip >= count)
+    throw new Error("invalid tooltip binding table");
+  const parents: number[] = [], children: number[] = [], anchored: boolean[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 9 + i * 3, bits = request[at]!, parent = request[at + 1]! | request[at + 2]! << 8;
+    if (bits > 1 || parent !== 65535 && parent >= i) throw new Error("invalid tooltip binding node");
+    parents.push(parent); children.push(65535); anchored.push(bits === 1);
+    if (bits === 1 && parent !== 65535) children[parent] = i;
+  }
+  let chosen = 65535;
+  if (owner !== 65535) {
+    const parent = parents[owner]!;
+    chosen = children[owner] !== 65535 ? children[owner]! : parent === 65535 ? 65535 : children[parent]!;
+    if (request[1] !== 0 && (tooltip === 65535 || !anchored[tooltip] || chosen !== tooltip ||
+        (request[8]! & (request[1] === 1 ? 1 : 2)) === 0)) chosen = 65535;
   }
   const result = new Uint8Array(2);
   result[0] = chosen & 255; result[1] = chosen >>> 8;
@@ -887,6 +922,11 @@ function nscvTextHistoryTimeline(request: Uint8Array): Uint8Array {
   out.setUint32(0, (matches ? 1 : 0) | (canUndo ? 2 : 0) | (canRedo ? 4 : 0), true);
   out.setUint32(4, undo, true); out.setUint32(8, redo, true);
   return result;
+}
+
+function nscvTooltipDelay(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 2147483647) throw new Error("invalid tooltip delay");
+  return value;
 }
 
 function nscvInteger(value: number): number {

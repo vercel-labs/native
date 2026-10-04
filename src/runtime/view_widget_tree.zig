@@ -800,6 +800,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// runtime itself stamps non-shown anchored tooltips hidden, and
         /// arming must find them to show them.
         pub fn canvasWidgetOwnedTooltipIndex(self: *const RuntimeView, trigger_index: usize) ?usize {
+            if (trigger_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_tooltip_policy) |policy|
+                return compiledCanvasTooltipBinding(policy, self.widgetLayoutTree(), trigger_index, null, 0, 0);
             return canvasWidgetOwnedTooltipIndexInNodes(self.widget_layout_nodes[0..self.widget_layout_node_count], trigger_index);
         }
 
@@ -886,13 +889,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// leaves both the old tree and the registers that can hide its
         /// tooltip intact.
         pub fn pruneCanvasTooltipIntentForLayout(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
-            if (self.canvas_tooltip_armed_id != 0 and !canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_armed_id, self.canvas_tooltip_armed_owner_id, false)) {
+            if (self.canvas_tooltip_armed_id != 0 and !canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_armed_id, self.canvas_tooltip_armed_owner_id, false)) {
                 self.canvas_tooltip_armed_id = 0;
                 self.canvas_tooltip_armed_owner_id = 0;
                 self.canvas_tooltip_deadline_ns = 0;
                 self.canvas_tooltip_warm_until_ns = 0;
             }
-            if (self.canvas_tooltip_shown_id != 0 and !canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) {
+            if (self.canvas_tooltip_shown_id != 0 and !canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) {
                 self.canvas_tooltip_shown_id = 0;
                 self.canvas_tooltip_shown_owner_id = 0;
                 self.canvas_tooltip_shown_from_focus = false;
@@ -916,7 +919,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// tooltip that is still painted is still hideable.
         pub fn canvasTooltipShownIdSurvivingLayout(self: *const RuntimeView, layout: canvas.WidgetLayoutTree) canvas.ObjectId {
             if (self.canvas_tooltip_shown_id == 0) return 0;
-            if (!canvasTooltipIntentBindingAlive(layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) return 0;
+            if (!canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) return 0;
             return self.canvas_tooltip_shown_id;
         }
 
@@ -930,8 +933,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// predicates already reject disabled and hidden widgets, so
         /// "the trigger can no longer be left" implies "the tooltip
         /// must not stay".
-        fn canvasTooltipIntentBindingAlive(layout: canvas.WidgetLayoutTree, tooltip_id: canvas.ObjectId, owner_id: canvas.ObjectId, from_focus: bool) bool {
+        fn canvasTooltipIntentBindingAlive(self: *const RuntimeView, layout: canvas.WidgetLayoutTree, tooltip_id: canvas.ObjectId, owner_id: canvas.ObjectId, from_focus: bool) bool {
             const tooltip_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, tooltip_id) orelse return false;
+            if (self.canvas_widget_tooltip_policy) |policy| {
+                const owner_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, owner_id) orelse return false;
+                const eligible = if (from_focus) layout.focusTargetById(owner_id) != null else canvasWidgetInteractionTargetExists(layout, owner_id);
+                return compiledCanvasTooltipBinding(policy, layout, owner_index, tooltip_index, if (from_focus) 2 else 1, if (eligible) (if (from_focus) @as(u8, 2) else 1) else 0) != null;
+            }
             const tooltip_widget = layout.nodes[tooltip_index].widget;
             if (tooltip_widget.kind != .tooltip or !canvas.widgetIsAnchored(tooltip_widget)) return false;
             const owner_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, owner_id) orelse return false;
@@ -939,6 +947,40 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (owned_index != tooltip_index) return false;
             if (from_focus) return layout.focusTargetById(owner_id) != null;
             return canvasWidgetInteractionTargetExists(layout, owner_id);
+        }
+
+        fn compiledCanvasTooltipBinding(
+            policy: *const fn ([]const u8, []u8) usize,
+            layout: canvas.WidgetLayoutTree,
+            owner: usize,
+            tooltip: ?usize,
+            mode: u8,
+            eligibility: u8,
+        ) ?usize {
+            if (layout.nodes.len > max_canvas_widget_nodes_per_view) @panic("tooltip policy tree exceeds native view budget");
+            var request: [9 + max_canvas_widget_nodes_per_view * 3]u8 = undefined;
+            request[0] = 23;
+            request[1] = mode;
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], @intCast(owner), .little);
+            std.mem.writeInt(u16, request[6..8], if (tooltip) |index| @intCast(index) else std.math.maxInt(u16), .little);
+            request[8] = eligibility;
+            for (layout.nodes, 0..) |node, index| {
+                const at = 9 + index * 3;
+                request[at] = @intFromBool(node.widget.kind == .tooltip and canvas.widgetIsAnchored(node.widget));
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+            }
+            var output: [2]u8 = undefined;
+            if (policy(request[0 .. 9 + layout.nodes.len * 3], &output) != output.len)
+                @panic("invalid compiled tooltip policy result");
+            const selected = std.mem.readInt(u16, &output, .little);
+            if (selected == std.math.maxInt(u16)) return null;
+            if (selected >= layout.nodes.len or (mode != 0 and selected != tooltip.?))
+                @panic("invalid compiled tooltip binding index");
+            const widget = layout.nodes[selected].widget;
+            if (widget.kind != .tooltip or !canvas.widgetIsAnchored(widget))
+                @panic("ineligible compiled tooltip binding target");
+            return selected;
         }
 
         /// True while the intent machine needs presented frames to keep

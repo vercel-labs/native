@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, split, resizable },
+    kind: enum { column, row, stack, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     wrap: ?bool = null,
@@ -74,6 +74,7 @@ const Record = struct {
     anchor: ?sdk.canvas.WidgetAnchorPlacement = null,
     anchorAlignment: sdk.canvas.WidgetAnchorAlignment = .start,
     anchorOffset: f32 = 4,
+    tooltipDelay: ?i32 = null,
 };
 const Tree = struct { format: u32, nodes: []const Record };
 
@@ -123,7 +124,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.press != null and !tree_row and value.kind != .button and value.kind != .stack and value.kind != .radio and value.kind != .segmented_control and value.kind != .list_item and value.kind != .select and value.kind != .menu_item) return error.InvalidView;
     if (value.dismiss != null and value.kind != .dropdown_menu) return error.InvalidView;
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
-    if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu) return error.InvalidView;
+    if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu and value.kind != .tooltip) return error.InvalidView;
+    if (value.tooltipDelay) |delay| if (value.kind != .tooltip or value.anchor == null or delay < 0) return error.InvalidView;
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
     if (value.toggle != null and !tree_row and value.kind != .checkbox and value.kind != .switch_control and value.kind != .toggle and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
@@ -212,6 +214,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor = value.anchor,
         .anchor_alignment = value.anchorAlignment,
         .anchor_offset = value.anchorOffset,
+        .tooltip_delay = value.tooltipDelay orelse -1,
     }, children.items);
     if (comptime @hasDecl(core, "nativeTextPolicy")) {
         // Every primitive can carry composed semantics. Specialized callbacks
@@ -595,4 +598,34 @@ test "compiled code diff ordinals preserve every mask word and reject invalid tr
         }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
         try std.testing.expectError(error.InvalidView, codeLineMask(&([_]u8{1} ** 129)));
     }
+}
+
+test "compiled tooltip records match native anchored and static primitives" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const source = "{\"format\":2,\"nodes\":[{\"end\":4,\"kind\":\"stack\",\"text\":\"\"},{\"end\":2,\"kind\":\"button\",\"text\":\"Run\"},{\"end\":3,\"kind\":\"tooltip\",\"text\":\"Run café\",\"anchor\":\"above\",\"anchorAlignment\":\"end\",\"anchorOffset\":8,\"tooltipDelay\":250},{\"end\":4,\"kind\":\"tooltip\",\"text\":\"Static hint\"}]}";
+        const bytes = try std.testing.allocator.dupe(u8, source);
+        defer std.testing.allocator.free(bytes);
+        var actual = try decode(&ui, bytes);
+        @memset(bytes, 0);
+        var reference_ui = Ui.init(arena.allocator());
+        const Reference = sdk.canvas.CompiledMarkupView(core.Model, core.Msg, "<stack><button>Run</button><tooltip anchor=\"above\" anchor-alignment=\"end\" anchor-offset=\"8\" tooltip-delay=\"250\">Run café</tooltip><tooltip>Static hint</tooltip></stack>");
+        const model: core.Model = undefined;
+        const expected = Reference.build(&reference_ui, &model);
+        // The runtime-only callback differs by frontend; every authored
+        // primitive field, child, owned string and anchor must match.
+        actual.widget.interaction_policy = null;
+        for (@constCast(actual.nodes)) |*child| child.widget.interaction_policy = null;
+        const actual_tree = try ui.finalize(actual);
+        const expected_tree = try reference_ui.finalize(expected);
+        try std.testing.expectEqualDeep(expected_tree.root, actual_tree.root);
+        try std.testing.expectEqualDeep(expected_tree.handlers, actual_tree.handlers);
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"tooltipDelay\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"tooltip\",\"text\":\"\",\"tooltipDelay\":0}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"tooltip\",\"text\":\"\",\"anchor\":\"above\",\"tooltipDelay\":-1}]}",
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+    } else return error.SkipZigTest;
 }

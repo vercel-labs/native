@@ -423,6 +423,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 if (options.focus_return_policy != null) @panic("TsUiApp owns focus_return_policy - remove custom focus return wiring");
                 stamped.focus_return_policy = core.nativeFocusReturnPolicy;
             }
+            if (comptime @hasDecl(core, "nativeTooltipPolicy")) {
+                if (options.tooltip_policy != null) @panic("TsUiApp owns tooltip_policy - remove custom tooltip policy wiring");
+                stamped.tooltip_policy = core.nativeTooltipPolicy;
+            }
             if (comptime @hasDecl(core, "nativePressHoldPolicy")) {
                 if (options.press_hold_policy != null) @panic("TsUiApp owns press_hold_policy - remove custom hold policy wiring");
                 stamped.press_hold_policy = core.nativePressHoldPolicy;

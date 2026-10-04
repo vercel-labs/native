@@ -385,6 +385,7 @@ test "boot parses the built-in sample through the real service child and the mar
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_tab_focus_policy == core.nativeTabFocusPolicy);
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_surface_scope_policy == core.nativeSurfaceScopePolicy);
     try std.testing.expect(h.harness.runtime.views[0].canvas_widget_focus_return_policy == core.nativeFocusReturnPolicy);
+    try std.testing.expect(h.harness.runtime.views[0].canvas_widget_tooltip_policy == core.nativeTooltipPolicy);
 
     const model = Bridge.model();
     try std.testing.expectEqual(@as(usize, 3), model.items.len);
@@ -5651,4 +5652,233 @@ test "compiled Tab plans preserve dispatch arena ownership and copied results" {
     core.rt.frameReset();
     _ = core.initialModel();
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, &output, .little));
+}
+
+test "compiled tooltip ownership and live binding match native retained facts" {
+    const Reference = struct {
+        fn child(nodes: []const canvas.WidgetLayoutNode, owner: usize) ?usize {
+            var found: ?usize = null;
+            for (nodes, 0..) |node, index| if (node.parent_index == owner and node.widget.kind == .tooltip and canvas.widgetIsAnchored(node.widget)) {
+                found = index;
+            };
+            return found;
+        }
+        fn owned(nodes: []const canvas.WidgetLayoutNode, owner: usize) ?usize {
+            if (child(nodes, owner)) |index| return index;
+            return if (nodes[owner].parent_index) |parent| child(nodes, parent) else null;
+        }
+    };
+    const kinds = [_]canvas.WidgetKind{ .stack, .button, .tooltip, .popover, .text_field };
+    var comparisons: usize = 0;
+    for (0..64) |variant| {
+        var nodes: [32]canvas.WidgetLayoutNode = undefined;
+        for (&nodes, 0..) |*node, index| {
+            const parent: ?usize = if (index == 0) null else (variant * 5 + index * 3) % index;
+            const frame = geometry.RectF.init(if ((variant + index) % 7 == 0) 900 else 0, 0, 100, 28);
+            node.* = .{ .widget = .{
+                .id = 0xfedc_ba98_7654_3200 + index,
+                .kind = kinds[(variant + index * 3) % kinds.len],
+                .frame = frame,
+                .state = .{ .disabled = (variant + index) % 5 == 0 },
+                .semantics = .{ .hidden = (variant + index) % 11 == 0, .focusable = (variant + index) % 3 == 0 },
+                .layout = .{ .anchor = if ((variant + index) % 3 == 0) null else .{ .placement = .below } },
+            }, .frame = frame, .parent_index = parent, .depth = if (parent) |p| nodes[p].depth + 1 else 0 };
+        }
+        var request: [9 + nodes.len * 3]u8 = undefined;
+        request[0] = 23;
+        std.mem.writeInt(u16, request[2..4], nodes.len, .little);
+        for (nodes, 0..) |node, index| {
+            const at = 9 + index * 3;
+            request[at] = @intFromBool(node.widget.kind == .tooltip and canvas.widgetIsAnchored(node.widget));
+            std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |p| @intCast(p) else 65535, .little);
+        }
+        for (0..nodes.len) |owner| {
+            core.rt.frameReset();
+            std.mem.writeInt(u16, request[4..6], @intCast(owner), .little);
+            const owned = Reference.owned(&nodes, owner);
+            const eligible: u8 = @intCast((variant + owner) % 4);
+            for (0..3) |mode| {
+                request[1] = @intCast(mode);
+                request[8] = eligible;
+                const tooltip: usize = if (mode == 2) (owner + variant) % nodes.len else owned orelse 0;
+                std.mem.writeInt(u16, request[6..8], @intCast(tooltip), .little);
+                const live = nodes[tooltip].widget.kind == .tooltip and canvas.widgetIsAnchored(nodes[tooltip].widget) and owned == tooltip and
+                    (eligible & (if (mode == 1) @as(u8, 1) else 2)) != 0;
+                const expected: u16 = if (mode == 0) (if (owned) |index| @intCast(index) else 65535) else if (live) @intCast(tooltip) else 65535;
+                var output: [2]u8 = undefined;
+                try std.testing.expectEqual(output.len, core.nativeTooltipPolicy(&request, &output));
+                try std.testing.expectEqual(expected, std.mem.readInt(u16, &output, .little));
+                comparisons += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 6144), comparisons);
+    core.rt.frameReset();
+}
+
+test "compiled tooltip binding preserves prospective pruning and full-width alias ownership" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const State = struct {
+        armed: canvas.ObjectId,
+        armed_owner: canvas.ObjectId,
+        deadline: u64,
+        shown: canvas.ObjectId,
+        shown_owner: canvas.ObjectId,
+        from_focus: bool,
+        warm: u64,
+        transit: u64,
+        fn read(v: anytype) @This() {
+            return .{ .armed = v.canvas_tooltip_armed_id, .armed_owner = v.canvas_tooltip_armed_owner_id, .deadline = v.canvas_tooltip_deadline_ns, .shown = v.canvas_tooltip_shown_id, .shown_owner = v.canvas_tooltip_shown_owner_id, .from_focus = v.canvas_tooltip_shown_from_focus, .warm = v.canvas_tooltip_warm_until_ns, .transit = v.canvas_tooltip_transit_deadline_ns };
+        }
+        fn write(s: @This(), v: anytype) void {
+            v.canvas_tooltip_armed_id = s.armed;
+            v.canvas_tooltip_armed_owner_id = s.armed_owner;
+            v.canvas_tooltip_deadline_ns = s.deadline;
+            v.canvas_tooltip_shown_id = s.shown;
+            v.canvas_tooltip_shown_owner_id = s.shown_owner;
+            v.canvas_tooltip_shown_from_focus = s.from_focus;
+            v.canvas_tooltip_warm_until_ns = s.warm;
+            v.canvas_tooltip_transit_deadline_ns = s.transit;
+        }
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "tooltip-parity", .source = native_sdk.WebViewSource.html("<h1>Tooltip</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    var comparisons: usize = 0;
+    for (0..64) |variant| {
+        core.rt.frameReset();
+        var nodes: [16]canvas.WidgetLayoutNode = undefined;
+        for (&nodes, 0..) |*node, index| {
+            const parent: ?usize = if (index == 0) null else (index + variant * 7) % index;
+            const frame = geometry.RectF.init(if ((index + variant) % 9 == 0) 900 else 0, 0, 100, 28);
+            node.* = .{ .widget = .{
+                .id = if (variant & 1 != 0) (if (index == 0) 0 else 0xffff_ffff_ffff_ff00 + index % 4) else 0xffff_ffff_ffff_ff00 + index,
+                .kind = if ((index + variant) % 3 == 0) .tooltip else .button,
+                .frame = frame,
+                .state = .{ .disabled = (index + variant) % 5 == 0 },
+                .semantics = .{ .hidden = (index + variant) % 7 == 0 },
+                .layout = .{ .anchor = if ((index + variant) % 4 == 0) null else .{ .placement = .above } },
+            }, .frame = frame, .parent_index = parent, .depth = if (parent) |p| nodes[p].depth + 1 else 0 };
+        }
+        @memcpy(view.widget_layout_nodes[0..nodes.len], &nodes);
+        view.widget_layout_node_count = nodes.len;
+        view.widget_layout_root_bounds = geometry.RectF.init(0, 0, 640, 480);
+        const layout = view.widgetLayoutTree();
+        for (0..nodes.len) |owner| {
+            view.canvas_widget_tooltip_policy = null;
+            const expected = view.canvasWidgetOwnedTooltipIndex(owner);
+            const expected_id = view.canvasWidgetOwnedTooltipIdForOwner(nodes[owner].widget.id);
+            view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+            try std.testing.expectEqual(expected, view.canvasWidgetOwnedTooltipIndex(owner));
+            try std.testing.expectEqual(expected_id, view.canvasWidgetOwnedTooltipIdForOwner(nodes[owner].widget.id));
+            comparisons += 2;
+            const seed = State{ .armed = if (expected) |t| nodes[t].widget.id else 0xffff_ffff_ffff_ffff, .armed_owner = nodes[owner].widget.id, .deadline = 100, .shown = nodes[(owner + variant) % nodes.len].widget.id, .shown_owner = nodes[owner].widget.id, .from_focus = variant & 2 != 0, .warm = 200, .transit = 300 };
+            seed.write(view);
+            view.canvas_widget_tooltip_policy = null;
+            const surviving = view.canvasTooltipShownIdSurvivingLayout(layout);
+            try std.testing.expectEqualDeep(seed, State.read(view)); // Prospective verdict is read-only.
+            view.pruneCanvasTooltipIntentForLayout(layout);
+            const pruned = State.read(view);
+            seed.write(view);
+            view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+            try std.testing.expectEqual(surviving, view.canvasTooltipShownIdSurvivingLayout(layout));
+            try std.testing.expectEqualDeep(seed, State.read(view));
+            view.pruneCanvasTooltipIntentForLayout(layout);
+            try std.testing.expectEqualDeep(pruned, State.read(view));
+            comparisons += 2;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4096), comparisons);
+    view.widget_layout_node_count = 0;
+    view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+    try std.testing.expectEqual(@as(?usize, null), view.canvasWidgetOwnedTooltipIndex(0));
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvasWidgetOwnedTooltipIdForOwner(0));
+    core.rt.frameReset();
+}
+
+test "compiled tooltip policy copies maximum-capacity results without resetting borrowed frames" {
+    core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    const capacity = runtime_ns.max_canvas_widget_nodes_per_view;
+    var request: [9 + capacity * 3]u8 = undefined;
+    request[0..9].* = .{ 23, 0, 0, 4, 1, 0, 255, 255, 0 };
+    for (0..capacity) |index| {
+        const at = 9 + index * 3;
+        request[at] = @intFromBool(index == capacity - 1);
+        std.mem.writeInt(u16, request[at + 1 ..][0..2], if (index == 0) 65535 else 0, .little);
+    }
+    var output: [2]u8 = undefined;
+    for (0..16) |_| {
+        try std.testing.expectEqual(output.len, core.nativeTooltipPolicy(&request, &output));
+        try std.testing.expectEqual(@as(u16, capacity - 1), std.mem.readInt(u16, &output, .little));
+        try std.testing.expectEqualSlices(u8, copy, borrowed);
+    }
+    core.rt.frameReset();
+    try std.testing.expectEqual(@as(u16, capacity - 1), std.mem.readInt(u16, &output, .little));
+    try std.testing.expectEqual(output.len, core.nativeTooltipPolicy(&.{ 23, 0, 0, 0, 255, 255, 255, 255, 0 }, &output));
+    try std.testing.expectEqual(@as(u16, 65535), std.mem.readInt(u16, &output, .little));
+    core.rt.frameReset();
+}
+
+test "compiled tooltip pruning stays transactional on rejected adoption and follows view compaction" {
+    const NoEvents = struct {
+        fn event(_: *anyopaque, _: *runtime_ns.Runtime, _: native_sdk.Event) anyerror!void {}
+    };
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var context: u8 = 0;
+    const app = native_sdk.App{ .context = &context, .name = "tooltip-adoption", .source = native_sdk.WebViewSource.html("<h1>Tooltip</h1>"), .event_fn = NoEvents.event };
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+    const owner_id: canvas.ObjectId = 0xffff_ffff_ffff_ff02;
+    const tooltip_id: canvas.ObjectId = 0xffff_ffff_ffff_ff03;
+    const children = [_]canvas.Widget{
+        .{ .id = owner_id, .kind = .button, .text = "Run", .frame = geometry.RectF.init(40, 60, 96, 32) },
+        .{ .id = tooltip_id, .kind = .tooltip, .text = "Run café", .layout = .{ .anchor = .{ .placement = .above } } },
+    };
+    var nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .id = 0xffff_ffff_ffff_ff01, .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 640, 480), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    view.canvas_tooltip_shown_id = tooltip_id;
+    view.canvas_tooltip_shown_owner_id = owner_id;
+    view.canvas_tooltip_shown_from_focus = true;
+    view.applyCanvasTooltipVisibility();
+    const index = view.canvasWidgetOwnedTooltipIndex(1).?;
+    try std.testing.expect(!view.widget_layout_nodes[index].widget.semantics.hidden);
+    // Seventeen anchored surfaces exceed the retained per-view budget of sixteen.
+    var overflow: [17]canvas.Widget = undefined;
+    for (&overflow, 0..) |*widget, i| widget.* = .{ .id = 100 + i, .kind = .tooltip, .text = "Overflow", .layout = .{ .anchor = .{ .placement = .above } } };
+    var overflow_nodes: [overflow.len + 1]canvas.WidgetLayoutNode = undefined;
+    const rejected = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &overflow }, geometry.RectF.init(0, 0, 640, 480), &overflow_nodes);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvasTooltipShownIdSurvivingLayout(rejected));
+    try std.testing.expectError(error.WidgetAnchoredSurfaceLimitReached, harness.runtime.setCanvasWidgetLayout(1, "canvas", rejected));
+    try std.testing.expectEqual(tooltip_id, view.canvas_tooltip_shown_id);
+    try std.testing.expectEqual(owner_id, view.canvas_tooltip_shown_owner_id);
+    try std.testing.expect(!view.widget_layout_nodes[index].widget.semantics.hidden);
+    _ = try harness.runtime.createView(.{ .window_id = 1, .label = "second", .kind = .gpu_surface, .frame = geometry.RectF.init(0, 0, 640, 480) });
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "second", view.widgetLayoutTree());
+    harness.runtime.views[1].canvas_widget_tooltip_policy = core.nativeTooltipPolicy;
+    try harness.runtime.closeView(1, "canvas");
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.view_count);
+    const moved = &harness.runtime.views[0];
+    try std.testing.expect(moved.canvas_widget_tooltip_policy == core.nativeTooltipPolicy);
+    try std.testing.expectEqual(tooltip_id, moved.canvasWidgetOwnedTooltipIdForOwner(owner_id));
+    moved.canvas_tooltip_shown_id = tooltip_id;
+    moved.canvas_tooltip_shown_owner_id = owner_id;
+    moved.pruneCanvasTooltipIntent();
+    try std.testing.expectEqual(tooltip_id, moved.canvas_tooltip_shown_id);
+    core.rt.frameReset();
 }

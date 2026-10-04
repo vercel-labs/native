@@ -405,7 +405,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", panel: "panel", badge: "badge", input: "input", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
+    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
     const container = ["column", "row", "stack", "scroll", "panel", "radio-group", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
@@ -483,8 +483,16 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         else props.push(`${name}: ${textValue(expr, node)}`);
       }
       else if (name === "icon") { if (/[{}]/.test(value)) fail(node, "icon requires a literal name"); props.push(`icon: ${JSON.stringify(value)}`); }
+      else if (name === "tooltip-delay") {
+        if (node.name !== "tooltip" || !node.attrs.has("anchor")) fail(node, "tooltip-delay requires anchored tooltip");
+        const delay = value.startsWith("{") ? binding(value, node, scope) : { code: String(Number(value)), type: { kind: "i64" } };
+        if (delay.type.kind !== "i64" || !value.startsWith("{") &&
+            (!/^[0-9]+$/.test(value) || !Number.isInteger(Number(value)) || Number(value) > 2147483647))
+          fail(node, "tooltip-delay requires a non-negative i32 integer");
+        props.push(`tooltipDelay: nscvTooltipDelay(${delay.code})`);
+      }
       else if (["anchor", "anchor-alignment", "anchor-offset"].includes(name)) {
-        if (node.name !== "dropdown-menu") fail(node, `${name} requires dropdown-menu`);
+        if (node.name !== "dropdown-menu" && node.name !== "tooltip") fail(node, `${name} requires dropdown-menu or tooltip`);
         if (name !== "anchor" && !node.attrs.has("anchor")) fail(node, `${name} requires anchor`);
         if (name === "anchor-offset") {
           if (value.trim() === "" || !Number.isFinite(Number(value))) fail(node, "anchor-offset requires a finite literal number");
