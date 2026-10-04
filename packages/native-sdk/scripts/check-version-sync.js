@@ -135,7 +135,7 @@ if (cliCompilerPin !== coreCompilerPin) {
   console.error(`Pin mismatch: package.json carries external core compiler pin ${cliCompilerPin}, expected ${coreCompilerPin} from packages/core dependencies`);
   errors++;
 }
-// The 0.2.0 library-sidecar lane calls the matching compiler API from Node.
+// The library-sidecar lane calls the matching compiler API from Node.
 // Keep that package in the CLI install and the checkout's dev install at the
 // same exact release as the native command and its surface manifest.
 const coreCompilerApiPin = coreJson.devDependencies?.['@scriptc/compiler'];

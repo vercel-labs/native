@@ -52,7 +52,7 @@ export function compilerArgv(command, options = {}) {
 }
 
 // Resolve scriptc through its published package `bin` declaration. The
-// installed 0.2.0 bin is native, so invoke it directly; keep JavaScript bin
+// installed scriptc bin is native, so invoke it directly; keep JavaScript bin
 // support for older toolchain fixtures and explicit version probes.
 export function publishedScriptcArgv(origin, options = {}) {
   const node = options.node ?? process.execPath;

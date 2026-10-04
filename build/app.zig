@@ -827,7 +827,7 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
 }
 
 /// The library-profile optimization field first shipped with the Node
-/// bootstrap. Scriptc 0.2.0 installs a native binary instead, so either
+/// bootstrap. scriptc installs a native binary instead, so either
 /// published entrypoint marks a compiler that accepts the field.
 fn scriptcProfileOptimization(b: *std.Build, dep: *std.Build.Dependency, optimize: std.builtin.OptimizeMode) ?[]const u8 {
     const sdk_root = tsSdkRoot(b.allocator, b.graph.io, dep);

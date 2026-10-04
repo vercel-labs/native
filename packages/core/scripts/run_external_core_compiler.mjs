@@ -183,11 +183,10 @@ if (reported !== pin) {
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-core-"));
 try {
   fs.cpSync(args.stage, work, { recursive: true });
-  // Scriptc 0.2.0's installed native command trips its self-hosted union
-  // conversion while emitting a byte-bearing library sidecar. The exact
-  // matching compiler package's Node API co-emits the archive and sidecar
-  // correctly. The native binary still supplies the version probe above;
-  // explicit compiler overrides keep their requested command.
+  // The exact matching compiler package's Node API co-emits the archive
+  // and sidecar for byte-bearing core contracts in one compile. The native
+  // binary supplies the version probe above; explicit compiler overrides
+  // keep their requested command.
   const libraryHelper = path.join(path.dirname(fileURLToPath(import.meta.url)), "run_library_compiler.mjs");
   const buildCommand = args["compiler-package-origin"] ? process.execPath : argv0[0];
   const buildArgs = args["compiler-package-origin"]

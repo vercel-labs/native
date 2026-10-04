@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.2.0
+# Service compile surface — scriptc 0.2.2
 
 What TypeScript under `src/services/` can use, as stated by the pinned
-compiler itself (surface manifest schema 1, 585 entries:
-425 static, 14 dynamic-only, 146 unsupported).
+compiler itself (surface manifest schema 1, 602 entries:
+471 static, 14 dynamic-only, 117 unsupported).
 
 How to read the tables:
 
@@ -92,7 +92,6 @@ each one refuses.
 | `diagnostic.sc1100` | operations on 'unknown' values | unsupported | `SC1100` | validate with 'as &lt;type&gt;' first — the cast checks the dynamic value at runtime and throws on mismatch |
 | `diagnostic.sc1101` | converting typed values to 'unknown' | unsupported | `SC1101` | numbers, strings, booleans, JSON-safe records/arrays/unions (a deep copy), functions, program class instances, and supported native handles convert into 'unknown' slots; functions, exact-class round trips, and handles preserve identity, while this value's type has no dynamic representation yet |
 | `diagnostic.sc1120` | this regex feature | unsupported | `SC1120` | supported: literal regexes with the g/i/m/s/u/y flags — .test(), .exec()/.match()/.matchAll(), named capture groups (.groups, $&lt;name&gt; templates, \k&lt;name&gt;), .source/.flags, and string replace/replaceAll/split with string replacement templates |
-| `diagnostic.sc1121` | '.test()' on a regex with the 'g' or 'y' flag | unsupported | `SC1121` | g/y regexes carry mutable lastIndex state between calls, which is not modeled; drop the flag for a plain match test, or use replace/replaceAll/split (their iteration is internal) |
 | `diagnostic.sc2001` | values of types outside the compilable set (constructor objects and library-derived or unresolved generic shapes) | unsupported | `SC2001` |  |
 | `diagnostic.sc2002` | record shape flows outside the width-copy rules (shapes must match exactly or width-coerce) | unsupported | `SC2002` |  |
 | `diagnostic.sc2003` | union-to-union conversions outside the re-tagging rule | unsupported | `SC2003` |  |
@@ -129,6 +128,7 @@ manifest row in the Notes column:
 | `node-builtin.dns` | dns | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.events` | events | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.fs` | fs | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.fs.callbacks` | fs error-first callbacks | static | native filesystem callbacks, including stored platform adapter functions |
 | `node-builtin.fs.promises` | fs/promises | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.http` | http | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.http2` | http2 | static | recognized module (bare and node:-prefixed specifiers) |
@@ -140,6 +140,7 @@ manifest row in the Notes column:
 | `node-builtin.path.posix` | path/posix | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.path.win32` | path/win32 | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.perf_hooks` | perf_hooks | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.process` | process | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.querystring` | querystring | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.readline` | readline | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.stream` | stream | static | recognized module (bare and node:-prefixed specifiers) |
@@ -173,6 +174,9 @@ manifest row in the Notes column:
 | `node-builtin.assert.strict.doesNotThrow` | assert/strict.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
 | `node-builtin.assert.strict.ifError` | assert/strict.ifError | unsupported | `SC2020` | test explicitly instead: assert.strictEqual(err, null) / assert.strictEqual(err, undefined) |
 | `node-builtin.assert.strict.rejects` | assert/strict.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
+| `node-builtin.buffer.isAscii` | buffer.isAscii | static |  |  |
+| `node-builtin.buffer.isUtf8` | buffer.isUtf8 | static |  |  |
+| `node-builtin.buffer.transcode` | buffer.transcode | static |  |  |
 | `node-builtin.child_process.execFile` | child_process.execFile | unsupported | `SC2020` | the callback forms execFile(file, callback), execFile(file, args, callback), and execFile(file, args, { encoding: 'utf8', maxBuffer: N }, callback) lower; maxBuffer is not enforced by the growing native capture; other options and reached no-callback calls remain fenced, while util.promisify(execFile) retains its wider options slice |
 | `node-builtin.child_process.execFileSync` | child_process.execFileSync | static |  |  |
 | `node-builtin.child_process.execSync` | child_process.execSync | static |  |  |
@@ -203,8 +207,8 @@ manifest row in the Notes column:
 | `node-builtin.crypto.getCipherInfo` | crypto.getCipherInfo | unsupported | `SC2020` | symmetric ciphers need a cipher stack the static runtime does not vendor — the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.getDiffieHellman` | crypto.getDiffieHellman | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.hash` | crypto.hash | static |  |  |
-| `node-builtin.crypto.hkdf` | crypto.hkdf | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.hkdfSync` | crypto.hkdfSync | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
+| `node-builtin.crypto.hkdf` | crypto.hkdf | static |  |  |
+| `node-builtin.crypto.hkdfSync` | crypto.hkdfSync | static |  |  |
 | `node-builtin.crypto.pbkdf2` | crypto.pbkdf2 | static |  |  |
 | `node-builtin.crypto.pbkdf2Sync` | crypto.pbkdf2Sync | static |  |  |
 | `node-builtin.crypto.privateDecrypt` | crypto.privateDecrypt | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
@@ -215,8 +219,8 @@ manifest row in the Notes column:
 | `node-builtin.crypto.randomFillSync` | crypto.randomFillSync | static |  |  |
 | `node-builtin.crypto.randomInt` | crypto.randomInt | static |  |  |
 | `node-builtin.crypto.randomUUID` | crypto.randomUUID | static |  |  |
-| `node-builtin.crypto.scrypt` | crypto.scrypt | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
-| `node-builtin.crypto.scryptSync` | crypto.scryptSync | unsupported | `SC2020` | key-derivation functions have no lowering yet — the lowered crypto surface is hashing, randomness, and the introspection statics |
+| `node-builtin.crypto.scrypt` | crypto.scrypt | static |  |  |
+| `node-builtin.crypto.scryptSync` | crypto.scryptSync | static |  |  |
 | `node-builtin.crypto.setFips` | crypto.setFips | unsupported | `SC2020` | a compiled binary has no FIPS provider to enable, and Node itself throws on setFips(true) in a non-FIPS build — getFips() answers 0 here |
 | `node-builtin.crypto.sign` | crypto.sign | unsupported | `SC2020` | asymmetric-key operations need a public-key stack (bignum, RSA/EC/EdDSA math) and a KeyObject value model — neither exists in the static runtime, so no faithful lowering can be small; the lowered crypto surface is hashing, randomness, and the introspection statics |
 | `node-builtin.crypto.timingSafeEqual` | crypto.timingSafeEqual | static |  |  |
@@ -235,8 +239,10 @@ manifest row in the Notes column:
 | `node-builtin.fs.copyFileSync` | fs.copyFileSync | static |  |  |
 | `node-builtin.fs.existsSync` | fs.existsSync | static |  |  |
 | `node-builtin.fs.fchmodSync` | fs.fchmodSync | static |  |  |
+| `node-builtin.fs.fdatasyncSync` | fs.fdatasyncSync | static |  |  |
 | `node-builtin.fs.fstatSync` | fs.fstatSync | static |  |  |
 | `node-builtin.fs.fsyncSync` | fs.fsyncSync | static |  |  |
+| `node-builtin.fs.ftruncateSync` | fs.ftruncateSync | static |  |  |
 | `node-builtin.fs.linkSync` | fs.linkSync | static |  |  |
 | `node-builtin.fs.lstatSync` | fs.lstatSync | static |  |  |
 | `node-builtin.fs.mkdirSync` | fs.mkdirSync | static |  |  |
@@ -257,6 +263,7 @@ manifest row in the Notes column:
 | `node-builtin.fs.readFileSync` | fs.readFileSync | static |  |  |
 | `node-builtin.fs.readSync` | fs.readSync | static |  |  |
 | `node-builtin.fs.readdirSync` | fs.readdirSync | static |  |  |
+| `node-builtin.fs.readvSync` | fs.readvSync | static |  |  |
 | `node-builtin.fs.realpathSync` | fs.realpathSync | static |  |  |
 | `node-builtin.fs.realpathSync.native` | fs.realpathSync.native | static |  |  |
 | `node-builtin.fs.rename` | fs.rename | static |  |  |
@@ -268,6 +275,7 @@ manifest row in the Notes column:
 | `node-builtin.fs.watch` | fs.watch | static |  |  |
 | `node-builtin.fs.writeFileSync` | fs.writeFileSync | static |  |  |
 | `node-builtin.fs.writeSync` | fs.writeSync | static |  |  |
+| `node-builtin.fs.writevSync` | fs.writevSync | static |  |  |
 | `node-builtin.http.maxHeaderSize` | http.maxHeaderSize | static |  | constant value read |
 | `node-builtin.http2.connect` | http2.connect | unsupported | `SC2020` | HTTP/2 client sessions have no lowering — the lowered http2 surface is the SERVER side: createSecureServer({ allowHTTP1: true, cert, key }), which serves HTTP/1.1 only (ALPN never offers h2 — h2-capable clients negotiate down); an HTTP/1.1 client is https.request |
 | `node-builtin.http2.createServer` | http2.createServer | unsupported | `SC2020` | cleartext (h2c) servers have no lowering — the lowered http2 surface is createSecureServer({ allowHTTP1: true, cert, key }), which serves HTTP/1.1 over TLS (plain HTTP/1.1 is http.createServer) |
@@ -336,6 +344,7 @@ manifest row in the Notes column:
 | `node-builtin.process.hrtime` | process.hrtime | static |  | native monotonic tuple clock and bigint member; direct calls and stored JavaScript callable values |
 | `node-builtin.process.isTTY` | process.isTTY | static |  | the isTTY read on process.stdin/stdout/stderr — one surface across the three streams |
 | `node-builtin.process.kill` | process.kill | static |  | the signal-name and signal-number forms are one surface |
+| `node-builtin.process.loadEnvFile` | process.loadEnvFile | static |  |  |
 | `node-builtin.process.pid` | process.pid | static |  |  |
 | `node-builtin.process.resourceUsage` | process.resourceUsage | static |  | getrusage's 16 fields — every field read samples live machine state |
 | `node-builtin.process.rows` | process.rows | static |  | the rows read on process.stdout/stderr (terminal geometry) |
@@ -362,6 +371,7 @@ manifest row in the Notes column:
 | `node-builtin.url.fileURLToPath` | url.fileURLToPath | static |  |  |
 | `node-builtin.url.pathToFileURL` | url.pathToFileURL | static |  |  |
 | `node-builtin.util.parseArgs` | util.parseArgs | static |  |  |
+| `node-builtin.util.parseEnv` | util.parseEnv | static |  |  |
 | `node-builtin.util.promisify` | util.promisify | unsupported | `SC2020` | the lowered shapes are const bindings over child_process.execFile and fs.readFile; call the bound function directly |
 | `node-builtin.worker_threads.isMainThread` | worker_threads.isMainThread | static |  | constant value read |
 | `node-builtin.worker_threads.threadId` | worker_threads.threadId | static |  | constant value read |
@@ -473,7 +483,7 @@ manifest row in the Notes column:
 | `stdlib.fetch.request-init.signal` | RequestInit.signal | static |  | Node 24.15.0 / Undici 7.24.4; conversion: native AbortSignal handle or absent; differential evidence: fixture:static, fixture:static-abort-throw |
 | `stdlib.fetch.request-init.window` | RequestInit.window | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; neither compiler tier preserves this RequestInit member's conversion or transport behavior |
 | `stdlib.headers.append` | Headers.append | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion |
-| `stdlib.headers.constructor` | Headers constructor | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the interface constructor has no compiler bridge in either tier |
+| `stdlib.headers.constructor` | Headers constructor | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, identity; supported scope: Record and iterable header pairs, including copying native Headers; differential evidence: fixture:static-request |
 | `stdlib.headers.delete` | Headers.delete | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, mutation, error-shape; differential evidence: fixture:static, fixture:static-coercion |
 | `stdlib.headers.entries` | Headers.entries | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle |
 | `stdlib.headers.forEach` | Headers.forEach | static |  | Node 24.15.0 / Undici 7.24.4; facets: callback-order, callback-this, mutation; differential evidence: fixture:static, fixture:static-coercion |
@@ -486,10 +496,13 @@ manifest row in the Notes column:
 | `stdlib.headers.values` | Headers.values | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; native Headers iteration does not yet expose a static iterator handle |
 | `stdlib.map.clear` | Map.prototype.clear | static |  |  |
 | `stdlib.map.delete` | Map.prototype.delete | static |  |  |
+| `stdlib.map.entries` | Map.prototype.entries | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.map.forEach` | Map.prototype.forEach | static |  |  |
 | `stdlib.map.get` | Map.prototype.get | static |  |  |
 | `stdlib.map.has` | Map.prototype.has | static |  |  |
+| `stdlib.map.keys` | Map.prototype.keys | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.map.set` | Map.prototype.set | static |  |  |
+| `stdlib.map.values` | Map.prototype.values | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.math.E` | Math.E | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
 | `stdlib.math.LN10` | Math.LN10 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
 | `stdlib.math.LN2` | Math.LN2 | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
@@ -556,33 +569,33 @@ manifest row in the Notes column:
 | `stdlib.readable-stream.symbol.asyncIterator` | ReadableStream.[Symbol.asyncIterator] | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; explicit symbol access and stored iterator handles have no compiler lowering in either tier |
 | `stdlib.readable-stream.tee` | ReadableStream.tee | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; the dynamic Web Streams bridge exposes only an explicit unsupported stub for this operation |
 | `stdlib.readable-stream.values` | ReadableStream.values | dynamic-only | `SC2020` | Node 24.15.0 / Undici 7.24.4; direct for-await consumption compiles statically; storing or driving the first-class iterator handle requires --dynamic |
-| `stdlib.request.arrayBuffer` | Request.arrayBuffer | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
+| `stdlib.request.arrayBuffer` | Request.arrayBuffer | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static-request |
 | `stdlib.request.attribute` | Request.attribute | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
 | `stdlib.request.blob` | Request.blob | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.body` | Request.body | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.bodyUsed` | Request.bodyUsed | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.bytes` | Request.bytes | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.cache` | Request.cache | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
+| `stdlib.request.body` | Request.body | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.bodyUsed` | Request.bodyUsed | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.bytes` | Request.bytes | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static-request |
+| `stdlib.request.cache` | Request.cache | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
 | `stdlib.request.clone` | Request.clone | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.constructor` | Request constructor | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.credentials` | Request.credentials | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.destination` | Request.destination | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.duplex` | Request.duplex | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
+| `stdlib.request.constructor` | Request constructor | static |  | Node 24.15.0 / Undici 7.24.4; facets: webidl-conversion, body-consumption, error-shape; supported scope: Absolute URLs with method, headers, body, duplex, redirect, and signal; other RequestInit members retain explicit fences; differential evidence: fixture:static-request |
+| `stdlib.request.credentials` | Request.credentials | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.destination` | Request.destination | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.duplex` | Request.duplex | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
 | `stdlib.request.formData` | Request.formData | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.headers` | Request.headers | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.integrity` | Request.integrity | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.isHistoryNavigation` | Request.isHistoryNavigation | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.isReloadNavigation` | Request.isReloadNavigation | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.json` | Request.json | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.keepalive` | Request.keepalive | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.method` | Request.method | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.mode` | Request.mode | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.redirect` | Request.redirect | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.referrer` | Request.referrer | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.referrerPolicy` | Request.referrerPolicy | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.signal` | Request.signal | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.text` | Request.text | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
-| `stdlib.request.url` | Request.url | unsupported | `SC2020` | Node 24.15.0 / Undici 7.24.4; typed source has no compiler bridge for this interface in either tier |
+| `stdlib.request.headers` | Request.headers | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.integrity` | Request.integrity | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.isHistoryNavigation` | Request.isHistoryNavigation | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.isReloadNavigation` | Request.isReloadNavigation | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.json` | Request.json | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static-request |
+| `stdlib.request.keepalive` | Request.keepalive | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.method` | Request.method | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.mode` | Request.mode | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.redirect` | Request.redirect | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.referrer` | Request.referrer | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.referrerPolicy` | Request.referrerPolicy | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.signal` | Request.signal | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
+| `stdlib.request.text` | Request.text | static |  | Node 24.15.0 / Undici 7.24.4; facets: body-consumption, promise-settlement, state-machine, error-shape; differential evidence: fixture:static-request |
+| `stdlib.request.url` | Request.url | static |  | Node 24.15.0 / Undici 7.24.4; facets: property-read, state-machine; supported scope: Reads on native Requests within the constructor's supported RequestInit subset; differential evidence: fixture:static-request |
 | `stdlib.response-init.headers` | ResponseInit.headers | static |  | Node 24.15.0 / Undici 7.24.4; conversion: Headers, record, or sequence-of-pairs snapshot; differential evidence: fixture:static |
 | `stdlib.response-init.status` | ResponseInit.status | static |  | Node 24.15.0 / Undici 7.24.4; conversion: WebIDL unsigned-short conversion followed by the 200–599 range check; differential evidence: fixture:static |
 | `stdlib.response-init.statusText` | ResponseInit.statusText | static |  | Node 24.15.0 / Undici 7.24.4; conversion: WebIDL ByteString with HTTP reason-phrase validation; differential evidence: fixture:static |
@@ -610,14 +623,17 @@ manifest row in the Notes column:
 | `stdlib.set.clear` | Set.prototype.clear | static |  |  |
 | `stdlib.set.delete` | Set.prototype.delete | static |  |  |
 | `stdlib.set.difference` | Set.prototype.difference | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
+| `stdlib.set.entries` | Set.prototype.entries | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.set.forEach` | Set.prototype.forEach | static |  |  |
 | `stdlib.set.has` | Set.prototype.has | static |  |  |
 | `stdlib.set.intersection` | Set.prototype.intersection | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.isDisjointFrom` | Set.prototype.isDisjointFrom | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.isSubsetOf` | Set.prototype.isSubsetOf | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.isSupersetOf` | Set.prototype.isSupersetOf | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
+| `stdlib.set.keys` | Set.prototype.keys | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.set.symmetricDifference` | Set.prototype.symmetricDifference | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.union` | Set.prototype.union | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
+| `stdlib.set.values` | Set.prototype.values | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
 | `stdlib.string.at` | string.prototype.at | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.string.charAt` | string.prototype.charAt | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.string.charCodeAt` | string.prototype.charCodeAt | static |  | the lowered call form takes 0 to 1 arguments |
@@ -626,6 +642,7 @@ manifest row in the Notes column:
 | `stdlib.string.includes` | string.prototype.includes | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.indexOf` | string.prototype.indexOf | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.isWellFormed` | string.prototype.isWellFormed | static |  | the lowered call form takes no arguments |
+| `stdlib.string.normalize` | string.prototype.normalize | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.string.padEnd` | string.prototype.padEnd | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.padStart` | string.prototype.padStart | static |  | the lowered call form takes 0 to 2 arguments |
 | `stdlib.string.repeat` | string.prototype.repeat | static |  | the lowered call form takes exactly 1 argument |

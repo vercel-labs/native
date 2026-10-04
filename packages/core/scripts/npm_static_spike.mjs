@@ -20,7 +20,7 @@ const candidates = [
   { name: "escape-string-regexp", version: "5.0.0", source: 'import escape from "escape-string-regexp";\nconsole.log(escape("a.b"));\n' },
   { name: "comma-separated-tokens", version: "2.0.3", source: 'import { parse } from "comma-separated-tokens";\nconsole.log(parse("a,b").length);\n' },
   { name: "space-separated-tokens", version: "2.0.2", source: 'import { parse } from "space-separated-tokens";\nconsole.log(parse("a b").length);\n' },
-  { name: "nanoid", version: "3.3.15", source: 'import { nanoid } from "nanoid";\nconsole.log(nanoid(4));\n' },
+  { name: "nanoid", version: "3.3.19", source: 'import { nanoid } from "nanoid";\nconsole.log(nanoid(4));\n' },
   { name: "micromark", version: "4.0.2", source: 'import { micromark } from "micromark";\nconsole.log(micromark("# hi"));\n' },
 ];
 

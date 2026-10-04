@@ -1,6 +1,6 @@
 {
-  "date": "2026-10-01",
-  "compiler": "scriptc 0.2.0",
+  "date": "2026-10-04",
+  "compiler": "scriptc 0.2.2",
   "policy": "explicit --npm-static; no auto or dynamic fallback",
   "method": "packages/core/scripts/npm_static_spike.mjs against exact package bytes in the locked docs workspace",
   "summary": "4 of 5 deliberately small candidates cleared 100% static coverage; micromark was refused, so package support is selective",
@@ -28,7 +28,7 @@
     },
     {
       "package": "nanoid",
-      "version": "3.3.15",
+      "version": "3.3.19",
       "verdict": "static",
       "static_percent": 100,
       "reason": "static coverage accepted"
@@ -37,8 +37,8 @@
       "package": "micromark",
       "version": "4.0.2",
       "verdict": "refused",
-      "static_percent": 92,
-      "reason": "only 92% of analyzed statements compile statically"
+      "static_percent": 93,
+      "reason": "only 93% of analyzed statements compile statically"
     }
   ]
 }

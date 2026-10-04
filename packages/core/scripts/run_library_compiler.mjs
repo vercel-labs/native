@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-// Scriptc 0.2.0's Node library API keeps the profile's archive and contract
-// sidecar in one compile. The installed native command has a self-hosted
-// union-conversion bug in this sidecar path for byte-bearing SDK contracts.
+// scriptc's Node library API co-emits the profile's archive and contract
+// sidecar for the SDK's byte-bearing contracts in one compile.
 
 import path from "node:path";
 
