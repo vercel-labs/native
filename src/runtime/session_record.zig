@@ -58,6 +58,7 @@ pub const SessionRecorder = struct {
     effect_count: u64 = 0,
     checkpoint_count: u64 = 0,
     screenshot_count: u64 = 0,
+    window_chrome_count: u64 = 0,
     /// Per-session salt for credential replay-placeholder digests. The digest
     /// is deliberately independent of the secret, so a shareable journal is
     /// not an offline guessing oracle. Successful secret bytes are never
@@ -76,6 +77,8 @@ pub const SessionRecorder = struct {
     staged_lens: [journal.max_session_event_depth]usize = [_]usize{0} ** journal.max_session_event_depth,
     staged_suppressed: [journal.max_session_event_depth]bool = [_]bool{false} ** journal.max_session_event_depth,
     staged: [journal.max_session_event_depth][journal.max_session_event_bytes]u8 = undefined,
+    staged_chrome_counts: [journal.max_session_event_depth]usize = @splat(0),
+    staged_chrome: [journal.max_session_event_depth][journal.max_session_window_chrome_queries]journal.WindowChromeRecord = undefined,
     /// Encode scratch for effect payloads (up to a whole file read).
     effect_buffer: [journal.max_session_record_bytes]u8 = undefined,
     small_buffer: [1024]u8 = undefined,
@@ -162,6 +165,7 @@ pub const SessionRecorder = struct {
         };
         self.staged_lens[self.depth] = encoded.len;
         self.staged_suppressed[self.depth] = false;
+        self.staged_chrome_counts[self.depth] = 0;
         if (event == .widget_accessibility_action) self.suppress_owner_depth = self.depth;
         self.depth += 1;
     }
@@ -176,8 +180,28 @@ pub const SessionRecorder = struct {
         if (self.suppress_owner_depth) |owner_depth| {
             if (owner_depth == self.depth) self.suppress_owner_depth = null;
         }
+        // Facts belong to the event that queried them. A nested event
+        // commits its own facts first; suppressed accessibility children
+        // contribute to their outer action in the original query order.
+        for (self.staged_chrome[self.depth][0..self.staged_chrome_counts[self.depth]]) |record| {
+            const payload = journal.encodeWindowChrome(record, &self.small_buffer) catch return self.fail("window chrome record over budget");
+            self.writeRecord(.window_chrome, payload);
+            if (!self.failed) self.window_chrome_count += 1;
+        }
         self.writeRecord(.event, self.staged[self.depth][0..self.staged_lens[self.depth]]);
         if (!self.failed) self.event_count += 1;
+    }
+
+    /// Stage the complete OS result beside its consuming event, rather
+    /// than publishing it ahead of an unrelated nested dispatch.
+    pub fn recordWindowChrome(self: *SessionRecorder, record: journal.WindowChromeRecord) void {
+        if (!self.began or self.failed or self.finished) return;
+        if (self.depth == 0) return self.fail("window chrome queried outside a recorded event");
+        const owner = self.suppress_owner_depth orelse (self.depth - 1);
+        const count = self.staged_chrome_counts[owner];
+        if (count == journal.max_session_window_chrome_queries) return self.fail("window chrome queries exceeded their per-event budget");
+        self.staged_chrome[owner][count] = record;
+        self.staged_chrome_counts[owner] = count + 1;
     }
 
     /// True when dispatch just returned to the top level and the frame
@@ -331,6 +355,7 @@ pub const SessionRecorder = struct {
             .effect_count = self.effect_count,
             .checkpoint_count = self.checkpoint_count,
             .screenshot_count = self.screenshot_count,
+            .window_chrome_count = self.window_chrome_count,
         }, &self.small_buffer) catch return self.fail("end record over budget");
         self.writeRecord(.end, payload);
     }
@@ -751,4 +776,57 @@ test "checkpoint gate fires once per frame index" {
     recorder.recordCheckpoint(1, 5);
     try testing.expect(!recorder.wantsCheckpoint(1));
     try testing.expect(recorder.wantsCheckpoint(2));
+}
+
+test "recorder binds chrome facts to nested events and outer accessibility actions" {
+    var buffer = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.stageEvent(.frame_requested);
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{ .insets = .{ .left = 98 } } });
+    recorder.stageEvent(.wake);
+    recorder.recordWindowChrome(.{ .window_id = 2, .chrome = .{ .tabs_projected = true } });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.stageEvent(.{ .widget_accessibility_action = .{ .window_id = 1, .label = "canvas", .id = 1, .action = .press } });
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.stageEvent(.wake);
+    recorder.recordWindowChrome(.{ .window_id = 2, .chrome = .{} });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    var reader = try journal.Reader.init(buffer.bytes());
+    _ = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .wake);
+    try testing.expectEqual(@as(u64, 1), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .frame_requested);
+    try testing.expectEqual(@as(u64, 1), (try reader.next()).?.window_chrome.window_id);
+    try testing.expectEqual(@as(u64, 2), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .widget_accessibility_action);
+    const end = (try reader.next()).?.end;
+    try testing.expectEqual(@as(u64, 3), end.event_count);
+    try testing.expectEqual(@as(u64, 4), end.window_chrome_count);
+}
+
+test "recorder refuses unowned and over-budget chrome facts without sealing" {
+    var buffer = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    try testing.expect(recorder.failed);
+    try testing.expect(!recorder.finished);
+    buffer.len = 0;
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.stageEvent(.wake);
+    for (0..journal.max_session_window_chrome_queries + 1) |_| recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.finish();
+    try testing.expect(recorder.failed);
+    try testing.expect(!recorder.finished);
 }

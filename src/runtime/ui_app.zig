@@ -2213,7 +2213,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // Apps whose headers already pad through the chrome
             // channel's insets never collide, never retry, and keep a
             // byte-identical layout.
-            if (windowControlsReservation(runtime, window_id, self.options.canvas_label, built.layout, tokens)) |controls| {
+            if (try windowControlsReservation(runtime, window_id, self.options.canvas_label, built.layout, tokens)) |controls| {
                 tokens.window_controls = controls;
                 built = try self.buildLayoutPass(runtime, window_id, bounds, tokens, next_index);
             }
@@ -2533,7 +2533,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// cluster. `tokens` must be the tokens the layout was built
         /// with: the scan re-measures text through the same seam to
         /// judge painted bounds, not frames.
-        fn windowControlsReservation(runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) ?geometry.RectF {
+        fn windowControlsReservation(runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) !?geometry.RectF {
             var has_drag_region = false;
             for (layout.nodes) |node| {
                 if (canvas.widgetIsWindowDragRegion(node.widget)) {
@@ -2542,7 +2542,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
             }
             if (!has_drag_region) return null;
-            const controls = runtime.windowControlsForView(window_id, canvas_label);
+            const controls = try runtime.windowControlsForView(window_id, canvas_label);
             if (controls.width <= 0 or controls.height <= 0) return null;
             if (!canvas.windowDragContentUnderWindowControls(layout.nodes, controls, tokens)) return null;
             return controls;
@@ -3255,7 +3255,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // exactly like the main window's, so a proven collision
             // stamps the cluster into THIS slot's tokens (a local copy —
             // other windows keep their own layout) for one more pass.
-            if (windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout, tokens)) |controls| {
+            if (try windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout, tokens)) |controls| {
                 tokens.window_controls = controls;
                 built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
             }
@@ -4824,7 +4824,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // rebuild below is the one that renders it), so a
                 // hidden-titlebar header is padded in the very first
                 // paint.
-                if (self.chromeInsetsMsg(runtime, frame_event.window_id)) |msg| {
+                if (try self.chromeInsetsMsg(runtime, frame_event.window_id)) |msg| {
                     self.applyMsg(msg);
                 }
                 try self.rebuild(runtime, frame_event.window_id);
@@ -5185,7 +5185,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // traffic lights); re-query on every resize and dispatch
             // only on change — `dispatch` already rebuilds, so the
             // plain-resize rebuild is the else arm.
-            if (self.chromeInsetsMsg(runtime, resize_event.window_id)) |msg| {
+            if (try self.chromeInsetsMsg(runtime, resize_event.window_id)) |msg| {
                 try self.dispatch(runtime, resize_event.window_id, msg);
                 return;
             }
@@ -5217,9 +5217,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// The `on_chrome` delivery gate: query the platform's chrome
         /// overlay geometry for the canvas window and map it to a Msg
         /// when the app subscribed AND the geometry actually changed.
-        fn chromeInsetsMsg(self: *Self, runtime: *Runtime, window_id: platform.WindowId) ?MsgT {
+        fn chromeInsetsMsg(self: *Self, runtime: *Runtime, window_id: platform.WindowId) !?MsgT {
             const map = self.options.on_chrome orelse return null;
-            const chrome = runtime.options.platform.services.windowChrome(window_id);
+            const chrome = try runtime.windowChrome(window_id);
             if (self.window_chrome_known and std.meta.eql(chrome, self.window_chrome)) return null;
             self.window_chrome = chrome;
             self.window_chrome_known = true;

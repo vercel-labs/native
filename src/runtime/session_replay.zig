@@ -66,6 +66,8 @@ pub const ReplayError = error{
     /// to decode at all); this class is for records that decode fine
     /// but lie.
     ReplayDamagedRecord,
+    /// The replayed event consumed different synchronous OS queries.
+    ReplayChromeDivergence,
 };
 
 /// Bounded mismatch detail (first N are kept; the count keeps counting).
@@ -145,6 +147,16 @@ pub fn replaySession(
     var reader = try journal.Reader.init(journal_bytes);
     var report: ReplayReport = .{};
     var armed = false;
+    runtime.replay_window_chrome_active = true;
+    runtime.replay_window_chrome_failed = false;
+    runtime.replay_window_chrome_count = 0;
+    runtime.replay_window_chrome_index = 0;
+    defer {
+        runtime.replay_window_chrome_active = false;
+        runtime.replay_window_chrome_failed = false;
+        runtime.replay_window_chrome_count = 0;
+        runtime.replay_window_chrome_index = 0;
+    }
 
     while (try reader.next()) |record| {
         switch (record) {
@@ -164,6 +176,11 @@ pub fn replaySession(
                     );
                     return error.ReplayPlatformMismatch;
                 }
+            },
+            .window_chrome => |fact| {
+                if (runtime.replay_window_chrome_count == journal.max_session_window_chrome_queries) return error.ReplayDamagedRecord;
+                runtime.replay_window_chrome[runtime.replay_window_chrome_count] = fact;
+                runtime.replay_window_chrome_count += 1;
             },
             .event => |event| {
                 if (!armed) {
@@ -193,6 +210,9 @@ pub fn replaySession(
                     }
                 }
                 try runtime.dispatchPlatformEvent(app, event);
+                if (runtime.replay_window_chrome_failed or runtime.replay_window_chrome_index != runtime.replay_window_chrome_count) return error.ReplayChromeDivergence;
+                runtime.replay_window_chrome_count = 0;
+                runtime.replay_window_chrome_index = 0;
                 report.events_replayed += 1;
             },
             .effect => |effect_record| {
@@ -494,7 +514,9 @@ pub fn replaySession(
                     });
                 }
             },
-            .end => {},
+            .end => {
+                if (runtime.replay_window_chrome_count != 0) return error.ReplayChromeDivergence;
+            },
         }
     }
     // End-of-journal consistency: every fed-but-queued record must have

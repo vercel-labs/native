@@ -27,6 +27,7 @@ const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
 const runtime_session_state = @import("session_state.zig");
+const session_journal = @import("session_journal.zig");
 const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
@@ -205,6 +206,13 @@ pub const Runtime = struct {
     max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
+    /// Synchronous OS facts queued only while replaying. One event must
+    /// consume the complete sequence before the next event can begin.
+    replay_window_chrome_active: bool = false,
+    replay_window_chrome_failed: bool = false,
+    replay_window_chrome: [session_journal.max_session_window_chrome_queries]session_journal.WindowChromeRecord = undefined,
+    replay_window_chrome_count: usize = 0,
+    replay_window_chrome_index: usize = 0,
     windows: [platform.max_windows]RuntimeWindow = undefined,
     window_count: usize = 0,
     views: [platform.max_views]RuntimeView = undefined,
@@ -890,6 +898,28 @@ pub const Runtime = struct {
         return self.surface.safe_area_insets;
     }
 
+    /// Query native chrome live, or consume the recorded OS result on
+    /// replay. Missing, extra and differently targeted queries diverge
+    /// loudly; replay never consults the current host for this fact.
+    pub fn windowChrome(self: *Runtime, window_id: platform.WindowId) !platform.WindowChrome {
+        if (self.replay_window_chrome_active) {
+            if (self.replay_window_chrome_index == self.replay_window_chrome_count) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            const record = self.replay_window_chrome[self.replay_window_chrome_index];
+            if (record.window_id != window_id) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            self.replay_window_chrome_index += 1;
+            return record.chrome;
+        }
+        const chrome = self.options.platform.services.windowChrome(window_id);
+        if (self.options.session_recorder) |recorder| recorder.recordWindowChrome(.{ .window_id = window_id, .chrome = chrome });
+        return chrome;
+    }
+
     /// The OS window-control cluster's frame in a canvas view's LOCAL
     /// coordinates (Windows: the DWM min/max/close buttons; macOS: the
     /// traffic lights), from the platform's live chrome report. Zero-sized
@@ -898,9 +928,9 @@ pub const Runtime = struct {
     /// view's window-content frame so a docked canvas judges the overlap
     /// in its own space. This is the geometry `UiApp` consults to keep a
     /// drag header's content out from under the cluster.
-    pub fn windowControlsForView(self: *const Runtime, window_id: platform.WindowId, label: []const u8) geometry.RectF {
+    pub fn windowControlsForView(self: *Runtime, window_id: platform.WindowId, label: []const u8) !geometry.RectF {
         const zero = geometry.RectF.init(0, 0, 0, 0);
-        const buttons = self.options.platform.services.windowChrome(window_id).buttons.normalized();
+        const buttons = (try self.windowChrome(window_id)).buttons.normalized();
         if (buttons.width <= 0 or buttons.height <= 0) return zero;
         const view_frame = (self.absoluteViewFrame(window_id, label, 0) catch return buttons).normalized();
         return geometry.RectF.init(buttons.x - view_frame.x, buttons.y - view_frame.y, buttons.width, buttons.height);
