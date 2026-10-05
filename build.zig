@@ -4229,6 +4229,10 @@ fn tsCoreE2eArtifact(
     const surface_layout_mod = module(b, target, optimize, "tests/ts-core/surface_layout_e2e_tests.zig");
     surface_layout_mod.addImport("native_sdk", desktop_mod);
     surface_layout_mod.addImport("surface_fixture_core", feed_reader_fixture.module);
+    const surface_decoder_mod = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    surface_decoder_mod.addImport("native_sdk", desktop_mod);
+    surface_decoder_mod.addImport("core.zig", feed_reader_fixture.module);
+    surface_layout_mod.addImport("surface_decoder", surface_decoder_mod);
     const feed_reader_service = externalServiceFixture(
         b,
         target,

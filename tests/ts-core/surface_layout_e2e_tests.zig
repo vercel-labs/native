@@ -3,6 +3,9 @@ const native_sdk = @import("native_sdk");
 const core = @import("surface_fixture_core");
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
+test "compiled modal view records match native construction" {
+    try @import("surface_decoder").testModalRecords();
+}
 extern fn nsc_core_native_view(out: *[*]const u8, len: *usize) callconv(.c) void;
 
 const samples = [_]f32{ -std.math.inf(f32), -16777216, -240.00002, -1, -0.0, 0, 0.000001, 1.0000001, 23.999998, 24, 24.000002, 239.99998, 240, 240.00002, 16777216, std.math.inf(f32), std.math.nan(f32) };

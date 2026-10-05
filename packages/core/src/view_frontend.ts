@@ -405,10 +405,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
+    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
-    const container = ["column", "row", "stack", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
+    const container = ["column", "row", "stack", "dialog", "drawer", "sheet", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
     if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel"].includes(node.name)) fail(node, "compiled treeitem requires column, row or panel");
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
     if (node.name === "list-item" ? node.text.trim() !== "" && node.children.length !== 0 : container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
@@ -448,7 +448,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`${name}: ${JSON.stringify(value)}`);
         }
       }
-      else if (name === "min-width") props.push(`minWidth: ${bound(value, "number", node, scope)}`);
+      else if (name === "min-width" || name === "max-width") props.push(`${name === "min-width" ? "minWidth" : "maxWidth"}: ${bound(value, "number", node, scope)}`);
       else if (["resize-duration", "resize-easing", "resize-origin"].includes(name)) {
         if (node.name !== "split") fail(node, `${name} requires split`);
         if (name !== "resize-duration" && (!node.attrs.has("resize-duration") || node.attrs.get("resize-duration") === "0")) fail(node, `${name} requires nonzero resize-duration`);
@@ -474,7 +474,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         const expr = key(value, node, scope), prop = name === "key" ? "key" : "globalKey";
         props.push(`${prop}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
       } else if (["label", "text", "placeholder", "command"].includes(name)) {
-        if (name === "text" && !["input", "search-field", "textarea", "select", "accordion", "checkbox"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header or checkbox");
+        if (name === "text" && !["input", "search-field", "textarea", "select", "accordion", "checkbox", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header or checkbox");
         if (name === "placeholder" && !["input", "search-field", "textarea", "select"].includes(node.name)) fail(node, "placeholder requires a text-entry widget or select");
         if (name === "text" && node.text.trim()) fail(node, "text attribute cannot be combined with element text");
         const expr = value.startsWith("{") ? binding(value, node, scope) : { code: JSON.stringify(value), type: { kind: "string" } };
@@ -512,7 +512,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
-        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && node.name !== "dropdown-menu") fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (["input", "submit"].includes(channel) && !["input", "search-field", "textarea", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");
         if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {

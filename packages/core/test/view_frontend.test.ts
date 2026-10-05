@@ -311,7 +311,7 @@ test("literal Unicode, entities, keyed nodes and conditional splicing survive vi
 
 test("unsupported or malformed markup fails with source location before compilation", () => {
   const cases = [
-    ['<dialog/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
+    ['<unsupported-surface/>', /unsupported element/], ['<text unknown="1"/>', /unsupported attribute/],
     ['<constructor/>', /unsupported element/],
     ['<text>{missing}</text>', /unknown binding/], ['<text>{count.constructor}</text>', /unsupported field/], ['<text>{count; process.exit()}</text>', /unsupported expression/],
     ['<switch checked="{count}"/>', /expected boolean/], ['<button on-press="loaded"/>', /scalar Msg payload/],
@@ -1689,4 +1689,23 @@ test("compiled hover handlers preserve typed byte envelopes on nested keyed list
   assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]); assert.deepEqual(view()[0].hoverEnter, [1, 0]); assert.deepEqual(view()[1].hoverEnter, [1, 0]);
   model.status = new TextEncoder().encode("Rebound"); assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]);
   assert.throws(() => compileView('<panel on-hover-leave="leave"/>', input), /matching scalar/);
+});
+
+
+test("compiled modals retain nested content, width constraints, captions and dismiss envelopes", () => {
+  for (const kind of ["dialog", "drawer", "sheet"]) {
+    const { model, view } = evaluate(`<${kind} text="{status}" width="{count}" height="220" min-width="4" max-width="420" on-dismiss="reset"><column><button on-press="increment">Close</button></column></${kind}>`);
+    let nodes = view().nodes;
+    assert.deepEqual(nodes, [
+      { end: 3, kind, text: "Café\nnotes", width: 7, height: 220, minWidth: 4, maxWidth: 420, dismiss: [1, 5] },
+      { end: 3, kind: "column", text: "" },
+      { end: 3, kind: "button", text: "Close", press: [1, 3] },
+    ]);
+    model.count = 12; model.status = new TextEncoder().encode("Changed");
+    nodes = view().nodes;
+    assert.equal(nodes[0].width, 12); assert.equal(nodes[0].text, "Changed");
+    assert.throws(() => compileView(`<${kind} on-dismiss="missing"/>`, contract), /event/);
+    assert.throws(() => compileView(`<${kind} text="{count}"/>`, contract), /requires text/);
+  }
+  assert.throws(() => compileView('<button on-dismiss="reset"/>', contract), /unsupported/);
 });
