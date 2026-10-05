@@ -5117,6 +5117,7 @@ pub fn Effects(comptime Msg: type) type {
         /// for `finishReplay`, which turns it into the divergence
         /// refusal the void-returning `loadVideo` cannot raise itself.
         replay_video_diverged: bool = false,
+        replay_audio_diverged: bool = false,
         /// Drain-pass counter (incremented in `drainBoundary`): the
         /// retired-video sweep's clock. Loop-thread only.
         drain_pass_seq: u64 = 0,
@@ -6341,12 +6342,18 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// End-of-journal consistency check (the `.finish` replay
-        /// control): every journaled video cascade resolution must have
+        /// control): synchronous audio deliveries must match and leave no
+        /// fed results pending; every journaled video cascade resolution must have
         /// been consumed by the load it named, and none may have paired
         /// against a different key. A leftover or mismatched record
         /// means the replayed updates issued different loads than the
         /// recording — divergence, not success.
-        pub fn finishReplay(self: *Self) error{ReplayVideoDivergence}!void {
+        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence }!void {
+            if (self.replay_audio_diverged) return error.ReplayAudioDivergence;
+            for (0..self.pending_exit_len) |offset| {
+                const entry = self.pending_exits[(self.pending_exit_head + offset) % max_effect_pending_exits];
+                if (entry == .audio and entry.audio.resolve) return error.ReplayAudioDivergence;
+            }
             if (self.replay_video_diverged) return error.ReplayVideoDivergence;
             if (self.replay_video_source_len > 0) {
                 std.debug.print(
@@ -10434,10 +10441,6 @@ pub fn Effects(comptime Msg: type) type {
         /// or has no handler. Loop-thread only; called by
         /// `UiApp.handleEvent` for `.audio` platform events.
         pub fn takeAudioMsg(self: *Self, platform_event: platform.AudioEvent) ?Msg {
-            // Under replay the journaled effect records are the ONLY
-            // Msg source (fed through `feedAudioEvent`); the replayed
-            // platform `.audio` events would double-deliver.
-            if (self.replay) return null;
             const kind: EffectAudioEventKind = switch (platform_event.kind) {
                 .loaded => .loaded,
                 .position => .position,
@@ -10455,6 +10458,21 @@ pub fn Effects(comptime Msg: type) type {
                 .buffering = platform_event.buffering,
                 .bands = platform_event.bands,
             }) orelse return null;
+            if (self.replay) {
+                // Live reports deliver synchronously. Pair the fed result
+                // with this event now, leaving deferred rejections and other
+                // completions in their original drain order.
+                if (self.takePendingAudioMatching(event.key)) |recorded| {
+                    if (!std.meta.eql(recorded, event)) {
+                        self.replay_audio_diverged = true;
+                        return null;
+                    }
+                    const event_fn = audio_fn orelse return null;
+                    return event_fn(recorded);
+                }
+                if (audio_fn != null) self.replay_audio_diverged = true;
+                return null;
+            }
             const event_fn = audio_fn orelse return null;
             self.journalNote(.{
                 .kind = .audio,
@@ -10500,6 +10518,36 @@ pub fn Effects(comptime Msg: type) type {
             };
         }
 
+        /// Queue every field of a recorded delivery, including its owner
+        /// key and spectrum transport flags. Platform audio events pair
+        /// these records synchronously; fake executor feeds still drain.
+        pub fn feedAudioRecord(self: *Self, event: EffectAudio) !void {
+            if (!self.audio.active or self.audio.key != event.key) return error.EffectNotFound;
+            self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = null, .resolve = true } });
+        }
+
+        /// Remove only the first fed audio result for this channel. Shift
+        /// entries and their sequence stamps together so unrelated deferred
+        /// completions retain their exact order, including wrapped rings.
+        fn takePendingAudioMatching(self: *Self, key: u64) ?EffectAudio {
+            for (0..self.pending_exit_len) |offset| {
+                const index = (self.pending_exit_head + offset) % max_effect_pending_exits;
+                const entry = self.pending_exits[index];
+                if (entry != .audio or !entry.audio.resolve or entry.audio.event.key != key) continue;
+                var hole = offset;
+                while (hole + 1 < self.pending_exit_len) : (hole += 1) {
+                    const to = (self.pending_exit_head + hole) % max_effect_pending_exits;
+                    const from = (self.pending_exit_head + hole + 1) % max_effect_pending_exits;
+                    self.pending_exits[to] = self.pending_exits[from];
+                    self.pending_exit_seqs[to] = self.pending_exit_seqs[from];
+                }
+                self.pending_exit_len -= 1;
+                if (self.pending_exit_len == 0) self.pending_exit_head = 0;
+                return entry.audio.event;
+            }
+            return null;
+        }
+
         /// Fake executor / replay: feed one audio event as the platform
         /// would deliver it. The event resolves against the live channel
         /// at drain time (key and handler from the channel, mirrors
@@ -10509,9 +10557,8 @@ pub fn Effects(comptime Msg: type) type {
             return self.feedAudioEventBuffering(kind, position_ms, duration_ms, playing, false);
         }
 
-        /// `feedAudioEvent` with the stream-stall flag — the shape the
-        /// replayer feeds (journal records carry buffering) and stream
-        /// suites use; the plain feed keeps local-file tests terse.
+        /// `feedAudioEvent` with the stream-stall flag for fake executor
+        /// stream tests; the plain feed keeps local-file tests terse.
         pub fn feedAudioEventBuffering(self: *Self, kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool) !void {
             if (!self.audio.active) return error.EffectNotFound;
             self.deliverPending(.{ .audio = .{

@@ -3450,3 +3450,125 @@ test "a logic-only journal declares absent chrome and never queries the replay h
     recorder.finish();
     try std.testing.expect(recorder.failed and !recorder.finished);
 }
+
+const AudioChromeModel = struct { last: ?effects_mod.EffectAudio = null, count: u32 = 0 };
+const AudioChromeMsg = union(enum) { audio_event: effects_mod.EffectAudio };
+const AudioChromeApp = ui_app_mod.UiApp(AudioChromeModel, AudioChromeMsg);
+fn audioChromeInit(_: *AudioChromeModel, fx: *AudioChromeApp.Effects) void {
+    fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = AudioChromeApp.Effects.audioMsg(.audio_event) });
+}
+fn audioChromeUpdate(model: *AudioChromeModel, msg: AudioChromeMsg) void {
+    model.last = msg.audio_event;
+    model.count += 1;
+}
+fn audioChromeView(ui: *AudioChromeApp.Ui, model: *const AudioChromeModel) AudioChromeApp.Ui.Node {
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 52 }, .{ui.text(.{}, ui.fmt("Audio {d}", .{model.count}))}),
+        ui.text(.{}, if (model.last) |event| @tagName(event.kind) else "waiting"),
+    });
+}
+fn audioChromeOptions() AudioChromeApp.Options {
+    return .{ .name = "audio-chrome-session", .scene = session_scene, .canvas_label = canvas_label, .update = audioChromeUpdate, .view = audioChromeView, .init_fx = audioChromeInit };
+}
+
+test "native audio callbacks replay in their owning event with complete chrome snapshots and pixels" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "audio-chrome-session" });
+    const recorded = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer recorded.destroy(gpa);
+    recorded.null_platform.gpu_surfaces = true;
+    recorded.null_platform.window_chrome = .{ .insets = .{ .top = 52, .left = 98 }, .buttons = .init(20, 26, 68, 14) };
+    recorded.runtime.options.session_recorder = recorder;
+    const state = try gpa.create(AudioChromeApp);
+    defer gpa.destroy(state);
+    state.* = AudioChromeApp.init(std.heap.page_allocator, .{}, audioChromeOptions());
+    defer state.deinit();
+    state.effects.executor = .fake;
+    const app = state.app();
+    try recorded.start(app);
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = .init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+    const events = [_]platform.AudioEvent{
+        .{ .kind = .loaded, .duration_ms = 30_000, .playing = true },
+        .{ .kind = .position, .position_ms = 750, .duration_ms = 30_000, .playing = true, .buffering = true },
+        .{ .kind = .spectrum, .position_ms = 750, .duration_ms = 30_000, .playing = false, .buffering = true, .bands = @splat(17) },
+        .{ .kind = .position, .position_ms = 900, .duration_ms = 30_000, .playing = false },
+        .{ .kind = .completed, .position_ms = 999, .duration_ms = 30_000, .playing = true, .buffering = true },
+        .{ .kind = .failed, .position_ms = 12, .duration_ms = 30_000, .playing = true, .buffering = true },
+    };
+    for (events, 0..) |event, index| {
+        try recorded.runtime.dispatchPlatformEvent(app, .{ .audio = event });
+        try std.testing.expectEqual(@as(u32, @intCast(index + 1)), state.model.count);
+        try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try recordChromePixels(&recorded.runtime, recorder);
+    }
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    try std.testing.expect(recorder.window_chrome_count >= events.len);
+    const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer replayed.destroy(gpa);
+    replayed.null_platform.gpu_surfaces = true;
+    replayed.null_platform.window_chrome = .{ .buttons = .init(999, 999, 99, 99) };
+    const fresh = try gpa.create(AudioChromeApp);
+    defer gpa.destroy(fresh);
+    fresh.* = AudioChromeApp.init(std.heap.page_allocator, .{}, audioChromeOptions());
+    defer fresh.deinit();
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), buffer.journalBytes(), .{ .verify = true, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(u64, events.len), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, events.len), report.screenshots_verified);
+    try std.testing.expectEqualDeep(state.model, fresh.model);
+    try std.testing.expectEqualDeep(state.effects.audioSnapshot(), fresh.effects.audioSnapshot());
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+}
+
+test "synchronous recorded audio leaves wrapped deferred rejections in their original order" {
+    const fx = try std.testing.allocator.create(SessionApp.Effects);
+    defer std.testing.allocator.destroy(fx);
+    fx.* = SessionApp.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    // Advance the ring head before retaining two deferred rejection Msgs.
+    for (0..effects_mod.max_effect_pending_exits - 1) |_| {
+        fx.playAudio(.{ .key = 7, .path = "", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+        try std.testing.expect(fx.takeMsg() != null);
+    }
+    for ([_]u64{ 7, 8 }) |key| fx.playAudio(.{ .key = key, .path = "", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+    fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+    const event: effects_mod.EffectAudio = .{ .key = 41, .kind = .loaded, .duration_ms = 30_000, .playing = true };
+    try fx.feedAudioRecord(event);
+    const synchronous = fx.takeAudioMsg(.{ .kind = .loaded, .duration_ms = 30_000, .playing = true }).?;
+    try std.testing.expectEqualDeep(event, synchronous.audio_event);
+    for ([_]u64{ 7, 8 }) |key| {
+        const deferred = fx.takeMsg().?.audio_event;
+        try std.testing.expectEqual(key, deferred.key);
+        try std.testing.expectEqual(effects_mod.EffectAudioEventKind.rejected, deferred.kind);
+    }
+    try std.testing.expect(fx.takeMsg() == null);
+    try fx.finishReplay();
+}
+
+test "recorded audio rejects altered missing unconsumed and wrongly owned deliveries" {
+    for (0..4) |scenario| {
+        const fx = try std.testing.allocator.create(SessionApp.Effects);
+        defer std.testing.allocator.destroy(fx);
+        fx.* = SessionApp.Effects.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+        var event: effects_mod.EffectAudio = .{ .key = 41, .kind = .loaded, .duration_ms = 30_000, .playing = true };
+        if (scenario == 3) {
+            event.key = 42;
+            try std.testing.expectError(error.EffectNotFound, fx.feedAudioRecord(event));
+            continue;
+        }
+        if (scenario != 1) try fx.feedAudioRecord(event);
+        if (scenario != 2) try std.testing.expect(fx.takeAudioMsg(.{ .kind = .loaded, .duration_ms = if (scenario == 0) 31_000 else 30_000, .playing = true }) == null);
+        try std.testing.expectError(error.ReplayAudioDivergence, fx.finishReplay());
+    }
+}

@@ -650,9 +650,9 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, timer.id);
             try cursor.writeInt(u64, timer.timestamp_ns);
         },
-        // Recorded for stream fidelity; inert on replay (the journaled
-        // audio EFFECT records are the Msg source — `takeAudioMsg`
-        // ignores platform audio events under replay).
+        // Recorded for stream fidelity. On replay this event pairs with
+        // its complete audio EFFECT record and delivers the recorded Msg
+        // synchronously, preserving the live rebuild/query boundary.
         .audio => |audio| {
             try cursor.writeEnum(EventTag.audio);
             try cursor.writeEnum(audio.kind);

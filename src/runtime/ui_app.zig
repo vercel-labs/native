@@ -1746,13 +1746,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         // is still divergent input).
                         .write => try self.effects.pushReplayPtyWriteVerdict(record.key, record.code == 1),
                     },
-                    // Spectrum records feed through the band-carrying
-                    // helper so replay repaints identical bars; every
-                    // other audio kind rides the plain shape.
-                    .audio => if (record.audio_kind == .spectrum)
-                        try self.effects.feedAudioSpectrum(record.audio_bands, record.audio_position_ms, record.audio_duration_ms)
-                    else
-                        try self.effects.feedAudioEventBuffering(record.audio_kind, record.audio_position_ms, record.audio_duration_ms, record.audio_playing, record.audio_buffering),
+                    .audio => try self.effects.feedAudioRecord(.{
+                        .key = record.key,
+                        .kind = record.audio_kind,
+                        .position_ms = record.audio_position_ms,
+                        .duration_ms = record.audio_duration_ms,
+                        .playing = record.audio_playing,
+                        .buffering = record.audio_buffering,
+                        .bands = record.audio_bands,
+                    }),
                     // `.video` records feed the whole journaled shape —
                     // dimensions included — routed by the journaled
                     // load identity (`video_token`), so replay delivers
