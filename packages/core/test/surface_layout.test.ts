@@ -62,5 +62,6 @@ test("surface wire honors offset views and preserves a signed-zero clamp endpoin
     assert.deepEqual(native_window_policy(storage.subarray(7, 7 + valid.length)), native_window_policy(valid));
   }
   const values = [-0, 0, 600, 400, 0, 20, 200, 24, 80, 40, 0, 0, 0, 0, 180, 0, 4, 0, 0];
-  assert.equal(Object.is(frame(native_window_policy(anchored(0, 0, values)))![0], -0), true);
+  assert.equal(Object.is(frame(native_window_policy(anchored(0, 8, values)))![0], -0), true);
+  assert.equal(Object.is(frame(native_window_policy(anchored(0, 0, values)))![0], 0), true);
 });

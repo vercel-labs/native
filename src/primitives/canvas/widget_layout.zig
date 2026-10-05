@@ -527,7 +527,7 @@ pub fn anchoredWidgetFrame(
     if (tokens.surface_layout_policy) |policy| {
         const intrinsic = intrinsicWidgetSize(child, tokens);
         const point = anchor.point orelse geometry.PointF.init(0, 0);
-        return @import("surface_layout_policy.zig").frame(policy, 1, @intFromEnum(anchor.placement), @as(u8, @intFromEnum(anchor.alignment)) | (if (anchor.point != null) @as(u8, 4) else 0), &.{ window_rect.x, window_rect.y, window_rect.width, window_rect.height, anchor_rect.x, anchor_rect.y, anchor_rect.width, anchor_rect.height, child.frame.width, child.frame.height, intrinsic.width, intrinsic.height, child.layout.min_size.width, child.layout.min_size.height, child.layout.max_size.width, child.layout.max_size.height, anchor.offset, point.x, point.y }) orelse @panic("invalid compiled anchor frame");
+        return @import("surface_layout_policy.zig").frame(policy, 1, @intFromEnum(anchor.placement), @import("surface_layout_policy.zig").anchorFlags(@intFromEnum(anchor.alignment), anchor.point != null), &.{ window_rect.x, window_rect.y, window_rect.width, window_rect.height, anchor_rect.x, anchor_rect.y, anchor_rect.width, anchor_rect.height, child.frame.width, child.frame.height, intrinsic.width, intrinsic.height, child.layout.min_size.width, child.layout.min_size.height, child.layout.max_size.width, child.layout.max_size.height, anchor.offset, point.x, point.y }) orelse @panic("invalid compiled anchor frame");
     }
     const window = window_rect.normalized();
     const anchor_frame = if (anchor.point) |point| geometry.RectF.init(

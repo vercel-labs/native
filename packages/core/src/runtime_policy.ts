@@ -630,10 +630,10 @@ function nscvShellDefaultHeight(kind: number, parent: number): number {
 interface NscSurfaceRect { readonly x: number; readonly y: number; readonly width: number; readonly height: number; }
 function nscvSurfaceMax(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.max(a, b); }
 function nscvSurfaceMin(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.min(a, b); }
-function nscvSurfaceClamp(v: number, lo: number, hi: number): number {
-  // Native clamp retains the lower endpoint, including its signed zero.
+function nscvSurfaceClamp(v: number, lo: number, hi: number, keepsLowerZero: boolean): number {
+  // The native numeric capability preserves the target's zero endpoint sign.
   const result = nscvSurfaceMax(lo, nscvSurfaceMin(v, hi));
-  return result === lo ? lo : result;
+  return keepsLowerZero && result === lo ? lo : result;
 }
 function nscvSurfaceBound(v: number, lo: number, hi: number): number { return nscvSurfaceMax(lo, hi > 0 ? nscvSurfaceMin(v, hi) : v); }
 function nscvSurfaceNormalize(r: NscSurfaceRect): NscSurfaceRect {
@@ -678,10 +678,10 @@ function nscvSurfaceLayout(request: Uint8Array): Uint8Array {
       }
     }
   } else if (operation === 1) {
-    if (a > 1 || b > 6) throw new Error("invalid anchor layout flags");
-    const point = (b & 4) !== 0, alignment = b & 3;
+    if (a > 1 || b > 14) throw new Error("invalid anchor layout flags");
+    const point = (b & 4) !== 0, alignment = b & 3, keepsLowerZero = (b & 8) !== 0;
     if (alignment > 2) throw new Error("invalid anchor alignment");
-    const anchor = point ? { x: nscvSurfaceClamp(v[17]!, bounds.x, nscvSurfaceRight(bounds)), y: nscvSurfaceClamp(v[18]!, bounds.y, nscvSurfaceBottom(bounds)), width: 0, height: 0 }
+    const anchor = point ? { x: nscvSurfaceClamp(v[17]!, bounds.x, nscvSurfaceRight(bounds), keepsLowerZero), y: nscvSurfaceClamp(v[18]!, bounds.y, nscvSurfaceBottom(bounds), keepsLowerZero), width: 0, height: 0 }
       : nscvSurfaceNormalize({ x: v[4]!, y: v[5]!, width: v[6]!, height: v[7]! });
     let width = v[8]! > 0 ? v[8]! : v[10]!;
     if (alignment === 2) width = nscvSurfaceMax(width, anchor.width);
@@ -695,8 +695,8 @@ function nscvSurfaceLayout(request: Uint8Array): Uint8Array {
     height = nscvSurfaceMin(height, nscvSurfaceMax(0, below ? belowSpace : aboveSpace));
     const y = below ? Math.fround(nscvSurfaceBottom(anchor) + offset) : Math.fround(Math.fround(anchor.y - offset) - height);
     const x = alignment === 1 ? Math.fround(nscvSurfaceRight(anchor) - width) : anchor.x;
-    frame = { x: nscvSurfaceClamp(x, bounds.x, nscvSurfaceMax(bounds.x, Math.fround(nscvSurfaceRight(bounds) - width))),
-      y: nscvSurfaceClamp(y, bounds.y, nscvSurfaceMax(bounds.y, Math.fround(nscvSurfaceBottom(bounds) - height))), width, height };
+    frame = { x: nscvSurfaceClamp(x, bounds.x, nscvSurfaceMax(bounds.x, Math.fround(nscvSurfaceRight(bounds) - width)), keepsLowerZero),
+      y: nscvSurfaceClamp(y, bounds.y, nscvSurfaceMax(bounds.y, Math.fround(nscvSurfaceBottom(bounds) - height)), keepsLowerZero), width, height };
   } else {
     if (a > 1 || b > 1) throw new Error("invalid caption clearance flags");
     // Content is already normalized by the layout. Preserve it verbatim
