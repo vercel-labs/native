@@ -117,7 +117,7 @@ pub fn layoutWidgetDepth(
         .scroll_view => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
-            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.scroll_axes, scrollLayoutOffset(widget), tokens),
+            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.scroll_axes, if (tokens.intrinsic_layout_policy != null) geometry.OffsetF.init(widget.value_x, widget.value) else scrollLayoutOffset(widget), tokens),
         .list => if (widget.layout.virtualized)
             try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
         else
@@ -1551,6 +1551,25 @@ fn layoutScrollChildren(
     scroll_offset: geometry.OffsetF,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.intrinsic_layout_policy) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("virtual_flow_policy.zig").Plan.init(scratch.get(), policy, children.len, .{ .content = content, .horizontal = axes.scrollsHorizontally(), .vertical = axes.scrollsVertically(), .scroll_x = scroll_offset.dx, .scroll_y = scroll_offset.dy }) catch @panic("scroll flow allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, index| if (widgetTakesFlowSlot(child)) {
+            plan.setChild(index, child, 0);
+        };
+        plan.run(2);
+        for (children, 0..) |child, index| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            plan.setFrame(index, stackChildFrame(plan.content(), child, tokens));
+            if (plan.needsWidth(index)) plan.setIntrinsicWidth(index, intrinsicChildSize(child, tokens, depth + 1).width);
+        }
+        plan.run(2);
+        for (children, 0..) |child, index| {
+            if (plan.enabled(index)) _ = try layoutWidgetDepth(child, plan.frame(index), parent_index, depth + 1, output, len, tokens);
+        }
+        return;
+    }
     const scrolled_content = content.translate(geometry.OffsetF.init(-scroll_offset.dx, -scroll_offset.dy));
     for (children) |child| {
         if (!widgetTakesFlowSlot(child)) continue;
@@ -1577,6 +1596,7 @@ fn layoutVirtualVerticalChildren(
     style: WidgetLayoutStyle,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.intrinsic_layout_policy != null) return compiledVirtualVerticalChildren(children, content, parent_index, depth, output, len, scroll_y, style, tokens);
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
 
@@ -1700,6 +1720,39 @@ fn layoutVariableVirtualChildren(
         try layoutVariableVirtualChild(child, content, y, height, first_index + flow_offset, item_count, parent_index, depth, output, len, tokens);
         y += height + gap;
         flow_offset += 1;
+    }
+}
+
+/// Native measurement and traversal surround one copied portable row plan.
+fn compiledVirtualVerticalChildren(children: []const Widget, content: geometry.RectF, parent_index: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, scroll_y: f32, style: WidgetLayoutStyle, tokens: DesignTokens) Error!void {
+    const flow_count = widgetFlowChildCount(children);
+    if (flow_count == 0) return;
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("virtual_flow_policy.zig").Plan.init(scratch.get(), tokens.intrinsic_layout_policy.?, children.len, .{ .content = content, .first = style.virtual_first_index, .declared = style.virtual_item_count, .anchor = style.virtual_anchor_index, .overscan = style.virtual_overscan, .flow_count = flow_count, .gap = style.gap, .item_extent = style.virtual_item_extent, .scroll_y = scroll_y, .anchor_extent = style.virtual_anchor_extent, .total_extent = style.virtual_total_extent }) catch @panic("virtual row allocation failed");
+    defer plan.deinit();
+    var flow: usize = 0;
+    for (children, 0..) |child, index| {
+        if (!widgetTakesFlowSlot(child)) continue;
+        plan.setChild(index, child, style.virtual_first_index +% flow);
+        flow += 1;
+    }
+    plan.run(0);
+    if (plan.mode() == 1) {
+        for (children, 0..) |child, index| {
+            if (widgetTakesFlowSlot(child) and !(child.frame.height > 0)) plan.setHeight(index, variableVirtualRowExtent(child, content.width, tokens, depth + 1));
+        }
+    } else if (!(style.virtual_item_extent > 0)) {
+        plan.setExtent(preferredMainExtent(firstWidgetFlowChild(children).?, .vertical, tokens));
+    }
+    plan.run(0);
+    if (plan.mode() == 0) output[parent_index].widget.layout.virtual_item_extent = plan.itemExtent();
+    output[parent_index].widget.semantics.list_item_count = plan.itemCount();
+    for (children, 0..) |source, index| {
+        if (!plan.enabled(index)) continue;
+        var child = source;
+        child.semantics.list_item_index = plan.itemIndex(index);
+        child.semantics.list_item_count = plan.itemCount();
+        _ = try layoutWidgetDepth(child, plan.frame(index), parent_index, depth + 1, output, len, tokens);
     }
 }
 
@@ -2976,6 +3029,7 @@ pub fn virtualWidgetScrollContentExtent(widget: Widget, viewport_extent: f32) f3
 }
 
 pub fn virtualWidgetScrollContentExtentWithTokens(widget: Widget, viewport_extent: f32, tokens: DesignTokens) f32 {
+    if (tokens.intrinsic_layout_policy != null) return compiledVirtualContentExtent(widget, viewport_extent, tokens);
     // A variable-extent windowed virtual list DECLARES its content
     // extent: the window's offset table already summed estimates plus
     // measured corrections plus gaps, and stamping it here is what
@@ -3002,6 +3056,27 @@ pub fn virtualWidgetScrollContentExtentWithTokens(widget: Widget, viewport_exten
         .viewport_extent = viewport_extent,
         .scroll_offset = widget.value,
     }).content_extent;
+}
+
+fn compiledVirtualContentExtent(widget: Widget, viewport: f32, tokens: DesignTokens) f32 {
+    const flow_count = widgetFlowChildCount(widget.children);
+    const policy = tokens.intrinsic_layout_policy.?;
+    const grid = if (widget.kind == .grid and flow_count > 0 and widget.layout.virtual_item_count == 0) @import("grid_layout_policy.zig").plan(policy, flow_count, widget.layout.columns, 0, .{}, 0, 0, 0, 0, false) else null;
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("virtual_flow_policy.zig").Plan.init(scratch.get(), policy, widget.children.len, .{ .content = .init(0, 0, 0, viewport), .first = widget.layout.virtual_first_index, .declared = widget.layout.virtual_item_count, .grid_rows = if (grid) |value| value.rows else 0, .grid = widget.kind == .grid, .semantic = widget.semantics.list_item_count orelse 0, .flow_count = flow_count, .gap = widget.layout.gap, .item_extent = widget.layout.virtual_item_extent, .scroll_y = widget.value, .total_extent = widget.layout.virtual_total_extent }) catch @panic("virtual content allocation failed");
+    defer plan.deinit();
+    for (widget.children, 0..) |child, index| if (widgetTakesFlowSlot(child)) {
+        plan.setChild(index, child, 0);
+    };
+    plan.run(1);
+    if (plan.mode() != 2 and !(widget.layout.virtual_item_extent > 0)) {
+        if (widget.kind == .grid and flow_count > 0) {
+            const columns = if (grid) |value| value.columns else @import("grid_layout_policy.zig").plan(policy, flow_count, widget.layout.columns, 0, .{}, 0, 0, 0, 0, false).columns;
+            plan.setExtent(preferredGridRowExtent(widget.children, columns, tokens));
+        } else if (firstWidgetFlowChild(widget.children)) |child| plan.setExtent(preferredMainExtent(child, .vertical, tokens));
+    }
+    plan.run(1);
+    return plan.contentExtent();
 }
 
 fn virtualWidgetScrollItemCount(widget: Widget) usize {

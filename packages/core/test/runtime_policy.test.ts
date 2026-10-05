@@ -305,7 +305,7 @@ test("window requests refuse malformed counts, labels, operations and trailing b
     for (let length = 0; length < valid.length; length++) assert.throws(() => native_window_policy(valid.subarray(0, length)), /window/);
     assert.throws(() => native_window_policy(new Uint8Array([...valid, 0])), /trailing/);
   }
-  assert.throws(() => native_window_policy(new Uint8Array([8])), /operation/);
+  assert.throws(() => native_window_policy(new Uint8Array([9])), /operation/);
   assert.throws(() => native_window_policy(new Uint8Array([0, 5])), /count/);
   assert.throws(() => native_window_policy(new Uint8Array([0, 0, 5])), /count/);
 });

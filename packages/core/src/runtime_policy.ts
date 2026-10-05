@@ -113,6 +113,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 5) return nscvContainerLayout(request);
   if (request[0] === 6) return nscvIntrinsicLayout(request);
   if (request[0] === 7) return nscvWrappedLayout(request);
+  if (request[0] === 8) return nscvVirtualFlow(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -754,27 +755,10 @@ function nscvGridLayout(request: Uint8Array): Uint8Array {
     let start = 0, end = count, offset = 0, extent = 0;
     if (virtual) {
       extent = float(48) > 0 ? float(48) : float(52);
-      if (rows === 0 || extent <= 0 || float(40) <= 0) { start = 0; end = 0; extent = 0; height = 0; }
-      else {
-        extent = nscvSurfaceMax(0, extent);
-        const stride = f(extent + gap), viewport = nscvSurfaceMax(0, float(40));
-        const total = f(f(f(rows) * extent) + f(nscvSurfaceMax(0, f(f(rows) - 1)) * gap));
-        const maxOffset = nscvSurfaceMax(0, f(total - viewport));
-        const raw = Number.isFinite(float(56)) ? float(56) : 0;
-        const bounded = nscvSurfaceClamp(nscvSurfaceMax(0, raw), 0, maxOffset, (flags & 2) !== 0);
-        offset = nscvSurfaceClamp(raw, -viewport, f(maxOffset + viewport), (flags & 2) !== 0);
-        const firstValue = f(bounded / stride), endValue = f(f(f(bounded + viewport) + gap) / stride);
-        const first = Math.min(rows - 1, Number.isFinite(firstValue) && firstValue > 0 ? Math.floor(firstValue) : 0);
-        const visibleEnd = Math.min(rows, Number.isFinite(endValue) && endValue > 0 ? Math.ceil(endValue) : 0);
-        start = first > overscan ? first - overscan : 0;
-        // Native usize addition is checked in safety builds and wraps in
-        // optimized builds. Keep the two lanes until after that boundary.
-        const lowSum = wire.getUint32(20, true) + visibleEnd % 4294967296;
-        const hiSum = wire.getUint32(24, true) + Math.floor(visibleEnd / 4294967296) + Math.floor(lowSum / 4294967296);
-        if (hiSum > 4294967295 && (flags & 4) !== 0) throw new Error("grid overscan overflow");
-        const sum = lowSum % 4294967296 + (hiSum % 4294967296) * 4294967296;
-        end = Math.min(rows, sum); height = extent;
-      }
+      const range = nscvFlowRange(nscvFlowSmall(rows), f(rows), extent, gap, float(40), float(56), nscvFlowInteger(wire, 20), flags >> 1);
+      start = range.start.low + range.start.high * 4294967296;
+      end = range.end.low + range.end.high * 4294967296;
+      offset = range.offset; extent = range.extent; height = range.extent;
     }
     const result = new Uint8Array(52), out = new DataView(result.buffer);
     // Preserve all integer bits of the chosen declared column count.
@@ -1051,4 +1035,113 @@ function nscvWrappedLayout(request: Uint8Array): Uint8Array {
     height = nscvSurfaceBound(height, v(24), v(28));
   }
   out.setFloat32(12, height, true); return result;
+}
+
+
+type NscFlowInteger = { low: number; high: number };
+function nscvFlowInteger(wire: DataView, at: number): NscFlowInteger { return { low: wire.getUint32(at, true), high: wire.getUint32(at + 4, true) }; }
+function nscvFlowCompare(a: NscFlowInteger, b: NscFlowInteger): number { return a.high !== b.high ? a.high - b.high : a.low - b.low; }
+function nscvFlowSmall(n: number): NscFlowInteger { return { low: n % 4294967296, high: Math.floor(n / 4294967296) }; }
+function nscvFlowAdd(a: NscFlowInteger, b: NscFlowInteger, checked: boolean): NscFlowInteger {
+  const low = a.low + b.low, high = a.high + b.high + Math.floor(low / 4294967296);
+  if (checked && high > 4294967295) throw new Error("virtual flow index overflow");
+  return { low: low % 4294967296, high: high % 4294967296 };
+}
+function nscvFlowSubtract(a: NscFlowInteger, b: NscFlowInteger): NscFlowInteger {
+  if (nscvFlowCompare(a, b) <= 0) return { low: 0, high: 0 };
+  return { low: a.low >= b.low ? a.low - b.low : a.low + 4294967296 - b.low, high: a.high - b.high - (a.low < b.low ? 1 : 0) };
+}
+function nscvFlowMin(a: NscFlowInteger, b: NscFlowInteger): NscFlowInteger { return nscvFlowCompare(a, b) < 0 ? a : b; }
+function nscvFlowMax(a: NscFlowInteger, b: NscFlowInteger): NscFlowInteger { return nscvFlowCompare(a, b) > 0 ? a : b; }
+function nscvFlowZero(a: NscFlowInteger): boolean { return a.low === 0 && a.high === 0; }
+function nscvFlowIndex(value: number, ceil: boolean, checked: boolean): NscFlowInteger {
+  if (!Number.isFinite(value) || value <= 0) return { low: 0, high: 0 };
+  const integer = ceil ? Math.ceil(value) : Math.floor(value);
+  if (integer >= 18446744073709551616) {
+    if (checked) throw new Error("virtual flow floating index overflow");
+    return { low: 4294967295, high: 4294967295 };
+  }
+  return nscvFlowSmall(integer);
+}
+function nscvFlowSemantic(value: NscFlowInteger): number { return value.high > 0 ? 4294967295 : value.low; }
+function nscvFlowWrite(out: DataView, at: number, value: NscFlowInteger): void { out.setUint32(at, value.low, true); out.setUint32(at + 4, value.high, true); }
+
+type NscFlowRange = { start: NscFlowInteger; end: NscFlowInteger; extent: number; gap: number; offset: number; total: number };
+/** Shared uniform-window arithmetic over exact integer lanes and native
+ * integer-to-f32 conversion facts. Native owns measurement and traversal. */
+function nscvFlowRange(count: NscFlowInteger, countF: number, authored: number, gapValue: number, viewportValue: number, scroll: number, overscan: NscFlowInteger, flags: number): NscFlowRange {
+  const zero = { low: 0, high: 0 }, f = Math.fround, max = nscvSurfaceMax;
+  if (nscvFlowZero(count) || authored <= 0 || viewportValue <= 0) return { start: zero, end: zero, extent: 0, gap: 0, offset: 0, total: 0 };
+  const extent = max(0, authored), gap = max(0, gapValue), stride = f(extent + gap), viewport = max(0, viewportValue);
+  const total = f(f(countF * extent) + f(max(0, f(countF - 1)) * gap));
+  const maximum = max(0, f(total - viewport)), raw = Number.isFinite(scroll) ? scroll : 0;
+  const offset = nscvSurfaceClamp(max(0, raw), 0, maximum, (flags & 1) !== 0);
+  const layout = nscvSurfaceClamp(raw, -viewport, f(maximum + viewport), (flags & 1) !== 0);
+  const first = nscvFlowMin(nscvFlowSubtract(count, nscvFlowSmall(1)), nscvFlowIndex(f(offset / stride), false, (flags & 2) !== 0));
+  const visibleEnd = nscvFlowMin(count, nscvFlowIndex(f(f(f(offset + viewport) + gap) / stride), true, (flags & 2) !== 0));
+  return { start: nscvFlowSubtract(first, overscan), end: nscvFlowMin(count, nscvFlowAdd(visibleEnd, overscan, (flags & 2) !== 0)), extent, gap, offset: layout, total };
+}
+
+/** Virtual row placement, scroll displacement and content extents over
+ * explicit native measurement facts. Requests/results have copied ownership;
+ * index lanes retain every usize bit independently of JS number precision. */
+function nscvVirtualFlow(request: Uint8Array): Uint8Array {
+  if (request.length < 128 || request[0] !== 8) throw new Error("invalid virtual flow request");
+  const op = request[1]!, flags = request[2]!, axes = request[3]!;
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(4, true);
+  if (op > 2 || flags > 3 || axes > 7 || request.length !== 128 + count * 64 || wire.getUint32(120, true) !== 0 || wire.getUint32(124, true) !== 0) throw new Error("invalid virtual flow operation, flags or length");
+  const first = nscvFlowInteger(wire, 8), declared = nscvFlowInteger(wire, 16), anchor = nscvFlowInteger(wire, 24), overscan = nscvFlowInteger(wire, 32);
+  const semantic = nscvFlowInteger(wire, 40), gridRows = nscvFlowInteger(wire, 48), f = Math.fround, max = nscvSurfaceMax;
+  const v = (at: number): number => wire.getFloat32(at, true);
+  let flows = 0;
+  for (let i = 0; i < count; i++) { const lane = wire.getUint32(128 + i * 64, true); if (lane > 1) throw new Error("invalid virtual flow child flags"); if (lane === 1) flows++; }
+  const checked = (flags & 2) !== 0, windowed = !nscvFlowZero(declared), variable = windowed && v(116) > 0;
+  const builtEnd = op === 1 && variable ? declared : op !== 2 && windowed ? nscvFlowAdd(first, nscvFlowSmall(flows), checked) : nscvFlowSmall(flows);
+  let items = windowed ? nscvFlowMax(declared, builtEnd) : op === 1 && (axes & 4) !== 0 && flows > 0 ? gridRows : flows > 0 ? nscvFlowSmall(flows) : semantic;
+  let itemsF = windowed ? nscvFlowCompare(declared, builtEnd) >= 0 ? v(64) : v(60) : op === 1 && (axes & 4) !== 0 && flows > 0 ? v(68) : flows > 0 ? v(56) : v(72);
+  if (op === 0 && flows === 0) { items = nscvFlowSmall(0); itemsF = 0; }
+  const x = v(76), y = v(80), width = v(84), viewport = v(88), gap = max(0, v(92));
+  const extent = v(96) > 0 ? v(96) : v(100), scroll = v(108);
+  const range = variable || op === 2 ? { start: nscvFlowSmall(0), end: items, extent: 0, gap, offset: 0, total: v(116) }
+    : nscvFlowRange(items, itemsF, extent, v(92), viewport, scroll, op === 1 ? nscvFlowSmall(0) : overscan, flags);
+  const result = new Uint8Array(48 + count * 32), out = new DataView(result.buffer);
+  out.setUint32(0, count, true); out.setUint32(4, op === 2 ? 4 : op === 1 ? variable ? 2 : 3 : variable ? 1 : 0, true);
+  out.setUint32(8, nscvFlowSemantic(items), true); out.setFloat32(12, range.extent, true);
+  out.setFloat32(16, op === 1 && variable ? v(116) : range.total, true); out.setFloat32(20, range.offset, true); nscvFlowWrite(out, 40, items);
+  const translatedX = op === 2 ? f(x - ((axes & 1) !== 0 ? v(104) : 0)) : x;
+  const translatedY = op === 2 ? f(y - ((axes & 2) !== 0 ? scroll : 0)) : y;
+  for (const [at, value] of [[24, translatedX], [28, translatedY], [32, width], [36, viewport]]) out.setFloat32(at!, value!, true);
+  let anchorChild = 0, leading = 0;
+  if (op === 0 && variable && flows > 0) {
+    const boundedAnchor = nscvFlowMin(nscvFlowSubtract(anchor, first), nscvFlowSmall(flows - 1)); anchorChild = boundedAnchor.low;
+    const total = max(0, v(116)), maximum = max(0, f(total - viewport)), raw = Number.isFinite(scroll) ? scroll : 0;
+    const offset = nscvSurfaceClamp(raw, -viewport, f(maximum + viewport), (flags & 1) !== 0);
+    leading = f(f(y + max(0, v(112))) - offset);out.setFloat32(20, offset, true);
+    let before = 0;
+    for (let i = 0; i < count && before < anchorChild; i++) {
+      const at = 128 + i * 64;if (wire.getUint32(at, true) === 0) continue;
+      const height = nscvSurfaceBound(v(at + 12) > 0 ? v(at + 12) : v(at + 40), v(at + 24), v(at + 28));
+      leading = f(leading - f(height + gap)); before++;
+    }
+  }
+  let index = 0;
+  for (let i = 0; i < count; i++) {
+    const at = 128 + i * 64, target = 48 + i * 32;
+    if (wire.getUint32(at, true) === 0 || op === 1) continue;
+    const absolute = op === 2 ? nscvFlowSmall(0) : nscvFlowAdd(first, nscvFlowSmall(index), checked); index++;
+    if (op === 0 && !variable && (nscvFlowCompare(absolute, range.start) < 0 || nscvFlowCompare(absolute, range.end) >= 0)) continue;
+    const measureHorizontal = op === 2 && (axes & 1) !== 0 && v(at + 8) <= 0;
+    out.setUint32(target, measureHorizontal ? 3 : 1, true);out.setUint32(target + 4, nscvFlowSemantic(absolute), true);nscvFlowWrite(out, target + 24, absolute);
+    let childX: number, childY: number, childWidth: number, childHeight: number;
+    if (op === 2) {
+      childX = v(at + 48);childY = v(at + 52);childWidth = measureHorizontal ? max(v(at + 56), v(at + 44)) : v(at + 56);childHeight = v(at + 60);
+    } else {
+      childX = f(x + v(at + 32));childWidth = nscvSurfaceBound(v(at + 8) > 0 ? v(at + 8) : width, v(at + 16), v(at + 20));
+      childHeight = nscvSurfaceBound(v(at + 12) > 0 ? v(at + 12) : variable ? v(at + 40) : range.extent, v(at + 24), v(at + 28));
+      childY = variable ? f(leading + v(at + 36)) : f(f(f(y + f(v(at + 4) * f(range.extent + range.gap))) - range.offset) + v(at + 36));
+      if (variable) leading = f(leading + f(childHeight + gap));
+    }
+    for (const [offset, value] of [[8, childX], [12, childY], [16, childWidth], [20, childHeight]]) out.setFloat32(target + offset!, value!, true);
+  }
+  return result;
 }

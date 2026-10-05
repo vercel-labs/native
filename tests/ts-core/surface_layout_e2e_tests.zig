@@ -767,3 +767,124 @@ test "wrapped recursive results and large native scratch retain borrowed core an
     core.rt.frameReset();
     try expectComplete(expected, actual);
 }
+
+test "compiled virtual vertical flow preserves complete uniform windows hoisted children and declared counts" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .frame = .init(0.125, -0.0, 0, 0), .children = &.{.{ .id = 3, .kind = .text, .text = "First" }} },
+        .{ .id = 4, .kind = .popover, .frame = .init(0, 0, 40, 20) },
+        .{ .id = 5, .kind = .list_item, .frame = .init(-0.0, 2.125, 120, 27), .layout = .{ .min_size = .init(100, 30) }, .children = &.{.{ .id = 6, .kind = .text, .text = "Second" }} },
+        .{ .id = 7, .kind = .list_item, .children = &.{.{ .id = 8, .kind = .text, .text = "Third" }} },
+    };
+    for ([_]canvas.WidgetKind{ .list, .scroll_view }) |kind| {
+        for ([_]usize{ 0, 10, 16777219, 4294967298, 9007199254740995 }) |declared| {
+            for ([_]usize{ 0, 3 }) |first| {
+                for ([_]usize{ 0, 1, 10 }) |overscan| {
+                    for ([_]f32{ -400, -0.0, 0, 31.000002, 90, 999999, std.math.inf(f32), std.math.nan(f32) }) |offset| {
+                        const root = canvas.Widget{ .id = 1, .kind = kind, .value = offset, .children = &children, .layout = .{ .virtualized = true, .virtual_first_index = first, .virtual_item_count = declared, .virtual_item_extent = 31.000002, .virtual_overscan = overscan, .gap = 2.125 } };
+                        try expectTree(root, .init(0.125, -0.0, 240.00002, 100), .{});
+                        core.rt.frameReset();
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled virtual flow retains exact uint64 indices above number precision" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const rows = [_]canvas.Widget{ .{ .id = 2, .kind = .list_item, .frame = .init(0, 0, 0, 30) }, .{ .id = 3, .kind = .list_item, .frame = .init(0, 0, 0, 40) } };
+    for ([_]usize{ 16777219, 4294967298, 9007199254740993, 18446744073709551500 }) |first| {
+        const count = first + rows.len;
+        const root = canvas.Widget{ .id = 1, .kind = .list, .children = &rows, .layout = .{ .virtualized = true, .virtual_first_index = first, .virtual_item_count = count, .virtual_item_extent = 30.000002, .virtual_overscan = first, .gap = 2.125 } };
+        try expectTree(root, .init(0.125, -0.0, 240, 100), .{});
+        core.rt.frameReset();
+    }
+}
+
+test "compiled variable flow clamps anchors and composes measured rows in source order" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const rows = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .layout = .{ .padding = .all(3), .min_size = .init(20, 30) }, .children = &.{.{ .id = 3, .kind = .text, .spans = &.{.{ .text = "Wrapped words before the anchor depend on viewport width." }} }} },
+        .{ .id = 4, .kind = .popover, .frame = .init(0, 0, 40, 20) },
+        .{ .id = 5, .kind = .list_item, .frame = .init(0, 2.125, 120, 50), .layout = .{ .max_size = .init(100, 40) } },
+        .{ .id = 6, .kind = .column, .children = &.{.{ .id = 7, .kind = .text, .spans = &.{.{ .text = "After the anchor\nSecond line with enough words to wrap." }} }} },
+    };
+    for ([_]usize{ 0, 10, 11, 12, 999 }) |anchor| {
+        for ([_]f32{ 80, 240.00002, 480 }) |width| {
+            for ([_]f32{ -999, -0.0, 0, 100, 300, 999, std.math.inf(f32), std.math.nan(f32) }) |offset| {
+                const root = canvas.Widget{ .id = 1, .kind = .list, .value = offset, .layout = .{ .virtualized = true, .virtual_first_index = 10, .virtual_item_count = 100, .virtual_anchor_index = anchor, .virtual_anchor_extent = 120.00001, .virtual_total_extent = 500.00003, .gap = 2.125 }, .children = &rows };
+                try expectTree(root, .init(0.125, -0.0, width, 100), .{});
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "compiled virtual content extents preserve empty semantic grid and exact large count selection" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const rows = [_]canvas.Widget{ .{ .id = 2, .kind = .list_item, .frame = .init(0, 0, 0, 30) }, .{ .id = 3, .kind = .list_item, .frame = .init(0, 0, 0, 40) }, .{ .id = 4, .kind = .popover } };
+    for ([_]canvas.WidgetKind{ .list, .scroll_view, .grid }) |kind| {
+        for ([_][]const canvas.Widget{ &.{}, &rows }) |children| {
+            for ([_]usize{ 0, 1, 10, 16777219, 4294967298, 9007199254740995 }) |declared| {
+                for ([_]f32{ 0, 30.000002 }) |extent| {
+                    for ([_]f32{ 0, 100, 999 }) |total| {
+                        const root = canvas.Widget{ .id = 1, .kind = kind, .children = children, .semantics = .{ .list_item_count = 7 }, .layout = .{ .virtualized = true, .columns = 2, .virtual_first_index = 3, .virtual_item_count = declared, .virtual_item_extent = extent, .virtual_total_extent = total, .gap = 2.125 } };
+                        for ([_]f32{ 0, 100, 240.00002 }) |viewport| {
+                            const expected = canvas.virtualWidgetScrollContentExtentWithTokens(root, viewport, .{});
+                            const actual = canvas.virtualWidgetScrollContentExtentWithTokens(root, viewport, .{ .intrinsic_layout_policy = core.nativeWindowPolicy });
+                            try expectComplete(expected, actual);
+                            core.rt.frameReset();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled scroll flow preserves axis grants authored widths and natural horizontal measurement" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .row, .children = &.{.{ .id = 3, .kind = .text, .text = "An unwrapped horizontal line extends beyond the viewport" }} },
+        .{ .id = 4, .kind = .text, .text = "Authored width", .frame = .init(2.125, -0.0, 160, 40) },
+        .{ .id = 5, .kind = .popover, .frame = .init(0, 0, 40, 20) },
+    };
+    for ([_]canvas.ScrollAxes{ .vertical, .horizontal, .both }) |axes| {
+        for ([_]f32{ -80, -0.0, 0, 50.000004, 999 }) |x| {
+            for ([_]f32{ -80, -0.0, 0, 50.000004, 999 }) |y| {
+                try expectTree(.{ .id = 1, .kind = .scroll_view, .scroll_axes = axes, .value_x = x, .value = y, .children = &children }, .init(0.125, -0.0, 240, 100), .{});
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "large virtual flow plans own copied frames across recursive calls and borrowed views" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var rows: [256]canvas.Widget = undefined;
+    for (&rows, 0..) |*row, i| row.* = .{ .id = @intCast(i + 2), .kind = .list_item, .frame = .init(0, 0, 0, 30), .children = &.{.{ .id = 500, .kind = .text, .text = "Recursive row" }} };
+    const root = canvas.Widget{ .id = 1, .kind = .list, .children = &rows, .layout = .{ .virtualized = true, .virtual_first_index = 10, .virtual_item_count = 1000, .virtual_anchor_index = 100, .virtual_anchor_extent = 3000, .virtual_total_extent = 30000, .gap = 0.125 } };
+    const borrowed = core.rt.frameAlloc(u8, 8);
+    @memcpy(borrowed, "flow\x00abi");
+    var view: [*]const u8 = undefined;
+    var view_len: usize = 0;
+    nsc_core_native_view(&view, &view_len);
+    const saved = try std.testing.allocator.dupe(u8, view[0..view_len]);
+    defer std.testing.allocator.free(saved);
+    var native_nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    var compiled_nodes: [1024]canvas.WidgetLayoutNode = undefined;
+    const expected = try canvas.layoutWidgetTreeWithTokens(root, .init(0, 0, 240, 100), .{}, &native_nodes);
+    const actual = try canvas.layoutWidgetTreeWithTokens(root, .init(0, 0, 240, 100), .{ .intrinsic_layout_policy = core.nativeWindowPolicy, .container_layout_policy = core.nativeWindowPolicy }, &compiled_nodes);
+    try expectComplete(expected.nodes, actual.nodes);
+    try std.testing.expectEqualSlices(u8, "flow\x00abi", borrowed);
+    try std.testing.expectEqualSlices(u8, saved, view[0..view_len]);
+    core.rt.frameReset();
+    try expectComplete(expected.nodes, actual.nodes);
+}
