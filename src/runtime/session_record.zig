@@ -59,6 +59,7 @@ pub const SessionRecorder = struct {
     checkpoint_count: u64 = 0,
     screenshot_count: u64 = 0,
     window_chrome_count: u64 = 0,
+    window_chrome_source: journal.WindowChromeSource = .native_queries,
     /// Per-session salt for credential replay-placeholder digests. The digest
     /// is deliberately independent of the secret, so a shareable journal is
     /// not an offline guessing oracle. Successful secret bytes are never
@@ -92,6 +93,7 @@ pub const SessionRecorder = struct {
     pub fn begin(self: *SessionRecorder, header: Header) void {
         if (self.began or self.failed) return;
         self.began = true;
+        self.window_chrome_source = header.window_chrome_source;
         // SessionRecorder deliberately has no ambient-I/O handle. Derive a
         // per-session salt from the already-journaled header identity and
         // timestamp. The resulting placeholder digest is metadata only and
@@ -196,6 +198,7 @@ pub const SessionRecorder = struct {
     /// than publishing it ahead of an unrelated nested dispatch.
     pub fn recordWindowChrome(self: *SessionRecorder, record: journal.WindowChromeRecord) void {
         if (!self.began or self.failed or self.finished) return;
+        if (self.window_chrome_source == .unavailable) return self.fail("a chrome-less session queried native window chrome");
         if (self.depth == 0) return self.fail("window chrome queried outside a recorded event");
         const owner = self.suppress_owner_depth orelse (self.depth - 1);
         const count = self.staged_chrome_counts[owner];

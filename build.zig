@@ -1295,6 +1295,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
         test_step.dependOn(&surface_layout_run.step);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        addTestStep(b, "test-ts-services-journal", "Verify devhost recordings replay through the packaged service carrier", filteredTestArtifact(b, ts_core_artifacts.services.root_module, "ts-services-journal-tests", &.{"a devhost-recorded service session"}));
         const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
         markup_components_e2e_step.dependOn(&markup_e2e_run.step);
         markup_components_e2e_step.dependOn(&kanban_e2e_run.step);

@@ -209,6 +209,7 @@ pub const Runtime = struct {
     /// Synchronous OS facts queued only while replaying. One event must
     /// consume the complete sequence before the next event can begin.
     replay_window_chrome_active: bool = false,
+    replay_window_chrome_source: session_journal.WindowChromeSource = .native_queries,
     replay_window_chrome_failed: bool = false,
     replay_window_chrome: [session_journal.max_session_window_chrome_queries]session_journal.WindowChromeRecord = undefined,
     replay_window_chrome_count: usize = 0,
@@ -903,6 +904,7 @@ pub const Runtime = struct {
     /// loudly; replay never consults the current host for this fact.
     pub fn windowChrome(self: *Runtime, window_id: platform.WindowId) !platform.WindowChrome {
         if (self.replay_window_chrome_active) {
+            if (self.replay_window_chrome_source == .unavailable) return .{};
             if (self.replay_window_chrome_index == self.replay_window_chrome_count) {
                 self.replay_window_chrome_failed = true;
                 return error.ReplayChromeDivergence;

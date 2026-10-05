@@ -3,9 +3,9 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-// GPU surface scroll input records now carry the detented-wheel flag;
-// older recordings must refuse before their input payloads are decoded.
-export const journalFormatFingerprint = 0x985475e24f954212n;
+// Headers identify absent logic-host chrome versus captured native queries;
+// sealed record totals include complete window chrome results.
+export const journalFormatFingerprint = 0xbd971022a49712f1n;
 export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
 
 const requestKeyBase = 0x5453525100000000n;
@@ -67,7 +67,7 @@ export class DevhostJournalWriter {
     new DataView(preamble.buffer).setBigUint64(8, journalFormatFingerprint, true);
     this.parts.push(preamble);
     const platform = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : process.platform;
-    const header = concat([u64(automationProtocolFingerprint), stringBytes(platform), stringBytes(appName), i64(Date.now()), f32(width), f32(height)]);
+    const header = concat([u64(automationProtocolFingerprint), stringBytes(platform), stringBytes(appName), i64(Date.now()), f32(width), f32(height), new Uint8Array([1])]);
     this.parts.push(frame(1, header));
   }
 
@@ -95,7 +95,7 @@ export class DevhostJournalWriter {
     this.effectCount += 1;
   }
   finish() {
-    this.parts.push(frame(6, concat([u64(this.eventCount), u64(this.effectCount), u64(0), u64(0)])));
+    this.parts.push(frame(6, concat([u64(this.eventCount), u64(this.effectCount), u64(0), u64(0), u64(0)])));
     fs.writeFileSync(this.file, concat(this.parts));
   }
 }
@@ -144,8 +144,14 @@ export function readDevhostJournal(file) {
   let events = 0;
   let effects = 0;
   let ended = false;
+  let chromeSource = null;
+  let chromeResults = 0;
+  let checkpoints = 0;
+  let screenshots = 0;
   while (!r.done()) {
+    if (ended) throw new Error("session journal has records after its end");
     const kind = r.byte();
+    if (!headerSeen && kind !== 1) throw new Error("session journal header is misplaced");
     const payload = r.take(r.u32());
     if (kind === 1) {
       if (headerSeen || records.length > 0) throw new Error("session journal header is misplaced");
@@ -153,6 +159,8 @@ export function readDevhostJournal(file) {
       const h = new Reader(payload);
       if (h.u64() !== automationProtocolFingerprint) throw new Error("session automation protocol differs from this SDK");
       h.string(); h.string(); h.i64(); h.f32(); h.f32();
+      chromeSource = h.byte();
+      if (chromeSource > 1) throw new Error("invalid session chrome source");
       if (!h.done()) throw new Error("invalid session journal header");
     } else if (kind === 2) {
       const event = new Reader(payload);
@@ -164,15 +172,28 @@ export function readDevhostJournal(file) {
     } else if (kind === 3) {
       records.push(decodeEffect(payload));
       effects += 1;
+    } else if (kind === 7) {
+      if (chromeSource !== 0) throw new Error("a chrome-less session carries native chrome results");
+      const chrome = new Reader(payload);
+      chrome.u64();
+      for (let index = 0; index < 8; index += 1) chrome.f32();
+      const formFactor = chrome.byte();
+      const tabsProjected = chrome.byte();
+      if (!chrome.done() || formFactor > 2 || tabsProjected > 1) throw new Error("invalid session chrome result");
+      chromeResults += 1;
     } else if (kind === 4 || kind === 5) {
+      if (kind === 4) checkpoints += 1;
+      else screenshots += 1;
       // Renderer checkpoints are meaningful to the packaged host and inert
       // in the logic-only dev host.
     } else if (kind === 6) {
       const end = new Reader(payload);
       const expectedEvents = Number(end.u64());
       const expectedEffects = Number(end.u64());
-      end.u64(); end.u64();
-      if (!end.done() || expectedEvents !== events || expectedEffects !== effects) throw new Error("session journal record counts disagree");
+      const expectedCheckpoints = Number(end.u64());
+      const expectedScreenshots = Number(end.u64());
+      const expectedChrome = Number(end.u64());
+      if (!end.done() || expectedEvents !== events || expectedEffects !== effects || expectedCheckpoints !== checkpoints || expectedScreenshots !== screenshots || expectedChrome !== chromeResults) throw new Error("session journal record counts disagree");
       ended = true;
     } else throw new Error(`unsupported session journal record ${kind}`);
   }

@@ -284,6 +284,10 @@ pub const WindowChromeRecord = struct {
     chrome: platform.WindowChrome,
 };
 
+/// A logic-only host has no window chrome capability. Its explicit
+/// absence replays as zero geometry; native sessions capture every query.
+pub const WindowChromeSource = enum(u8) { native_queries, unavailable };
+
 /// Session identity, written once as the first record.
 pub const Header = struct {
     /// The automation protocol fingerprint baked into the recording
@@ -301,6 +305,7 @@ pub const Header = struct {
     /// Initial main-window geometry, for provenance and sanity checks.
     window_width: f32 = 0,
     window_height: f32 = 0,
+    window_chrome_source: WindowChromeSource = .native_queries,
 };
 
 /// A model-state fingerprint taken after the event with `event_ordinal`
@@ -1245,6 +1250,7 @@ pub fn encodeHeader(header: Header, buffer: []u8) JournalError![]const u8 {
     try cursor.writeInt(i64, header.recorded_at_wall_ms);
     try cursor.writeF32(header.window_width);
     try cursor.writeF32(header.window_height);
+    try cursor.writeEnum(header.window_chrome_source);
     return buffer[0..cursor.len];
 }
 
@@ -1257,6 +1263,7 @@ pub fn decodeHeader(bytes: []const u8) JournalError!Header {
         .recorded_at_wall_ms = try cursor.readInt(i64),
         .window_width = try cursor.readF32(),
         .window_height = try cursor.readF32(),
+        .window_chrome_source = try cursor.readEnum(WindowChromeSource),
     };
     if (!cursor.done()) return error.JournalCorrupt;
     return header;

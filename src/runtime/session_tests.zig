@@ -3376,10 +3376,11 @@ test "OS chrome results replay complete snapshots and pixels through resize full
 const ChromeQueryProbe = struct {
     targets: []const u64,
     swallow: bool = false,
+    observed: platform.WindowChrome = .{},
     fn start(context: *anyopaque, runtime: *core.Runtime) !void {
         const self: *@This() = @ptrCast(@alignCast(context));
         for (self.targets) |target| {
-            _ = runtime.windowChrome(target) catch |err| {
+            self.observed = runtime.windowChrome(target) catch |err| {
                 if (self.swallow) continue;
                 return err;
             };
@@ -3419,4 +3420,33 @@ test "replay refuses missing extra and reordered OS queries even without verific
     const report = try session_replay.replaySession(&fresh.runtime, probe.app(), buffer.journalBytes(), .{ .verify = false, .require_same_platform = false });
     try std.testing.expect(report.ok());
     try std.testing.expect(!fresh.runtime.replay_window_chrome_active);
+}
+
+test "a logic-only journal declares absent chrome and never queries the replay host" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-query", .window_chrome_source = .unavailable });
+    recorder.stageEvent(.app_start);
+    recorder.commitEvent();
+    recorder.finish();
+    const fresh = try core.TestHarness().create(gpa, .{});
+    defer fresh.destroy(gpa);
+    fresh.null_platform.window_chrome = .{ .insets = .{ .top = 999, .left = 999 } };
+    var probe: ChromeQueryProbe = .{ .targets = &.{ 1, 2 } };
+    const report = try session_replay.replaySession(&fresh.runtime, probe.app(), buffer.journalBytes(), .{ .verify = false, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqualDeep(platform.WindowChrome{}, probe.observed);
+    // Absence cannot be combined with fabricated native query results.
+    buffer.len = 0;
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-query", .window_chrome_source = .unavailable });
+    recorder.stageEvent(.app_start);
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.finish();
+    try std.testing.expect(recorder.failed and !recorder.finished);
 }

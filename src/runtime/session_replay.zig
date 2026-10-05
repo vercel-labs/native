@@ -153,6 +153,7 @@ pub fn replaySession(
     runtime.replay_window_chrome_index = 0;
     defer {
         runtime.replay_window_chrome_active = false;
+        runtime.replay_window_chrome_source = .native_queries;
         runtime.replay_window_chrome_failed = false;
         runtime.replay_window_chrome_count = 0;
         runtime.replay_window_chrome_index = 0;
@@ -161,6 +162,7 @@ pub fn replaySession(
     while (try reader.next()) |record| {
         switch (record) {
             .header => |header| {
+                runtime.replay_window_chrome_source = header.window_chrome_source;
                 report.protocol_fingerprint = header.protocol_fingerprint;
                 if (header.protocol_fingerprint != automation_protocol.fingerprint) {
                     std.debug.print(
@@ -178,6 +180,7 @@ pub fn replaySession(
                 }
             },
             .window_chrome => |fact| {
+                if (runtime.replay_window_chrome_source == .unavailable) return error.ReplayDamagedRecord;
                 if (runtime.replay_window_chrome_count == journal.max_session_window_chrome_queries) return error.ReplayDamagedRecord;
                 runtime.replay_window_chrome[runtime.replay_window_chrome_count] = fact;
                 runtime.replay_window_chrome_count += 1;
