@@ -115,6 +115,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 7) return nscvWrappedLayout(request);
   if (request[0] === 8) return nscvVirtualFlow(request);
   if (request[0] === 9) return nscvSemanticTree(request);
+  if (request[0] === 10) return nscvExtentPolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1313,4 +1314,145 @@ function nscvSemanticTree(request: Uint8Array): Uint8Array {
     emitted++;
   }
   out.setUint32(0, emitted, true); return result;
+}
+
+/** Retained variable-window transitions. Cached estimate/index queries remain
+ * explicit native capabilities; sparse corrections cross once per measured
+ * batch and hot window coordination uses small scalar records. No retained
+ * native address or borrowed model bytes escape this copied boundary. */
+function nscvExtentPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 4 || request[0] !== 10 || request[2]! > 1) throw new Error("invalid extent policy header");
+  const op = request[1]!, w = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const f = Math.fround, max = nscvSurfaceMax, integer = (at: number): NscFlowInteger => nscvFlowInteger(w, at);
+  const v = (at: number): number => w.getFloat32(at, true);
+  const fixed = (length: number): void => { if (request.length !== length) throw new Error("invalid extent policy length"); };
+  if (op === 0) {
+    fixed(72); if (request[3] !== 0) throw new Error("invalid extent sync flags");
+    const oldId = integer(8), id = integer(16), oldCount = integer(24), count = integer(32), oldBase = integer(40), base = integer(48);
+    if (nscvFlowZero(id) || w.getUint32(4,true) !== 0 || w.getUint32(64,true) !== 0 || w.getUint32(68,true) !== 0) throw new Error("invalid extent sync identity");
+    const fresh = nscvFlowZero(oldId) || nscvFlowCompare(oldId,id) !== 0;
+    const mode = fresh ? 1 : nscvFlowCompare(base,oldBase) < 0 ? 2 : nscvFlowCompare(base,oldBase) > 0 ? 3 : nscvFlowCompare(count,oldCount) > 0 ? 4 : nscvFlowCompare(count,oldCount) < 0 ? 5 : 0;
+    const chunkSource = mode === 4 ? oldCount : mode === 5 ? count : nscvFlowSmall(0);
+    const firstChunk = { low: Math.floor(chunkSource.low / 64) + (chunkSource.high % 64) * 67108864, high: Math.floor(chunkSource.high / 64) };
+    const shift = mode === 2 ? nscvFlowMin(nscvFlowSubtract(oldBase,base),count) : mode === 3 ? nscvFlowMin(nscvFlowSubtract(base,oldBase),oldCount) : nscvFlowSmall(0);
+    const result = new Uint8Array(40), out = new DataView(result.buffer);
+    result[0] = mode; result[1] = mode === 1 ? 1 : mode === 4 ? 2 : mode === 2 ? 4 : 0;
+    out.setFloat32(4,nscvExtentClean(v(56)),true); out.setFloat32(8,fresh ? 0 : v(60),true);
+    nscvFlowWrite(out,16,firstChunk); nscvFlowWrite(out,24,shift); return result;
+  }
+  if (op === 1) return nscvExtentCorrections(request);
+  if (op === 2) {
+    fixed(32); if (request[3]! > 7) throw new Error("invalid extent window flags");
+    const flags = request[3]!, retained = (flags & 4) !== 0, trailing = (flags & 1) !== 0, mounted = (flags & 2) !== 0;
+    let offset = retained ? f(v(4) + v(8)) : v(4);
+    if (trailing && (!mounted || (retained && v(20) >= 0 && v(4) >= f(max(0,f(v(20)-v(24))) - 1)))) offset = max(0,f(v(12)-v(16)));
+    const result = new Uint8Array(4); new DataView(result.buffer).setFloat32(0,offset,true); return result;
+  }
+  if (op === 3) {
+    fixed(32); if (request[3] !== 0 || w.getUint32(4,true) !== 0 || w.getUint32(28,true) !== 0) throw new Error("invalid extent range bounds");
+    const result = new Uint8Array(16), out = new DataView(result.buffer);
+    if (nscvFlowZero(integer(8)) || v(20) <= 0) return result;
+    const maximum = max(0,f(v(16)-v(20))), raw = Number.isFinite(v(24)) ? v(24) : 0;
+    const offset = nscvSurfaceClamp(max(0,raw),0,maximum,request[2] === 1);
+    out.setUint32(0,1,true); out.setFloat32(4,offset,true); out.setFloat32(8,nscvSurfaceClamp(raw,-v(20),f(maximum+v(20)),request[2] === 1),true);
+    out.setFloat32(12,f(offset+v(20)),true); return result;
+  }
+  if (op === 4 || op === 7) {
+    fixed(op === 4 ? 48 : 64); if (request[3] !== 0 || w.getUint32(4,true) !== 0 || w.getUint32(40,true) !== 0 && op === 4 || w.getUint32(44,true) !== 0 && op === 4) throw new Error("invalid extent index facts");
+    const count = integer(8), overscan = integer(32), first = nscvFlowMin(nscvFlowSubtract(count,nscvFlowSmall(1)),integer(16));
+    let end = nscvFlowMin(count,nscvFlowAdd(integer(24),nscvFlowSmall(1),true));
+    if (op === 4 && nscvFlowCompare(end,first) <= 0) end = nscvFlowAdd(first,nscvFlowSmall(1),true);
+    const start = nscvFlowSubtract(first,overscan), last = nscvFlowSubtract(end,nscvFlowSmall(1));
+    end = nscvFlowMin(count,nscvFlowAdd(end,overscan,true));
+    if (op === 7) {
+      if (w.getUint32(56,true) !== 0 || w.getUint32(60,true) !== 0) throw new Error("invalid extent coverage padding");
+      const result = new Uint8Array(1); result[0] = nscvFlowCompare(start,integer(40)) < 0 || nscvFlowCompare(end,integer(48)) > 0 ? 1 : 0; return result;
+    }
+    const result = new Uint8Array(32), out = new DataView(result.buffer);
+    nscvFlowWrite(out,0,start); nscvFlowWrite(out,8,end); nscvFlowWrite(out,16,first); nscvFlowWrite(out,24,last); return result;
+  }
+  if (op === 5) {
+    fixed(32); if (request[3] !== 0 || w.getUint32(28,true) !== 0) throw new Error("invalid extent range finish");
+    const result = new Uint8Array(24), out = new DataView(result.buffer);
+    for (let i=0;i<6;i++) out.setFloat32(i*4,i === 0 ? v(20) : i === 1 ? v(24) : i === 2 ? v(4) : i === 3 ? v(12) : i === 4 ? max(0,f(v(4)-v(8))) : v(16),true);
+    return result;
+  }
+  if (op === 6) {
+    if (request.length < 24 || request[3] !== 0 || w.getUint32(12,true) !== 0) throw new Error("invalid extent slot header");
+    const count=w.getUint32(4,true), declared=w.getUint32(8,true), id=integer(16);
+    if (count > 254 || declared > 254 || request.length !== 24 + (count+declared)*8) throw new Error("invalid extent slot table");
+    const result=new Uint8Array(2); result[1]=255; if(nscvFlowZero(id))return result;
+    for(let i=0;i<count;i++)if(nscvFlowCompare(integer(24+i*8),id) === 0){result[1]=i;return result;}
+    for(let i=0;i<count;i++)if(nscvFlowZero(integer(24+i*8))){result[1]=i;return result;}
+    for(let i=0;i<count;i++){
+      let keep=false;for(let j=0;j<declared;j++)if(nscvFlowCompare(integer(24+i*8),integer(24+(count+j)*8)) === 0)keep=true;
+      if(!keep){result[0]=1;result[1]=i;return result;}
+    }
+    return result;
+  }
+  if (op === 8) {
+    fixed(16);if(request[3]! > 1 || w.getUint32(12,true) !== 0)throw new Error("invalid extent pending shift");
+    const result=new Uint8Array(4);new DataView(result.buffer).setFloat32(0,request[3] === 1 ? f(v(4)-v(8)) : f(v(4)+v(8)),true);return result;
+  }
+  throw new Error("unknown extent policy operation");
+}
+function nscvExtentClean(value:number):number{return !Number.isFinite(value) || value < 0 ? 0 : value;}
+type NscExtentMeasured={index:NscFlowInteger;delta:number;prefix:number};
+function nscvExtentDistance(a:NscFlowInteger,b:NscFlowInteger):NscFlowInteger{return nscvFlowCompare(a,b)>0?nscvFlowSubtract(a,b):nscvFlowSubtract(b,a);}
+function nscvExtentCorrections(request:Uint8Array):Uint8Array{
+  if(request.length<64 || request[3]!>5)throw new Error("invalid extent correction header");
+  const w=new DataView(request.buffer,request.byteOffset,request.byteLength), mode=request[3]!, count=w.getUint32(4,true), rows=w.getUint32(8,true), f=Math.fround;
+  if(count>2048 || w.getUint32(12,true)>1 || request.length!==64+count*16+rows*16 || w.getUint32(60,true)!==0 || (mode!==1 && mode!==3 && rows!==0))throw new Error("invalid extent correction table");
+  const base=nscvFlowInteger(w,16), items=nscvFlowInteger(w,24);
+  const anchor=mode===0 || mode===3?nscvFlowMin(nscvFlowInteger(w,32),items):nscvFlowInteger(w,32), logicalAnchor=mode===4 || mode===5?base:nscvFlowAdd(base,anchor,true);
+  const measured:NscExtentMeasured[]=[];
+  for(let i=0;i<count;i++){
+    const at=64+i*16,index=nscvFlowInteger(w,at);
+    if(i>0 && nscvFlowCompare(measured[i-1]!.index,index)>=0)throw new Error("invalid extent measurement ordering");
+    measured.push({index,delta:w.getFloat32(at+8,true),prefix:w.getFloat32(at+12,true)});
+  }
+  let dirty=w.getUint32(12,true)===1,total=w.getFloat32(48,true),pending=w.getFloat32(44,true),before=w.getFloat32(40,true);
+  const deltaBefore=():number=>{
+    if(dirty)throw new Error("dirty extent query");
+    for(const entry of measured)if(nscvFlowCompare(entry.index,logicalAnchor)>=0)return entry.prefix;
+    return total;
+  };
+  if(mode===0 || mode===3){
+    if(dirty)throw new Error("dirty extent correction begin");
+    if(request[2]===0)before=f(f(w.getFloat32(52,true)+deltaBefore())+w.getFloat32(56,true));
+  }
+  if(mode===4){
+    const end=nscvFlowAdd(base,items,true);
+    // Both end truncation and head compaction mark the prefix dirty, even
+    // when no entry drops. Preserve that intermediate state until finish.
+    for(let i=measured.length-1;i>=0;i--)if(nscvFlowCompare(measured[i]!.index,base)<0 || nscvFlowCompare(measured[i]!.index,end)>=0)measured.splice(i,1);
+    dirty=true;
+  }
+  for(let i=0;i<rows;i++){
+    const at=64+count*16+i*16,physical=nscvFlowInteger(w,at);
+    if(nscvFlowCompare(physical,items)>=0)continue;
+    const index=nscvFlowAdd(base,physical,true),delta=f(nscvExtentClean(w.getFloat32(at+12,true))-nscvExtentClean(w.getFloat32(at+8,true)));
+    let slot=0;while(slot<measured.length && nscvFlowCompare(measured[slot]!.index,index)<0)slot++;
+    if(slot<measured.length && nscvFlowCompare(measured[slot]!.index,index)===0){
+      if(Math.abs(f(measured[slot]!.delta-delta))<=0.25)continue;
+      measured[slot]!.delta=delta;dirty=true;continue;
+    }
+    if(Math.abs(delta)<=0.25)continue;
+    if(measured.length>=2048){
+      const first=nscvExtentDistance(measured[0]!.index,logicalAnchor),last=nscvExtentDistance(measured[measured.length-1]!.index,logicalAnchor),incoming=nscvExtentDistance(index,logicalAnchor);
+      const evictLast=nscvFlowCompare(last,first)>=0,far=evictLast?last:first;
+      if(nscvFlowCompare(incoming,far)>=0)continue;
+      measured.splice(evictLast?measured.length-1:0,1);dirty=true;
+      slot=0;while(slot<measured.length && nscvFlowCompare(measured[slot]!.index,index)<0)slot++;
+    }
+    measured.splice(slot,0,{index,delta,prefix:0});dirty=true;
+  }
+  if(mode===2 || mode===3 || mode===5){
+    if(dirty){total=0;for(const entry of measured){entry.prefix=total;total=f(total+entry.delta);}dirty=false;}
+    if(mode!==5)pending=f(pending+f(f(f(w.getFloat32(52,true)+deltaBefore())+w.getFloat32(56,true))-before));
+  }
+  const result=new Uint8Array(32+measured.length*16),out=new DataView(result.buffer);
+  nscvFlowWrite(out,0,anchor);out.setFloat32(8,before,true);out.setFloat32(12,pending,true);out.setFloat32(16,total,true);out.setUint32(20,dirty?1:0,true);out.setUint32(24,measured.length,true);
+  for(let i=0;i<measured.length;i++){const at=32+i*16,e=measured[i]!;nscvFlowWrite(out,at,e.index);out.setFloat32(at+8,e.delta,true);out.setFloat32(at+12,e.prefix,true);}
+  return result;
 }

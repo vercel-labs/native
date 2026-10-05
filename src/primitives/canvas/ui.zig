@@ -440,6 +440,7 @@ pub fn Ui(comptime Msg: type) type {
         /// variable windows compute from estimates alone.
         virtual_extent_context: ?*anyopaque = null,
         virtual_extent_source: ?VirtualExtentSourceFn = null,
+        virtual_extent_policy: ?@import("virtual_extent_policy.zig").Policy = null,
         /// The windowed virtual lists this build declared (`virtualList`),
         /// for the app loop's coverage check and scroll re-derivation.
         virtual_window_records: [max_virtual_windows]VirtualWindowRecord = [_]VirtualWindowRecord{.{}} ** max_virtual_windows,
@@ -1832,6 +1833,7 @@ pub fn Ui(comptime Msg: type) type {
                 break :blk null;
             };
             var range_options = canvas.VirtualVariableRangeOptions{
+                .policy = self.virtual_extent_policy,
                 .item_count = options.item_count,
                 .gap = options.gap,
                 .viewport_extent = viewport,
@@ -1843,6 +1845,7 @@ pub fn Ui(comptime Msg: type) type {
                 .uniform_estimate = options.item_extent,
             };
             if (table) |retained| {
+                retained.policy = self.virtual_extent_policy;
                 _ = retained.sync(.{
                     .id = id,
                     .item_count = options.item_count,
@@ -1854,20 +1857,25 @@ pub fn Ui(comptime Msg: type) type {
                 });
                 // Corrections and prepends land here, together with the
                 // patched offsets below — the anchoring invariant.
-                offset += retained.takePendingOffsetDelta();
+                const pending = retained.takePendingOffsetDelta();
                 const total = retained.totalExtent();
-                if (options.anchor == .trailing) {
-                    if (!state.mounted) {
-                        offset = @max(0, total - viewport);
-                    } else if (retained.last_build_total >= 0) {
-                        // Was-at-the-bottom re-pin: the RETAINED offset
-                        // is compared against the geometry it was
-                        // scrolled under (last build's total), so both
-                        // appends and measured corrections keep a
-                        // pinned transcript pinned — while a viewport
-                        // scrolled away is never yanked.
-                        const old_max = @max(0, retained.last_build_total - retained.last_build_viewport);
-                        if (state.offset >= old_max - trailing_stick_slop) offset = @max(0, total - viewport);
+                if (self.virtual_extent_policy) |policy| {
+                    offset = @import("virtual_extent_policy.zig").windowOffset(policy, state.offset, pending, total, viewport, retained.last_build_total, retained.last_build_viewport, options.anchor == .trailing, state.mounted, true);
+                } else {
+                    offset += pending;
+                    if (options.anchor == .trailing) {
+                        if (!state.mounted) {
+                            offset = @max(0, total - viewport);
+                        } else if (retained.last_build_total >= 0) {
+                            // Was-at-the-bottom re-pin: the RETAINED offset
+                            // is compared against the geometry it was
+                            // scrolled under (last build's total), so both
+                            // appends and measured corrections keep a
+                            // pinned transcript pinned — while a viewport
+                            // scrolled away is never yanked.
+                            const old_max = @max(0, retained.last_build_total - retained.last_build_viewport);
+                            if (state.offset >= old_max - trailing_stick_slop) offset = @max(0, total - viewport);
+                        }
                     }
                 }
                 retained.last_build_total = total;
@@ -1877,7 +1885,10 @@ pub fn Ui(comptime Msg: type) type {
                 // estimated bottom (one extra estimate pass — bare-build
                 // pricing only; app loops always install a table).
                 const probe = canvas.virtualVariableListRange(range_options, null);
-                offset = @max(0, probe.content_extent - viewport);
+                offset = if (self.virtual_extent_policy) |policy|
+                    @import("virtual_extent_policy.zig").windowOffset(policy, state.offset, 0, probe.content_extent, viewport, -1, 0, true, false, false)
+                else
+                    @max(0, probe.content_extent - viewport);
             }
             range_options.scroll_offset = offset;
             const variable = canvas.virtualVariableListRange(range_options, table);

@@ -45,6 +45,7 @@ pub fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!voi
 
 test {
     _ = @import("semantic_tree_e2e_tests.zig");
+    _ = @import("virtual_extent_e2e_tests.zig");
 }
 
 test "compiled modal defaults and f32 boundaries match the native reference" {

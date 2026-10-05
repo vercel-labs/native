@@ -2439,6 +2439,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
                 ui.virtual_extent_context = @ptrCast(self);
                 ui.virtual_extent_source = virtualExtentResolve;
+                ui.virtual_extent_policy = self.options.intrinsic_layout_policy;
                 ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(self.options.canvas_label);
                 if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
                 self.armUiFragmentHost(&ui);
@@ -2644,7 +2645,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     if (record.item_count == 0) continue;
                     const offset = @max(0, node.widget.value);
                     const first_visible = table.indexAtOffset(offset);
-                    const visible_end = @min(record.item_count, table.indexAtOffset(offset + viewport.height) + 1);
+                    const end_probe = table.indexAtOffset(offset + viewport.height);
+                    if (self.options.intrinsic_layout_policy) |policy| {
+                        if (canvas.virtual_extent_policy.undercovered(policy, record.item_count, first_visible, end_probe, record.overscan, record.start_index, record.end_index)) return true;
+                        continue;
+                    }
+                    const visible_end = @min(record.item_count, end_probe + 1);
                     const start = if (first_visible > record.overscan) first_visible - record.overscan else 0;
                     const end = @min(record.item_count, visible_end + record.overscan);
                     if (start < record.start_index or end > record.end_index) return true;
@@ -2686,6 +2692,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn claimVirtualExtentTable(self: *Self, id: canvas.ObjectId) ?*canvas.VirtualExtentTable {
+            if (self.options.intrinsic_layout_policy) |policy| {
+                const decision = canvas.virtual_extent_policy.slot(policy, id, &self.virtual_extent_tables, self.virtual_windows[0..self.virtual_window_count]);
+                if (decision) |plan| {
+                    const table = &self.virtual_extent_tables[plan.index];
+                    if (plan.recycle) table.reset();
+                    table.policy = policy;
+                    return table;
+                }
+                if (id != 0) ui_app_log.warn("variable-extent virtual list table budget exhausted; using estimates without measured corrections", .{});
+                return null;
+            }
             if (id == 0) return null;
             for (&self.virtual_extent_tables) |*table| {
                 if (table.id == id) return table;
@@ -2742,15 +2759,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // the pending offset by however much the batch moves
                 // that edge, and the anchored row stays under the
                 // user's eyes.
-                table.beginCorrections(list_node.widget.layout.virtual_anchor_index, null);
+                var measurements: std.ArrayList(canvas.VirtualExtentMeasurement) = .empty;
+                defer measurements.deinit(std.heap.page_allocator);
                 for (layout.nodes) |node| {
                     const parent = node.parent_index orelse continue;
                     if (parent != list_index) continue;
                     if (node.widget.layout.anchor != null) continue;
                     const physical = node.widget.semantics.list_item_index orelse continue;
-                    table.recordMeasured(@intCast(physical), node.frame.normalized().height);
+                    measurements.append(std.heap.page_allocator, .{ .physical = @intCast(physical), .extent = node.frame.normalized().height }) catch @panic("virtual row measurement allocation failed");
                 }
-                table.endCorrections();
+                table.applyMeasurements(list_node.widget.layout.virtual_anchor_index, null, measurements.items);
                 if (@abs(table.pending_offset_delta) > virtual_correction_retry_threshold) corrected = true;
             }
             return corrected;

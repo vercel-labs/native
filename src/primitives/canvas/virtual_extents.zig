@@ -40,6 +40,8 @@
 //! was showing.
 
 const std = @import("std");
+const compiled = @import("virtual_extent_policy.zig");
+pub const VirtualExtentMeasurement = compiled.Measurement;
 
 /// Per-item extent estimate: cheap, pure, O(1) — derived from model
 /// facts (line counts, attachment presence), never from layout. The
@@ -114,6 +116,8 @@ pub const VirtualExtentSyncArgs = struct {
 /// it off the stack); all methods are single-threaded, called from the
 /// view-build/measure path only.
 pub const VirtualExtentTable = struct {
+    /// Explicit compiled transition owner; null selects the native reference.
+    policy: ?compiled.Policy = null,
     /// 0 = free slot.
     id: u64 = 0,
     item_count: usize = 0,
@@ -160,10 +164,11 @@ pub const VirtualExtentTable = struct {
     anchor_offset_before: f32 = 0,
 
     pub fn reset(self: *VirtualExtentTable) void {
-        self.* = .{};
+        const policy = self.policy;
+        self.* = .{ .policy = policy };
     }
 
-    fn estimateAt(self: *const VirtualExtentTable, physical: usize) f32 {
+    pub fn estimateAt(self: *const VirtualExtentTable, physical: usize) f32 {
         if (self.estimate_fn) |estimate| {
             return nonNegativeFinite(estimate(self.estimate_context, self.index_base + @as(u64, physical)));
         }
@@ -287,6 +292,7 @@ pub const VirtualExtentTable = struct {
     /// `pending_offset_delta` so the viewport stays put.
     pub fn sync(self: *VirtualExtentTable, args: VirtualExtentSyncArgs) VirtualExtentSyncInfo {
         std.debug.assert(args.id != 0);
+        if (self.policy) |policy| return self.syncCompiled(policy, args);
         if (self.id != args.id) self.reset();
         // Estimate plumbing refreshes every build (fn/context/gap may
         // be view-local values); the cached sums only rebuild on shape
@@ -349,6 +355,50 @@ pub const VirtualExtentTable = struct {
         return info;
     }
 
+    fn syncCompiled(self: *VirtualExtentTable, policy: compiled.Policy, args: VirtualExtentSyncArgs) VirtualExtentSyncInfo {
+        // Refresh estimate capabilities before reading the previous total,
+        // matching the native reference's cached/full-partial-chunk behavior.
+        self.estimate_context = args.estimate_context;
+        self.estimate_fn = args.estimate_fn;
+        self.uniform_estimate = args.uniform_estimate;
+        const old_total = if (self.id == args.id and self.id != 0) self.totalExtent() else 0;
+        const plan = compiled.sync(policy, self, args, old_total);
+        if (plan.mode == 1) {
+            self.reset();
+            self.estimate_context = args.estimate_context;
+            self.estimate_fn = args.estimate_fn;
+            self.uniform_estimate = args.uniform_estimate;
+            self.id = args.id;
+            self.chunk_prefix[0] = 0;
+        }
+        self.gap = plan.gap;
+        // Head truncation uses the refreshed callback and NEW sanitized gap
+        // with the OLD count/base/cache, exactly as the reference does.
+        const removed_with_gap = if (plan.mode == 3) self.offsetAtPhysical(plan.shift) else 0;
+        if (plan.mode != 0) {
+            self.index_base = args.index_base;
+            self.item_count = args.item_count;
+            if (plan.mode == 2 or plan.mode == 3 or plan.mode == 5) compiled.corrections(policy, self, 4, self.anchor_physical, null, &.{}, 0, 0);
+            self.rebuildChunkPrefixFrom(plan.first_chunk);
+        }
+        if (self.measured_prefix_dirty) compiled.corrections(policy, self, 5, self.anchor_physical, null, &.{}, 0, 0);
+        if (plan.mode == 2 or plan.mode == 3) self.pending_offset_delta = compiled.shift(policy, self.pending_offset_delta, if (plan.mode == 2) self.offsetAtPhysical(plan.shift) else removed_with_gap, plan.mode == 3);
+        return .{ .fresh = plan.flags & 1 != 0, .appended = plan.flags & 2 != 0, .prepended = plan.flags & 4 != 0, .old_total_extent = plan.old_total };
+    }
+
+    /// One ordered measurement transfer per mounted window. Single-record
+    /// methods remain available with the same native/compiled ownership.
+    pub fn applyMeasurements(self: *VirtualExtentTable, anchor: usize, rendered_offset: ?f32, rows: []const VirtualExtentMeasurement) void {
+        if (self.policy) |policy| {
+            const clamped = @min(anchor, self.item_count);
+            compiled.corrections(policy, self, 3, anchor, rendered_offset, rows, self.estimatePrefix(clamped), self.gap * @as(f32, @floatFromInt(clamped)));
+            return;
+        }
+        self.beginCorrections(anchor, rendered_offset);
+        for (rows) |row| self.recordMeasured(row.physical, row.extent);
+        self.endCorrections();
+    }
+
     fn dropMeasuredBelow(self: *VirtualExtentTable, logical: u64) void {
         var keep_from: usize = 0;
         while (keep_from < self.measured_count and self.measured_index[keep_from] < logical) keep_from += 1;
@@ -378,6 +428,11 @@ pub const VirtualExtentTable = struct {
     /// this baseline into `pending_offset_delta`.
     pub fn beginCorrections(self: *VirtualExtentTable, anchor_physical: usize, rendered_offset: ?f32) void {
         std.debug.assert(!self.measured_prefix_dirty);
+        if (self.policy) |policy| {
+            const clamped = @min(anchor_physical, self.item_count);
+            compiled.corrections(policy, self, 0, anchor_physical, rendered_offset, &.{}, self.estimatePrefix(clamped), self.gap * @as(f32, @floatFromInt(clamped)));
+            return;
+        }
         self.anchor_physical = @min(anchor_physical, self.item_count);
         self.anchor_offset_before = rendered_offset orelse self.offsetAtPhysical(self.anchor_physical);
     }
@@ -389,6 +444,10 @@ pub const VirtualExtentTable = struct {
     /// instead if IT is the farthest.
     pub fn recordMeasured(self: *VirtualExtentTable, physical: usize, extent: f32) void {
         if (physical >= self.item_count) return;
+        if (self.policy) |policy| {
+            compiled.corrections(policy, self, 1, self.anchor_physical, null, &.{.{ .physical = physical, .extent = extent }}, 0, 0);
+            return;
+        }
         const logical = self.index_base + @as(u64, physical);
         const clean = nonNegativeFinite(extent);
         const estimate = self.estimateAt(physical);
@@ -437,6 +496,10 @@ pub const VirtualExtentTable = struct {
     /// scroll offset by exactly the amount that keeps the anchored row
     /// where the user sees it.
     pub fn endCorrections(self: *VirtualExtentTable) void {
+        if (self.policy) |policy| {
+            compiled.corrections(policy, self, 2, self.anchor_physical, null, &.{}, self.estimatePrefix(self.anchor_physical), self.gap * @as(f32, @floatFromInt(self.anchor_physical)));
+            return;
+        }
         if (self.measured_prefix_dirty) self.rebuildMeasuredPrefix();
         self.pending_offset_delta += self.offsetAtPhysical(self.anchor_physical) - self.anchor_offset_before;
     }
@@ -457,6 +520,7 @@ fn absDistance(a: u64, b: u64) u64 {
 /// Options for a variable-extent window computation (the counterpart of
 /// `VirtualListOptions` for `virtualListRange`).
 pub const VirtualVariableRangeOptions = struct {
+    policy: ?compiled.Policy = null,
     item_count: usize = 0,
     gap: f32 = 0,
     viewport_extent: f32 = 0,
@@ -491,6 +555,7 @@ pub const VirtualVariableRange = struct {
 /// estimates via a linear scan — O(item_count) worst case, fine for
 /// tests, which is why app loops always install a table.
 pub fn virtualVariableListRange(options: VirtualVariableRangeOptions, table: ?*const VirtualExtentTable) VirtualVariableRange {
+    if (options.policy orelse (if (table) |source| source.policy else null)) |policy| return virtualVariableListRangeCompiled(options, table, policy);
     if (options.item_count == 0 or options.viewport_extent <= 0) return .{};
     const gap = nonNegativeFinite(options.gap);
     const viewport = options.viewport_extent;
@@ -537,4 +602,21 @@ pub fn virtualVariableListRange(options: VirtualVariableRangeOptions, table: ?*c
         .after_extent = @max(0, content_extent - source.offsetAtPhysical(end_index)),
         .anchor_extent = source.offsetAtPhysical(first_visible),
     };
+}
+
+fn virtualVariableListRangeCompiled(options: VirtualVariableRangeOptions, table: ?*const VirtualExtentTable, policy: compiled.Policy) VirtualVariableRange {
+    // Empty ranges never invoke the estimate capability, even for stateless
+    // builds. The compiled bounds owner decides this short circuit.
+    const probe = compiled.bounds(policy, options.item_count, 0, options.viewport_extent, options.scroll_offset);
+    if (!probe.active) return .{};
+    var scratch = VirtualExtentTable{ .policy = policy };
+    const source = table orelse blk: {
+        _ = scratch.sync(.{ .id = 1, .item_count = options.item_count, .index_base = options.index_base, .gap = options.gap, .estimate_context = options.estimate_context, .estimate_fn = options.estimate_fn, .uniform_estimate = options.uniform_estimate });
+        break :blk &scratch;
+    };
+    const total = source.totalExtent();
+    const bounds = compiled.bounds(policy, options.item_count, total, options.viewport_extent, options.scroll_offset);
+    const indices = compiled.indices(policy, options.item_count, source.indexAtOffset(bounds.offset), source.indexAtOffset(bounds.end_query), options.overscan);
+    const values = compiled.finish(policy, total, source.offsetAtPhysical(indices.end), source.offsetAtPhysical(indices.start), source.offsetAtPhysical(indices.first), bounds.offset, bounds.layout);
+    return .{ .start_index = indices.start, .end_index = indices.end, .first_visible_index = indices.first, .last_visible_index = indices.last, .scroll_offset = values[0], .layout_offset = values[1], .content_extent = values[2], .before_extent = values[3], .after_extent = values[4], .anchor_extent = values[5] };
 }
