@@ -665,3 +665,7 @@ test "intrinsic composition cost is measured beside the native reference" {
     }
     std.debug.print("20-child intrinsic row: native {d} ns, compiled {d} ns (including enclosing reset)\n", .{ @divTrunc(elapsed[0], 1000), @divTrunc(elapsed[1], 1000) });
 }
+
+test "compiled content surface records preserve defaults captions nested content and owned bytes" {
+    try @import("surface_decoder").testContentSurfaceRecords();
+}

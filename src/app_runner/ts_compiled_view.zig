@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, grid, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     command: []const u8 = "",
@@ -126,13 +126,13 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
-    const container = modal or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
+    const container = modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
     if (!container and value.end != index + 1) return error.InvalidView;
     if (value.kind == .list_item and value.end != index + 1 and value.text.len != 0) return error.InvalidView;
-    if (value.press != null and !tree_row and value.kind != .button and value.kind != .stack and value.kind != .radio and value.kind != .segmented_control and value.kind != .list_item and value.kind != .select and value.kind != .menu_item) return error.InvalidView;
+    if (value.press != null and !tree_row and value.kind != .button and value.kind != .stack and value.kind != .card and value.kind != .alert and value.kind != .radio and value.kind != .segmented_control and value.kind != .list_item and value.kind != .select and value.kind != .menu_item) return error.InvalidView;
     if (value.dismiss != null and !modal and value.kind != .dropdown_menu) return error.InvalidView;
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
     if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu and value.kind != .tooltip) return error.InvalidView;
@@ -711,4 +711,31 @@ pub fn testGridRecords() !void {
         "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"grid\",\"text\":\"\",\"virtualItemExtent\":-1}]}",
         "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"grid\",\"text\":\"\",\"columns\":9007199254740992}]}",
     }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+}
+
+pub fn testContentSurfaceRecords() !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ sdk.canvas.WidgetKind.card, sdk.canvas.WidgetKind.alert }) |kind| {
+        for ([_]?f32{ null, 0, 12 }) |padding| {
+            for ([_]sdk.canvas.WidgetVariant{ .default, .destructive }) |variant| {
+                var ui = Ui.init(arena.allocator());
+                const spacing = if (padding) |value| try std.fmt.allocPrint(ui.arena, ",\"padding\":{d}", .{value}) else "";
+                const source = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{{\"end\":2,\"kind\":\"{s}\",\"text\":\"Café\",\"width\":360,\"minWidth\":120,\"maxWidth\":420,\"variant\":\"{s}\"{s}}},{{\"end\":2,\"kind\":\"text\",\"text\":\"Owned content\"}}]}}", .{ @tagName(kind), @tagName(variant), spacing });
+                const bytes = try ui.arena.dupe(u8, source);
+                const actual = try decode(&ui, bytes);
+                @memset(bytes, 0);
+                var reference = Ui.init(arena.allocator());
+                var child = reference.text(.{}, "Owned content");
+                if (comptime @hasDecl(core, "nativeTextPolicy")) child.widget.interaction_policy = core.nativeTextPolicy;
+                var expected = reference.el(kind, .{ .text = "Café", .width = 360, .min_width = 120, .max_width = 420, .padding = padding, .variant = variant }, .{child});
+                if (comptime @hasDecl(core, "nativeTextPolicy")) expected.widget.interaction_policy = core.nativeTextPolicy;
+                try std.testing.expectEqualDeep(expected, actual);
+                const actual_tree = try ui.finalize(actual);
+                const reference_tree = try reference.finalize(expected);
+                try std.testing.expectEqualDeep(reference_tree.root, actual_tree.root);
+                try std.testing.expectEqualDeep(reference_tree.handlers, actual_tree.handlers);
+            }
+        }
+    }
 }

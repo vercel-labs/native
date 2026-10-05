@@ -1720,3 +1720,22 @@ test("compiled grids preserve dynamic columns, virtual extents, and owned nested
   assert.equal(first.nodes[0].columns, 7); model.count = -1; assert.throws(view, /grid columns/);
   for (const attr of ['columns="2"', 'virtualized="true"', 'virtual-item-extent="40"']) assert.throws(() => compileView(`<row ${attr}/>`, contract), /requires grid/);
 });
+
+
+test("content surfaces preserve captions child boundaries explicit spacing and activation envelopes", () => {
+  for (const kind of ["card", "alert"]) {
+    const { model, view } = evaluate(`<${kind} text="{status}" width="360" min-width="120" max-width="420" padding="0" variant="destructive" on-press="increment"><column gap="6"><text wrap="true">Description</text><if test="{ticking}"><text>Extra content</text></if></column></${kind}>`);
+    let nodes = view().nodes;
+    assert.equal(nodes.length, 4); assert.equal(nodes[0].kind, kind); assert.equal(nodes[0].text, "Café\nnotes");
+    assert.equal(nodes[0].end, 4); assert.equal(nodes[1].end, 4); assert.equal(nodes[2].end, 3);
+    assert.equal(nodes[0].padding, 0); assert.equal(nodes[0].width, 360); assert.equal(nodes[0].minWidth, 120); assert.equal(nodes[0].maxWidth, 420); assert.equal(nodes[0].variant, "destructive");
+    assert.deepEqual(nodes[0].press, [1, 3]);
+    model.ticking = false; model.status = new TextEncoder().encode("New caption"); nodes = view().nodes;
+    assert.equal(nodes.length, 3); assert.equal(nodes[0].end, 3); assert.equal(nodes[0].text, "New caption");
+    const empty = evaluate(`<${kind}/>`).view().nodes[0]; assert.equal(empty.text, ""); assert.equal(empty.end, 1); assert.equal(empty.padding, undefined);
+    assert.equal(evaluate(`<${kind}>Inline café</${kind}>`).view().nodes[0].text, "Inline café");
+    assert.throws(() => compileView(`<${kind}>Caption<text>Body</text></${kind}>`, contract), /mixed content/);
+    assert.throws(() => compileView(`<${kind} on-toggle="increment"/>`, contract), /unsupported/);
+    assert.throws(() => compileView(`<${kind} on-dismiss="increment"/>`, contract), /unsupported/);
+  }
+});
