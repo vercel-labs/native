@@ -1329,6 +1329,18 @@ fn layoutGridChildren(
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
 
+    if (tokens.grid_layout_policy) |policy| {
+        const grid = @import("grid_layout_policy.zig").plan(policy, flow_count, requested_columns, 0, content, gap, 0, 0, 0, false);
+        var flow_index: usize = 0;
+        for (children) |child| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            const child_frame = @import("grid_layout_policy.zig").frame(policy, grid, flow_index, content, child.frame, child.layout.min_size, child.layout.max_size, false, primaryUnderlineTabsFillWidth(child, tokens));
+            flow_index += 1;
+            _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
+        }
+        return;
+    }
+
     const columns = gridColumnCount(flow_count, requested_columns);
     const rows = gridRowCount(flow_count, columns);
     const clamped_gap = nonNegative(gap);
@@ -1370,6 +1382,30 @@ fn layoutVirtualGridChildren(
 ) Error!void {
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
+
+    if (tokens.grid_layout_policy) |policy| {
+        // Measurement needs the first row's slot count; the portable planner
+        // chooses it before native text/intrinsic providers measure that row.
+        const initial = @import("grid_layout_policy.zig").plan(policy, flow_count, style.columns, style.virtual_overscan, content, style.gap, style.virtual_item_extent, 0, scroll_y, true);
+        const measured_extent = if (style.virtual_item_extent > 0) 0 else preferredGridRowExtent(children, initial.columns, tokens);
+        const grid = if (style.virtual_item_extent > 0) initial else @import("grid_layout_policy.zig").plan(policy, flow_count, style.columns, style.virtual_overscan, content, style.gap, style.virtual_item_extent, measured_extent, scroll_y, true);
+        output[parent_index].widget.layout.virtual_item_extent = grid.item_extent;
+        output[parent_index].widget.semantics.list_item_count = saturatingU32(grid.rows);
+        if (grid.start >= grid.end) return;
+        var flow_index: usize = 0;
+        for (children) |source| {
+            if (!widgetTakesFlowSlot(source)) continue;
+            defer flow_index += 1;
+            const row = flow_index / grid.columns;
+            if (row < grid.start or row >= grid.end) continue;
+            var child = source;
+            child.semantics.list_item_index = saturatingU32(flow_index);
+            child.semantics.list_item_count = saturatingU32(flow_count);
+            const child_frame = @import("grid_layout_policy.zig").frame(policy, grid, flow_index, content, child.frame, child.layout.min_size, child.layout.max_size, true, primaryUnderlineTabsFillWidth(child, tokens));
+            _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
+        }
+        return;
+    }
 
     const columns = gridColumnCount(flow_count, style.columns);
     const rows = gridRowCount(flow_count, columns);

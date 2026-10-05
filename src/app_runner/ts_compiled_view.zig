@@ -10,7 +10,7 @@ const Ui = sdk.canvas.Ui(core.Msg);
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
+    kind: enum { column, row, stack, grid, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     command: []const u8 = "",
@@ -21,6 +21,9 @@ const Record = struct {
     keySlot: usize = 0,
     globalKey: ?[]const u8 = null,
     globalKeyInt: ?i64 = null,
+    columns: usize = 0,
+    virtualized: bool = false,
+    virtualItemExtent: f32 = 0,
     gap: f32 = 0,
     padding: ?f32 = null,
     grow: f32 = 0,
@@ -112,6 +115,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (!std.math.isFinite(value.resizeOrigin) or (value.resizeOrigin != -1 and (value.resizeOrigin < 0 or value.resizeOrigin > 1))) return error.InvalidView;
     if ((value.resizeDuration != 0 or value.resizeEasing != .standard or value.resizeOrigin != -1) and value.kind != .split) return error.InvalidView;
     if ((value.resizeEasing != .standard or value.resizeOrigin != -1) and value.resizeDuration == 0) return error.InvalidView;
+    if (!std.math.isFinite(value.virtualItemExtent) or value.virtualItemExtent < 0) return error.InvalidView;
+    if ((value.columns != 0 or value.virtualized or value.virtualItemExtent != 0) and value.kind != .grid) return error.InvalidView;
+    if (value.columns > 9007199254740991) return error.InvalidView;
     if (!std.math.isFinite(value.value)) return error.InvalidView;
     if ((value.valueX != null or value.axis != null or value.overscroll != null) and value.kind != .scroll) return error.InvalidView;
     if (value.valueX) |offset| if (!std.math.isFinite(offset)) return error.InvalidView;
@@ -120,7 +126,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
-    const container = modal or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
+    const container = modal or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
@@ -179,6 +185,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .command = value.command,
         .wrap = value.wrap,
         .submit_on_enter = value.submitOnEnter,
+        .columns = value.columns,
+        .virtualized = value.virtualized,
+        .virtual_item_extent = value.virtualItemExtent,
         .gap = value.gap,
         .padding = value.padding,
         .grow = value.grow,
@@ -677,4 +686,29 @@ pub fn testModalRecords() !void {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"dismiss\":[1,0]}]}",
         }) |source| try std.testing.expectError(error.InvalidView, decode(&ui, source));
     } else return error.SkipZigTest;
+}
+
+pub fn testGridRecords() !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const bytes = try std.testing.allocator.dupe(u8, "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"grid\",\"text\":\"\",\"columns\":3,\"virtualized\":true,\"virtualItemExtent\":40,\"value\":24},{\"end\":2,\"kind\":\"text\",\"text\":\"Café\"}]}");
+    defer std.testing.allocator.free(bytes);
+    var actual = try decode(&ui, bytes);
+    @memset(bytes, 'x');
+    var reference_ui = Ui.init(arena.allocator());
+    const expected = reference_ui.el(.grid, .{ .columns = 3, .virtualized = true, .virtual_item_extent = 40, .value = 24 }, .{reference_ui.text(.{}, "Café")});
+    actual.widget.interaction_policy = null;
+    for (@constCast(actual.nodes)) |*child| child.widget.interaction_policy = null;
+    const actual_tree = try ui.finalize(actual);
+    const expected_tree = try reference_ui.finalize(expected);
+    try std.testing.expectEqualDeep(expected_tree.root, actual_tree.root);
+    try std.testing.expectEqualDeep(expected_tree.handlers, actual_tree.handlers);
+    try std.testing.expectEqualStrings("Café", actual_tree.root.children[0].text);
+    for ([_][]const u8{
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"row\",\"text\":\"\",\"columns\":2}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"virtualized\":true}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"grid\",\"text\":\"\",\"virtualItemExtent\":-1}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"grid\",\"text\":\"\",\"columns\":9007199254740992}]}",
+    }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
 }

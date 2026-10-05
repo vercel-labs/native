@@ -7,6 +7,7 @@ import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffs
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
+  columns?: number; virtualized?: boolean; virtualItemExtent?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; valueX?: number; axis?: string; overscroll?: string;

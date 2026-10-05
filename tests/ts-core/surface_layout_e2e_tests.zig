@@ -105,6 +105,7 @@ fn expectTree(widget: canvas.Widget, bounds: geometry.RectF, tokens: canvas.Desi
     const expected = try canvas.layoutWidgetTreeWithTokens(widget, bounds, tokens, &reference_nodes);
     var compiled_tokens = tokens;
     compiled_tokens.surface_layout_policy = core.nativeWindowPolicy;
+    compiled_tokens.grid_layout_policy = core.nativeWindowPolicy;
     const actual = try canvas.layoutWidgetTreeWithTokens(widget, bounds, compiled_tokens, &compiled_nodes);
     try std.testing.expectEqual(expected.nodes.len, actual.nodes.len);
     for (expected.nodes, actual.nodes) |left, right| {
@@ -210,6 +211,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         defer app.destroy();
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
     }
 }
 
@@ -278,4 +280,102 @@ test "surface planning bounded call cost is measured beside the native reference
         elapsed[lane] = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - started;
     }
     std.debug.print("surface anchored call: native {d} ns, compiled {d} ns (including enclosing reset)\n", .{ @divTrunc(elapsed[0], 1000), @divTrunc(elapsed[1], 1000) });
+}
+
+test "compiled grids preserve all nodes semantics and display commands across column and numeric boundaries" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = .init(0.125, -0.0, 0, 0), .layout = .{ .min_size = .init(1, 2), .max_size = .init(320, 240) } },
+        .{ .id = 3, .kind = .panel, .frame = .init(-8, 4, 60, 42) },
+        .{ .id = 4, .kind = .panel, .frame = .init(12, -4, 400, 100) },
+        .{ .id = 5, .kind = .tabs, .frame = .init(8, 2, 64, 24), .variant = .primary },
+        .{ .id = 6, .kind = .dialog, .frame = .init(0, 0, 160, 80) },
+        .{ .id = 7, .kind = .panel, .frame = .init(0, 0, 0, 0) },
+    };
+    for ([_]usize{ 0, 1, 2, 3, 8, 16777217, std.math.maxInt(usize) }) |columns| {
+        for ([_]f32{ -1, -0.0, 0, 0.125, 8, 24.000002, std.math.inf(f32), std.math.nan(f32) }) |gap| {
+            const root = canvas.Widget{ .id = 1, .kind = .grid, .children = &children, .layout = .{ .columns = columns, .gap = gap } };
+            try expectTree(root, .init(0.125, -0.0, 800.00006, 599.99994), .{});
+            core.rt.frameReset();
+            var geist = canvas.DesignTokens{};
+            geist.controls.tabs_indicator = .underline;
+            geist.metrics.tabs_list_full_width = true;
+            try expectTree(root, .init(0.125, -0.0, 800.00006, 599.99994), geist);
+            core.rt.frameReset();
+        }
+    }
+    for (samples) |sample| {
+        children[0].frame.width = sample;
+        children[1].layout.min_size.height = sample;
+        children[2].layout.max_size.width = sample;
+        try expectTree(.{ .id = 1, .kind = .grid, .children = &children, .layout = .{ .columns = 3, .gap = 8 } }, .init(0, 0, 600, 400), .{});
+        core.rt.frameReset();
+    }
+}
+
+test "compiled virtual grids retain row culling rubber banding measurements and complete semantics" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [20]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .panel, .frame = .init(@floatFromInt(i % 3), @floatFromInt(i % 2), if (i % 2 == 0) 0 else 60, if (i % 3 == 0) 0 else 42), .layout = .{ .min_size = .init(1, 2), .max_size = .init(320, 240) } };
+    for ([_]usize{ 0, 1, 3, 24, std.math.maxInt(usize) }) |columns| {
+        for ([_]usize{ 0, 1, 4, 100 }) |overscan| {
+            for ([_]f32{ 0, 40.000004, 80 }) |extent| {
+                for ([_]f32{ -300, -0.0, 0, 30.000002, 240.00002, 3000, std.math.inf(f32), std.math.nan(f32) }) |scroll| {
+                    const root = canvas.Widget{ .id = 1, .kind = .grid, .children = &children, .value = scroll, .layout = .{ .columns = columns, .gap = 8.000001, .virtualized = true, .virtual_item_extent = extent, .virtual_overscan = overscan } };
+                    try expectTree(root, .init(0.125, -0.0, 600.00006, 160.00002), .{});
+                    core.rt.frameReset();
+                }
+            }
+        }
+    }
+    for ([_]f32{ -1, 0, 0.00001, 120 }) |height| {
+        try expectTree(.{ .id = 1, .kind = .grid, .children = &children, .layout = .{ .columns = 3, .virtualized = true, .virtual_item_extent = 40 } }, .init(0, 0, 600, height), .{});
+        core.rt.frameReset();
+    }
+}
+
+test "grid plans retain borrowed views and copied recursive frames until cycle collection" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const borrowed = core.rt.frameAlloc(u8, 9);
+    @memcpy(borrowed, "keep\x00\xffabi");
+    var view: [*]const u8 = undefined;
+    var view_len: usize = 0;
+    nsc_core_native_view(&view, &view_len);
+    const owned = try std.testing.allocator.dupe(u8, view[0..view_len]);
+    defer std.testing.allocator.free(owned);
+    const root = canvas.Widget{ .id = 1, .kind = .grid, .layout = .{ .columns = 2, .gap = 8 }, .children = &.{ .{ .id = 2, .kind = .grid, .children = &.{.{ .id = 3, .kind = .panel }}, .layout = .{ .columns = 3 } }, .{ .id = 4, .kind = .panel } } };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const tree = try canvas.layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 400), .{ .grid_layout_policy = core.nativeWindowPolicy }, &nodes);
+    try std.testing.expectEqualSlices(u8, "keep\x00\xffabi", borrowed);
+    try std.testing.expectEqualSlices(u8, owned, view[0..view_len]);
+    const copied = tree.nodes[3].frame;
+    core.rt.frameReset();
+    try expectRect(.init(304, 0, 296, 400), copied);
+}
+
+test "grid planning cost is measured beside the native reference" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [20]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .panel };
+    const root = canvas.Widget{ .id = 1, .kind = .grid, .children = &children, .layout = .{ .columns = 4, .gap = 8 } };
+    var nodes: [21]canvas.WidgetLayoutNode = undefined;
+    var elapsed: [2]i128 = undefined;
+    for (0..2) |lane| {
+        const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+        for (0..1000) |_| {
+            const tree = try canvas.layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 400), .{ .grid_layout_policy = if (lane == 1) core.nativeWindowPolicy else null }, &nodes);
+            std.mem.doNotOptimizeAway(tree);
+            core.rt.frameReset();
+        }
+        elapsed[lane] = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - started;
+    }
+    std.debug.print("20-child grid: native {d} ns, compiled {d} ns (including enclosing reset)\n", .{ @divTrunc(elapsed[0], 1000), @divTrunc(elapsed[1], 1000) });
+}
+
+test "compiled grid view records own nodes and text with complete native construction parity" {
+    try @import("surface_decoder").testGridRecords();
 }

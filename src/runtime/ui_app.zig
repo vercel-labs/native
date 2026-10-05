@@ -500,6 +500,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens_fn: ?*const fn (model: *const ModelT) canvas.DesignTokens = null,
             /// Portable surface placement over native measurements, independent of theme overrides.
             surface_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+            grid_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             /// Which built-in theme pack the stock tokens resolve when
             /// the app claims neither `tokens` nor `tokens_fn`: the
             /// pack composes with the live system appearance (scheme,
@@ -1985,6 +1986,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 };
                 tokens.pixel_snap.scale = self.pixel_snap_scale;
                 tokens.surface_layout_policy = self.options.surface_layout_policy;
+                tokens.grid_layout_policy = self.options.grid_layout_policy;
                 return tokens;
             }
             const state = self.currentThemeState();
@@ -2030,6 +2032,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (accent) |value| tokens = tokens.withOverrides(canvas.accentOverrides(value, color_scheme));
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             tokens.surface_layout_policy = self.options.surface_layout_policy;
+            tokens.grid_layout_policy = self.options.grid_layout_policy;
             return tokens;
         }
 

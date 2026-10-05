@@ -109,6 +109,7 @@ function themeHexNibble(byte: number): number {
 export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 2) return nscvShellLayout(request);
   if (request[0] === 3) return nscvSurfaceLayout(request);
+  if (request[0] === 4) return nscvGridLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -720,4 +721,83 @@ function nscvSurfaceLayout(request: Uint8Array): Uint8Array {
   const output = new DataView(result.buffer);
   output.setFloat32(1, frame.x, true);output.setFloat32(5, frame.y, true);output.setFloat32(9, frame.width, true);output.setFloat32(13, frame.height, true);
   return result;
+}
+
+/** Grid geometry over native-owned children and measured row extents.
+ * Operation 0 plans the grid and virtual row window; operation 1 places one
+ * flow child. Integer lanes preserve declared usize columns even above the
+ * exact JS number range; native conversion facts preserve u64-to-f32 rounding.
+ * Results are owned bytes, collected only by the enclosing view/cycle.
+ */
+function nscvGridLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 4 || request[0] !== 4 || request[3] !== 0) throw new Error("invalid grid layout request");
+  const op = request[1]!, flags = request[2]!;
+  if ((op !== 0 && op !== 1) || request.length !== 76 || flags > (op === 0 ? 7 : 3))
+    throw new Error("invalid grid layout operation, length or flags");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const integer = (at: number): number => wire.getUint32(at, true) + wire.getUint32(at + 4, true) * 4294967296;
+  const float = (at: number): number => wire.getFloat32(at, true);
+  const virtual = (flags & 1) !== 0;
+  const f = Math.fround;
+  if (op === 0) {
+    const count = integer(4), declared = integer(12), overscan = integer(20);
+    if (!Number.isSafeInteger(count)) throw new Error("invalid grid child count");
+    const columns = count === 0 ? 0 : declared > 0 ? declared : count;
+    const rows = columns === 0 ? 0 : 1 + Math.floor((count - 1) / columns);
+    const columnsF = count === 0 ? 0 : declared > 0 ? float(64) : float(60);
+    const gap = nscvSurfaceMax(0, float(44));
+    const width = columns > 0 ? f(nscvSurfaceMax(0, f(float(36) - f(gap * (declared > 0 ? float(72) : float(68))))) / columnsF) : 0;
+    let height = rows > 0 ? f(nscvSurfaceMax(0, f(float(40) - f(gap * f(rows - 1)))) / f(rows)) : 0;
+    let start = 0, end = count, offset = 0, extent = 0;
+    if (virtual) {
+      extent = float(48) > 0 ? float(48) : float(52);
+      if (rows === 0 || extent <= 0 || float(40) <= 0) { start = 0; end = 0; extent = 0; height = 0; }
+      else {
+        extent = nscvSurfaceMax(0, extent);
+        const stride = f(extent + gap), viewport = nscvSurfaceMax(0, float(40));
+        const total = f(f(f(rows) * extent) + f(nscvSurfaceMax(0, f(f(rows) - 1)) * gap));
+        const maxOffset = nscvSurfaceMax(0, f(total - viewport));
+        const raw = Number.isFinite(float(56)) ? float(56) : 0;
+        const bounded = nscvSurfaceClamp(nscvSurfaceMax(0, raw), 0, maxOffset, (flags & 2) !== 0);
+        offset = nscvSurfaceClamp(raw, -viewport, f(maxOffset + viewport), (flags & 2) !== 0);
+        const firstValue = f(bounded / stride), endValue = f(f(f(bounded + viewport) + gap) / stride);
+        const first = Math.min(rows - 1, Number.isFinite(firstValue) && firstValue > 0 ? Math.floor(firstValue) : 0);
+        const visibleEnd = Math.min(rows, Number.isFinite(endValue) && endValue > 0 ? Math.ceil(endValue) : 0);
+        start = first > overscan ? first - overscan : 0;
+        // Native usize addition is checked in safety builds and wraps in
+        // optimized builds. Keep the two lanes until after that boundary.
+        const lowSum = wire.getUint32(20, true) + visibleEnd % 4294967296;
+        const hiSum = wire.getUint32(24, true) + Math.floor(visibleEnd / 4294967296) + Math.floor(lowSum / 4294967296);
+        if (hiSum > 4294967295 && (flags & 4) !== 0) throw new Error("grid overscan overflow");
+        const sum = lowSum % 4294967296 + (hiSum % 4294967296) * 4294967296;
+        end = Math.min(rows, sum); height = extent;
+      }
+    }
+    const result = new Uint8Array(52), out = new DataView(result.buffer);
+    // Preserve all integer bits of the chosen declared column count.
+    if (count > 0) result.set(request.subarray(declared > 0 ? 12 : 4, declared > 0 ? 20 : 12), 0);
+    for (const [at, value] of [[8, rows], [16, start], [24, end]]) {
+      out.setUint32(at!, value! % 4294967296, true); out.setUint32(at! + 4, Math.floor(value! / 4294967296), true);
+    }
+    for (const [at, value] of [[32, width], [36, height], [40, gap], [44, offset], [48, extent]]) out.setFloat32(at!, value!, true);
+    return result;
+  }
+  const index = integer(4), columns = integer(12);
+  if (!Number.isSafeInteger(index) || columns === 0) throw new Error("invalid grid cell index or columns");
+  const row = Math.floor(index / columns), column = index - row * columns;
+  const x = f(float(20) + f(f(column) * f(float(28) + float(36))));
+  let y = f(float(24) + f(f(row) * f(float(32) + float(36))));
+  if (virtual) y = f(y - float(40));
+  let width = float(52) > 0 ? float(52) : float(28);
+  if ((flags & 2) !== 0) width = nscvSurfaceMax(width, nscvSurfaceMax(0, f(float(28) - float(44))));
+  width = nscvSurfaceBound(width, float(60), float(68));
+  const height = nscvSurfaceBound(float(56) > 0 ? float(56) : float(32), float(64), float(72));
+  const result = new Uint8Array(17), out = new DataView(result.buffer); result[0] = 1;
+  out.setFloat32(1, f(x + float(44)), true); out.setFloat32(5, f(y + float(48)), true);
+  out.setFloat32(9, width, true); out.setFloat32(13, height, true); return result;
+}
+
+function nscvGridCount(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid grid columns");
+  return value;
 }

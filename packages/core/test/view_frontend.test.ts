@@ -1709,3 +1709,14 @@ test("compiled modals retain nested content, width constraints, captions and dis
   }
   assert.throws(() => compileView('<button on-dismiss="reset"/>', contract), /unsupported/);
 });
+
+
+test("compiled grids preserve dynamic columns, virtual extents, and owned nested records", () => {
+  const { model, view } = evaluate('<grid columns="{count}" virtualized="{ticking}" virtual-item-extent="40" gap="8" value="{stampedMs}"><button on-press="increment">Café</button></grid>');
+  const first = view(); assert.equal(first.nodes[0].kind, "grid"); assert.equal(first.nodes[0].columns, 7);
+  assert.equal(first.nodes[0].virtualized, true); assert.equal(first.nodes[0].virtualItemExtent, 40);
+  assert.equal(first.nodes[0].value, -1); assert.equal(first.nodes[0].end, 2); assert.equal(first.nodes[1].text, "Café");
+  model.count = 3; model.ticking = false; const next = view(); assert.equal(next.nodes[0].columns, 3); assert.equal(next.nodes[0].virtualized, false);
+  assert.equal(first.nodes[0].columns, 7); model.count = -1; assert.throws(view, /grid columns/);
+  for (const attr of ['columns="2"', 'virtualized="true"', 'virtual-item-extent="40"']) assert.throws(() => compileView(`<row ${attr}/>`, contract), /requires grid/);
+});
