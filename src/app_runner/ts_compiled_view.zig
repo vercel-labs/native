@@ -8,6 +8,16 @@ const core = @import("core.zig");
 pub const enabled = @hasDecl(core, "nativeView");
 const Ui = sdk.canvas.Ui(core.Msg);
 
+const SpanRecord = struct {
+    text: []const u8,
+    weight: sdk.canvas.TextSpanWeight = .regular,
+    color: ?sdk.canvas.TextSpanColor = null,
+    scale: ?f32 = null,
+    monospace: bool = false,
+    italic: bool = false,
+    underline: bool = false,
+};
+
 const Record = struct {
     end: usize,
     kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
@@ -44,6 +54,7 @@ const Record = struct {
     role: @FieldType(sdk.canvas.WidgetSemantics, "role") = .none,
     background: @FieldType(sdk.canvas.StyleTokenRefs, "background") = null,
     foreground: @FieldType(sdk.canvas.StyleTokenRefs, "foreground") = null,
+    borderColor: @FieldType(sdk.canvas.StyleTokenRefs, "border_color") = null,
     radius: @FieldType(sdk.canvas.StyleTokenRefs, "radius") = null,
     windowDrag: bool = false,
     main: @FieldType(Ui.ElementOptions, "main") = .start,
@@ -58,6 +69,8 @@ const Record = struct {
     treeLevel: u16 = 0,
     listItemIndex: ?u32 = null,
     listItemCount: ?u32 = null,
+    spans: ?[]const SpanRecord = null,
+    textAlignment: sdk.canvas.TextAlign = .start,
     spanWeight: ?sdk.canvas.TextSpanWeight = null,
     spanColor: ?sdk.canvas.TextSpanColor = null,
     spanScale: ?f32 = null,
@@ -97,7 +110,10 @@ pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node
 
 fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
-    const tree = try std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always });
+    const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidView,
+    };
     if (tree.format != 2 or tree.nodes.len == 0 or tree.nodes.len > 1024) return error.InvalidView;
     if (tree.nodes[0].end != tree.nodes.len) return error.InvalidView;
     return node(ui, tree.nodes, 0, tree.nodes.len, 0);
@@ -148,7 +164,12 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
     if (value.wrap != null and value.kind != .text) return error.InvalidView;
-    const paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
+    const legacy_paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
+    const paragraph = value.spans != null or legacy_paragraph;
+    if (value.spans) |spans| {
+        if (legacy_paragraph or value.text.len != 0 or value.wrap != null or spans.len == 0 or spans.len > 2048) return error.InvalidView;
+        for (spans) |span| if (span.scale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
+    }
     if (paragraph and value.kind != .text) return error.InvalidView;
     if (value.spanScale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
     if (value.codeLanguage != null or value.codeLineDigits != null) {
@@ -184,6 +205,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .placeholder = value.placeholder,
         .command = value.command,
         .wrap = value.wrap,
+        .text_alignment = value.textAlignment,
         .submit_on_enter = value.submitOnEnter,
         .columns = value.columns,
         .virtualized = value.virtualized,
@@ -206,7 +228,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .icon = value.icon,
         .window_drag = value.windowDrag,
         .semantics = .{ .role = value.role, .label = value.label, .focusable = value.focusable, .list_item_index = value.listItemIndex, .list_item_count = value.listItemCount },
-        .style_tokens = .{ .background = value.background, .foreground = value.foreground, .radius = value.radius },
+        .style_tokens = .{ .background = value.background, .foreground = value.foreground, .border_color = value.borderColor, .radius = value.radius },
         .main = value.main,
         .cross = value.cross,
         .size = value.size,
@@ -275,7 +297,22 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
             result.widget.interaction_policy = if (value.role == .tree) scrollTreePolicy else core.nativeScrollPolicy;
         }
     }
-    if (paragraph) {
+    if (value.spans) |runs| {
+        // Rebase every run into one native-owned paragraph buffer. No pointer
+        // into the compiled result arena survives this tree generation.
+        var text_len: usize = 0;
+        for (runs) |run| text_len += run.text.len;
+        const text_bytes = try ui.arena.alloc(u8, text_len);
+        const spans = try ui.arena.alloc(sdk.canvas.TextSpan, runs.len);
+        var offset: usize = 0;
+        for (runs, spans) |run, *span| {
+            @memcpy(text_bytes[offset .. offset + run.text.len], run.text);
+            span.* = .{ .text = text_bytes[offset .. offset + run.text.len], .weight = run.weight, .color = run.color, .scale = run.scale orelse 0, .monospace = run.monospace, .italic = run.italic, .underline = run.underline };
+            offset += run.text.len;
+        }
+        result.widget.text = text_bytes;
+        result.widget.spans = spans;
+    } else if (legacy_paragraph) {
         const spans = try ui.arena.alloc(sdk.canvas.TextSpan, 1);
         spans[0] = .{ .text = result.widget.text, .weight = value.spanWeight orelse .regular, .color = value.spanColor, .scale = value.spanScale orelse 0 };
         result.widget.spans = spans;
@@ -738,4 +775,54 @@ pub fn testContentSurfaceRecords() !void {
             }
         }
     }
+}
+
+pub fn testInlineParagraphRecords() !void {
+    if (comptime !enabled) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const source =
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","textAlignment":"end","size":"display","key":"readout","label":"Result","spans":[{"text":"Value"},{"text":" "},{"text":"café","weight":"medium","monospace":true,"italic":true,"underline":true,"scale":1.5,"color":"accent"},{"text":"."}]}]}
+    ;
+    const bytes = try std.testing.allocator.dupe(u8, source);
+    defer std.testing.allocator.free(bytes);
+    var actual = try decode(&ui, bytes);
+    @memset(bytes, 0);
+    var reference_ui = Ui.init(arena.allocator());
+    const Reference = sdk.canvas.CompiledMarkupView(core.Model, core.Msg,
+        \\<text text-alignment="end" size="display" key="readout" label="Result">Value <span weight="medium" mono="true" italic="true" underline="true" scale="1.5" foreground="accent">café</span>.</text>
+    );
+    const model: core.Model = undefined;
+    const expected = Reference.build(&reference_ui, &model);
+    actual.widget.interaction_policy = null;
+    const actual_tree = try ui.finalize(actual);
+    const expected_tree = try reference_ui.finalize(expected);
+    try std.testing.expectEqualDeep(expected_tree.root, actual_tree.root);
+    try std.testing.expectEqualDeep(expected_tree.handlers, actual_tree.handlers);
+    try std.testing.expectEqualStrings("Value café.", actual.widget.text);
+    var offset: usize = 0;
+    for (actual.widget.spans) |span| {
+        try std.testing.expect(span.text.ptr == actual.widget.text.ptr + offset);
+        offset += span.text.len;
+    }
+    for ([_][]const u8{
+        \\{"format":2,"nodes":[{"end":1,"kind":"button","text":"","spans":[{"text":"x"}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"hidden","spans":[{"text":"x"}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spans":[{"text":"x","scale":0}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spans":[{"text":"x","scale":-1}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spans":[{"text":"x","weight":"heavy"}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spans":[{"text":"x","color":"invalid"}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spans":[{"text":"x","extra":true}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","spanWeight":"bold","spans":[{"text":"x"}]}]}
+        ,
+        \\{"format":2,"nodes":[{"end":1,"kind":"text","text":"","wrap":true,"spans":[{"text":"x"}]}]}
+    }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
 }

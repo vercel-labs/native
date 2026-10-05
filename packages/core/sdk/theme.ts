@@ -1,0 +1,267 @@
+// Typed model-derived token overrides. Names match the native token ABI.
+// Omitted members inherit the selected stock register. Colors use normalized RGBA.
+export type ThemeColor = { readonly r: number; readonly g: number; readonly b: number; readonly a: number; }
+
+export type ThemeFontFamily = "geist" | "geist_mono" | "system_sans" | "system_mono";
+export type ThemeSpinnerStyleToken = "arc" | "segmented";
+export type ThemeEasing = "linear" | "standard" | "emphasized" | "spring";
+export type ThemeScrollOverscroll = "none" | "rubber_band";
+export type ThemeTabsIndicatorKind = "pill" | "underline";
+export type ThemeButtonGroupKind = "segmented" | "detached";
+export type ThemeDensity = "compact" | "regular" | "spacious";
+
+export type ThemeColorTokenOverrides = {
+  readonly background?: ThemeColor;
+  readonly surface?: ThemeColor;
+  readonly surface_subtle?: ThemeColor;
+  readonly surface_pressed?: ThemeColor;
+  readonly text?: ThemeColor;
+  readonly text_muted?: ThemeColor;
+  readonly syntax_plain?: ThemeColor;
+  readonly syntax_comment?: ThemeColor;
+  readonly syntax_keyword?: ThemeColor;
+  readonly syntax_literal?: ThemeColor;
+  readonly syntax_function?: ThemeColor;
+  readonly syntax_property?: ThemeColor;
+  readonly syntax_constant?: ThemeColor;
+  readonly border?: ThemeColor;
+  readonly accent?: ThemeColor;
+  readonly accent_text?: ThemeColor;
+  readonly destructive?: ThemeColor;
+  readonly destructive_text?: ThemeColor;
+  readonly success?: ThemeColor;
+  readonly success_text?: ThemeColor;
+  readonly warning?: ThemeColor;
+  readonly warning_text?: ThemeColor;
+  readonly info?: ThemeColor;
+  readonly info_text?: ThemeColor;
+  readonly focus_ring?: ThemeColor;
+  readonly shadow?: ThemeColor;
+  readonly scrim?: ThemeColor;
+  readonly disabled?: ThemeColor;
+}
+
+export type ThemeTypographyTokenOverrides = {
+  readonly font_id?: number;
+  readonly mono_font_id?: number;
+  readonly font_family?: ThemeFontFamily;
+  readonly mono_font_family?: ThemeFontFamily;
+  readonly body_size?: number;
+  readonly label_size?: number;
+  readonly title_size?: number;
+  readonly button_size?: number;
+  readonly button_font_id?: number;
+  readonly heading_size?: number;
+  readonly display_size?: number;
+}
+
+export type ThemeSpacingTokenOverrides = {
+  readonly xs?: number;
+  readonly sm?: number;
+  readonly md?: number;
+  readonly lg?: number;
+  readonly xl?: number;
+}
+
+export type ThemeRadiusTokenOverrides = {
+  readonly sm?: number;
+  readonly md?: number;
+  readonly lg?: number;
+  readonly xl?: number;
+}
+
+export type ThemeStrokeTokenOverrides = {
+  readonly hairline?: number;
+  readonly regular?: number;
+  readonly focus?: number;
+  readonly focus_offset?: number;
+}
+
+export type ThemeStateTokenOverrides = {
+  readonly hover_fill_alpha?: number;
+  readonly pressed_fill_alpha?: number;
+  readonly disabled_alpha?: number;
+  readonly selection_wash_alpha?: number;
+  readonly destructive_wash_alpha?: number;
+  readonly destructive_wash_hover_alpha?: number;
+  readonly destructive_wash_pressed_alpha?: number;
+  readonly badge_destructive_wash_alpha?: number;
+  readonly secondary_hover_alpha?: number;
+}
+
+export type ThemeControlMetricTokenOverrides = {
+  readonly control_height_sm?: number;
+  readonly control_height?: number;
+  readonly control_height_lg?: number;
+  readonly button_inset_sm?: number;
+  readonly button_inset?: number;
+  readonly button_inset_lg?: number;
+  readonly button_label_sm_step?: number;
+  readonly button_label_lg_step?: number;
+  readonly button_icon_gap?: number;
+  readonly icon_text_step?: number;
+  readonly row_extent?: number;
+  readonly size_inset_step?: number;
+  readonly slider_track_height?: number;
+  readonly slider_thumb_width?: number;
+  readonly slider_thumb_height?: number;
+  readonly tabs_indicator_thickness?: number;
+  readonly tabs_list_inset?: number;
+  readonly tabs_list_full_width?: boolean;
+  readonly tabs_trigger_height?: number;
+  readonly tabs_trigger_inset?: number;
+  readonly tabs_label_size_step?: number;
+  readonly tabs_gap?: number;
+  readonly button_group_gap?: number;
+  readonly spinner_style?: ThemeSpinnerStyleToken;
+  readonly spinner_segment_count?: number;
+  readonly spinner_segment_length_ratio?: number;
+  readonly spinner_segment_thickness_ratio?: number;
+  readonly spinner_segment_radius_ratio?: number;
+  readonly spinner_tail_opacity?: number;
+  readonly spinner_period_ms?: number;
+  readonly tooltip_show_delay_ms?: number;
+  readonly tooltip_warm_window_ms?: number;
+}
+
+export type ThemeShadowTokenOverrides = {
+  readonly y?: number;
+  readonly blur?: number;
+  readonly spread?: number;
+}
+
+export type ThemeShadowTokensOverrides = {
+  readonly none?: ThemeShadowTokenOverrides;
+  readonly xs?: ThemeShadowTokenOverrides;
+  readonly sm?: ThemeShadowTokenOverrides;
+  readonly md?: ThemeShadowTokenOverrides;
+}
+
+export type ThemeBlurTokenOverrides = {
+  readonly none?: number;
+  readonly sm?: number;
+  readonly md?: number;
+  readonly scrim?: number;
+}
+
+export type ThemeSpringTokenOverrides = {
+  readonly mass?: number;
+  readonly stiffness?: number;
+  readonly damping?: number;
+}
+
+export type ThemeMotionTokenOverrides = {
+  readonly fast_ms?: number;
+  readonly normal_ms?: number;
+  readonly slow_ms?: number;
+  readonly easing?: ThemeEasing;
+  readonly spring?: ThemeSpringTokenOverrides;
+}
+
+export type ThemeScrollPhysicsOverrides = {
+  readonly wheel_multiplier?: number;
+  readonly wheel_velocity_scale?: number;
+  readonly deceleration_per_second?: number;
+  readonly stop_velocity?: number;
+  readonly overscroll?: ThemeScrollOverscroll;
+  readonly rubberband_extent_ratio?: number;
+  readonly rubberband_max_extent?: number;
+  readonly rubberband_resistance?: number;
+  readonly rubberband_return_per_second?: number;
+  readonly rubberband_velocity_decay_per_second?: number;
+  readonly rubberband_snap_distance?: number;
+}
+
+export type ThemeLayerTokenOverrides = {
+  readonly base?: number;
+  readonly floating?: number;
+  readonly overlay?: number;
+  readonly modal?: number;
+}
+
+export type ThemePixelSnapTokenOverrides = {
+  readonly geometry?: boolean;
+  readonly text?: boolean;
+  readonly scale?: number;
+}
+
+export type ThemeControlVisualTokenOverrides = {
+  readonly background?: ThemeColor;
+  readonly hover_background?: ThemeColor;
+  readonly active_background?: ThemeColor;
+  readonly pressed_background?: ThemeColor;
+  readonly disabled_background?: ThemeColor;
+  readonly disabled_foreground?: ThemeColor;
+  readonly foreground?: ThemeColor;
+  readonly active_foreground?: ThemeColor;
+  readonly border?: ThemeColor;
+  readonly radius?: number;
+  readonly stroke_width?: number;
+}
+
+export type ThemeControlTokenOverrides = {
+  readonly button_default?: ThemeControlVisualTokenOverrides;
+  readonly button_primary?: ThemeControlVisualTokenOverrides;
+  readonly button_secondary?: ThemeControlVisualTokenOverrides;
+  readonly button_outline?: ThemeControlVisualTokenOverrides;
+  readonly button_ghost?: ThemeControlVisualTokenOverrides;
+  readonly button_destructive?: ThemeControlVisualTokenOverrides;
+  readonly button_disabled_border?: ThemeColor;
+  readonly toggle_button?: ThemeControlVisualTokenOverrides;
+  readonly accordion?: ThemeControlVisualTokenOverrides;
+  readonly alert?: ThemeControlVisualTokenOverrides;
+  readonly bubble?: ThemeControlVisualTokenOverrides;
+  readonly card?: ThemeControlVisualTokenOverrides;
+  readonly dialog?: ThemeControlVisualTokenOverrides;
+  readonly drawer?: ThemeControlVisualTokenOverrides;
+  readonly sheet?: ThemeControlVisualTokenOverrides;
+  readonly select?: ThemeControlVisualTokenOverrides;
+  readonly input?: ThemeControlVisualTokenOverrides;
+  readonly text_field?: ThemeControlVisualTokenOverrides;
+  readonly search_field?: ThemeControlVisualTokenOverrides;
+  readonly combobox?: ThemeControlVisualTokenOverrides;
+  readonly textarea?: ThemeControlVisualTokenOverrides;
+  readonly list_item?: ThemeControlVisualTokenOverrides;
+  readonly menu_item?: ThemeControlVisualTokenOverrides;
+  readonly data_cell?: ThemeControlVisualTokenOverrides;
+  readonly tabs?: ThemeControlVisualTokenOverrides;
+  readonly segmented_control?: ThemeControlVisualTokenOverrides;
+  readonly tabs_indicator?: ThemeTabsIndicatorKind;
+  readonly button_group?: ThemeControlVisualTokenOverrides;
+  readonly button_group_style?: ThemeButtonGroupKind;
+  readonly checkbox?: ThemeControlVisualTokenOverrides;
+  readonly radio?: ThemeControlVisualTokenOverrides;
+  readonly switch_control?: ThemeControlVisualTokenOverrides;
+  readonly slider?: ThemeControlVisualTokenOverrides;
+  readonly progress?: ThemeControlVisualTokenOverrides;
+  readonly scrollbar?: ThemeControlVisualTokenOverrides;
+  readonly panel?: ThemeControlVisualTokenOverrides;
+  readonly resizable?: ThemeControlVisualTokenOverrides;
+  readonly popover?: ThemeControlVisualTokenOverrides;
+  readonly menu_surface?: ThemeControlVisualTokenOverrides;
+  readonly dropdown_menu?: ThemeControlVisualTokenOverrides;
+  readonly tooltip?: ThemeControlVisualTokenOverrides;
+  readonly avatar?: ThemeControlVisualTokenOverrides;
+  readonly badge?: ThemeControlVisualTokenOverrides;
+  readonly separator?: ThemeControlVisualTokenOverrides;
+  readonly skeleton?: ThemeControlVisualTokenOverrides;
+  readonly spinner?: ThemeControlVisualTokenOverrides;
+}
+
+export type ThemeDesignTokenOverrides = {
+  readonly colors?: ThemeColorTokenOverrides;
+  readonly typography?: ThemeTypographyTokenOverrides;
+  readonly spacing?: ThemeSpacingTokenOverrides;
+  readonly radius?: ThemeRadiusTokenOverrides;
+  readonly stroke?: ThemeStrokeTokenOverrides;
+  readonly states?: ThemeStateTokenOverrides;
+  readonly metrics?: ThemeControlMetricTokenOverrides;
+  readonly shadow?: ThemeShadowTokensOverrides;
+  readonly blur?: ThemeBlurTokenOverrides;
+  readonly motion?: ThemeMotionTokenOverrides;
+  readonly scroll?: ThemeScrollPhysicsOverrides;
+  readonly layer?: ThemeLayerTokenOverrides;
+  readonly pixel_snap?: ThemePixelSnapTokenOverrides;
+  readonly controls?: ThemeControlTokenOverrides;
+  readonly density?: ThemeDensity;
+}

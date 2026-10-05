@@ -332,6 +332,8 @@ export class TypeTable {
   }
 
   private isCanonicalOptionalSdkRecord(decl: ts.TypeAliasDeclaration): boolean {
+    const theme = sdkLibraryModules.get("@native-sdk/core/theme");
+    if (theme !== undefined && path.resolve(decl.getSourceFile().fileName) === path.resolve(theme)) return true;
     const events = sdkLibraryModules.get("@native-sdk/core/events");
     return (decl.name.text === "ThemeState" || decl.name.text === "StatusItemPresentation" || decl.name.text === "StatusItemMenuItem") && events !== undefined &&
       path.resolve(decl.getSourceFile().fileName) === path.resolve(events);

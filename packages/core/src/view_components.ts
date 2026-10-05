@@ -4,6 +4,8 @@
  */
 import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, textClipboardRange as nscvClipboardRange, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
+type NscViewSpan = { text: string; weight?: string; color?: string; scale?: number; monospace?: boolean; italic?: boolean; underline?: boolean };
+
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
@@ -12,11 +14,12 @@ type NscViewNode = {
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; valueX?: number; axis?: string; overscroll?: string;
   image?: number; icon?: string; label?: string; role?: string;
-  background?: string; foreground?: string; radius?: string; windowDrag?: boolean;
+  background?: string; foreground?: string; borderColor?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
   disabled?: boolean; selected?: boolean; focusable?: boolean;
   expanded?: boolean; treeLevel?: number;
   listItemIndex?: number; listItemCount?: number;
+  spans?: readonly NscViewSpan[]; textAlignment?: string;
   spanWeight?: string; spanColor?: string; spanScale?: number;
   codeLanguage?: string; codeLineDigits?: number;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
@@ -25,6 +28,11 @@ type NscViewNode = {
   hoverEnter?: number[]; hoverLeave?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;
 };
+
+function nscvSpanScale(value: number): number {
+  if (!Number.isFinite(value) || value <= 0 || value > 3.4028234663852886e38) throw new Error("span scale requires a positive finite f32");
+  return value;
+}
 
 function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {
   if (nodes.length >= 1024) throw new Error("compiled view exceeds 1024 nodes");

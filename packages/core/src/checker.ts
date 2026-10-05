@@ -508,6 +508,7 @@ export class SubsetChecker {
     this.checkMigrationHook();
     this.checkThemePackHelper();
     this.checkThemeStateHelper();
+    this.checkTokenOverridesHelper();
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
     this.checkWindowsHelper();
@@ -890,6 +891,21 @@ export class SubsetChecker {
         "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`); import it from `@native-sdk/core/events`.",
         decl.type,
       );
+    }
+  }
+
+  private checkTokenOverridesHelper(): void {
+    const decl = this.entryExportedFunction("tokenOverrides");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "tokenOverrides" && candidate.decl === decl);
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : undefined;
+    // The canonical declaration is complete: importing it gives every
+    // consumer one optional field for every register member, even when an
+    // app returns a small override. Partial hand-authored shapes cannot
+    // silently drop a token from generated projection or native validation.
+    if (!helper || returns?.k !== "struct" || returns.name !== "ThemeDesignTokenOverrides" ||
+        this.table.structs.get(returns.name)?.decl.getSourceFile().fileName !== path.join(path.dirname(sdkCoreModulePath), "theme.ts")) {
+      this.report("NS1033", "`tokenOverrides` must be a single-Model helper returning `ThemeDesignTokenOverrides` imported from `@native-sdk/core/theme`.", decl.type ?? decl);
     }
   }
 
@@ -2017,7 +2033,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "statusItem", "statusItems", "windows",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

@@ -1286,3 +1286,15 @@ For scripted checks (and the CI workflow `native init --full` scaffolds), replac
 native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
 native automate assert --absent 'error event='
 ```
+
+## Compiled inline typography
+
+A text paragraph can contain ordered `span` leaves. Each leaf supports `weight="regular|medium|bold"`, `mono`, `italic`, `underline`, a positive `scale`, and a foreground color token. Use `text-alignment="start|center|end"` on the paragraph. Layout, keys, semantics, and events belong on the enclosing text element. The compiler preserves one separating space between whitespace-separated runs and keeps punctuation adjacent. Spans cannot contain nested elements or several comment-separated text runs.
+
+```xml
+<text size="display" text-alignment="end" label="{readout}">
+  <span mono="true" weight="medium">{readout}</span>
+</text>
+```
+
+Text-entry controls also accept `border-color` tokens, including `background` for a field that blends into the surrounding surface.

@@ -1867,3 +1867,37 @@ export function update(model: Model, msg: Msg): Model {
 `);
   assert.ok(ruleIds(asserted).includes("NS1061"), `got ${ruleIds(asserted)}`);
 });
+
+test("model token overrides require the complete SDK register and remain entry-owned", () => {
+  const result = check(`
+import type { ThemeDesignTokenOverrides } from "@native-sdk/core/theme";
+export interface Model { readonly dark: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { dark: false }; }
+export function update(model: Model, msg: Msg): Model { return { dark: !model.dark }; }
+export function tokenOverrides(model: Model): ThemeDesignTokenOverrides {
+  return { typography: { display_size: 36, mono_font_id: 64 }, radius: { sm: 7 },
+    colors: { accent: { r: 0.1, g: 0.2, b: model.dark ? 0.9 : 0.5, a: 1 } },
+    controls: { button_primary: { radius: 10, stroke_width: 1 } }, pixel_snap: { geometry: true, text: true } };
+}
+`, { contractEntry: "core.ts" });
+  assert.equal(result.ok, true, result.diagnostics.map(d => d.message).join("\n"));
+  const contract = JSON.parse(result.contract!);
+  const register = contract.types.structs.find((record: { name: string }) => record.name === "ThemeDesignTokenOverrides");
+  assert.equal(register.fields.length, 15);
+  assert.ok(register.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const colors = contract.types.structs.find((record: { name: string }) => record.name === "ThemeColorTokenOverrides");
+  const typography = contract.types.structs.find((record: { name: string }) => record.name === "ThemeTypographyTokenOverrides");
+  assert.ok(typography.fields.every((field: { type: { inner: { kind: string } } }) => field.type.inner.kind !== "i64"));
+  assert.equal(colors.fields.length, 28);
+  assert.ok(colors.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const wrong = checkOnly(`
+export interface Model { readonly value: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { value: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export type PartialTokens = { readonly radius?: number };
+export function tokenOverrides(model: Model): PartialTokens { return {}; }
+`);
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+});

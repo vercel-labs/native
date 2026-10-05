@@ -530,6 +530,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// is mutually exclusive with it. Explicit `tokens_fn`/`tokens`
             /// still own the complete register and take precedence.
             theme_state_fn: ?*const fn (model: *const ModelT) ThemeState = null,
+            /// Model-derived overrides over the resolved stock register.
+            /// Explicit complete tokens retain precedence; device scale and
+            /// native measurement capabilities remain runtime-owned.
+            token_overrides_fn: ?*const fn (model: *const ModelT) canvas.DesignTokenOverrides = null,
             /// The app's ONE-accent brand statement over the stock
             /// tokens: when set (and the app claims neither `tokens`
             /// nor `tokens_fn` — apps that own their tokens own their
@@ -1954,7 +1958,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn themeControl(self: *const Self, scheme: ThemeColorScheme) ThemeControl {
             const full_tokens = self.options.tokens_fn != null or self.options.tokens != null;
             if (self.options.theme_policy) |policy| {
-                const request = [_]u8{ 2, @intFromBool(self.options.tokens_fn != null), @intFromBool(self.options.tokens != null), @intFromBool(self.options.theme_state_fn != null), themeSchemeByte(scheme) };
+                const request = [_]u8{ 2, @intFromBool(self.options.tokens_fn != null), @intFromBool(self.options.tokens != null), @intFromBool(self.options.theme_state_fn != null), themeSchemeByte(scheme), @intFromBool(self.options.token_overrides_fn != null) };
                 var result: [4]u8 = undefined;
                 if (policy(&request, &result) != result.len or result[0] > 2 or result[1] > 1 or result[2] > 1) @panic("invalid compiled theme control result");
                 return .{ .mode = result[0], .follows_system = result[1] == 1, .derives = result[2] == 1 };
@@ -1963,7 +1967,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             return .{
                 .mode = if (self.options.tokens_fn != null) 1 else if (self.options.tokens != null) 2 else 0,
                 .follows_system = follows,
-                .derives = self.options.tokens_fn != null or self.options.theme_state_fn != null or follows,
+                .derives = self.options.tokens_fn != null or self.options.theme_state_fn != null or self.options.token_overrides_fn != null or follows,
             };
         }
 
@@ -2046,6 +2050,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .pack = pack,
             });
             if (accent) |value| tokens = tokens.withOverrides(canvas.accentOverrides(value, color_scheme));
+            if (self.options.token_overrides_fn) |overrides| tokens = tokens.withOverrides(overrides(&self.model));
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             tokens.surface_layout_policy = self.options.surface_layout_policy;
             tokens.grid_layout_policy = self.options.grid_layout_policy;

@@ -1,0 +1,9 @@
+<column padding="24" gap="16" grow="1">
+  <text size="display" label="{status}"><span mono="true" weight="medium">{status}</span></text>
+  <text label="Inline styles">A <span weight="bold">single</span> paragraph with <span italic="true" foreground="accent">mixed styles</span> and <span underline="true" mono="true">registered mono</span>.</text>
+  <text text-alignment="end" label="Right aligned"><span mono="true">1234567890</span></text>
+  <row gap="8">
+    <button on-press="size" label="Change size">Change size</button>
+    <button variant="primary" selected="{accent}" on-press="accent" label="Change accent">Change accent</button>
+  </row>
+</column>

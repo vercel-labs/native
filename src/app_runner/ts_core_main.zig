@@ -144,13 +144,17 @@ fn appOptions(io: ?std.Io) Adapter.Options {
 /// A separate executable uses the same core, markup, theme and command routes.
 /// Test startup never enters production persistence, services or app directories.
 pub fn testMain(init: std.process.Init) !void {
-    try native_sdk.native_testing.runWithCoreOptions(Adapter, init, appOptions(null), .{
+    var boot_fonts = try BootFonts.load(init.io);
+    defer boot_fonts.deinit();
+    var options = appOptions(null);
+    options.fonts = boot_fonts.entries[0..boot_fonts.len];
+    try native_sdk.native_testing.runWithCoreOptions(Adapter, init, options, .{
         .service_results = if (comptime services.enabled) .{ .index_fn = services.indexOf, .streaming_fn = services.isStreaming, .decode_fn = services.resultDecoder(core) } else null,
     });
 }
 
 pub fn main(init: std.process.Init) !void {
-    const options = appOptions(init.io);
+    var options = appOptions(init.io);
     // The platform caches directory for this app: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
     // the conventional content-addressed path under this directory —
@@ -239,6 +243,10 @@ pub fn main(init: std.process.Init) !void {
             boot_image_count += 1;
         } else |_| {}
     }
+
+    var boot_fonts = try BootFonts.load(init.io);
+    defer boot_fonts.deinit();
+    options.fonts = boot_fonts.entries[0..boot_fonts.len];
 
     // The core's launch-time environment channel (`envMsgs`): read each
     // named variable once, here at the boundary — never inside update —
@@ -453,6 +461,53 @@ fn manifestImages() []const ImageAsset {
         var out: []const ImageAsset = &.{};
         for (manifest.assets.images) |entry| {
             out = out ++ &[_]ImageAsset{.{ .id = entry.id, .path = entry.path }};
+        }
+        return out;
+    }
+}
+
+/// Native file access and font registration remain explicit capabilities.
+const BootFonts = struct {
+    entries: [manifestFonts().len]App.FontRegistration = undefined,
+    len: usize = 0,
+
+    fn load(io: std.Io) !BootFonts {
+        var result: BootFonts = .{};
+        errdefer result.deinit();
+        inline for (comptime manifestFonts()) |asset| {
+            const bytes = runner.app_assets.readFileAlloc(io, asset.path, std.heap.page_allocator, .limited(native_sdk.max_registered_canvas_font_bytes)) catch |err| {
+                std.log.err("font asset '{s}' (id {d}) could not be read: {s}", .{ asset.path, asset.id, @errorName(err) });
+                return err;
+            };
+            result.entries[result.len] = .{ .id = asset.id, .name = asset.path, .ttf = bytes };
+            result.len += 1;
+        }
+        return result;
+    }
+
+    fn deinit(self: *const BootFonts) void {
+        for (self.entries[0..self.len]) |font| std.heap.page_allocator.free(font.ttf);
+    }
+};
+
+const FontAsset = struct { id: native_sdk.canvas.FontId, path: []const u8 };
+
+fn manifestFonts() []const FontAsset {
+    comptime {
+        if (!@hasField(@TypeOf(manifest), "assets")) return &.{};
+        if (!@hasField(@TypeOf(manifest.assets), "fonts")) return &.{};
+        if (manifest.assets.fonts.len > native_sdk.max_registered_canvas_fonts) @compileError("too many declared font assets");
+        var out: []const FontAsset = &.{};
+        for (manifest.assets.fonts) |entry| {
+            if (entry.id < native_sdk.canvas.min_registered_font_id or entry.id > 9_007_199_254_740_991) @compileError("font asset id requires a safe whole id at or above 64");
+            if (!std.mem.startsWith(u8, entry.path, "assets/")) @compileError("font assets require a bundled assets/ path");
+            if (std.mem.indexOfScalar(u8, entry.path, '\\') != null or std.mem.indexOfScalar(u8, entry.path, 0) != null) @compileError("invalid font asset path");
+            var segments = std.mem.splitScalar(u8, entry.path, '/');
+            while (segments.next()) |segment| {
+                if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) @compileError("invalid font asset path segment");
+            }
+            for (out) |previous| if (previous.id == entry.id) @compileError("duplicate declared font asset id");
+            out = out ++ &[_]FontAsset{.{ .id = entry.id, .path = entry.path }};
         }
         return out;
     }

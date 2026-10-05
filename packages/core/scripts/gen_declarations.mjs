@@ -23,7 +23,7 @@ const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const sdkDir = path.join(pkg, "sdk");
 
 /// The author-visible modules, in exports-map order.
-export const declarationSources = ["core.ts", "text.ts", "events.ts"];
+export const declarationSources = ["core.ts", "text.ts", "events.ts", "theme.ts"];
 
 /// Generate declaration text per output file name (relative to sdk/),
 /// entirely in memory.

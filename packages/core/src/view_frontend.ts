@@ -11,7 +11,7 @@ export interface ViewContract {
   model_helpers: { name: string; params: Ref[]; returns: Ref }[];
   msg: { name?: string; arms: Arm[] };
 }
-interface Element { name: string; attrs: Map<string, string>; children: Element[]; text: string; at: number; file: string }
+interface Element { name: string; attrs: Map<string, string>; children: Element[]; content: (Element | { text: string; at: number; end: number })[]; text: string; at: number; end: number; file: string }
 interface Expr { code: string; type: Ref }
 type Scope = ReadonlyMap<string, Expr>;
 interface Slot { children: Element[]; scope: Scope; slot?: Slot }
@@ -53,7 +53,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -86,10 +86,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       const start = /^<([a-z][a-z0-9-]*)\b/.exec(src.slice(pos));
       if (!start) error("expected an element");
       pos += start[0].length;
-      const node: Element = { name: start[1]!, attrs: new Map(), children: [], text: "", at, file };
+      const node: Element = { name: start[1]!, attrs: new Map(), children: [], content: [], text: "", at, end: at, file };
       for (;;) {
         while (/\s/.test(src[pos] ?? "") && pos < src.length) pos++;
-        if (src.startsWith("/>", pos)) { pos += 2; return node; }
+        if (src.startsWith("/>", pos)) { pos += 2; node.end = pos; return node; }
         if (src[pos] === ">") { pos++; break; }
         const attr = /^([a-z][a-z0-9-]*)\s*=\s*"([^"]*)"/.exec(src.slice(pos));
         if (!attr) error("expected a quoted attribute or >");
@@ -106,12 +106,12 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (src.startsWith("</", pos)) {
           const close = /^<\/([a-z][a-z0-9-]*)\s*>/.exec(src.slice(pos));
           if (!close || close[1] !== node.name) error(`expected </${node.name}>`);
-          pos += close[0].length; return node;
+          pos += close[0].length; node.end = pos; return node;
         }
-        if (src[pos] === "<") node.children.push(element(depth + 1));
+        if (src[pos] === "<") { const child = element(depth + 1); node.children.push(child); node.content.push(child); }
         else {
           const end = src.indexOf("<", pos), stop = end < 0 ? src.length : end;
-          node.text += decode(src.slice(pos, stop)); pos = stop;
+          const value = decode(src.slice(pos, stop)); node.text += value; node.content.push({ text: value, at: pos, end: stop }); pos = stop;
         }
       }
     };
@@ -414,8 +414,48 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     const container = ["column", "row", "stack", "grid", "card", "alert", "dialog", "drawer", "sheet", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
     if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel"].includes(node.name)) fail(node, "compiled treeitem requires column, row or panel");
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
-    if (["list-item", "card", "alert"].includes(node.name) ? node.text.trim() !== "" && node.children.length !== 0 : container ? node.text.trim() !== "" : node.children.length !== 0) fail(node, "mixed content is unsupported");
+    const paragraph = node.name === "text" && node.children.length > 0;
+    if (!paragraph && (["list-item", "card", "alert"].includes(node.name) ? node.text.trim() !== "" && node.children.length !== 0 : container ? node.text.trim() !== "" : node.children.length !== 0)) fail(node, "mixed content is unsupported");
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
+    if (paragraph) {
+      if (node.attrs.has("wrap") || node.attrs.has("overflow")) fail(node, "span paragraphs always word-wrap; drop wrap and overflow");
+      const runs: string[] = [];
+      let separator = false;
+      for (const part of node.content) {
+        const isSpan = "name" in part;
+        if (isSpan && (part.name !== "span" || part.children.length || part.content.length !== 1 || !part.text.trim())) fail(part, "text takes nonempty span leaves without nesting");
+        const raw = part.text;
+        const visible = raw.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+        if (!isSpan && /^[ \t\r\n]/.test(raw)) separator = true;
+        if (!visible) { if (/[ \t\r\n]/.test(raw)) separator = true; continue; }
+        if (runs.length && separator) runs.push('{ text: " " }');
+        const fields = [`text: ${text(visible, node, scope)}`];
+        if (isSpan) for (const [name, value] of part.attrs) {
+          if (["mono", "italic", "underline"].includes(name)) fields.push(`${name === "mono" ? "monospace" : name}: ${bound(value, "boolean", part, scope)}`);
+          else if (name === "scale") {
+            if (!value.startsWith("{") && (!Number.isFinite(Number(value)) || Number(value) <= 0)) fail(part, "span scale requires a positive finite number");
+            fields.push(`scale: nscvSpanScale(${bound(value, "number", part, scope)})`);
+          } else if (name === "weight") {
+            if (value.startsWith("{")) {
+              const expr = binding(value, part, scope);
+              const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
+              if (expr.type.kind !== "enum" || !members?.every(member => ["regular", "medium", "bold"].includes(member))) fail(part, "span weight requires regular, medium or bold");
+              fields.push(`weight: ${expr.code}`);
+            } else {
+              if (!["regular", "medium", "bold"].includes(value)) fail(part, "unsupported span weight");
+              fields.push(`weight: ${JSON.stringify(value)}`);
+            }
+          } else if (name === "foreground") {
+            if (!["background", "surface", "surface_subtle", "surface_pressed", "text", "text_muted", "syntax_plain", "syntax_comment", "syntax_keyword", "syntax_literal", "syntax_function", "syntax_property", "syntax_constant", "border", "accent", "accent_text", "destructive", "destructive_text", "success", "success_text", "warning", "warning_text", "info", "info_text", "focus_ring", "shadow", "scrim", "disabled"].includes(value)) fail(part, "unsupported span foreground token");
+            fields.push(`color: ${JSON.stringify(value)}`);
+          } else fail(part, `unsupported span attribute ${name}; layout, identity and events belong on text`);
+        }
+        runs.push(`{ ${fields.join(", ")} }`);
+        separator = !isSpan && /[ \t\r\n]$/.test(raw);
+      }
+      props[1] = 'text: ""';
+      props.push(`spans: [${runs.join(", ")}]`);
+    }
     if (node.name === "code") {
       if (node.attrs.get("editable") !== "true" || node.attrs.get("wrap") !== "false")
         fail(node, 'compiled code requires editable="true" and wrap="false"');
@@ -456,6 +496,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           if (!vocabulary.includes(value)) fail(node, `unsupported ${name}=${value}`);
           props.push(`${name}: ${JSON.stringify(value)}`);
         }
+      }
+      else if (name === "text-alignment") {
+        if (!["start", "center", "end"].includes(value)) fail(node, "unsupported text-alignment");
+        props.push(`textAlignment: ${JSON.stringify(value)}`);
       }
       else if (name === "min-width" || name === "max-width") props.push(`${name === "min-width" ? "minWidth" : "maxWidth"}: ${bound(value, "number", node, scope)}`);
       else if (["resize-duration", "resize-easing", "resize-origin"].includes(name)) {
@@ -513,11 +557,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`${name === "anchor" ? "anchor" : "anchorAlignment"}: ${JSON.stringify(value)}`);
         }
       }
-      else if (["main", "cross", "size", "variant", "role", "background", "foreground", "radius"].includes(name)) {
-        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], radius: ["sm", "md", "lg"] };
+      else if (["main", "cross", "size", "variant", "role", "background", "foreground", "border-color", "radius"].includes(name)) {
+        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], "border-color": ["background", "surface", "border", "accent", "focus_ring", "destructive"], radius: ["sm", "md", "lg"] };
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
         if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
-        props.push(`${name}: ${JSON.stringify(value)}`);
+        props.push(`${name === "border-color" ? "borderColor" : name}: ${JSON.stringify(value)}`);
       } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
@@ -532,7 +576,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     const id = next++;
     if (node.name === "tabs" || node.name === "split") output.push(`const nscvStart${id} = nscvNodes.length;`);
     output.push(`const nscvNode${id}: NscViewNode = { end: 0, ${props.join(", ")} };`, `nscvNodes.push(nscvNode${id});`, 'if (nscvNodes.length > 1024) throw new Error("compiled view exceeds 1024 nodes");');
-    emitChildren(node.children, scope, slot, stack, depth + 1); output.push(`nscvNode${id}.end = nscvNodes.length;`);
+    if (!paragraph) emitChildren(node.children, scope, slot, stack, depth + 1); output.push(`nscvNode${id}.end = nscvNodes.length;`);
     if (node.name === "code") {
       const spec = (name: string): string => {
         const raw = node.attrs.get(name);

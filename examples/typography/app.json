@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.typography",
+  "name": "typography",
+  "display_name": "Typography",
+  "description": "Model-derived typography and inline text styles.",
+  "version": "0.1.0",
+  "platforms": [
+    "macos"
+  ],
+  "permissions": [
+    "view",
+    "command"
+  ],
+  "capabilities": [
+    "native_views",
+    "gpu_surfaces"
+  ],
+  "assets": {
+    "fonts": [
+      {
+        "id": 64,
+        "path": "assets/GeistMono-Regular.ttf"
+      }
+    ]
+  },
+  "shell": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Typography",
+        "width": 560,
+        "height": 360,
+        "restore_policy": "center_on_primary",
+        "views": [
+          {
+            "label": "typography-canvas",
+            "kind": "gpu_surface",
+            "fill": true,
+            "gpu_backend": "metal",
+            "gpu_pixel_format": "bgra8_unorm",
+            "gpu_present_mode": "timer",
+            "gpu_color_space": "srgb",
+            "gpu_alpha_mode": "opaque",
+            "gpu_vsync": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -482,6 +482,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 comptime validateThemeStateHelper();
                 stamped.theme_state_fn = themeStateAdapter;
             }
+            if (comptime @hasDecl(Model, "tokenOverrides")) {
+                if (options.token_overrides_fn != null) @panic("TsUiApp owns token_overrides_fn from tokenOverrides");
+                stamped.token_overrides_fn = tokenOverridesAdapter;
+            }
             if (comptime @hasDecl(core, "nativeStatusPolicy")) {
                 if (options.status_policy != null) @panic("TsUiApp owns status_policy - remove custom status policy wiring");
                 stamped.status_policy = core.nativeStatusPolicy;
@@ -605,6 +609,54 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 !@hasField(Pack, "house") or !@hasField(Pack, "geist"))
             {
                 @compileError(teaching);
+            }
+        }
+
+        fn tokenOverridesAdapter(model: *const Model) canvas.DesignTokenOverrides {
+            const params = @typeInfo(@TypeOf(Model.tokenOverrides)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.tokenOverrides() else model.tokenOverrides(core.rt.frameAllocator());
+            return tokenOverrideValue(canvas.DesignTokenOverrides, raw);
+        }
+
+        /// Copy the complete typed declaration by value before the next core
+        /// call. No text, pointers or behavior can survive as token data.
+        fn tokenOverrideValue(comptime Target: type, raw: anytype) Target {
+            const Raw = @TypeOf(raw);
+            if (comptime @typeInfo(Raw) == .pointer) return tokenOverrideValue(Target, raw.*);
+            switch (@typeInfo(Target)) {
+                .optional => |info| {
+                    if (comptime @typeInfo(Raw) != .optional) @compileError("token override members must be optional");
+                    return if (raw) |value| tokenOverrideValue(info.child, value) else null;
+                },
+                .@"struct" => |info| {
+                    if (comptime @typeInfo(Raw) == .optional) return if (raw) |value| tokenOverrideValue(Target, value) else .{};
+                    if (comptime @typeInfo(Raw) != .@"struct" or @typeInfo(Raw).@"struct".fields.len != info.fields.len) @compileError("token override record must match the complete canonical register");
+                    var result: Target = undefined;
+                    inline for (info.fields) |field| {
+                        if (comptime !@hasField(Raw, field.name)) @compileError("token override record is missing " ++ field.name);
+                        @field(result, field.name) = tokenOverrideValue(field.type, @field(raw, field.name));
+                    }
+                    if (comptime Target == canvas.Color) {
+                        inline for (.{ "r", "g", "b", "a" }) |field| {
+                            const value = @field(result, field);
+                            if (value < 0 or value > 1) @panic("token color channels require normalized RGBA");
+                        }
+                    }
+                    return result;
+                },
+                .float => {
+                    const value: Target = if (comptime @typeInfo(Raw) == .float) @floatCast(raw) else @floatFromInt(raw);
+                    if (!std.math.isFinite(value)) @panic("token override must be finite");
+                    return value;
+                },
+                .int => {
+                    const value: f64 = if (comptime @typeInfo(Raw) == .float) @floatCast(raw) else @floatFromInt(raw);
+                    if (!std.math.isFinite(value) or value != @trunc(value) or value < -9_007_199_254_740_991 or value > 9_007_199_254_740_991 or value < @as(f64, @floatFromInt(std.math.minInt(Target))) or value > @as(f64, @floatFromInt(std.math.maxInt(Target)))) @panic("token override integer is out of range");
+                    return @intFromFloat(value);
+                },
+                .@"enum" => return std.meta.stringToEnum(Target, @tagName(raw)) orelse @panic("invalid token override enum"),
+                .bool => return raw,
+                else => @compileError("unsupported token override ABI field"),
             }
         }
 

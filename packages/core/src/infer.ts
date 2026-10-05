@@ -23,7 +23,8 @@
 // into a slot some use forces to be an integer — that is a conflict reported
 // as a teaching error (NS1016), never a downstream Zig type error.
 
-import { ts, TypedAst, exportListBindings } from "./typed_ast.ts";
+import { ts, TypedAst, exportListBindings, sdkLibraryModules } from "./typed_ast.ts";
+import path from "node:path";
 import { constFunctionValue } from "./ownership.ts";
 import { thrownShapeOf } from "./checker.ts";
 import type { TypeTable } from "./types.ts";
@@ -275,7 +276,14 @@ export class IntInference {
           this.addSlot(node, node.name.text);
         }
       } else if (ts.isPropertySignature(node) && node.name && ts.isIdentifier(node.name)) {
-        if (this.numberish(node.type)) this.addSlot(node, node.name.text);
+        if (this.numberish(node.type)) {
+          // Canonical token numbers cross a fixed native register. Their ABI
+          // remains f64 across apps; the native capability validates integer
+          // ids/ranges and performs the explicit f32 conversion.
+          const theme = sdkLibraryModules.get("@native-sdk/core/theme");
+          if (theme !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(theme)) this.addFloatSlot(node, node.name.text);
+          else this.addSlot(node, node.name.text);
+        }
       } else if (ts.isPropertyDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
         // R19: a class field is a slot like a record field, fed by its
         // initializer and by `this.x = ...` writes (wired in collectFlows).

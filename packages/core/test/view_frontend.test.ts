@@ -1765,3 +1765,44 @@ test("unkeyed enum filters preserve structural identities and dispatch typed enu
   assert.throws(() => compileView(markup.replace("set_filter:{f}", "set_filter:{other}"), c), /matching scalar/);
   assert.throws(() => compileView(markup.replace('as="f"', 'as="f" key=""'), c), /for requires/);
 });
+
+test("inline paragraphs preserve ordered runs, native whitespace, identity and styles", () => {
+  const { view } = evaluate('<text key="readout" size="display" text-alignment="end" label="Result">  Value <span mono="true" weight="medium" italic="true" underline="true" scale="1.5" foreground="accent">{status}</span>. <span weight="bold">done</span>  </text>');
+  const tree = view();
+  assert.equal(tree.nodes.length, 1);
+  const node = tree.nodes[0];
+  assert.equal(node.textAlignment, "end");
+  assert.equal(node.key, "readout");
+  assert.deepEqual(node.spans, [
+    { text: "Value" }, { text: " " },
+    { text: "Café\nnotes", monospace: true, weight: "medium", italic: true, underline: true, scale: 1.5, color: "accent" },
+    { text: "." }, { text: " " }, { text: "done", weight: "bold" },
+  ]);
+  assert.equal(node.end, 1);
+  assert.equal(node.text, "");
+  assert.deepEqual(evaluate('<text><span>a</span><!-- comment whitespace --><span>b</span></text>').view().nodes[0].spans, [{ text: "a" }, { text: "b" }]);
+  assert.deepEqual(evaluate('<text><span>a</span> \n <span>b</span></text>').view().nodes[0].spans, [{ text: "a" }, { text: " " }, { text: "b" }]);
+});
+
+test("inline paragraph misuse is rejected at its authoring boundary", () => {
+  for (const markup of [
+    '<span>outside</span>', '<text><button>child</button></text>',
+    '<text><span><span>nested</span></span></text>', '<text><span>a<!--comment-->b</span></text>', '<text><span/></text>',
+    '<text><span key="run">x</span></text>', '<text><span on-press="reset">x</span></text>',
+    '<text><span weight="heavy">x</span></text>', '<text><span foreground="invalid">x</span></text>',
+    '<text><span scale="0">x</span></text>', '<text><span scale="-1">x</span></text>',
+    '<text><span scale="NaN">x</span></text>', '<text><span scale="{status}">x</span></text>',
+    '<text wrap="true"><span>x</span></text>', '<text overflow="clip"><span>x</span></text>',
+    '<text text-alignment="right">x</text>',
+  ]) assert.throws(() => compileView(markup, contract), undefined, markup);
+  const { model, view } = evaluate('<text><span scale="{count}">x</span></text>');
+  assert.equal(view().nodes[0].spans[0].scale, 7);
+  model.count = 0;
+  assert.throws(view, /positive finite/);
+});
+
+test("text entry border tokens preserve the authored surface blend", () => {
+  const node = evaluate('<input background="background" border-color="background" />').view().nodes[0];
+  assert.equal(node.borderColor, "background");
+  assert.throws(() => compileView('<input border-color="invalid" />', contract), /unsupported border-color/);
+});

@@ -31,6 +31,10 @@
       "types": "./sdk/events.ts",
       "default": "./sdk/events.ts"
     },
+    "./theme": {
+      "types": "./sdk/theme.ts",
+      "default": "./sdk/theme.ts"
+    },
     "./testing": {
       "types": "./testing/index.ts",
       "default": "./testing/index.ts"

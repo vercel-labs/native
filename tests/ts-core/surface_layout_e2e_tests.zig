@@ -4,6 +4,10 @@ const native_sdk = @import("native_sdk");
 const core = @import("surface_fixture_core");
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
+test "compiled inline paragraphs match native rendering data and own every run" {
+    try @import("surface_decoder").testInlineParagraphRecords();
+}
+
 test "compiled modal view records match native construction" {
     try @import("surface_decoder").testModalRecords();
 }

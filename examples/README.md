@@ -24,6 +24,7 @@ TypeScript is the primary app-authoring language. A new `native init my_app` pro
 | `kanban` | Keyed boards, drag interactions, avatars, controlled scrolling, and file drops. |
 | `menu-bar` | Status-item lifecycle, native menus, window hiding and reopening, and typed commands. |
 | `soundboard` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
+| `typography` | Model-derived design tokens, styled paragraphs, alignment, and bundled fonts. |
 | `system-monitor` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
 
 Soundboard and System Monitor use the canonical unsuffixed folders. Their TypeScript cores and Native markup replace the earlier duplicate Zig implementations. New TypeScript apps need no language suffix.

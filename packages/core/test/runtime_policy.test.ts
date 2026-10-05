@@ -342,8 +342,10 @@ test("theme policy preserves complete-token precedence and rebuild coordination"
     const follows = !fn && !fixed && (!helper || scheme === 0);
     assert.deepEqual([...native_theme_policy(new Uint8Array([2, fn, fixed, helper, scheme]))],
       [fn ? 1 : fixed ? 2 : 0, +follows, +(!!fn || !!helper || follows), 0]);
+    for (const overrides of [0, 1]) assert.deepEqual([...native_theme_policy(new Uint8Array([2, fn, fixed, helper, scheme, overrides]))],
+      [fn ? 1 : fixed ? 2 : 0, +follows, +(!!fn || !!helper || !!overrides || follows), 0]);
   }
-  for (const bytes of [[], [3], [1], [2], [1, 3, 1, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, 1, 0, 2, 0, 0, 0], [2, 2, 0, 0, 0], [2, 0, 0, 0, 3]]) {
+  for (const bytes of [[], [3], [1], [2], [1, 3, 1, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, 1, 0, 2, 0, 0, 0], [2, 2, 0, 0, 0], [2, 0, 0, 0, 3], [2, 0, 0, 0, 0, 2], [2, 0, 0, 0, 0, 0, 0]]) {
     assert.throws(() => native_theme_policy(new Uint8Array(bytes)), /theme policy|theme .*request|theme .*flag/);
   }
 });

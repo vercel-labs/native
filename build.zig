@@ -1143,6 +1143,26 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&status_driver_run.step);
         test_step.dependOn(&status_driver_run.step);
 
+        const typography_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        typography_reference_run.setCwd(b.path("examples/typography"));
+        typography_reference_run.has_side_effects = true;
+        typography_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        typography_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/typography-view-reference"));
+        _ = typography_reference_run.captureStdOut(.{});
+        _ = typography_reference_run.captureStdErr(.{});
+        const typography_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        typography_driver_run.setCwd(b.path("examples/typography"));
+        typography_driver_run.has_side_effects = true;
+        typography_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        typography_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/typography-view-reference"));
+        _ = typography_driver_run.captureStdOut(.{});
+        _ = typography_driver_run.captureStdErr(.{});
+        typography_driver_run.step.dependOn(&typography_reference_run.step);
+        b.step("test-ts-typography-driver", "Compare complete typography snapshots and replay across view backends").dependOn(&typography_driver_run.step);
+        native_driver_step.dependOn(&typography_driver_run.step);
+        ts_core_e2e_step.dependOn(&typography_driver_run.step);
+        test_step.dependOn(&typography_driver_run.step);
+
         const relational_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         relational_reference_run.setCwd(b.path("examples/relational-notes"));
         relational_reference_run.has_side_effects = true;
@@ -1290,6 +1310,10 @@ pub fn build(b: *std.Build) void {
         addTestStep(b, "test-ts-shell-layout-e2e", "Run compiled shell planning, ownership, and OS application parity", ts_core_artifacts.shell_layout);
         ts_core_e2e_step.dependOn(&shell_layout_e2e_run.step);
         test_step.dependOn(&shell_layout_e2e_run.step);
+        const typography_run = b.addRunArtifact(ts_core_artifacts.typography);
+        b.step("test-ts-typography-e2e", "Verify compiled token overrides and registered rich paragraphs").dependOn(&typography_run.step);
+        ts_core_e2e_step.dependOn(&typography_run.step);
+        test_step.dependOn(&typography_run.step);
         const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
         b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
@@ -2464,6 +2488,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effect-policy", "Run named effect policy example tests", "examples/effect-policy", .managed),
         ui_inbox_example_step,
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-typography", "Run typography and bundled font startup tests", "examples/typography", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-video-player", "Run video player example tests", "examples/video-player", .managed),
@@ -3990,6 +4015,7 @@ const TsCoreE2eArtifacts = struct {
     feed_reader: *std.Build.Step.Compile,
     shell_layout: *std.Build.Step.Compile,
     surface_layout: *std.Build.Step.Compile,
+    typography: *std.Build.Step.Compile,
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
@@ -4271,6 +4297,19 @@ fn tsCoreE2eArtifact(
     const shell_layout_mod = module(b, target, optimize, "tests/ts-core/shell_layout_e2e_tests.zig");
     shell_layout_mod.addImport("native_sdk", desktop_mod);
     shell_layout_mod.addImport("shell_fixture_core", feed_reader_fixture.module);
+    const typography_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/typography/src/core.ts",
+        .src_dir = b.path("examples/typography/src"),
+        .name = "typography_core",
+        .typescript_view = true,
+    });
+    const typography_mod = module(b, target, optimize, "tests/ts-core/typography_e2e_tests.zig");
+    typography_mod.addImport("native_sdk", desktop_mod);
+    typography_mod.addImport("typography_core", typography_fixture.module);
+    const typography_decoder_mod = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    typography_decoder_mod.addImport("native_sdk", desktop_mod);
+    typography_decoder_mod.addImport("core.zig", typography_fixture.module);
+    typography_mod.addImport("typography_decoder", typography_decoder_mod);
     const surface_layout_mod = module(b, target, optimize, "tests/ts-core/surface_layout_e2e_tests.zig");
     surface_layout_mod.addImport("native_sdk", desktop_mod);
     surface_layout_mod.addImport("surface_fixture_core", feed_reader_fixture.module);
@@ -4542,6 +4581,7 @@ fn tsCoreE2eArtifact(
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
         .shell_layout = filteredTestArtifact(b, shell_layout_mod, "ts-shell-layout-e2e-tests", &.{}),
+        .typography = filteredTestArtifact(b, typography_mod, "ts-typography-e2e-tests", &.{}),
         .surface_layout = filteredTestArtifact(b, surface_layout_mod, "ts-surface-layout-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
