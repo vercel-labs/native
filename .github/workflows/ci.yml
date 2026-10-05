@@ -149,6 +149,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -260,6 +264,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -292,6 +300,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -404,6 +416,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
