@@ -994,6 +994,80 @@ export interface FetchStreamRoute<M extends Msgish> {
   readonly err: BytesKind<M>;
 }
 
+/// Complete subprocess and clipboard records retain loss and failure metadata.
+/// Keys echo the authored wire key as bytes; no native engine address crosses the ABI.
+export type SpawnExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export type ClipboardOutcome = "ok" | "failed" | "rejected" | "cancelled";
+export type ClipboardOp = "read" | "write";
+export type VideoSourceKind = "local" | "stream";
+export interface SpawnLineEventArm {
+  readonly key: Uint8Array;
+  readonly line: Uint8Array;
+  readonly truncated: boolean;
+  readonly droppedBefore: number;
+}
+export interface SpawnExitEventArm {
+  readonly key: Uint8Array;
+  readonly code: number;
+  readonly reason: SpawnExitReason;
+  readonly droppedLines: number;
+  readonly output: Uint8Array;
+  readonly outputTruncated: boolean;
+  readonly stderrTail: Uint8Array;
+  readonly stderrTruncated: boolean;
+}
+export interface ClipboardEventArm {
+  readonly key: Uint8Array;
+  readonly operation: ClipboardOp;
+  readonly outcome: ClipboardOutcome;
+  readonly text: Uint8Array;
+  readonly droppedBefore: number;
+}
+/// A copied mirror of the single native playback channel, captured at command
+/// issue. The reply runs in the same dispatch, before returning to the host.
+/// Declarative/foreign playback has an empty key; ownership remains native.
+export interface VideoSnapshotArm {
+  readonly key: Uint8Array;
+  readonly active: boolean;
+  readonly surface: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly completed: boolean;
+  readonly looping: boolean;
+  readonly muted: boolean;
+  readonly source: VideoSourceKind;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly width: number;
+  readonly height: number;
+  readonly volume: number;
+}
+/// A flat, exact capability record. Reverse assignability refuses missing enum
+/// states as well as extra/missing fields, before native dispatch is possible.
+export type CapabilityKind<M extends Msgish, P> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof P]
+    ? [keyof P] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & P
+        ? P extends Omit<M, "kind"> ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface SpawnEventsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly collect?: boolean;
+  readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+  readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+export interface ClipboardResultRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly result: CapabilityKind<M, ClipboardEventArm>;
+}
+export interface VideoSnapshotRoute<M extends Msgish> {
+  readonly snapshot: CapabilityKind<M, VideoSnapshotArm>;
+}
+
 /// `Cmd.spawn` routing, line mode: each stdout line dispatches the optional
 /// `line` arm (one bytes field; omitted = lines dropped), a clean exit the
 /// `exit` arm (one number field — the exit code), every other end the `err`
@@ -1296,6 +1370,9 @@ export type Cmd<M extends Msgish> =
       readonly body: Uint8Array;
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
@@ -1341,7 +1418,7 @@ export type Cmd<M extends Msgish> =
   | {
       readonly op: "video_ctl";
       readonly key: string;
-      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
       /// Seek position (ms) / volume (0..1) / the muted-loop switch
       /// (0 = off, 1 = on); 0 for the value-less verbs.
       readonly value: number;
@@ -1788,6 +1865,12 @@ export const Cmd = {
     return { op: "clip_write", bytes };
   },
 
+  /// Write with one complete terminal result, including refusal/cancellation.
+  /// A duplicate live key is rejected; it never replaces a pending write.
+  clipboardWriteResult<M extends Msgish>(bytes: Uint8Array, route: ClipboardResultRoute<M>): Cmd<M> {
+    return { op: "clip_write_result", key: route.key ?? "", resultKind: route.result, bytes };
+  },
+
   /// Read the system clipboard. Exactly one terminal Msg: the `ok` arm with
   /// the text bytes, or the `err` arm with the reason bytes ("failed",
   /// "rejected").
@@ -1869,6 +1952,13 @@ export const Cmd = {
     };
   },
 
+  /// Stream complete line/exit records. Collect mode retains stdout, stderr
+  /// tails, truncation and drop counts even for unsuccessful exits.
+  spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M> {
+    return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""),
+      exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
   /// Open (or replace — one player is the whole surface) the keyed audio
   /// event stream: resolve the source cascade (local path, then url, cached
   /// and integrity-gated) and start playback. Every playback event
@@ -1940,6 +2030,17 @@ export const Cmd = {
       loop: source.loop ?? false,
       muted: source.muted ?? false,
     };
+  },
+
+  /// Read the native channel mirror as an explicit, deterministic reply.
+  /// This performs no OS operation and adds no effect journal entry.
+  videoSnapshot<M extends Msgish>(route: VideoSnapshotRoute<M>): Cmd<M> {
+    return { op: "video_snapshot", snapshotKind: route.snapshot };
+  },
+
+  /// Reload the same owned source from zero, including completed playback.
+  videoRestart(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "restart", value: 0 };
   },
 
   /// Start or resume the loaded playback — the poster-frame counterpart

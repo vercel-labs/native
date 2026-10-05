@@ -273,7 +273,7 @@ function channels(s: CoreContract, out: Diagnostic[]): void {
   }
 }
 export const unconditionalExports = ["abi_version", "build_id", "set_panic_sink", "init", "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"];
-export const conditionalExports = ["command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy"];
+export const conditionalExports = ["command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy"];
 function abi(s: CoreContract, out: Diagnostic[]): void {
   let cursor = 0;
   for (const name of unconditionalExports) {
@@ -390,7 +390,7 @@ function integerSlots(s: CoreContract, out: Diagnostic[]): void {
 }
 export function validateCore(input: CoreInput): Diagnostic[] {
   const s = input.sidecar, out: Diagnostic[] = [];
-  if (s.wire_version !== 7) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 7, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
+  if (s.wire_version !== 8) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 8, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi_version !== 2) flag(out, "abi_version", `this generator binds core ABI version 2, the sidecar declares ${input.abi_text} — upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi.snapshot_format !== 1) flag(out, "abi.snapshot_format", `this generator decodes snapshot format 1, the sidecar declares ${input.snapshot_text} — upgrade the SDK or pin the compiler release that matches it`);
   names(s, out);

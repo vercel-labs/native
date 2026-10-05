@@ -670,7 +670,7 @@ class ContractEmitter {
     return (
       "{\n" +
       '  "format": 1,\n' +
-      '  "wire_version": 7,\n' +
+      '  "wire_version": 8,\n' +
       '  "abi_version": 2,\n' +
       '  "compiler_version": "0.0.1",\n' +
       `  "entry": ${js(this.entry)},\n` +

@@ -108,6 +108,8 @@ function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
   if (s.model !== "Model") reserved.push("Model");
   if (s.msg.name !== "Msg") reserved.push("Msg");
   if (s.abi.exports.includes("native_view")) reserved.push("nativeView", "nativeViewEvent", "ptr", "len", "arena");
+  if (s.abi.exports.includes("native_media_view")) reserved.push("nativeMediaView");
+  if (s.abi.exports.includes("native_media_window_view")) reserved.push("nativeMediaWindowView");
   if (s.abi.exports.includes("native_window_view")) reserved.push("nativeWindowView", "label", "ptr", "len", "arena");
   const policies = ["radio", "tabs", "tree", "list", "menu", "toggle", "accordion", "slider", "split", "scroll", "resizable", "text", "timer", "db", "effect", "stream", "window", "theme", "status"];
   const methods = ["nativeRadioPolicy", "nativeTabsPolicy", "nativeTreePolicy", "nativeListPolicy", "nativeMenuPolicy", "nativeTogglePolicy", "nativeAccordionPolicy", "nativeSliderPolicy", "nativeSplitPolicy", "nativeScrollPolicy", "nativeResizablePolicy", "nativeTextPolicy", "nativeTimerPolicy", "nativeDbPolicy", "nativeEffectPolicy", "nativeStreamPolicy", "nativeWindowPolicy", "nativeThemePolicy", "nativeStatusPolicy"];

@@ -209,3 +209,18 @@ test("compiled profiles preserve the optional Native primary and window view sig
   assert.match(mirror, /abi\.native_window_view\(label.ptr, label.len, &ptr, &len\)/);
   assert.ok(!mirror.includes('const nscfCommitted'));
 }));
+
+test("media view exports carry explicit playback context and copy results before frame reset", () => withWork(dir => {
+  const input = currentContract("wide_msg");
+  input.abi.exports.push("native_view", "native_window_view", "native_media_view", "native_media_window_view");
+  const result = invoke(dir, input, ["--profile", "profile.json", "--out", "mirror.zig"]);
+  assert.equal(result.status, 0, result.stderr);
+  const profile = JSON.parse(fs.readFileSync(path.join(dir, "profile.json"), "utf8"));
+  const entries = profile.exports.filter((item: { export: string }) => item.export.startsWith("native_media"));
+  assert.deepEqual(entries.map((item: { export: string; params: string[]; returns: string }) => [item.export, item.params, item.returns]), [["native_media_view", ["bytes"], "bytes"], ["native_media_window_view", ["bytes", "bytes"], "bytes"]]);
+  const mirror = fs.readFileSync(path.join(dir, "mirror.zig"), "utf8");
+  for (const name of ["nativeMediaView", "nativeMediaWindowView"]) {
+    const wrapper = mirror.match(new RegExp(`pub fn ${name}\\([\\s\\S]*?\\n}`))![0];
+    assert.match(wrapper, /defer abi.frame_reset/); assert.match(wrapper, /allocator.dupe|arena.dupe/);
+  }
+}));

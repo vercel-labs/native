@@ -1842,3 +1842,42 @@ test("model-derived variants stay within the closed widget vocabulary", () => {
   assert.throws(() => compileView('<button variant="{status}"/>', input), /variant/);
   assert.throws(() => compileView('<button variant="{variant}"/>', { ...input, types: { ...input.types, enums: [{ name: "Variant", members: ["primary", "unknown"] }] } }), /variant/);
 });
+
+test("playback context builds owned house chrome independently for primary and secondary windows", () => {
+  const markup = '<video src="{status}" controls="true" grow="1" label="Clip"/>';
+  const generated = compileViewBundle(markup, contract, {}, [{ label: "player", source: markup }]);
+  const exports: { native_view?: () => Uint8Array; native_media_view?: (bytes: Uint8Array) => Uint8Array; native_media_window_view?: (label: Uint8Array, bytes: Uint8Array) => Uint8Array } = {};
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: { status: new TextEncoder().encode("clip.mp4") } });
+  const context = (flags: number, position: number, duration: number) => {
+    const result = new Uint8Array(20); result[0] = 1; result[1] = flags;
+    const data = new DataView(result.buffer); data.setFloat64(4, position, true); data.setFloat64(12, duration, true); return result;
+  };
+  const read = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes)).nodes;
+  const live = context(7, 3_723_000, 7_325_000);
+  const primary = read(exports.native_media_view!(live));
+  assert.deepEqual(read(exports.native_media_window_view!(new TextEncoder().encode("player"), live)), primary);
+  assert.equal(primary[0].videoSrc, "clip.mp4"); assert.equal(primary[0].zeroIntrinsic, true); assert.equal(primary[0].clipContent, true);
+  assert.equal(primary[1].label, "Clip"); assert.equal(primary[1].image, 0x0001766964656f5f);
+  assert.equal(primary[3].label, "Pause"); assert.equal(primary[3].videoControl, "toggle"); assert.equal(primary[3].disabled, false);
+  assert.equal(primary[4].text, "1:02:03"); assert.equal(primary[6].text, "2:02:05");
+  assert.equal(primary[5].value, Math.fround(3_723_000 / 7_325_000)); assert.equal(primary[5].videoControl, "scrub");
+  const complete = read(exports.native_media_view!(context(9, 60000, 60000)));
+  assert.equal(complete[3].label, "Play"); assert.equal(complete[5].disabled, true);
+  assert.equal(read(exports.native_view!())[3].disabled, true); // No context leaked from either window.
+  live.fill(255); assert.equal(primary[4].text, "1:02:03");
+  for (const bytes of [new Uint8Array(), new Uint8Array(19), context(16, 0, 0), context(0, -1, 0), context(0, NaN, 0), context(0, 0, Infinity), context(0, .5, 0)])
+    assert.throws(() => exports.native_media_view!(bytes), /playback/);
+  const bad = context(0, 0, 0); bad[2] = 1; assert.throws(() => exports.native_media_view!(bad), /playback/);
+});
+
+test("bare media surfaces and closed dynamic icons preserve their binding types", () => {
+  const input: ViewContract = { ...contract, types: { ...contract.types, enums: [{ name: "PlayIcon", members: ["pause", "play"] }], structs: [{ name: "Model", fields: [{ name: "surface", type: { kind: "i64" } }, { name: "icon", type: { kind: "enum", name: "PlayIcon" } }] }] } };
+  const code = compileView('<row><media-surface surface="{surface}" grow="1" label="Frames"/><button icon="{icon}"/></row>', input);
+  const exports: { native_view?: () => Uint8Array } = {};
+  const model = { surface: 0x7601, icon: "pause" };
+  runInNewContext(ts.transpile(code, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  assert.equal(nodes[1].kind, "media_surface"); assert.equal(nodes[1].image, 0x7601); assert.equal(nodes[2].icon, "pause");
+  assert.throws(() => compileView('<button surface="{surface}"/>', input), /requires media-surface/);
+  assert.throws(() => compileView('<button icon="{count}"/>', contract), /closed union/);
+});

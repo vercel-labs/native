@@ -1330,6 +1330,14 @@ pub fn build(b: *std.Build) void {
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
+        const effects_probe_run = b.addRunArtifact(ts_core_artifacts.effects_probe);
+        b.step("test-ts-effects-probe-e2e", "Compare compiled effects-probe with complete native behavior").dependOn(&effects_probe_run.step);
+        ts_core_e2e_step.dependOn(&effects_probe_run.step);
+        test_step.dependOn(&effects_probe_run.step);
+        const video_player_run = b.addRunArtifact(ts_core_artifacts.video_player);
+        b.step("test-ts-video-player-e2e", "Compare compiled video-player with complete native behavior").dependOn(&video_player_run.step);
+        ts_core_e2e_step.dependOn(&video_player_run.step);
+        test_step.dependOn(&video_player_run.step);
         const inbox_run = b.addRunArtifact(ts_core_artifacts.inbox);
         b.step("test-ts-inbox-e2e", "Compare compiled Inbox with the native behavior reference").dependOn(&inbox_run.step);
         ts_core_e2e_step.dependOn(&inbox_run.step);
@@ -2376,6 +2384,12 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
+    addTestStep(b, "test-ts-capability-records", "Verify complete TypeScript capability records and ownership", filteredTestArtifact(b, desktop_mod, "ts-capability-record-tests", &.{
+        "runtime.ts_core_host_tests.test.complete subprocess records",
+        "runtime.ts_core_host_tests.test.routed clipboard duplicates",
+        "runtime.ts_core_host_tests.test.routed clipboard keys",
+        "runtime.ts_core_host_tests.test.playback snapshot captures",
+    }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",
     }));
@@ -4049,6 +4063,8 @@ const TsCoreE2eArtifacts = struct {
     kanban: *std.Build.Step.Compile,
     habits: *std.Build.Step.Compile,
     inbox: *std.Build.Step.Compile,
+    effects_probe: *std.Build.Step.Compile,
+    video_player: *std.Build.Step.Compile,
     canvas_preview: *std.Build.Step.Compile,
     soundboard: *std.Build.Step.Compile,
     system_monitor: *std.Build.Step.Compile,
@@ -4241,6 +4257,46 @@ fn tsCoreE2eArtifact(
     });
     kanban_mod.addImport("native_sdk", desktop_mod);
     kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
+
+    const effects_probe_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/effects-probe/src/core.ts",
+        .src_dir = b.path("examples/effects-probe/src"),
+        .name = "effects_probe_core",
+        .typescript_view = true,
+    });
+    const effects_probe_stage = b.addWriteFiles();
+    const effects_probe_root = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_e2e_tests.zig"), "effects_probe_e2e_tests.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_reference.zig"), "effects_probe_reference.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_reference_tests.zig"), "effects_probe_reference_tests.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("examples/effects-probe/src/app.native"), "app.native");
+    const effects_probe_mod = b.createModule(.{ .root_source_file = effects_probe_root, .target = target, .optimize = optimize });
+    effects_probe_mod.addImport("native_sdk", desktop_mod);
+    effects_probe_mod.addImport("effects_probe_core", effects_probe_fixture.module);
+    const effects_probe_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    effects_probe_decoder.addImport("native_sdk", desktop_mod);
+    effects_probe_decoder.addImport("core.zig", effects_probe_fixture.module);
+    effects_probe_mod.addImport("effects_probe_decoder", effects_probe_decoder);
+
+    const video_player_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/video-player/src/core.ts",
+        .src_dir = b.path("examples/video-player/src"),
+        .name = "video_player_core",
+        .typescript_view = true,
+    });
+    const video_player_stage = b.addWriteFiles();
+    const video_player_root = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_e2e_tests.zig"), "video_player_e2e_tests.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_reference.zig"), "video_player_reference.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_reference_tests.zig"), "video_player_reference_tests.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = video_player_stage.addCopyFile(b.path("examples/video-player/src/app.native"), "app.native");
+    const video_player_mod = b.createModule(.{ .root_source_file = video_player_root, .target = target, .optimize = optimize });
+    video_player_mod.addImport("native_sdk", desktop_mod);
+    video_player_mod.addImport("video_player_core", video_player_fixture.module);
+    const video_player_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    video_player_decoder.addImport("native_sdk", desktop_mod);
+    video_player_decoder.addImport("core.zig", video_player_fixture.module);
+    video_player_mod.addImport("video_player_decoder", video_player_decoder);
 
     const inbox_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/ui-inbox/src/core.ts",
@@ -4659,6 +4715,8 @@ fn tsCoreE2eArtifact(
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
+        .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
+        .video_player = filteredTestArtifact(b, video_player_mod, "ts-video-player-e2e-tests", &.{}),
         .inbox = filteredTestArtifact(b, inbox_mod, "ts-inbox-e2e-tests", &.{}),
         .canvas_preview = filteredTestArtifact(b, canvas_preview_mod, "ts-canvas-preview-e2e-tests", &.{}),
         .habits = filteredTestArtifact(b, habits_mod, "ts-habits-e2e-tests", &.{}),

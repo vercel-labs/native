@@ -14,6 +14,8 @@ type NscViewNode = {
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; valueX?: number; axis?: string; overscroll?: string;
+  videoSrc?: string; videoControls?: boolean; videoAutoplay?: boolean; videoLoop?: boolean; videoMuted?: boolean;
+  videoControl?: string; zeroIntrinsic?: boolean; clipContent?: boolean; overflow?: string;
   image?: number; icon?: string; label?: string; role?: string;
   background?: string; foreground?: string; borderColor?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
@@ -2218,4 +2220,40 @@ export function native_tree_policy(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(2);
   result[0] = target % 256; result[1] = Math.floor(target / 256);
   return result;
+}
+
+// Playback arrives through an explicit per-build capability record; no mutable
+// process-wide view context survives an ABI call or crosses window builds.
+type NscVideoPlaybackState = { active: boolean; playing: boolean; buffering: boolean; completed: boolean; positionMs: number; durationMs: number };
+function nscvEmptyVideo(): NscVideoPlaybackState { return { active: false, playing: false, buffering: false, completed: false, positionMs: 0, durationMs: 0 }; }
+function nscvVideoState(request: Uint8Array): NscVideoPlaybackState {
+  if (request.length !== 20 || request[0] !== 1 || request[1]! > 15 || request[2] !== 0 || request[3] !== 0) throw new Error("invalid playback view context");
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const positionMs = data.getFloat64(4, true), durationMs = data.getFloat64(12, true);
+  if (!Number.isSafeInteger(positionMs) || positionMs < 0 || !Number.isSafeInteger(durationMs) || durationMs < 0) throw new Error("invalid playback clock");
+  const flags = request[1]!;
+  return { active: (flags & 1) !== 0, playing: (flags & 2) !== 0, buffering: (flags & 4) !== 0, completed: (flags & 8) !== 0, positionMs, durationMs };
+}
+function nscvVideoClock(ms: number): string {
+  const total = Math.floor(ms / 1000), seconds = total % 60, minutes = Math.floor(total / 60) % 60, hours = Math.floor(total / 3600);
+  return hours > 0 ? `${hours}:${minutes < 10 ? "0" : ""}${minutes}:${seconds < 10 ? "0" : ""}${seconds}` : `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+}
+function nscvVideoElement(nodes: NscViewNode[], root: NscViewNode, state: NscVideoPlaybackState, src: string, controls: boolean, autoplay: boolean, loop: boolean, muted: boolean): void {
+  root.videoSrc = src; root.videoControls = controls; root.videoAutoplay = autoplay; root.videoLoop = loop; root.videoMuted = muted;
+  if (!controls) {
+    root.kind = "media_surface"; root.image = 0x0001766964656f5f;
+    nscvPush(nodes, root); return;
+  }
+  root.kind = "column"; root.zeroIntrinsic = true; root.clipContent = true;
+  nscvPush(nodes, root);
+  nscvPush(nodes, { end: 0, kind: "media_surface", text: "", image: 0x0001766964656f5f, grow: 1, label: root.label ?? "" });
+  // Only the surface has the author's label. The enclosing column is structural.
+  root.label = "";
+  const row: NscViewNode = { end: 0, kind: "row", text: "", padding: 8, gap: 8, cross: "center", background: "surface" };
+  nscvPush(nodes, row);
+  nscvPush(nodes, { end: 0, kind: "button", text: "", variant: "ghost", size: "sm", icon: state.playing ? "pause" : "play", disabled: !state.active, label: state.playing ? "Pause" : "Play", videoControl: "toggle" });
+  nscvPush(nodes, { end: 0, kind: "text", text: nscvVideoClock(state.positionMs), size: "sm", width: 46, wrap: false, overflow: "clip", foreground: "text_muted" });
+  nscvPush(nodes, { end: 0, kind: "slider", text: "", grow: 1, value: state.durationMs === 0 ? 0 : Math.fround(state.positionMs / state.durationMs), disabled: !state.active || state.completed, label: "Seek", videoControl: "scrub" });
+  nscvPush(nodes, { end: 0, kind: "text", text: nscvVideoClock(state.durationMs), size: "sm", width: 46, wrap: false, overflow: "clip", foreground: "text_muted" });
+  row.end = nodes.length; root.end = nodes.length;
 }

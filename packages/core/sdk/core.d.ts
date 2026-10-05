@@ -191,6 +191,64 @@ export interface FetchStreamRoute<M extends Msgish> {
     readonly ok: TimestampKind<M>;
     readonly err: BytesKind<M>;
 }
+export type SpawnExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export type ClipboardOutcome = "ok" | "failed" | "rejected" | "cancelled";
+export type ClipboardOp = "read" | "write";
+export type VideoSourceKind = "local" | "stream";
+export interface SpawnLineEventArm {
+    readonly key: Uint8Array;
+    readonly line: Uint8Array;
+    readonly truncated: boolean;
+    readonly droppedBefore: number;
+}
+export interface SpawnExitEventArm {
+    readonly key: Uint8Array;
+    readonly code: number;
+    readonly reason: SpawnExitReason;
+    readonly droppedLines: number;
+    readonly output: Uint8Array;
+    readonly outputTruncated: boolean;
+    readonly stderrTail: Uint8Array;
+    readonly stderrTruncated: boolean;
+}
+export interface ClipboardEventArm {
+    readonly key: Uint8Array;
+    readonly operation: ClipboardOp;
+    readonly outcome: ClipboardOutcome;
+    readonly text: Uint8Array;
+    readonly droppedBefore: number;
+}
+export interface VideoSnapshotArm {
+    readonly key: Uint8Array;
+    readonly active: boolean;
+    readonly surface: number;
+    readonly playing: boolean;
+    readonly buffering: boolean;
+    readonly completed: boolean;
+    readonly looping: boolean;
+    readonly muted: boolean;
+    readonly source: VideoSourceKind;
+    readonly positionMs: number;
+    readonly durationMs: number;
+    readonly width: number;
+    readonly height: number;
+    readonly volume: number;
+}
+export type CapabilityKind<M extends Msgish, P> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof P] ? [keyof P] extends [Exclude<keyof M, "kind">] ? M extends Msgish & P ? P extends Omit<M, "kind"> ? M["kind"] : never : never : never : never : never;
+export interface SpawnEventsRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly stdin?: Uint8Array;
+    readonly collect?: boolean;
+    readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+    readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+export interface ClipboardResultRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly result: CapabilityKind<M, ClipboardEventArm>;
+}
+export interface VideoSnapshotRoute<M extends Msgish> {
+    readonly snapshot: CapabilityKind<M, VideoSnapshotArm>;
+}
 export interface SpawnRoute<M extends Msgish> {
     readonly key?: string;
     readonly stdin?: Uint8Array;
@@ -422,6 +480,22 @@ export type Cmd<M extends Msgish> = {
     readonly op: "clip_write";
     readonly bytes: Uint8Array;
 } | {
+    readonly op: "clip_write_result";
+    readonly key: string;
+    readonly resultKind: string;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "spawn_events";
+    readonly key: string;
+    readonly lineKind: string;
+    readonly exitKind: string;
+    readonly collect: boolean;
+    readonly argv: readonly Uint8Array[];
+    readonly stdin: Uint8Array;
+} | {
+    readonly op: "video_snapshot";
+    readonly snapshotKind: string;
+} | {
     readonly op: "clip_read";
     readonly key: string;
     readonly okKind: string;
@@ -474,7 +548,7 @@ export type Cmd<M extends Msgish> = {
 } | {
     readonly op: "video_ctl";
     readonly key: string;
-    readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+    readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
     readonly value: number;
 } | {
     readonly op: "window_show";
@@ -593,6 +667,7 @@ export declare const Cmd: {
     };
     fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
+    clipboardWriteResult<M extends Msgish>(bytes: Uint8Array, route: ClipboardResultRoute<M>): Cmd<M>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
@@ -600,6 +675,7 @@ export declare const Cmd: {
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
+    spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;
     audioPause(key: string): Cmd<never>;
     audioResume(key: string): Cmd<never>;
@@ -607,6 +683,8 @@ export declare const Cmd: {
     audioSeek(key: string, ms: number): Cmd<never>;
     audioSetVolume(key: string, volume: number): Cmd<never>;
     videoLoad<M extends Msgish>(key: string, source: VideoSource, route: VideoRoute<M>): Cmd<M>;
+    videoSnapshot<M extends Msgish>(route: VideoSnapshotRoute<M>): Cmd<M>;
+    videoRestart(key: string): Cmd<never>;
     videoPlay(key: string): Cmd<never>;
     videoPause(key: string): Cmd<never>;
     videoStop(key: string): Cmd<never>;

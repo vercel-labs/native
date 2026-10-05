@@ -141,6 +141,8 @@ const signatures: Signature[] = [
   { suffix: "pinch_msg", name: "abi_pinch_msg", params: ["f64", "bytes", "u32", "f64", "f64", "f64"] },
   { suffix: "drop_msg", name: "abi_drop_msg", params: ["bytes"] },
   { suffix: "native_view", name: "native_view", params: [] },
+  { suffix: "native_media_view", name: "native_media_view", params: ["bytes"] },
+  { suffix: "native_media_window_view", name: "native_media_window_view", params: ["bytes", "bytes"] },
   { suffix: "native_window_view", name: "native_window_view", params: ["bytes"] },
   { suffix: "native_radio_policy", name: "native_radio_policy", params: ["bytes"] },
   { suffix: "native_tabs_policy", name: "native_tabs_policy", params: ["bytes"] },

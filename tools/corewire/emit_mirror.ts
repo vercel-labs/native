@@ -222,6 +222,7 @@ class MirrorEmitter extends CodeWriter {
       this.print("pub fn nativeViewEvent(envelope: []const u8, arena: std.mem.Allocator) ?{f} {{\n    return decodeMsgEnvelope(envelope, arena);\n}}\n", [msg]);
     }
     const extensions = [
+      { name: "native_media_view", code: text.nativeMediaView }, { name: "native_media_window_view", code: text.nativeMediaWindowView },
       { name: "native_window_view", code: text.nativeWindowView }, { name: "native_radio_policy", code: text.nativeRadioPolicy },
       { name: "native_tabs_policy", code: text.nativeTabsPolicy }, { name: "native_tree_policy", code: text.nativeTreePolicy },
       { name: "native_list_policy", code: text.nativeListPolicy }, { name: "native_menu_policy", code: text.nativeMenuPolicy },

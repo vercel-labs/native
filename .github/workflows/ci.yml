@@ -459,6 +459,11 @@ jobs:
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install core compiler
+        run: npm ci --prefix packages/core --include=dev
       - name: Install Wine and Xvfb
         run: sudo apt-get update && sudo apt-get install -y wine xvfb
       # Cross-compiles examples/effects-probe for x86_64-windows-gnu and

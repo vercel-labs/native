@@ -1304,3 +1304,8 @@ A text paragraph can contain ordered `span` leaves. Each leaf supports `weight="
 ```
 
 Text-entry controls also accept `border-color` tokens, including `background` for a field that blends into the surrounding surface.
+
+
+## Compiled playback views
+
+TypeScript apps support `<video src="{opened}" controls="true" grow="1" label="Clip"/>` for house transport chrome and `<media-surface surface="{surface}" grow="1" label="Frames"/>` for app-owned controls. The scriptc view receives explicit playback state for each build, including secondary windows; it composes the transport widgets without mutable global view context. Native code supplies decoded textures and the current playback capability. Dynamic icons bind a closed string-literal union such as `"play" | "pause"`. The Video Player example demonstrates both playback styles.

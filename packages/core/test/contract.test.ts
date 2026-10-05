@@ -62,7 +62,7 @@ export function update(model: Model, msg: Msg): Model {
 test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
-  assert.equal(doc.wire_version, 7);
+  assert.equal(doc.wire_version, 8);
   assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");
@@ -395,4 +395,25 @@ export function webPanes(model: Model): readonly WebViewPane[] {
   const pane = (doc.types as { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] }).structs.find(record => record.name === "WebViewPane")!;
   for (const name of ["x", "y", "width", "height", "reloadToken"])
     assert.equal(pane.fields.find(field => field.name === name)!.type.kind, "f64", name);
+});
+
+test("complete capability routes require every metadata field and every enum state", () => {
+  const source = fs.readFileSync(new URL("../../../examples/effects-probe/src/core.ts", import.meta.url), "utf8");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-capability-contract-"));
+  try {
+    const entry = path.join(dir, "core.ts");
+    const check = (text: string) => {
+      fs.writeFileSync(entry, text);
+      return checkFile(entry);
+    };
+    const checked = check(source);
+    assert.equal(checked.ok, true, [...checked.typeErrors, ...checked.diagnostics.map(d => d.message)].join("\n"));
+    for (const invalid of [
+      source.replace('readonly droppedBefore: number', 'readonly missingDrops: number'),
+      source.replace('"cancelled" | "rejected" | "spawn_failed"', '"rejected" | "spawn_failed"'),
+      source.replace('readonly stderrTruncated: boolean', 'readonly stderrTruncated: number'),
+    ]) assert.equal(check(invalid).ok, false, "incomplete capability route passed the frontend");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -3799,3 +3799,215 @@ test "compiled named and streaming policies share key occupancy and preserve can
     try std.testing.expect(effect_policy_probe_core.calls[0] == 1 and effect_policy_probe_core.calls[1] >= 3 and effect_policy_probe_core.calls[2] == 1);
     try std.testing.expect(stream_policy_probe_core.calls[1] > 0 and stream_policy_probe_core.calls[4] == 1);
 }
+
+// Complete capability records deliberately shuffle enum declaration order.
+const complete_core = struct {
+    pub const rt = mini_core.rt;
+    const Line = struct { key: []const u8, line: []const u8, truncated: bool, droppedBefore: f64 };
+    const Exit = struct { key: []const u8, code: f64, reason: enum { rejected, signaled, cancelled, spawn_failed, exited }, droppedLines: f64, output: []const u8, outputTruncated: bool, stderrTail: []const u8, stderrTruncated: bool };
+    const Clipboard = struct { key: []const u8, operation: enum { write, read }, outcome: enum { cancelled, rejected, failed, ok }, text: []const u8, droppedBefore: f64 };
+    const Snapshot = struct { key: []const u8, active: bool, surface: f64, playing: bool, buffering: bool, completed: bool, looping: bool, muted: bool, source: enum { stream, local }, positionMs: f64, durationMs: f64, width: f64, height: f64, volume: f64 };
+    pub const Model = struct { line: ?Line = null, exit: ?Exit = null, clipboard: ?Clipboard = null, snapshot: ?Snapshot = null, replies: usize = 0 };
+    pub const Msg = union(enum) {
+        commands: []const u8,
+        line: Line,
+        exit: Exit,
+        clipboard: Clipboard,
+        snapshot: Snapshot,
+        video: struct { state: enum { failed, rejected, completed, loaded, position }, positionMs: f64, durationMs: f64, playing: bool, buffering: bool, width: f64, height: f64 },
+    };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [6][8192]u8 = undefined;
+    fn bytes(value: []const u8, slot: usize) []const u8 {
+        std.debug.assert(value.len <= owned[slot].len);
+        @memcpy(owned[slot][0..value.len], value);
+        return owned[slot][0..value.len];
+    }
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .line => |line| {
+                model.line = line;
+                model.line.?.key = bytes(line.key, 0);
+                model.line.?.line = bytes(line.line, 1);
+            },
+            .exit => |exit| {
+                model.exit = exit;
+                model.exit.?.key = bytes(exit.key, 2);
+                model.exit.?.output = bytes(exit.output, 3);
+                model.exit.?.stderrTail = bytes(exit.stderrTail, 4);
+            },
+            .clipboard => |clip| {
+                model.clipboard = clip;
+                model.clipboard.?.key = bytes(clip.key, 5);
+            },
+            .snapshot => |snapshot| {
+                model.snapshot = snapshot;
+                model.snapshot.?.key = bytes(snapshot.key, 5);
+            },
+            .video => {},
+        }
+        model.replies += 1;
+        return .{ .model = &model, .cmd = "" };
+    }
+    fn pair(a: []const u8, b: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, a.len + b.len);
+        @memcpy(out[0..a.len], a);
+        @memcpy(out[a.len..], b);
+        return out;
+    }
+    fn spawn(key: []const u8, collect: bool) []const u8 {
+        const argv = [_][]const u8{ "worker", "argument" };
+        const out = rt.frameAlloc(u8, 6 + key.len + 4 + 6 + 4 + 8 + 4);
+        out[0] = 0x33;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var at = 2 + key.len;
+        out[at] = 1;
+        out[at + 1] = 2;
+        out[at + 2] = @intFromBool(collect);
+        out[at + 3] = argv.len;
+        at += 4;
+        for (argv) |arg| at = mini_core.writeLongBytes(out, at, arg);
+        _ = mini_core.writeLongBytes(out, at, "");
+        return out;
+    }
+    fn clipboard(key: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 7 + key.len + 4);
+        out[0] = 0x34;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = 3;
+        _ = mini_core.writeLongBytes(out, 3 + key.len, "copy");
+        return out;
+    }
+};
+const CompleteHost = ts_core_host.TsCoreHost(complete_core);
+var complete_channel: CompleteHost.Fx = undefined;
+fn freshComplete() *CompleteHost.Fx {
+    complete_channel = CompleteHost.Fx.init(std.testing.allocator);
+    complete_channel.executor = .fake;
+    CompleteHost.init(&complete_channel);
+    return &complete_channel;
+}
+test "complete subprocess records retain all metadata, rejection keys, collected output and stderr" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", false) });
+    const key = fx.pendingSpawnAt(0).?.key;
+    try fx.feedLineWithMetadata(key, "Caf\xc3\xa9\x00tail", true, 17);
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Line{ .key = "lines", .line = "Caf\xc3\xa9\x00tail", .truncated = true, .droppedBefore = 17 }, CompleteHost.model().line.?);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", false) });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("lines", CompleteHost.model().exit.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().exit.?.reason);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    try fx.feedExitWithMetadata(key, -9, .signaled, .{ .dropped_lines = 31, .output_truncated = true, .stderr_truncated = true });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Exit{ .key = "lines", .code = -9, .reason = .signaled, .droppedLines = 31, .output = "", .outputTruncated = true, .stderrTail = "", .stderrTruncated = true }, CompleteHost.model().exit.?);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", true) });
+    const collected = fx.pendingSpawnAt(0).?.key;
+    try fx.feedOutput(collected, "output\x00owned");
+    try fx.feedStderr(collected, "stderr\xc3\xa9");
+    try fx.feedExit(collected, 7);
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("output\x00owned", CompleteHost.model().exit.?.output);
+    try std.testing.expectEqualStrings("stderr\xc3\xa9", CompleteHost.model().exit.?.stderrTail);
+    try std.testing.expectEqual(@as(f64, 7), CompleteHost.model().exit.?.code);
+    // Starting a new cycle resets transient command bytes; retained result
+    // bytes must still match the entire prior completion.
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("next", false) });
+    try std.testing.expectEqualStrings("output\x00owned", CompleteHost.model().exit.?.output);
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("next") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.cancelled, CompleteHost.model().exit.?.reason);
+}
+test "routed clipboard duplicates reject without stealing the original completion and cancel retires the key" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    const key = fx.pendingClipboardAt(0).?.key;
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Clipboard{ .key = "copy-key", .operation = .write, .outcome = .rejected, .text = "", .droppedBefore = 0 }, CompleteHost.model().clipboard.?);
+    try std.testing.expectEqual(key, fx.pendingClipboardAt(0).?.key);
+    try fx.feedClipboardResult(key, .ok, "ignored");
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.ok, CompleteHost.model().clipboard.?.outcome);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("copy-key") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.cancelled, CompleteHost.model().clipboard.?.outcome);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+}
+test "playback snapshot captures command-order state and restart retains ownership without commandeering a foreign load" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoLoad("owned", 5, 0x7601, "clip.mp4", "", 7) });
+    try fx.feedVideoEvent(.loaded, 1234, 60000, true, true, 1920, 1080);
+    CompleteHost.drain(fx);
+    const pause = mini_core.cmdVideoCtl("owned", 1, 0);
+    const command = complete_core.pair(&.{ 0x35, 4 }, pause);
+    CompleteHost.dispatch(fx, .{ .commands = command });
+    const snapshot = CompleteHost.model().snapshot.?;
+    try std.testing.expectEqualDeep(complete_core.Snapshot{ .key = "owned", .active = true, .surface = 0x7601, .playing = true, .buffering = true, .completed = false, .looping = true, .muted = true, .source = .local, .positionMs = 1234, .durationMs = 60000, .width = 1920, .height = 1080, .volume = 1 }, snapshot);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.completed, 60000, 60000, false, false, 1920, 1080);
+    CompleteHost.drain(fx);
+    const token = fx.videoOwnerToken();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 7, 0) });
+    try std.testing.expect(fx.videoOwnerToken() != token);
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 1, 0) });
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    fx.loadVideo(.{ .key = 77, .surface = 99, .path = "foreign.mp4" });
+    const foreign = fx.videoSnapshot();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 7, 0) });
+    try std.testing.expectEqualDeep(foreign, fx.videoSnapshot());
+    CompleteHost.dispatch(fx, .{ .commands = &.{ 0x35, 4 } });
+    try std.testing.expectEqualStrings("", CompleteHost.model().snapshot.?.key);
+}
+
+test "routed clipboard keys reject cross-family collisions and every full-capacity terminal returns its original key" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("shared", false) });
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("shared") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().clipboard.?.outcome);
+    try std.testing.expectEqualStrings("shared", CompleteHost.model().clipboard.?.key);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("shared") });
+    CompleteHost.drain(fx);
+    for (0..effects_mod.max_effects) |i| {
+        var key: [16]u8 = undefined;
+        CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard(try std.fmt.bufPrint(&key, "copy-{d}", .{i})) });
+    }
+    try std.testing.expectEqual(effects_mod.max_effects, fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("overflow") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("overflow", CompleteHost.model().clipboard.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().clipboard.?.outcome);
+    // A new stream cannot steal a pending clipboard key either.
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("copy-0", false) });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("copy-0", CompleteHost.model().exit.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().exit.?.reason);
+    for (0..effects_mod.max_effects) |_| {
+        const request = fx.pendingClipboardAt(0).?;
+        try fx.feedClipboardResult(request.key, .ok, "");
+        CompleteHost.drain(fx);
+    }
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("reused") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+}

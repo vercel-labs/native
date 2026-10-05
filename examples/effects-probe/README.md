@@ -1,6 +1,6 @@
 # effects-probe
 
-The minimal effects dogfood: a native-rendered app whose Start button spawns a long-running shell stream through `fx.spawn`, streams each stdout line into the list as a typed `Msg`, and whose Cancel button kills the process mid-stream through `fx.cancel`.
+The minimal effects dogfood: a TypeScript core and Native markup app whose Start button spawns a long-running shell stream through `Cmd.spawnEvents`, streams each stdout line into the list as a typed `Msg`, and whose Cancel button kills the process mid-stream through `Cmd.cancel`.
 
 This is the standing proof for the effect system's live path: worker thread → bounded completion queue → `wake_fn` → loop-thread drain → `update` → rebuild.
 
@@ -25,7 +25,7 @@ native automate wait
 ## Test
 
 ```bash
-native test -Dplatform=null
+zig build test-ts-effects-probe-e2e -Dplatform=null
 ```
 
-The tests drive the same `update` through the fake effect executor: spawn requests are asserted on (argv, key), synthetic lines and exits are fed back as dispatched Msgs, and cancel semantics are proven without running a process.
+The repository suite compares the scriptc-compiled core and both view backends with the retained native reference. It covers complete subprocess and clipboard results, owned payloads, exact 64-bit counters, and sealed session replay through the fake executor.

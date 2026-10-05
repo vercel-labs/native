@@ -41,7 +41,7 @@
 // Cmd.db uses a real process-local SQLite database, and typed app services
 // execute directly through their generated contract.
 // Every other effect (files, buffered/streaming fetch, clipboard,
-// notifications, spawn, audio, raw host commands)
+// notifications, spawn, audio/video (including playback snapshots), raw host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
 // and the loop stays deterministic.

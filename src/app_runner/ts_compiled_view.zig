@@ -19,8 +19,17 @@ const SpanRecord = struct {
 };
 
 const Record = struct {
+    videoSrc: ?[]const u8 = null,
+    videoControls: bool = false,
+    videoAutoplay: bool = true,
+    videoLoop: bool = false,
+    videoMuted: bool = false,
+    videoControl: sdk.canvas.VideoControlVerb = .none,
+    zeroIntrinsic: ?bool = null,
+    clipContent: ?bool = null,
+    overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface },
     text: []const u8,
     placeholder: []const u8 = "",
     command: []const u8 = "",
@@ -107,12 +116,26 @@ const Tree = struct { format: u32, nodes: []const Record };
 
 pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
     _ = model;
-    return decode(ui, core.nativeView(ui.arena)) catch @panic("invalid compiled TypeScript view data");
+    var context: [20]u8 = undefined;
+    const bytes = if (comptime @hasDecl(core, "nativeMediaView")) core.nativeMediaView(videoContext(ui, &context), ui.arena) else core.nativeView(ui.arena);
+    return decode(ui, bytes) catch @panic("invalid compiled TypeScript view data");
 }
 
 pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node {
     _ = model;
-    return decode(ui, core.nativeWindowView(label, ui.arena)) catch @panic("invalid compiled TypeScript window view data");
+    var context: [20]u8 = undefined;
+    const bytes = if (comptime @hasDecl(core, "nativeMediaWindowView")) core.nativeMediaWindowView(label, videoContext(ui, &context), ui.arena) else core.nativeWindowView(label, ui.arena);
+    return decode(ui, bytes) catch @panic("invalid compiled TypeScript window view data");
+}
+
+fn videoContext(ui: *Ui, buffer: *[20]u8) []const u8 {
+    const state = ui.video_state;
+    buffer.* = @splat(0);
+    buffer[0] = 1;
+    buffer[1] = @as(u8, @intFromBool(state.active)) | (@as(u8, @intFromBool(state.playing)) << 1) | (@as(u8, @intFromBool(state.buffering)) << 2) | (@as(u8, @intFromBool(state.completed)) << 3);
+    std.mem.writeInt(u64, buffer[4..12], @bitCast(@as(f64, @floatFromInt(state.position_ms))), .little);
+    std.mem.writeInt(u64, buffer[12..20], @bitCast(@as(f64, @floatFromInt(state.duration_ms))), .little);
+    return buffer;
 }
 
 fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
@@ -225,6 +248,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .placeholder = value.placeholder,
         .command = value.command,
         .wrap = value.wrap,
+        .overflow = value.overflow,
         .text_alignment = value.textAlignment,
         .submit_on_enter = value.submitOnEnter,
         .columns = value.columns,
@@ -276,6 +300,12 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor_offset = value.anchorOffset,
         .tooltip_delay = value.tooltipDelay orelse -1,
     }, children.items);
+    if (value.videoSrc) |src| {
+        if (src.len > 0) ui.video_declaration = .{ .src = src, .controls = value.videoControls, .autoplay = value.videoAutoplay, .loop = value.videoLoop, .muted = value.videoMuted };
+    }
+    result.widget.video_control = value.videoControl;
+    if (value.zeroIntrinsic) |flag| result.widget.layout.zero_intrinsic = flag;
+    if (value.clipContent) |flag| result.widget.layout.clip_content = flag;
     if (comptime @hasDecl(core, "nativeTextPolicy")) {
         // Every primitive can carry composed semantics. Specialized callbacks
         // below also accept shared keyboard, semantic-control and action tags.

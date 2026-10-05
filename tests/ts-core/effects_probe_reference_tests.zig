@@ -1,6 +1,6 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const main = @import("main.zig");
+const main = @import("effects_probe_reference.zig");
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;

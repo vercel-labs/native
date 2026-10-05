@@ -473,6 +473,9 @@ export type CmdData =
       readonly body: Uint8Array;
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
@@ -515,7 +518,7 @@ export type CmdData =
   | {
       readonly op: "video_ctl";
       readonly key: string;
-      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
@@ -850,6 +853,10 @@ export const Cmd = {
     return { op: "clip_write", bytes };
   },
 
+  clipboardWriteResult(bytes: Uint8Array, route: { readonly key?: string; readonly result: string }): CmdData {
+    return { op: "clip_write_result", key: route.key ?? "", resultKind: route.result, bytes };
+  },
+
   clipboardRead(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
   },
@@ -904,6 +911,10 @@ export const Cmd = {
     };
   },
 
+  spawnEvents(argv: readonly Uint8Array[], route: { readonly key?: string; readonly stdin?: Uint8Array; readonly collect?: boolean; readonly line?: string; readonly exit: string }): CmdData {
+    return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""), exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
   audioPlay(key: string, source: AudioSource, route: { readonly event: string }): CmdData {
     return {
       op: "audio_play",
@@ -949,6 +960,9 @@ export const Cmd = {
       muted: source.muted ?? false,
     };
   },
+
+  videoSnapshot(route: { readonly snapshot: string }): CmdData { return { op: "video_snapshot", snapshotKind: route.snapshot }; },
+  videoRestart(key: string): CmdData { return { op: "video_ctl", key, verb: "restart", value: 0 }; },
 
   videoPlay(key: string): CmdData {
     return { op: "video_ctl", key, verb: "play", value: 0 };

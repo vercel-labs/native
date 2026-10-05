@@ -17,9 +17,9 @@ pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
 
-const canvas_label = "probe-canvas";
-const window_width: f32 = 560;
-const window_height: f32 = 480;
+pub const canvas_label = "probe-canvas";
+pub const window_width: f32 = 560;
+pub const window_height: f32 = 480;
 
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Effects probe canvas", .accessibility_label = "Effects probe", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
@@ -31,7 +31,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .height = window_height,
     .views = &shell_views,
 }};
-const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
 
 // ------------------------------------------------------------------ model
 
@@ -213,5 +213,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    _ = @import("tests.zig");
+    _ = @import("effects_probe_reference_tests.zig");
 }

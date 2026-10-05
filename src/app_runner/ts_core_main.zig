@@ -255,6 +255,10 @@ pub fn main(init: std.process.Init) !void {
     // named variable once, here at the boundary — never inside update —
     // and hand the present values to the adapter, which dispatches them
     // as ordinary journaled Msgs right after the boot command.
+    var launch_args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer launch_args.deinit();
+    _ = launch_args.next();
+    const first_launch_arg = launch_args.next();
     var env_values_buffer: [envMsgsLen()]Adapter.EnvValue = undefined;
     var env_value_count: usize = 0;
     if (comptime @hasDecl(core, "envMsgs")) {
@@ -262,6 +266,14 @@ pub fn main(init: std.process.Init) !void {
             if (std.mem.eql(u8, entry.env, app_data_dir_env)) {
                 if (app_data_dir.len > 0) {
                     env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                    env_value_count += 1;
+                }
+            } else if (std.mem.eql(u8, entry.env, "NATIVE_SDK_TARGET_OS")) {
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = @tagName(builtin.os.tag) };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, "NATIVE_SDK_ARG_1")) {
+                if (first_launch_arg) |value| {
+                    env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = value };
                     env_value_count += 1;
                 }
             } else if (init.environ_map.get(entry.env)) |value| {

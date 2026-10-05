@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 7) onto the real effect engine
+//! emits (`cmd_format_version` 8) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -567,6 +567,7 @@ pub fn TsCoreHost(comptime core: type) type {
             exit_tag: u8 = 0,
             err_tag: u8 = 0,
             collect: bool = false,
+            complete_events: bool = false,
             /// Fetch lines are data records, so a cut or dropped line makes
             /// the eventual success terminal unusable. Spawn line mode keeps
             /// its existing best-effort contract.
@@ -747,7 +748,22 @@ pub fn TsCoreHost(comptime core: type) type {
 
         /// A `now` record captured during the command walk, dispatched
         /// after the issuing cycle's frame reset.
-        const PendingNow = struct { tag: u8, ms: i64 };
+        const ClipboardWriteEntry = struct {
+            used: bool = false,
+            key: [max_wire_key_bytes]u8 = undefined,
+            key_len: usize = 0,
+            tag: u8 = 0,
+            fn wireKey(self: *const ClipboardWriteEntry) []const u8 {
+                return self.key[0..self.key_len];
+            }
+        };
+        var clipboard_writes: [runtime_effects.max_effects]ClipboardWriteEntry = @splat(.{});
+        const clipboard_result_key_base: u64 = 0x5453_4352_0000_0000;
+
+        const PendingNow = union(enum) {
+            clock: struct { tag: u8, ms: i64 },
+            video: struct { tag: u8, snapshot: Fx.VideoSnapshot, key: [max_wire_key_bytes]u8, key_len: usize },
+        };
 
         // Bridge-refused dispatches (a spawn under a live wire key, an
         // image load or channel open under a duplicate live id/key, an
@@ -804,6 +820,7 @@ pub fn TsCoreHost(comptime core: type) type {
             ptys = @splat(.{});
             dbs = @splat(.{});
             clip_write_counter = 0;
+            clipboard_writes = @splat(.{});
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
             swallow_next_dispatch = false;
@@ -968,8 +985,12 @@ pub fn TsCoreHost(comptime core: type) type {
             reconcileSubscriptions(fx);
             fx.flushDbSubscriptions();
             core.rt.frameReset();
-            for (nows[0..now_count]) |pending| {
-                dispatchDepth(fx, msgFromTagNumber(pending.tag, @floatFromInt(pending.ms)), depth + 1);
+            for (nows[0..now_count]) |*pending| {
+                const reply = switch (pending.*) {
+                    .clock => |clock| msgFromTagNumber(clock.tag, @floatFromInt(clock.ms)),
+                    .video => |*video| msgFromVideoSnapshot(video.tag, video.snapshot, video.key[0..video.key_len]),
+                };
+                dispatchDepth(fx, reply, depth + 1);
             }
         }
 
@@ -1001,7 +1022,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                         // The journaled clock read (replay pops the same
                         // value), captured in record order.
-                        nows[now_count.*] = .{ .tag = tag, .ms = fx.wallMs() };
+                        nows[now_count.*] = .{ .clock = .{ .tag = tag, .ms = fx.wallMs() } };
                         now_count.* += 1;
                     },
                     // host [op][name_len][name][argc][argc * f64 LE]
@@ -1125,7 +1146,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         // otherwise find this named op first and leave the
                         // stream running. The live stream owns the key, so
                         // reject the newcomer through its own err arm.
-                        if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
+                        if (head.key.len > 0 and (findStream(head.key) != null or reservedWireKeyOccupied(head.key))) {
                             fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                         } else {
                             const effect_index = allocEffectEntry(fx, head) orelse continue;
@@ -1154,6 +1175,37 @@ pub fn TsCoreHost(comptime core: type) type {
                             .on_result = null,
                         });
                         clip_write_counter +%= 1;
+                    },
+                    // Complete spawn records; the legacy opcode remains unchanged.
+                    0x33 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const line_tag = takeByte(cmd, &at);
+                        const exit_tag = takeByte(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        const argc = takeByte(cmd, &at);
+                        if (mode > 1 or argc == 0 or argc > runtime_effects.max_effect_argv) @panic("ts core host: invalid complete spawn wire record");
+                        var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
+                        for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
+                        const stdin = takeLongBytes(cmd, &at);
+                        issueSpawn(fx, .{ .key = key, .line_tag = line_tag, .exit_tag = exit_tag, .err_tag = exit_tag, .complete_events = true }, mode == 1, argv[0..argc], stdin);
+                    },
+                    // Routed write completion, including rejection and cancellation.
+                    0x34 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        issueClipboardWrite(fx, key, tag, bytes);
+                    },
+                    // Capture now; reply after resetting the ABI result arena, in
+                    // command order like Cmd.now. No intervening host turn occurs.
+                    0x35 => {
+                        const tag = takeByte(cmd, &at);
+                        if (now_count.* >= max_nows_per_cmd) @panic("ts core host: over 16 immediate capability replies in one command");
+                        const snapshot = fx.videoSnapshot();
+                        const key = if (video_entry.used and fx.videoOwnerToken() == video_entry.token) video_entry.wireKey() else "";
+                        nows[now_count.*] = .{ .video = .{ .tag = tag, .snapshot = snapshot, .key = undefined, .key_len = key.len } };
+                        @memcpy(nows[now_count.*].video.key[0..key.len], key);
+                        now_count.* += 1;
                     },
                     // clip_read [op][key_len][key][ok][err]
                     0x0B => {
@@ -1724,7 +1776,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// its `.cancelled` terminal drains).
         fn allocEffectEntry(fx: *Fx, head: RoutedHead) ?u64 {
             const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head) else blk: {
-                const blocked = head.key.len > 0 and fileStreamOccupiesKey(head.key);
+                const blocked = head.key.len > 0 and reservedWireKeyOccupied(head.key);
                 break :blk EffectPlan{
                     .admitted = !blocked,
                     .slot = if (blocked) null else freeEffectIndex(),
@@ -1802,7 +1854,7 @@ pub fn TsCoreHost(comptime core: type) type {
             request[1] = @intCast(head.key.len);
             @memcpy(request[2..][0..head.key.len], head.key);
             const at = 2 + head.key.len;
-            request[at] = @intFromBool(head.key.len > 0 and fileStreamOccupiesKey(head.key));
+            request[at] = @intFromBool(head.key.len > 0 and reservedWireKeyOccupied(head.key));
             request[at + 1] = head.ok_tag;
             request[at + 2] = head.err_tag;
             const end = writeEffectTable(&request, at + 3);
@@ -1846,8 +1898,8 @@ pub fn TsCoreHost(comptime core: type) type {
             // A delay has no err arm. Preserve an incumbent file stream and
             // fail closed instead of creating a second owner that Cmd.cancel
             // could not address unambiguously.
-            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, fileStreamOccupiesKey(key)) orelse return else blk: {
-                if (fileStreamOccupiesKey(key)) return;
+            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, reservedWireKeyOccupied(key)) orelse return else blk: {
+                if (reservedWireKeyOccupied(key)) return;
                 const index = if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex();
                 break :blk .{
                     .slot = index orelse @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers"),
@@ -1886,7 +1938,7 @@ pub fn TsCoreHost(comptime core: type) type {
 
         // ------------------------------------------- spawn / fetch streams
 
-        const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8 };
+        const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8, complete_events: bool = false };
 
         /// Open a spawn stream: claim a non-retiring stream entry (the
         /// keyed-effect discipline's ONE exception — a live wire key
@@ -1904,11 +1956,14 @@ pub fn TsCoreHost(comptime core: type) type {
             stdin: []const u8,
         ) void {
             const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, false) else blk: {
-                if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) break :blk null;
+                if (head.key.len > 0 and (findStream(head.key) != null or reservedWireKeyOccupied(head.key))) break :blk null;
                 break :blk freeStreamIndex();
             };
             const slot = index orelse {
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                fx.stageLoopMsg(if (head.complete_events)
+                    msgFromSpawnExit(head.exit_tag, .{ .key = 0, .reason = .rejected }, fx.stageLoopKey(head.key))
+                else
+                    msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             };
             const entry = &streams[slot];
@@ -1919,6 +1974,7 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.exit_tag = head.exit_tag;
             entry.err_tag = head.err_tag;
             entry.collect = collect;
+            entry.complete_events = head.complete_events;
             entry.fetch = false;
             entry.damaged = false;
             fx.spawn(.{
@@ -1946,7 +2002,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// two HTTP responses into one app-owned stream.
         fn issueFetchStream(fx: *Fx, head: SpawnHead, options: FetchStreamOptions) void {
             const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, true) else blk: {
-                if (head.key.len > 0 and (findStream(head.key) != null or findEffect(head.key) != null or fileStreamOccupiesKey(head.key))) break :blk null;
+                if (head.key.len > 0 and (findStream(head.key) != null or findEffect(head.key) != null or reservedWireKeyOccupied(head.key))) break :blk null;
                 break :blk freeStreamIndex();
             };
             const slot = index orelse {
@@ -1962,6 +2018,7 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.err_tag = head.err_tag;
             entry.collect = false;
             entry.fetch = true;
+            entry.complete_events = false;
             entry.damaged = false;
             fx.fetch(.{
                 .key = spawn_key_base + slot,
@@ -2018,7 +2075,7 @@ pub fn TsCoreHost(comptime core: type) type {
             var request: [max_stream_policy_bytes]u8 = undefined;
             request[0] = 0;
             request[1] = @intFromBool(fetch);
-            request[2] = @intFromBool(fileStreamOccupiesKey(key));
+            request[2] = @intFromBool(reservedWireKeyOccupied(key));
             request[3] = @intFromBool(fetch and key.len > 0 and findEffect(key) != null);
             request[4] = @intCast(key.len);
             @memcpy(request[5..][0..key.len], key);
@@ -2055,8 +2112,8 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
-        fn fileStreamOccupiesKey(key: []const u8) bool {
-            return key.len > 0 and findFileStream(key) != null;
+        fn reservedWireKeyOccupied(key: []const u8) bool {
+            return key.len > 0 and (findFileStream(key) != null or findClipboardWrite(key) != null);
         }
 
         /// Every string-keyed command family shares one authored key surface.
@@ -2069,7 +2126,8 @@ pub fn TsCoreHost(comptime core: type) type {
                 findStream(key) != null or
                 findDelay(key) != null or
                 findPty(key) != null or
-                findDb(key) != null;
+                findDb(key) != null or
+                findClipboardWrite(key) != null;
         }
 
         fn freeFileStreamIndex() ?usize {
@@ -2211,6 +2269,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// complete.
         fn streamLineMsg(line: runtime_effects.EffectLine) Msg {
             const entry = streamAt(line.key);
+            if (entry.complete_events) return msgFromSpawnLine(entry.line_tag, line, entry.wireKey());
             if (comptime @hasDecl(core, "nativeStreamPolicy")) {
                 const plan = compiledStreamCompletion(&.{ 2, @intFromBool(entry.fetch), @intFromBool(entry.damaged), @intFromBool(line.truncated), @intFromBool(line.dropped_before != 0), entry.line_tag });
                 if (plan.shape != .bytes) @panic("ts core host: invalid compiled stream line payload");
@@ -2233,6 +2292,10 @@ pub fn TsCoreHost(comptime core: type) type {
         /// with the reason name as bytes.
         fn spawnExitMsg(exit: runtime_effects.EffectExit) Msg {
             const entry = streamAt(exit.key);
+            if (entry.complete_events) {
+                entry.used = false;
+                return msgFromSpawnExit(entry.exit_tag, exit, entry.wireKey());
+            }
             if (comptime @hasDecl(core, "nativeStreamPolicy")) {
                 const plan = compiledStreamCompletion(&.{ 3, @intFromBool(entry.collect), @intFromBool(exit.reason == .exited), @intFromBool(exit.output_truncated), entry.exit_tag, entry.err_tag });
                 if (plan.retire) entry.used = false;
@@ -2388,6 +2451,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 4 => fx.setVideoVolume(@floatCast(value)),
                 5 => fx.setVideoMuted(value != 0),
                 6 => fx.setVideoLoop(value != 0),
+                7 => {
+                    fx.restartVideo();
+                    video_entry.token = fx.videoMintedToken();
+                },
                 else => @panic("ts core host: unknown video_ctl verb wire value - the core and this runtime disagree on cmd_format_version"),
             }
         }
@@ -2782,7 +2849,7 @@ pub fn TsCoreHost(comptime core: type) type {
             term: []const u8,
             argv: []const []const u8,
         ) void {
-            if (key.len > 0 and (findPty(key) != null or fileStreamOccupiesKey(key))) {
+            if (key.len > 0 and (findPty(key) != null or reservedWireKeyOccupied(key))) {
                 // The rejection is STAGED (delivered a later frame), so its
                 // key must be self-contained: the wire key points into this
                 // dispatch's command buffer, gone by delivery, so intern
@@ -2895,7 +2962,7 @@ pub fn TsCoreHost(comptime core: type) type {
             done_tag: u8,
             err_tag: u8,
         ) ?usize {
-            if (fileStreamOccupiesKey(key)) {
+            if (reservedWireKeyOccupied(key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                 return null;
             }
@@ -2994,6 +3061,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 dropEffectEntry(fx, index);
                 return;
             }
+            if (findClipboardWrite(key)) |index| {
+                fx.cancel(clipboard_result_key_base + index);
+                return;
+            }
             if (findStream(key)) |index| {
                 // The engine's `.cancelled` terminal retires the entry in
                 // spawnExitMsg or fetchStreamResultMsg.
@@ -3052,7 +3123,7 @@ pub fn TsCoreHost(comptime core: type) type {
             ok_void: bool,
             pool: RequestPool,
         ) ?u64 {
-            if (fileStreamOccupiesKey(key)) return null;
+            if (reservedWireKeyOccupied(key)) return null;
             const index = blk: {
                 if (key.len > 0) {
                     if (findRequest(key)) |existing| {
@@ -3220,7 +3291,7 @@ pub fn TsCoreHost(comptime core: type) type {
             max_pending: u8,
             payload: []const u8,
         ) void {
-            if (key.len > 0 and (findRequest(key) != null or fileStreamOccupiesKey(key))) {
+            if (key.len > 0 and (findRequest(key) != null or reservedWireKeyOccupied(key))) {
                 stageRequestRejected(fx, err_tag);
                 return;
             }
@@ -3428,6 +3499,79 @@ pub fn TsCoreHost(comptime core: type) type {
         /// and never route): ok routes the text bytes, everything else
         /// the outcome name. A dropped entry's terminal routes nothing
         /// — the silent drop.
+        fn findClipboardWrite(key: []const u8) ?usize {
+            if (key.len == 0) return null;
+            for (&clipboard_writes, 0..) |*entry, index| if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            return null;
+        }
+        fn issueClipboardWrite(fx: *Fx, key: []const u8, tag: u8, bytes: []const u8) void {
+            var slot: ?usize = null;
+            if (!reservedWireKeyOccupied(key) and !wireKeyOccupiedOutsideFileStreams(key)) {
+                for (&clipboard_writes, 0..) |*entry, index| if (!entry.used) {
+                    slot = index;
+                    break;
+                };
+            }
+            const index = slot orelse {
+                fx.stageLoopMsg(msgFromClipboard(tag, .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                return;
+            };
+            clipboard_writes[index] = .{ .used = true, .key = undefined, .key_len = key.len, .tag = tag };
+            @memcpy(clipboard_writes[index].key[0..key.len], key);
+            fx.writeClipboard(.{ .key = clipboard_result_key_base + index, .text = bytes, .on_result = clipboardWriteResultMsg });
+        }
+        fn clipboardWriteResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
+            const index = result.key - clipboard_result_key_base;
+            if (index >= clipboard_writes.len or !clipboard_writes[index].used) @panic("ts core host: untracked clipboard completion");
+            const entry = &clipboard_writes[index];
+            entry.used = false;
+            return msgFromClipboard(entry.tag, result, entry.wireKey());
+        }
+        /// Match complete capability records by field NAME and type. Bytes are
+        /// borrowed only until this dispatch; the core ABI copies all retained
+        /// values into its committed graph. Native engine keys remain private.
+        fn msgFromCapability(tag: u8, record: anytype) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime @typeInfo(arm.type) == .@"struct" and @typeInfo(arm.type).@"struct".fields.len == @typeInfo(@TypeOf(record)).@"struct".fields.len) {
+                        var result: arm.type = undefined;
+                        inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                            if (comptime @hasField(@TypeOf(record), field.name)) {
+                                const value = @field(record, field.name);
+                                const V = @TypeOf(value);
+                                if (comptime @typeInfo(V) == .@"enum" and @typeInfo(field.type) == .@"enum") {
+                                    @field(result, field.name) = std.meta.stringToEnum(field.type, @tagName(value)) orelse @panic("ts core host: incomplete capability enum");
+                                } else if (comptime (@typeInfo(V) == .int or @typeInfo(V) == .comptime_int) and field.type == f64) {
+                                    @field(result, field.name) = @floatFromInt(value);
+                                } else if (comptime (@typeInfo(V) == .int or @typeInfo(V) == .comptime_int) and (@typeInfo(field.type) == .int)) {
+                                    @field(result, field.name) = @intCast(value);
+                                } else if (comptime V == f32 and field.type == f64) {
+                                    @field(result, field.name) = value;
+                                } else if (comptime V == field.type) {
+                                    @field(result, field.name) = value;
+                                } else @panic("ts core host: incompatible capability field type");
+                            } else @panic("ts core host: missing capability field");
+                        }
+                        return @unionInit(Msg, arm.name, result);
+                    }
+                    @panic("ts core host: invalid capability record arm");
+                }
+            }
+            @panic("ts core host: invalid capability message tag");
+        }
+        fn msgFromSpawnLine(tag: u8, line: runtime_effects.EffectLine, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .line = line.line, .truncated = line.truncated, .droppedBefore = line.dropped_before });
+        }
+        fn msgFromSpawnExit(tag: u8, exit: runtime_effects.EffectExit, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .code = exit.code, .reason = exit.reason, .droppedLines = exit.dropped_lines, .output = exit.output, .outputTruncated = exit.output_truncated, .stderrTail = exit.stderr_tail, .stderrTruncated = exit.stderr_truncated });
+        }
+        fn msgFromClipboard(tag: u8, result: runtime_effects.EffectClipboardResult, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .operation = result.op, .outcome = result.outcome, .text = result.text, .droppedBefore = result.dropped_before });
+        }
+        fn msgFromVideoSnapshot(tag: u8, snapshot: Fx.VideoSnapshot, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .active = snapshot.active, .surface = snapshot.surface, .playing = snapshot.playing, .buffering = snapshot.buffering, .completed = snapshot.completed, .looping = snapshot.looping, .muted = snapshot.muted, .source = snapshot.source, .positionMs = snapshot.position_ms, .durationMs = snapshot.duration_ms, .width = snapshot.width, .height = snapshot.height, .volume = snapshot.volume });
+        }
+
         fn clipboardResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
             const route = takeEffectEntry(result.key, .bytes, result.outcome == .ok, false);
             return switch (route.payload) {
