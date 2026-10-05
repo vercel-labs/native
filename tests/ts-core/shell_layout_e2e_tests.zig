@@ -39,6 +39,22 @@ test "compiled shell planner matches every native kind edge axis constraint and 
             }
         }
     }
+    for (0..256) |mask| {
+        const view = native_sdk.ShellView{
+            .label = "optionals",
+            .kind = .spacer,
+            .fill = true,
+            .x = if (mask & 1 != 0) -0.125 else null,
+            .y = if (mask & 2 != 0) 0.25 else null,
+            .width = if (mask & 4 != 0) 24.000002 else null,
+            .height = if (mask & 8 != 0) 12.000001 else null,
+            .min_width = if (mask & 16 != 0) 30.000004 else null,
+            .min_height = if (mask & 32 != 0) 20.000002 else null,
+            .max_width = if (mask & 64 != 0) 28.000002 else null,
+            .max_height = if (mask & 128 != 0) 18.000002 else null,
+        };
+        try expectShellPlan(geometry.RectF.init(0, 0, 32.000004, 24.000002), &.{view});
+    }
     for ([_]native_sdk.app_manifest.ViewKind{ .stack, .split, .toolbar }) |kind| {
         for ([_]native_sdk.app_manifest.ShellAxis{ .row, .column }) |axis| {
             for (samples) |sample| {
@@ -71,6 +87,12 @@ test "compiled shell plan preserves full declaration passes opaque parents and u
     try expectShellPlan(bounds, &.{});
     try expectShellPlan(bounds, &.{ views[0], views[4] });
     try expectShellPlan(bounds, &.{ .{ .label = "a", .kind = .stack, .parent = "b" }, .{ .label = "b", .kind = .split, .parent = "a" }, views[4] });
+    try expectShellPlan(bounds, &.{
+        .{ .label = "duplicate", .kind = .stack, .parent = "later", .width = 80, .height = 40 },
+        .{ .label = "main", .kind = .webview, .parent = "duplicate", .x = 2, .width = 16, .height = 24 },
+        .{ .label = "duplicate", .kind = .split, .x = 5, .width = 200, .height = 80 },
+        .{ .label = "later", .kind = .stack, .x = 40, .width = 400, .height = 160 },
+    });
     var maximum: [128]native_sdk.ShellView = undefined;
     var names: [128][3]u8 = undefined;
     for (&maximum, 0..) |*view, i| {

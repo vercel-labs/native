@@ -475,18 +475,24 @@ function nscvShellLayout(request: Uint8Array): Uint8Array {
   }
   const resolved: NscShellResolved[] = [];
   const created: boolean[] = [];
+  const parents: string[] = [];
+  const first = new Map<string, number>();
   const cursorX: number[] = [], cursorY: number[] = [];
-  for (let i = 0; i < count; i++) { created.push(false); cursorX.push(8); cursorY.push(8); }
-  const find = (label: Uint8Array): number => {
-    for (let i = 0; i < resolved.length; i++) if (nscvShellEqual(resolved[i]!.view.label, label)) return i;
-    return -1;
-  };
+  // Hex keys preserve every opaque byte, including NUL and invalid UTF-8.
+  // Resolve each parent through the first recorded declaration, so duplicates
+  // share cursors exactly as the reference does without repeated label scans.
+  const keys: string[] = [];
+  for (let i = 0; i < count; i++) {
+    created.push(false); cursorX.push(8); cursorY.push(8);
+    keys.push(nscvShellKey(views[i]!.label));
+    parents.push(views[i]!.parent === null ? "" : nscvShellKey(views[i]!.parent!));
+  }
   while (resolved.length < count) {
     let progressed = false;
     for (let index = 0; index < count; index++) {
       if (created[index]) continue;
       const view = views[index]!;
-      const parentIndex = view.parent === null ? -1 : find(view.parent);
+      const parentIndex = view.parent === null ? -1 : first.get(parents[index]!) ?? -1;
       if (view.parent !== null && parentIndex === -1) continue;
       let frame: NscShellRect;
       if (parentIndex >= 0) {
@@ -525,6 +531,7 @@ function nscvShellLayout(request: Uint8Array): Uint8Array {
       const next = resolved.length;
       resolved.push({ index, view, frame, absolute });
       cursorX[next] = view.kind === 5 ? 0 : 8; cursorY[next] = view.kind === 5 ? 0 : 8;
+      if (!first.has(keys[index]!)) first.set(keys[index]!, next);
       created[index] = true; progressed = true;
     }
     if (!progressed) break;
@@ -540,13 +547,18 @@ function nscvShellLayout(request: Uint8Array): Uint8Array {
   for (const item of resolved) {
     out.setUint16(at, item.index, true); at += 2;
     writeRect(item.frame); writeRect(item.absolute);
-    const first = resolved[find(item.view.label)]!;
+    const initial = resolved[first.get(keys[item.index]!)!]!;
     const main = nscvShellEqual(item.view.label, new Uint8Array([109, 97, 105, 110]));
-    writeRect(item.view.kind === 0 && item.view.parent !== null && main ? first.absolute : item.frame);
+    writeRect(item.view.kind === 0 && item.view.parent !== null && main ? initial.absolute : item.frame);
   }
   return output;
 }
 
+function nscvShellKey(label: Uint8Array): string {
+  const chunks: string[] = [];
+  for (const byte of label) chunks.push(byte.toString(16).padStart(2, "0"));
+  return chunks.join("");
+}
 function nscvShellEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;

@@ -62,6 +62,17 @@ test("shell unresolved graphs retain the complete valid prefix and raw label ide
   assert.deepEqual(out.items[0]!.rects, [0, 0, 32, 24, 0, 0, 32, 24, 0, 0, 32, 24]);
 });
 
+test("shell duplicate parent labels select the first recorded declaration", () => {
+  const out = decode(native_window_policy(request([
+    { kind: 6, label: label("dup"), parent: label("later"), geometry: [null, null, 80, 40] },
+    { kind: 0, label: label("main"), parent: label("dup"), geometry: [2, 0, 16, 24] },
+    { kind: 5, label: label("dup"), geometry: [5, 0, 200, 80] },
+    { kind: 6, label: label("later"), geometry: [40, 0, 400, 160] },
+  ])));
+  assert.deepEqual(out.items.map(item => item.index), [2, 3, 0, 1]);
+  assert.equal(out.items[3]!.rects[8], 7);
+});
+
 test("shell requests reject malformed data and honor input byte offsets", () => {
   const valid = request([{ kind: 7, label: label("button") }]);
   for (let length = 0; length < valid.length; length++) assert.throws(() => native_window_policy(valid.subarray(0, length)));
