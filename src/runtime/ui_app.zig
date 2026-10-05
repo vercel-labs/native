@@ -483,6 +483,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         pub const Options = struct {
             name: []const u8,
             scene: app_manifest.ShellConfig,
+            shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             canvas_label: []const u8,
             /// Fixed design tokens for an app that owns its look. Leave
             /// null (the default) and the stock tokens FOLLOW THE SYSTEM
@@ -1499,6 +1500,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = self,
                 .name = self.options.name,
                 .scene_fn = sceneFn,
+                .shell_layout_policy = self.options.shell_layout_policy,
                 .event_fn = eventFn,
                 .stop_fn = stopFn,
                 .replay_fn = replayFn,

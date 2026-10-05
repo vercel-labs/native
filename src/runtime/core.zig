@@ -258,6 +258,7 @@ pub const Runtime = struct {
     video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
+    shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Reused by runtime-created window restoration. `Store.loadWindow`
     /// needs the whole bounded state file plus decoded-string scratch; keep
     /// that 64-KiB workspace on the already heap-owned Runtime instead of
@@ -1263,6 +1264,9 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub const nativeShellPlan = shell_layout.referenceShellPlan;
+    pub const compiledShellPlan = shell_layout.compiledShellPlan;
+    pub const encodeShellPlanRequest = shell_layout.encodeShellPlanRequest;
     pub fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
         return testingCopyInto(buffer, value);
     }

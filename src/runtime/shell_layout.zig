@@ -282,12 +282,16 @@ pub fn shellViewOptions(window_id: platform.WindowId, view: app_manifest.ShellVi
     const frame = try layout.frameFor(view);
     const resolved = layout.findView(view.label) orelse return error.InvalidViewOptions;
     const platform_frame = if (view.kind == .webview and view.parent != null and validation.isMainWebViewLabel(view.label)) resolved.absolute_frame else frame;
+    return shellViewOptionsWithFrame(window_id, view, platform_frame);
+}
+
+pub fn shellViewOptionsWithFrame(window_id: platform.WindowId, view: app_manifest.ShellView, frame: geometry.RectF) platform.ViewOptions {
     return .{
         .window_id = window_id,
         .label = view.label,
         .kind = shellViewKind(view.kind),
         .parent = view.parent,
-        .frame = platform_frame,
+        .frame = frame,
         .layer = view.layer,
         .visible = view.visible,
         .enabled = view.enabled,
@@ -498,4 +502,118 @@ pub fn combinedViewportInsets(surface: platform.Surface) geometry.InsetsF {
         .bottom = @max(surface.safe_area_insets.bottom, surface.keyboard_insets.bottom),
         .left = @max(surface.safe_area_insets.left, surface.keyboard_insets.left),
     };
+}
+
+pub const ShellPlanItem = struct {
+    index: usize,
+    frame: geometry.RectF,
+    absolute_frame: geometry.RectF,
+    platform_frame: geometry.RectF,
+};
+
+pub const ShellPlan = struct {
+    items: [app_manifest.max_shell_views_per_window]ShellPlanItem = undefined,
+    count: usize = 0,
+    invalid_parents: bool = false,
+};
+
+/// Encode exact native geometry and label bytes; copy the complete bounded
+/// result before executing any OS calls. No reset is allowed here: model or
+/// helper slices may still be borrowed by the installing/rebuilding cycle.
+pub fn compiledShellPlan(policy: *const fn ([]const u8, []u8) usize, bounds: geometry.RectF, views: []const app_manifest.ShellView) ShellPlan {
+    if (views.len > app_manifest.max_shell_views_per_window) @panic("invalid shell declaration count");
+    var request: [19 + app_manifest.max_shell_views_per_window * (41 + 2 * app_manifest.max_view_label_bytes)]u8 = undefined;
+    const length = encodeShellPlanRequest(&request, bounds, views);
+    var output: [3 + app_manifest.max_shell_views_per_window * 50]u8 = undefined;
+    const result_length = policy(request[0..length], &output);
+    if (result_length < 3 or result_length > output.len or output[0] > 1) @panic("invalid compiled shell plan");
+    const count = std.mem.readInt(u16, output[1..3], .little);
+    if (count > views.len or result_length != 3 + @as(usize, count) * 50 or (output[0] == 0 and count != views.len)) @panic("invalid compiled shell plan count");
+    var plan = ShellPlan{ .count = count, .invalid_parents = output[0] == 1 };
+    var seen = [_]bool{false} ** app_manifest.max_shell_views_per_window;
+    for (plan.items[0..count], 0..) |*item, i| {
+        const at = 3 + i * 50;
+        const index = std.mem.readInt(u16, output[at..][0..2], .little);
+        if (index >= views.len or seen[index]) @panic("invalid compiled shell plan index");
+        seen[index] = true;
+        item.* = .{
+            .index = index,
+            .frame = shellReadRect(output[at + 2 ..][0..16]),
+            .absolute_frame = shellReadRect(output[at + 18 ..][0..16]),
+            .platform_frame = shellReadRect(output[at + 34 ..][0..16]),
+        };
+    }
+    return plan;
+}
+
+pub fn encodeShellPlanRequest(output: []u8, bounds: geometry.RectF, views: []const app_manifest.ShellView) usize {
+    var writer = std.Io.Writer.fixed(output);
+    writer.writeByte(2) catch @panic("shell request capacity");
+    writer.writeInt(u16, @intCast(views.len), .little) catch @panic("shell request capacity");
+    for ([_]f32{ bounds.x, bounds.y, bounds.width, bounds.height }) |value| shellWriteFloat(&writer, value);
+    for (views) |view| {
+        const values = [_]?f32{ view.x, view.y, view.width, view.height, view.min_width, view.min_height, view.max_width, view.max_height };
+        var mask: u8 = 0;
+        for (values, 0..) |value, field| if (value != null) {
+            mask |= @as(u8, 1) << @intCast(field);
+        };
+        writer.writeAll(&.{ @intFromEnum(view.kind), if (view.edge) |edge| @intFromEnum(edge) else 255, @intFromEnum(view.axis orelse .row), @intFromBool(view.fill), mask }) catch @panic("shell request capacity");
+        for (values) |value| shellWriteFloat(&writer, value orelse 0);
+        shellWriteLabel(&writer, view.label);
+        if (view.parent) |parent| shellWriteLabel(&writer, parent) else writer.writeInt(u16, 65535, .little) catch @panic("shell request capacity");
+    }
+    return writer.buffered().len;
+}
+
+fn shellWriteLabel(writer: *std.Io.Writer, label: []const u8) void {
+    if (label.len > app_manifest.max_view_label_bytes) @panic("invalid shell label length");
+    writer.writeInt(u16, @intCast(label.len), .little) catch @panic("shell request capacity");
+    writer.writeAll(label) catch @panic("shell request capacity");
+}
+
+fn shellWriteFloat(writer: *std.Io.Writer, value: f32) void {
+    writer.writeInt(u32, @bitCast(value), .little) catch @panic("shell request capacity");
+}
+
+fn shellReadRect(bytes: *const [16]u8) geometry.RectF {
+    return .{
+        .x = @bitCast(std.mem.readInt(u32, bytes[0..4], .little)),
+        .y = @bitCast(std.mem.readInt(u32, bytes[4..8], .little)),
+        .width = @bitCast(std.mem.readInt(u32, bytes[8..12], .little)),
+        .height = @bitCast(std.mem.readInt(u32, bytes[12..16], .little)),
+    };
+}
+
+/// Test oracle using the original native stateful layout and traversal.
+/// Production native apps apply each view as they resolve it above the OS seam.
+pub fn referenceShellPlan(bounds: geometry.RectF, views: []const app_manifest.ShellView) ShellPlan {
+    var layout = ShellLayout.init(bounds, views);
+    var created = [_]bool{false} ** app_manifest.max_shell_views_per_window;
+    var plan: ShellPlan = .{};
+    while (plan.count < views.len) {
+        var progressed = false;
+        for (views, 0..) |view, index| {
+            if (created[index]) continue;
+            if (view.parent) |parent| if (!layout.containsView(parent)) continue;
+            const frame = layout.frameFor(view) catch {
+                plan.invalid_parents = true;
+                return plan;
+            };
+            const first = layout.findView(view.label).?;
+            plan.items[plan.count] = .{
+                .index = index,
+                .frame = frame,
+                .absolute_frame = layout.views[layout.view_count - 1].absolute_frame,
+                .platform_frame = if (view.kind == .webview and view.parent != null and validation.isMainWebViewLabel(view.label)) first.absolute_frame else frame,
+            };
+            plan.count += 1;
+            created[index] = true;
+            progressed = true;
+        }
+        if (!progressed) {
+            plan.invalid_parents = true;
+            return plan;
+        }
+    }
+    return plan;
 }

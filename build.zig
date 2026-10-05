@@ -1260,6 +1260,10 @@ pub fn build(b: *std.Build) void {
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
+        const shell_layout_e2e_run = b.addRunArtifact(ts_core_artifacts.shell_layout);
+        addTestStep(b, "test-ts-shell-layout-e2e", "Run compiled shell planning, ownership, and OS application parity", ts_core_artifacts.shell_layout);
+        ts_core_e2e_step.dependOn(&shell_layout_e2e_run.step);
+        test_step.dependOn(&shell_layout_e2e_run.step);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
         const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
         markup_components_e2e_step.dependOn(&markup_e2e_run.step);
@@ -3951,6 +3955,7 @@ const TsCoreE2eArtifacts = struct {
     /// loopback Cmd.fetch, the generated typed client into a real service
     /// child, the shipping markup, and record→replay without either.
     feed_reader: *std.Build.Step.Compile,
+    shell_layout: *std.Build.Step.Compile,
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
@@ -4213,6 +4218,9 @@ fn tsCoreE2eArtifact(
         .emit_services = true,
         .typescript_view = true,
     });
+    const shell_layout_mod = module(b, target, optimize, "tests/ts-core/shell_layout_e2e_tests.zig");
+    shell_layout_mod.addImport("native_sdk", desktop_mod);
+    shell_layout_mod.addImport("shell_fixture_core", feed_reader_fixture.module);
     const feed_reader_service = externalServiceFixture(
         b,
         target,
@@ -4475,6 +4483,7 @@ fn tsCoreE2eArtifact(
         .profile_archive = profile_archive,
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
+        .shell_layout = filteredTestArtifact(b, shell_layout_mod, "ts-shell-layout-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
         .mobile_battery = mobile_battery,

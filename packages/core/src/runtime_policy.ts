@@ -107,6 +107,7 @@ function themeHexNibble(byte: number): number {
  * their creation-time canvas, title, geometry and close policy stay fixed.
  */
 export function native_window_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 2) return nscvShellLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -418,4 +419,192 @@ export function native_effect_policy(request: Uint8Array): Uint8Array {
   result[2] = blocked === 1 || length === 0 || matching < 0 ? 255 : matching;
   result[3] = ok; result[4] = err;
   return result;
+}
+
+/** Operation 2 of the window ABI plans a complete shell in stable declaration
+ * passes. Labels remain opaque bytes; f32 rounding happens at each native
+ * arithmetic step. A missing/cyclic parent returns the valid prefix, so the
+ * host observes the same ordered OS calls and rollback boundary as before.
+ * Header: opcode, u16 count, four f32 bounds. Each declaration carries kind,
+ * edge (255 = absent), axis, fill, an eight-bit optional-geometry mask, eight
+ * f32 values, u16-sized label and parent (65535 = absent). Result: refusal,
+ * u16 count, then u16 declaration index + local/absolute/platform rectangles.
+ */
+interface NscShellRect { x: number; y: number; width: number; height: number }
+interface NscShellView {
+  kind: number; edge: number; axis: number; fill: boolean; mask: number;
+  values: number[]; label: Uint8Array; parent: Uint8Array | null;
+}
+interface NscShellResolved {
+  index: number; view: NscShellView; frame: NscShellRect; absolute: NscShellRect;
+}
+
+function nscvShellLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 19) throw new Error("truncated shell layout request");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const count = wire.getUint16(1, true);
+  if (count > 128) throw new Error("invalid shell layout count");
+  let at = 3;
+  const readRect = (): NscShellRect => {
+    const value = { x: wire.getFloat32(at, true), y: wire.getFloat32(at + 4, true),
+      width: wire.getFloat32(at + 8, true), height: wire.getFloat32(at + 12, true) };
+    at += 16; return value;
+  };
+  const readLabel = (nullable: boolean): Uint8Array | null => {
+    if (at + 2 > request.length) throw new Error("truncated shell label");
+    const length = wire.getUint16(at, true); at += 2;
+    if (nullable && length === 65535) return null;
+    if (length > request.length - at) throw new Error("truncated shell label");
+    const value = request.subarray(at, at + length); at += length; return value;
+  };
+  let remaining = readRect();
+  const views: NscShellView[] = [];
+  for (let index = 0; index < count; index++) {
+    if (at + 37 > request.length) throw new Error("truncated shell declaration");
+    const kind = request[at++]!, edge = request[at++]!, axis = request[at++]!, fill = request[at++]!, mask = request[at++]!;
+    if (kind > 18 || edge !== 255 && edge > 3 || axis > 1 || fill > 1) throw new Error("invalid shell declaration");
+    const values: number[] = [];
+    for (let field = 0; field < 8; field++) { values.push(wire.getFloat32(at, true)); at += 4; }
+    const label = readLabel(false)!;
+    views.push({ kind, edge, axis, fill: fill === 1, mask, values, label, parent: readLabel(true) });
+  }
+  if (at !== request.length) throw new Error("trailing shell layout bytes");
+  let fill = remaining;
+  for (const view of views) if (view.parent === null && !view.fill && view.edge !== 255) {
+    fill = nscvShellConsume(fill, view.edge, nscvShellDock(fill, view));
+  }
+  const resolved: NscShellResolved[] = [];
+  const created: boolean[] = [];
+  const cursorX: number[] = [], cursorY: number[] = [];
+  for (let i = 0; i < count; i++) { created.push(false); cursorX.push(8); cursorY.push(8); }
+  const find = (label: Uint8Array): number => {
+    for (let i = 0; i < resolved.length; i++) if (nscvShellEqual(resolved[i]!.view.label, label)) return i;
+    return -1;
+  };
+  while (resolved.length < count) {
+    let progressed = false;
+    for (let index = 0; index < count; index++) {
+      if (created[index]) continue;
+      const view = views[index]!;
+      const parentIndex = view.parent === null ? -1 : find(view.parent);
+      if (view.parent !== null && parentIndex === -1) continue;
+      let frame: NscShellRect;
+      if (parentIndex >= 0) {
+        const parent = resolved[parentIndex]!;
+        const split = parent.view.kind === 5, row = parent.view.axis === 0;
+        const x = nscvShellValue(view, 0, row ? cursorX[parentIndex]! : split ? 0 : 8);
+        let y: number, width: number, height: number;
+        if (split) {
+          y = nscvShellValue(view, 1, row ? 0 : cursorY[parentIndex]!);
+          const availableWidth = nscvShellMax(Math.fround(parent.frame.width - x), 0);
+          const availableHeight = nscvShellMax(Math.fround(parent.frame.height - y), 0);
+          width = nscvShellWidth(view, nscvShellValue(view, 2, row ? view.fill ? availableWidth : nscvShellDefaultWidth(view.kind) : availableWidth));
+          height = nscvShellHeight(view, nscvShellValue(view, 3, row ? availableHeight : view.fill ? availableHeight : nscvShellDefaultHeight(view.kind, parent.frame.height)));
+          if (row) cursorX[parentIndex] = nscvShellMax(cursorX[parentIndex]!, Math.fround(x + width));
+          else cursorY[parentIndex] = nscvShellMax(cursorY[parentIndex]!, Math.fround(y + height));
+        } else {
+          width = nscvShellWidth(view, nscvShellValue(view, 2, nscvShellDefaultWidth(view.kind)));
+          height = nscvShellHeight(view, nscvShellValue(view, 3, nscvShellDefaultHeight(view.kind, parent.frame.height)));
+          y = nscvShellValue(view, 1, row ? parent.frame.height <= height ? 0 : Math.fround(Math.fround(parent.frame.height - height) / 2) : cursorY[parentIndex]!);
+          if (row && (view.mask & 1) === 0) cursorX[parentIndex] = Math.fround(Math.fround(x + width) + 8);
+          if (!row && (view.mask & 2) === 0) cursorY[parentIndex] = Math.fround(Math.fround(y + height) + 8);
+        }
+        frame = { x, y, width, height };
+      } else if (view.fill) {
+        frame = { x: nscvShellValue(view, 0, fill.x), y: nscvShellValue(view, 1, fill.y),
+          width: nscvShellWidth(view, nscvShellValue(view, 2, fill.width)), height: nscvShellHeight(view, nscvShellValue(view, 3, fill.height)) };
+      } else if (view.edge !== 255) {
+        frame = nscvShellDock(remaining, view); remaining = nscvShellConsume(remaining, view.edge, frame);
+      } else {
+        frame = { x: nscvShellValue(view, 0, 0), y: nscvShellValue(view, 1, 0),
+          width: nscvShellWidth(view, nscvShellValue(view, 2, nscvShellDefaultWidth(view.kind))),
+          height: nscvShellHeight(view, nscvShellValue(view, 3, nscvShellDefaultHeight(view.kind, 0))) };
+      }
+      const absolute = parentIndex < 0 ? frame : { ...frame,
+        x: Math.fround(frame.x + resolved[parentIndex]!.absolute.x), y: Math.fround(frame.y + resolved[parentIndex]!.absolute.y) };
+      const next = resolved.length;
+      resolved.push({ index, view, frame, absolute });
+      cursorX[next] = view.kind === 5 ? 0 : 8; cursorY[next] = view.kind === 5 ? 0 : 8;
+      created[index] = true; progressed = true;
+    }
+    if (!progressed) break;
+  }
+  const output = new Uint8Array(3 + resolved.length * 50);
+  const out = new DataView(output.buffer);
+  output[0] = resolved.length === count ? 0 : 1; out.setUint16(1, resolved.length, true);
+  at = 3;
+  const writeRect = (frame: NscShellRect): void => {
+    out.setFloat32(at, frame.x, true); out.setFloat32(at + 4, frame.y, true);
+    out.setFloat32(at + 8, frame.width, true); out.setFloat32(at + 12, frame.height, true); at += 16;
+  };
+  for (const item of resolved) {
+    out.setUint16(at, item.index, true); at += 2;
+    writeRect(item.frame); writeRect(item.absolute);
+    const first = resolved[find(item.view.label)]!;
+    const main = nscvShellEqual(item.view.label, new Uint8Array([109, 97, 105, 110]));
+    writeRect(item.view.kind === 0 && item.view.parent !== null && main ? first.absolute : item.frame);
+  }
+  return output;
+}
+
+function nscvShellEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+// Zig's min/max ignore one NaN operand. All arithmetic operands already carry
+// native f32 values, and the explicit rounds preserve native evaluation order.
+function nscvShellMax(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.max(a, b); }
+function nscvShellMin(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.min(a, b); }
+function nscvShellValue(view: NscShellView, field: number, fallback: number): number {
+  return (view.mask & (1 << field)) === 0 ? fallback : view.values[field]!;
+}
+function nscvShellWidth(view: NscShellView, value: number): number {
+  let width = value;
+  if ((view.mask & 16) !== 0) width = nscvShellMax(width, view.values[4]!);
+  if ((view.mask & 64) !== 0) width = nscvShellMin(width, view.values[6]!);
+  return width;
+}
+function nscvShellHeight(view: NscShellView, value: number): number {
+  let height = value;
+  if ((view.mask & 32) !== 0) height = nscvShellMax(height, view.values[5]!);
+  if ((view.mask & 128) !== 0) height = nscvShellMin(height, view.values[7]!);
+  return height;
+}
+function nscvShellDock(remaining: NscShellRect, view: NscShellView): NscShellRect {
+  const vertical = view.edge === 0 || view.edge === 2;
+  const width = nscvShellWidth(view, nscvShellValue(view, 2, vertical ? remaining.width : nscvShellDefaultWidth(view.kind)));
+  const height = nscvShellHeight(view, nscvShellValue(view, 3, vertical ? nscvShellDefaultHeight(view.kind, 0) : remaining.height));
+  return { x: view.edge === 1 ? Math.fround(remaining.x + nscvShellMax(Math.fround(remaining.width - width), 0)) : remaining.x,
+    y: view.edge === 2 ? Math.fround(remaining.y + nscvShellMax(Math.fround(remaining.height - height), 0)) : remaining.y, width, height };
+}
+function nscvShellConsume(remaining: NscShellRect, edge: number, frame: NscShellRect): NscShellRect {
+  return { x: edge === 3 ? Math.fround(remaining.x + frame.width) : remaining.x,
+    y: edge === 0 ? Math.fround(remaining.y + frame.height) : remaining.y,
+    width: edge === 1 || edge === 3 ? nscvShellMax(Math.fround(remaining.width - frame.width), 0) : remaining.width,
+    height: edge === 0 || edge === 2 ? nscvShellMax(Math.fround(remaining.height - frame.height), 0) : remaining.height };
+}
+function nscvShellDefaultWidth(kind: number): number {
+  switch (kind) {
+    case 7: case 10: case 11: return 96;
+    case 8: return 32;
+    case 9: case 13: case 14: return 220;
+    case 12: return 168;
+    case 15: return 160;
+    case 16: return 12;
+    case 18: return 24;
+    case 3: return 240;
+    default: return 0;
+  }
+}
+function nscvShellDefaultHeight(kind: number, parent: number): number {
+  switch (kind) {
+    case 7: case 8: case 9: case 10: case 11: case 12: return 32;
+    case 15: case 18: return 24;
+    case 16: return nscvShellMax(parent, 1);
+    case 13: case 14: case 4: return 28;
+    case 1: return 48;
+    case 2: return 36;
+    default: return 0;
+  }
 }

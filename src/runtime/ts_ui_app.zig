@@ -411,6 +411,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             stamped.on_lifecycle = lifecycleAdapter;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
+            if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                if (options.shell_layout_policy != null) @panic("TsUiApp owns shell_layout_policy - remove custom shell layout wiring");
+                stamped.shell_layout_policy = core.nativeWindowPolicy;
+            }
             if (comptime @hasDecl(core, "nativeTabFocusPolicy")) {
                 if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");
                 stamped.tab_focus_policy = core.nativeTabFocusPolicy;

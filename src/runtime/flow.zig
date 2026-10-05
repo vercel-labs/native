@@ -227,6 +227,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
 
             switch (event_value) {
                 .app_start => {
+                    self.shell_layout_policy = app.shell_layout_policy;
                     // A startup failure must be loud and attributable.
                     // Without this record the error unwinds into the
                     // platform stop path and the only trace is a bare

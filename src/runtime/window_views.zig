@@ -309,6 +309,22 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         }
 
         pub fn applyShellViews(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView, bounds: geometry.RectF, mode: ShellApplyMode, tracked_labels: ?*[app_manifest.max_shell_views_per_window][]const u8, tracked_count: ?*usize) anyerror!void {
+            if (self.shell_layout_policy) |policy| {
+                const plan = shell_layout.compiledShellPlan(policy, bounds, views);
+                for (plan.items[0..plan.count]) |item| {
+                    const view = views[item.index];
+                    const did_create = try Self.applyShellView(self, shell_layout.shellViewOptionsWithFrame(window_id, view, item.platform_frame), mode);
+                    if (did_create) {
+                        if (tracked_labels) |labels| {
+                            const count = tracked_count.?;
+                            labels[count.*] = view.label;
+                            count.* += 1;
+                        }
+                    }
+                }
+                if (plan.invalid_parents) return error.InvalidViewOptions;
+                return;
+            }
             var layout = ShellLayout.init(bounds, views);
             var created: [app_manifest.max_shell_views_per_window]bool = [_]bool{false} ** app_manifest.max_shell_views_per_window;
             var created_count: usize = 0;
