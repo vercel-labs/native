@@ -428,6 +428,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.text_cache_policy = core.nativeWindowPolicy;
                 if (options.render_cache_policy != null) @panic("TsUiApp owns render_cache_policy - remove custom render cache wiring");
                 stamped.render_cache_policy = core.nativeWindowPolicy;
+                if (options.render_plan_policy != null) @panic("TsUiApp owns render_plan_policy - remove custom render plan wiring");
+                stamped.render_plan_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeTabFocusPolicy")) {
                 if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");

@@ -221,6 +221,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             var frame_options = options;
             if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
+            if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
             if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
@@ -879,6 +880,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             var frame_options = options;
             if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
+            if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
@@ -947,18 +949,20 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 return canvas_frame;
             }
 
-            var render_plan = try display_list.renderPlan(storage.render_commands);
+            var cache_workspace = canvas.RenderCacheWorkspace.forFrame(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len);
+            defer if (cache_workspace) |*workspace| workspace.deinit();
+            const planning_workspace: ?*canvas.RenderCacheWorkspace = if (cache_workspace) |*workspace| workspace else null;
+            const cache_owner: ?*canvas.RenderCacheWorkspace = if (frame_options.render_cache_policy != null) planning_workspace else null;
+            var render_plan = try display_list.renderPlanWithWorkspace(storage.render_commands, frame_options.render_plan_policy, planning_workspace);
             const render_override_dirty_bounds = canvas.renderOverrideDirtyBounds(render_plan.commands, frame_options.previous_render_overrides, frame_options.render_overrides);
             const render_animation_dirty_bounds = self.views[index].canvasRenderAnimationDirtyBoundsForOverrides(frame_options.previous_render_overrides, frame_options.render_overrides);
             render_plan.bounds = canvas.applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], frame_options.render_overrides);
-            var cache_workspace = canvas.RenderCacheWorkspace.forFrame(frame_options.render_cache_policy, storage, frame_options);
-            defer if (cache_workspace) |*workspace| workspace.deinit();
-            const batch_plan = try render_plan.batchPlan(storage.render_batches);
+            const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, frame_options.render_plan_policy, planning_workspace);
             const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
                 canvas.RenderPipelineCachePlan{}
             else
                 try batch_plan.cachePlanWithWorkspace(
-                    if (cache_workspace) |*workspace| workspace else null,
+                    cache_owner,
                     frame_options.previous_pipeline_cache,
                     frame_options.frame_index,
                     storage.pipeline_cache_entries,
@@ -972,7 +976,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 canvas.RenderPathGeometryCachePlan{}
             else
                 try path_geometry_plan.cachePlanWithWorkspace(
-                    if (cache_workspace) |*workspace| workspace else null,
+                    cache_owner,
                     frame_options.previous_path_geometry_cache,
                     frame_options.frame_index,
                     storage.path_geometry_cache_entries,
@@ -986,7 +990,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 canvas.RenderImageCachePlan{}
             else
                 try image_plan.cachePlanWithWorkspace(
-                    if (cache_workspace) |*workspace| workspace else null,
+                    cache_owner,
                     frame_options.previous_image_cache,
                     frame_options.frame_index,
                     storage.image_cache_entries,
@@ -1000,7 +1004,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 canvas.RenderLayerCachePlan{}
             else
                 try layer_plan.cachePlanWithWorkspace(
-                    if (cache_workspace) |*workspace| workspace else null,
+                    cache_owner,
                     frame_options.previous_layer_cache,
                     frame_options.frame_index,
                     storage.layer_cache_entries,
@@ -1008,7 +1012,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 );
             const resource_plan = try display_list.resourcePlan(storage.resources);
             const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
-                if (cache_workspace) |*workspace| workspace else null,
+                cache_owner,
                 frame_options.previous_resource_cache,
                 frame_options.frame_index,
                 storage.resource_cache_entries,
@@ -1022,7 +1026,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 canvas.VisualEffectCachePlan{}
             else
                 try visual_effect_plan.cachePlanWithWorkspace(
-                    if (cache_workspace) |*workspace| workspace else null,
+                    cache_owner,
                     frame_options.previous_visual_effect_cache,
                     frame_options.frame_index,
                     storage.visual_effect_cache_entries,

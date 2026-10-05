@@ -161,6 +161,12 @@ pub const DisplayList = struct {
         return planner.build(self);
     }
 
+    pub fn renderPlanWithWorkspace(self: DisplayList, output: []RenderCommand, policy: ?@import("render_cache_policy.zig").Policy, workspace: ?*@import("render_cache_policy.zig").Workspace) Error!RenderPlan {
+        var planner = RenderPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner, workspace orelse @panic("missing render plan workspace"));
+        return planner.build(self);
+    }
+
     pub fn resourcePlan(self: DisplayList, output: []RenderResource) Error!RenderResourcePlan {
         var planner = RenderResourcePlanner.init(output);
         return planner.build(self);

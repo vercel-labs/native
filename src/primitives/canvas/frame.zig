@@ -456,6 +456,7 @@ pub const CanvasFrame = struct {
 pub const CanvasFrameOptions = struct {
     text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -515,17 +516,19 @@ pub const CanvasFrameStorage = struct {
 };
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
-    var render_plan = try next.renderPlan(storage.render_commands);
+    var cache_workspace = render_cache.Workspace.forFrame(options.render_cache_policy, storage, options, next.commands.len);
+    defer if (cache_workspace) |*workspace| workspace.deinit();
+    const planning_workspace: ?*render_cache.Workspace = if (cache_workspace) |*workspace| workspace else null;
+    const cache_owner: ?*render_cache.Workspace = if (options.render_cache_policy != null) planning_workspace else null;
+    var render_plan = try next.renderPlanWithWorkspace(storage.render_commands, options.render_plan_policy, planning_workspace);
     const render_override_dirty_bounds = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
     render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
-    var cache_workspace = render_cache.Workspace.forFrame(options.render_cache_policy, storage, options);
-    defer if (cache_workspace) |*workspace| workspace.deinit();
-    const batch_plan = try render_plan.batchPlan(storage.render_batches);
+    const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, options.render_plan_policy, planning_workspace);
     const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
         RenderPipelineCachePlan{}
     else
         try batch_plan.cachePlanWithWorkspace(
-            if (cache_workspace) |*workspace| workspace else null,
+            cache_owner,
             options.previous_pipeline_cache,
             options.frame_index,
             storage.pipeline_cache_entries,
@@ -539,7 +542,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         RenderPathGeometryCachePlan{}
     else
         try path_geometry_plan.cachePlanWithWorkspace(
-            if (cache_workspace) |*workspace| workspace else null,
+            cache_owner,
             options.previous_path_geometry_cache,
             options.frame_index,
             storage.path_geometry_cache_entries,
@@ -553,7 +556,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         RenderImageCachePlan{}
     else
         try image_plan.cachePlanWithWorkspace(
-            if (cache_workspace) |*workspace| workspace else null,
+            cache_owner,
             options.previous_image_cache,
             options.frame_index,
             storage.image_cache_entries,
@@ -567,7 +570,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         RenderLayerCachePlan{}
     else
         try layer_plan.cachePlanWithWorkspace(
-            if (cache_workspace) |*workspace| workspace else null,
+            cache_owner,
             options.previous_layer_cache,
             options.frame_index,
             storage.layer_cache_entries,
@@ -575,7 +578,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         );
     const resource_plan = try next.resourcePlan(storage.resources);
     const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
-        if (cache_workspace) |*workspace| workspace else null,
+        cache_owner,
         options.previous_resource_cache,
         options.frame_index,
         storage.resource_cache_entries,
@@ -589,7 +592,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         VisualEffectCachePlan{}
     else
         try visual_effect_plan.cachePlanWithWorkspace(
-            if (cache_workspace) |*workspace| workspace else null,
+            cache_owner,
             options.previous_visual_effect_cache,
             options.frame_index,
             storage.visual_effect_cache_entries,

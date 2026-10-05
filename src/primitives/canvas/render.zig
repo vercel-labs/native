@@ -1,3 +1,4 @@
+const compiled_plan = @import("render_plan_policy.zig");
 const compiled_cache = @import("render_cache_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
@@ -384,6 +385,12 @@ pub const RenderPlan = struct {
         return planner.build(self);
     }
 
+    pub fn batchPlanWithWorkspace(self: RenderPlan, output: []RenderBatch, policy: ?compiled_cache.Policy, workspace: ?*compiled_cache.Workspace) Error!RenderBatchPlan {
+        var planner = RenderBatchPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner, workspace orelse @panic("missing render plan workspace"));
+        return planner.build(self);
+    }
+
     pub fn pathGeometryPlan(self: RenderPlan, output: []RenderPathGeometry) Error!RenderPathGeometryPlan {
         var planner = RenderPathGeometryPlanner.init(output);
         return planner.build(self);
@@ -436,6 +443,10 @@ pub const RenderPlanner = struct {
             .commands = self.commands[0..self.len],
             .bounds = self.bounds_value,
         };
+    }
+
+    pub fn buildCompiled(self: *RenderPlanner, list: DisplayList, policy: compiled_cache.Policy, workspace: *compiled_cache.Workspace) Error!RenderPlan {
+        return compiled_plan.buildRender(RenderPlan, self, list, policy, workspace);
     }
 
     fn consume(self: *RenderPlanner, command: CanvasCommand) Error!void {
@@ -564,6 +575,10 @@ pub const RenderBatchPlanner = struct {
             .batches = self.batches[0..self.len],
             .bounds = render_plan.bounds,
         };
+    }
+
+    pub fn buildCompiled(self: *RenderBatchPlanner, plan: RenderPlan, policy: compiled_cache.Policy, workspace: *compiled_cache.Workspace) Error!RenderBatchPlan {
+        return compiled_plan.buildBatch(RenderBatchPlan, self, plan, policy, workspace);
     }
 
     fn consume(self: *RenderBatchPlanner, command: RenderCommand, index: usize) Error!void {

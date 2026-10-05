@@ -3,7 +3,7 @@ const std = @import("std");
 pub const Policy = *const fn ([]const u8, []u8) usize;
 pub const Family = enum(u8) { pipeline, path, image, layer, resource, effect };
 
-/// One native-owned pair of copied buffers, reused by the six ordered cache
+/// One native-owned pair of copied buffers, reused by ordered render planning and cache
 /// calls in a frame. Resources and committed core storage never cross the ABI.
 pub const Workspace = struct {
     policy: Policy,
@@ -18,8 +18,20 @@ pub const Workspace = struct {
         };
     }
 
-    pub fn forFrame(policy: ?Policy, storage: anytype, options: anytype) ?Workspace {
-        const owner = policy orelse return null;
+    pub fn initPlanning(policy: Policy, command_count: usize, batch_count: usize) Workspace {
+        return initBytes(policy, 16 + command_count * 48 + 864 + command_count * 68, @max(864 + command_count * 68, 32 + batch_count * 52));
+    }
+
+    fn initBytes(policy: Policy, request_bytes: usize, result_bytes: usize) Workspace {
+        return .{
+            .policy = policy,
+            .request = std.heap.page_allocator.alloc(u8, request_bytes) catch @panic("render request allocation failed"),
+            .result = std.heap.page_allocator.alloc(u8, result_bytes) catch @panic("render result allocation failed"),
+        };
+    }
+
+    pub fn forFrame(policy: ?Policy, storage: anytype, options: anytype, command_count: usize) ?Workspace {
+        const owner = policy orelse options.render_plan_policy orelse return null;
         var facts: usize = 0;
         var entries: usize = 0;
         var actions: usize = 0;
@@ -34,7 +46,14 @@ pub const Workspace = struct {
             entries = @max(entries, @min(current, @field(storage, fields[1] ++ "_cache_entries").len));
             actions = @max(actions, @min(total, @field(storage, fields[1] ++ "_cache_actions").len));
         }
-        return init(owner, facts, entries, actions);
+        var request_bytes = 24 + facts * 56;
+        var result_bytes = 16 + entries * 4 + actions * 12;
+        if (options.render_plan_policy != null) {
+            const draws = @min(command_count, storage.render_commands.len);
+            request_bytes = @max(request_bytes, 16 + command_count * 48 + 864 + draws * 68);
+            result_bytes = @max(result_bytes, @max(864 + draws * 68, 32 + @min(draws, storage.render_batches.len) * 52));
+        }
+        return initBytes(owner, request_bytes, result_bytes);
     }
 
     pub fn deinit(self: Workspace) void {

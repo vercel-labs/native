@@ -118,6 +118,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 10) return nscvExtentPolicy(request);
   if (request[0] === 11) return nscvTextCachePolicy(request);
   if (request[0] === 12) return nscvRenderCachePolicy(request);
+  if (request[0] === 13) return nscvRenderPlanPolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1639,4 +1640,140 @@ function nscvRenderCachePolicy(request: Uint8Array): Uint8Array {
   for (let i = 0; i < entryCount; i++) output.setUint32(16 + i * 4, entries[i]!, true);
   for (let i = 0; i < actionCount * 3; i++) output.setUint32(16 + entryCount * 4 + i * 4, actions[i]!, true);
   return result;
+}
+
+/** Ordered render-state and adjacent-batch coordination. Native supplies local
+ * drawing bounds and primitive tags; commands, identities and resources stay
+ * borrowed natively. Opcode 13 uses copied buffers and never collects an arena.
+ * State replies include every written stack slot and complete partial commands.
+ * Every arithmetic intermediate rounds in the native f32 evaluation order.
+ */
+interface NscRenderAffine { readonly a: number; readonly b: number; readonly c: number; readonly d: number; readonly tx: number; readonly ty: number; }
+function nscvRenderExtreme(a: number, b: number, flags: number, maximum: boolean): number {
+  if (a === 0 && b === 0) {
+    const an = 1 / a < 0, bn = 1 / b < 0;
+    if (an === bn) return a;
+    return (flags & (1 << ((maximum ? 2 : 0) + (an ? 0 : 1)))) !== 0 ? -0 : 0;
+  }
+  return maximum ? nscvSurfaceMax(a, b) : nscvSurfaceMin(a, b);
+}
+function nscvRenderRect(w: DataView, at: number): NscSurfaceRect {
+  return { x: w.getFloat32(at, true), y: w.getFloat32(at + 4, true), width: w.getFloat32(at + 8, true), height: w.getFloat32(at + 12, true) };
+}
+function nscvRenderPutRect(w: DataView, at: number, r: NscSurfaceRect): void {
+  w.setFloat32(at, r.x, true); w.setFloat32(at + 4, r.y, true); w.setFloat32(at + 8, r.width, true); w.setFloat32(at + 12, r.height, true);
+}
+function nscvRenderOptional(w: DataView, at: number): NscSurfaceRect | null { return w.getUint32(at, true) === 0 ? null : nscvRenderRect(w, at + 4); }
+function nscvRenderPutOptional(w: DataView, at: number, r: NscSurfaceRect | null): void {
+  w.setUint32(at, r === null ? 0 : 1, true);
+  nscvRenderPutRect(w, at + 4, r === null ? { x: 0, y: 0, width: 0, height: 0 } : r);
+}
+function nscvRenderAffine(w: DataView, at: number): NscRenderAffine {
+  return { a: w.getFloat32(at, true), b: w.getFloat32(at + 4, true), c: w.getFloat32(at + 8, true), d: w.getFloat32(at + 12, true), tx: w.getFloat32(at + 16, true), ty: w.getFloat32(at + 20, true) };
+}
+function nscvRenderPutAffine(w: DataView, at: number, t: NscRenderAffine): void {
+  w.setFloat32(at, t.a, true); w.setFloat32(at + 4, t.b, true); w.setFloat32(at + 8, t.c, true); w.setFloat32(at + 12, t.d, true); w.setFloat32(at + 16, t.tx, true); w.setFloat32(at + 20, t.ty, true);
+}
+function nscvRenderMultiply(t: NscRenderAffine, u: NscRenderAffine): NscRenderAffine {
+  const f = Math.fround;
+  return { a: f(f(t.a * u.a) + f(t.c * u.b)), b: f(f(t.b * u.a) + f(t.d * u.b)), c: f(f(t.a * u.c) + f(t.c * u.d)), d: f(f(t.b * u.c) + f(t.d * u.d)),
+    tx: f(f(f(t.a * u.tx) + f(t.c * u.ty)) + t.tx), ty: f(f(f(t.b * u.tx) + f(t.d * u.ty)) + t.ty) };
+}
+function nscvRenderTransform(t: NscRenderAffine, rect: NscSurfaceRect, flags: number): NscSurfaceRect {
+  const r = nscvSurfaceNormalize(rect), f = Math.fround;
+  let minX = f(f(f(t.a * r.x) + f(t.c * r.y)) + t.tx), minY = f(f(f(t.b * r.x) + f(t.d * r.y)) + t.ty), maxX = minX, maxY = minY;
+  for (let i = 1; i < 4; i++) {
+    const x = (i & 1) !== 0 ? nscvSurfaceRight(r) : r.x, y = i >= 2 ? nscvSurfaceBottom(r) : r.y;
+    const px = f(f(f(t.a * x) + f(t.c * y)) + t.tx), py = f(f(f(t.b * x) + f(t.d * y)) + t.ty);
+    minX = nscvRenderExtreme(minX, px, flags, false); minY = nscvRenderExtreme(minY, py, flags, false);
+    maxX = nscvRenderExtreme(maxX, px, flags, true); maxY = nscvRenderExtreme(maxY, py, flags, true);
+  }
+  return { x: minX, y: minY, width: f(maxX - minX), height: f(maxY - minY) };
+}
+function nscvRenderEmpty(r: NscSurfaceRect): boolean { return r.width <= 0 || r.height <= 0; }
+function nscvRenderIntersection(a: NscSurfaceRect, b: NscSurfaceRect, flags: number): NscSurfaceRect {
+  const x = nscvRenderExtreme(a.x, b.x, flags, true), y = nscvRenderExtreme(a.y, b.y, flags, true), right = nscvRenderExtreme(nscvSurfaceRight(a), nscvSurfaceRight(b), flags, false), bottom = nscvRenderExtreme(nscvSurfaceBottom(a), nscvSurfaceBottom(b), flags, false);
+  return { x, y, width: right <= x || bottom <= y ? 0 : Math.fround(right - x), height: right <= x || bottom <= y ? 0 : Math.fround(bottom - y) };
+}
+function nscvRenderUnion(left: NscSurfaceRect, right: NscSurfaceRect, flags: number): NscSurfaceRect {
+  const a = nscvSurfaceNormalize(left), b = nscvSurfaceNormalize(right);
+  if (nscvRenderEmpty(a) && nscvRenderEmpty(b)) return { x: 0, y: 0, width: 0, height: 0 };
+  if (nscvRenderEmpty(a)) return b;
+  if (nscvRenderEmpty(b)) return a;
+  const x = nscvRenderExtreme(a.x, b.x, flags, false), y = nscvRenderExtreme(a.y, b.y, flags, false);
+  return { x, y, width: Math.fround(nscvRenderExtreme(nscvSurfaceRight(a), nscvSurfaceRight(b), flags, true) - x), height: Math.fround(nscvRenderExtreme(nscvSurfaceBottom(a), nscvSurfaceBottom(b), flags, true) - y) };
+}
+function nscvRenderRectEqual(a: NscSurfaceRect | null, b: NscSurfaceRect | null): boolean {
+  return a === null ? b === null : b !== null && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+function nscvRenderPlanPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 16 || request[1]! > 1 || request[2]! > 15 || request[3] !== 0) throw new Error("invalid render planning header");
+  const w = new DataView(request.buffer, request.byteOffset, request.byteLength), mode = request[1]!, flags = request[2]!, count = w.getUint32(4, true), capacity = w.getUint32(8, true), header = mode === 0 ? 16 : 32;
+  if (request.length !== header + count * 48 + (mode === 0 ? w.getUint32(12, true) : 0) || (mode === 1 && w.getUint32(12, true) > 1)) throw new Error("invalid render planning shape");
+  for (let i = 0; i < count; i++) {
+    const at = header + i * 48, kind = w.getUint32(at, true);
+    if (kind > 14 || w.getUint32(at + 4, true) > (mode === 0 && kind === 12 ? 2 : 1) || (mode === 1 && w.getUint32(at + 12, true) > 1)) throw new Error("invalid render planning fact");
+  }
+  if (mode === 1) return nscvRenderBatches(w, count, capacity, flags);
+  const result = new Uint8Array(864 + Math.min(count, capacity) * 68), out = new DataView(result.buffer), f = Math.fround, resume = w.getUint32(12, true);
+  let start = 0;
+  if (resume !== 0) {
+    const at = 16 + count * 48;
+    if (resume < 864 || resume > result.length || w.getUint32(at + 4, true) !== 4 || resume !== 864 + w.getUint32(at, true) * 68 || w.getUint32(at + 16, true) > 32 || w.getUint32(at + 20, true) > 32 || w.getUint32(at + 8, true) > w.getUint32(at + 16, true) || w.getUint32(at + 12, true) > w.getUint32(at + 20, true)) throw new Error("invalid render continuation state");
+    result.set(request.subarray(at, at + resume)); start = out.getUint32(860, true);
+    if (start >= count || w.getUint32(16 + start * 48 + 4, true) === 2) throw new Error("unresolved render continuation fact");
+  }
+  let opacity = resume === 0 ? 1 : out.getFloat32(24, true), transform: NscRenderAffine = resume === 0 ? { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 } : nscvRenderAffine(out, 48), clip: NscSurfaceRect | null = resume === 0 ? null : nscvRenderOptional(out, 28), bounds: NscSurfaceRect | null = resume === 0 ? null : nscvRenderOptional(out, 72);
+  let clips = resume === 0 ? 0 : out.getUint32(8, true), opacities = resume === 0 ? 0 : out.getUint32(12, true), clipWritten = resume === 0 ? 0 : out.getUint32(16, true), opacityWritten = resume === 0 ? 0 : out.getUint32(20, true), emitted = resume === 0 ? 0 : out.getUint32(0, true), failed = 0, pending = 0;
+  for (let i = start; i < count; i++) {
+    const at = 16 + i * 48, kind = w.getUint32(at, true);
+    if (kind === 0) {
+      if (clips === 32) { failed = 1; break; }
+      nscvRenderPutOptional(out, 92 + clips * 20, clip); clips++; clipWritten = Math.max(clipWritten, clips);
+      const next = nscvRenderTransform(transform, nscvRenderRect(w, at + 8), flags);
+      clip = clip === null ? next : nscvRenderIntersection(clip, next, flags);
+    } else if (kind === 1) {
+      if (clips === 0) { failed = 2; break; }
+      clips--; clip = nscvRenderOptional(out, 92 + clips * 20);
+    } else if (kind === 2) {
+      if (opacities === 32) { failed = 1; break; }
+      out.setFloat32(732 + opacities * 4, opacity, true); opacities++; opacityWritten = Math.max(opacityWritten, opacities);
+      opacity = f(opacity * nscvRenderExtreme(0, nscvRenderExtreme(w.getFloat32(at + 8, true), 1, flags, false), flags, true));
+    } else if (kind === 3) {
+      if (opacities === 0) { failed = 2; break; }
+      opacities--; opacity = out.getFloat32(732 + opacities * 4, true);
+    } else if (kind === 4) transform = nscvRenderMultiply(transform, nscvRenderAffine(w, at + 24));
+    else if (!(opacity <= 0) && w.getUint32(at + 4, true) !== 0) {
+      if (w.getUint32(at + 4, true) === 2) { failed = 4; pending = i; break; }
+      const local = nscvRenderRect(w, at + 8), transformed = nscvRenderTransform(transform, local, flags), visible = clip === null ? transformed : nscvRenderIntersection(clip, transformed, flags);
+      if (nscvRenderEmpty(visible)) continue;
+      if (emitted === capacity) { failed = 3; break; }
+      const target = 864 + emitted * 68;
+      out.setUint32(target, i, true); out.setFloat32(target + 4, opacity, true); nscvRenderPutOptional(out, target + 8, clip); nscvRenderPutAffine(out, target + 28, transform); nscvRenderPutRect(out, target + 52, visible);
+      emitted++; bounds = bounds === null ? visible : nscvRenderUnion(bounds, visible, flags);
+    }
+  }
+  out.setUint32(0, emitted, true); out.setUint32(4, failed, true); out.setUint32(8, clips, true); out.setUint32(12, opacities, true); out.setUint32(16, clipWritten, true); out.setUint32(20, opacityWritten, true);
+  out.setFloat32(24, opacity, true); nscvRenderPutOptional(out, 28, clip); nscvRenderPutAffine(out, 48, transform); nscvRenderPutOptional(out, 72, bounds);
+  out.setUint32(860, pending, true);
+  return result.subarray(0, 864 + emitted * 68);
+}
+function nscvRenderBatches(w: DataView, count: number, capacity: number, flags: number): Uint8Array {
+  const result = new Uint8Array(32 + Math.min(count, capacity) * 52), out = new DataView(result.buffer);
+  nscvRenderPutOptional(out, 8, nscvRenderOptional(w, 12));
+  let emitted = 0, failed = 0;
+  for (let i = 0; i < count; i++) {
+    const at = 32 + i * 48, kind = w.getUint32(at, true), fill = w.getUint32(at + 4, true), opacity = w.getFloat32(at + 8, true), clip = nscvRenderOptional(w, at + 12), bounds = nscvRenderRect(w, at + 32);
+    const pipeline = kind <= 4 ? 0 : kind <= 8 ? fill : kind <= 10 ? 4 : kind === 11 ? 2 : kind === 12 ? 3 : kind === 13 ? 5 : 6;
+    const previous = 32 + (emitted - 1) * 52;
+    if (emitted > 0 && out.getUint32(previous, true) === pipeline && out.getUint32(previous + 4, true) + out.getUint32(previous + 8, true) === i && out.getFloat32(previous + 12, true) === opacity && nscvRenderRectEqual(nscvRenderOptional(out, previous + 16), clip)) {
+      out.setUint32(previous + 8, out.getUint32(previous + 8, true) + 1, true); nscvRenderPutRect(out, previous + 36, nscvRenderUnion(nscvRenderRect(out, previous + 36), bounds, flags));
+    } else {
+      if (emitted === capacity) { failed = 4; break; }
+      const target = 32 + emitted * 52;
+      out.setUint32(target, pipeline, true); out.setUint32(target + 4, i, true); out.setUint32(target + 8, 1, true); out.setFloat32(target + 12, opacity, true); nscvRenderPutOptional(out, target + 16, clip); nscvRenderPutRect(out, target + 36, bounds); emitted++;
+    }
+  }
+  out.setUint32(0, emitted, true); out.setUint32(4, failed, true);
+  return result.subarray(0, 32 + emitted * 52);
 }

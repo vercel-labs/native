@@ -220,6 +220,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         defer app.destroy();
         try std.testing.expect(app.app().text_cache_policy == core.nativeWindowPolicy);
         try std.testing.expect(app.app().render_cache_policy == core.nativeWindowPolicy);
+        try std.testing.expect(app.app().render_plan_policy == core.nativeWindowPolicy);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
@@ -251,6 +252,7 @@ test "app token paths retain adapter placement and consume supplied frames" {
         defer app.destroy();
         try std.testing.expect(app.app().text_cache_policy == null);
         try std.testing.expect(app.app().render_cache_policy == null);
+        try std.testing.expect(app.app().render_plan_policy == null);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == Factory.policy);
         try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
@@ -898,4 +900,8 @@ test "large virtual flow plans own copied frames across recursive calls and borr
     try std.testing.expectEqualSlices(u8, saved, view[0..view_len]);
     core.rt.frameReset();
     try expectComplete(expected.nodes, actual.nodes);
+}
+
+test {
+    _ = @import("render_plan_e2e_tests.zig");
 }

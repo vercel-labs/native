@@ -136,12 +136,14 @@ const scene = [_]canvas.CanvasCommand{
     .pop_opacity,
 };
 var family_calls: [6]usize = .{0} ** 6;
+var planning_calls: [2]usize = .{0} ** 2;
 fn observedPolicy(request: []const u8, output: []u8) usize {
     if (request[0] == 12) family_calls[request[1]] += 1;
+    if (request[0] == 13) planning_calls[request[1]] += 1;
     return core.nativeWindowPolicy(request, output);
 }
 
-test "both runtime frame consumers use all six compiled caches and preserve complete warm changed and empty frames" {
+test "both runtime frame consumers use compiled state batching and all six caches and preserve complete warm changed and empty frames" {
     _ = core.initialModel();
     defer core.rt.frameReset();
     const native = try sdk.runtime.TestHarness().create(std.testing.allocator, .{});
@@ -151,10 +153,11 @@ test "both runtime frame consumers use all six compiled caches and preserve comp
     var context: u8 = 0;
     for ([_]@TypeOf(native){ native, compiled }, 0..) |h, lane| {
         h.null_platform.gpu_surfaces = true;
-        try h.start(.{ .context = &context, .name = "cache-parity", .source = sdk.platform.WebViewSource.html(""), .render_cache_policy = if (lane == 1) observedPolicy else null });
+        try h.start(.{ .context = &context, .name = "cache-parity", .source = sdk.platform.WebViewSource.html(""), .render_cache_policy = if (lane == 1) observedPolicy else null, .render_plan_policy = if (lane == 1) observedPolicy else null });
         _ = try h.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = .init(0, 0, 160, 120) });
     }
     try std.testing.expect(compiled.runtime.render_cache_policy == observedPolicy);
+    try std.testing.expect(compiled.runtime.render_plan_policy == observedPolicy);
     var a = try Storage.init();
     defer a.deinit();
     var b = try Storage.init();
@@ -166,13 +169,17 @@ test "both runtime frame consumers use all six compiled caches and preserve comp
         for ([_]@TypeOf(native){ native, compiled }) |h| _ = try h.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = commands });
         const options = canvas.CanvasFrameOptions{ .frame_index = 9007199254740993 + phase, .timestamp_ns = 33, .full_repaint = true };
         family_calls = .{0} ** 6;
+        planning_calls = .{0} ** 2;
         const diagnostic = try native.runtime.canvasFramePlan(1, "canvas", null, options, a.value);
         try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value));
         try exact([_]usize{1} ** 6, family_calls);
+        try exact([_]usize{ 1, 1 }, planning_calls);
         family_calls = .{0} ** 6;
+        planning_calls = .{0} ** 2;
         const presentation = try native.runtime.nextCanvasFrame(1, "canvas", options, a.value);
         try frameEqual(presentation, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value));
         try exact([_]usize{1} ** 6, family_calls);
+        try exact([_]usize{ 1, 1 }, planning_calls);
         if (phase < 3) {
             try std.testing.expect(presentation.pipeline_cache_plan.entries.len > 0);
             try std.testing.expect(presentation.path_geometry_cache_plan.entries.len > 0);
@@ -211,7 +218,7 @@ test "frame cache failure preserves action-before-entry storage and prevents dow
     try std.testing.expectEqual(@as(?usize, 0), b.value.pipeline_cache_actions[0].batch_index);
 }
 
-test "six cache planning cost is measured with frame buffer allocation copying and reset" {
+test "render state batching and six cache cost include frame buffers copying and reset" {
     _ = core.initialModel();
     defer core.rt.frameReset();
     var storage = try Storage.init();
@@ -225,13 +232,14 @@ test "six cache planning cost is measured with frame buffer allocation copying a
     for ([_]?*const fn ([]const u8, []u8) usize{ null, core.nativeWindowPolicy }, 0..) |policy, lane| {
         var selected = options;
         selected.render_cache_policy = policy;
+        selected.render_plan_policy = policy;
         const begin = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
         for (0..100) |_| {
             const frame = try list.framePlan(null, selected, output.value);
             std.mem.doNotOptimizeAway(frame);
             core.rt.frameReset();
         }
-        std.debug.print("six-cache complete frame lane {d}: {d} ns (including frame buffers, copying and enclosing reset)\n", .{ lane, @divTrunc(std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - begin, 100) });
+        std.debug.print("render-and-cache complete frame lane {d}: {d} ns (including frame buffers, copying and enclosing reset)\n", .{ lane, @divTrunc(std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - begin, 100) });
     }
 }
 
@@ -241,4 +249,56 @@ fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame) !void {
     }
     // The fixed backing array is undefined past the published count.
     try exact(a.dirtyRects(), b.dirtyRects());
+}
+
+test "render and batch failures precede every cache and preserve complete frame storage" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var a = try Storage.init();
+    defer a.deinit();
+    var b = try Storage.init();
+    defer b.deinit();
+    const list = canvas.DisplayList{ .commands = &scene };
+    for ([_]bool{ false, true }) |batch| {
+        var sa = a.value;
+        var sb = b.value;
+        if (batch) {
+            sa.render_batches = sa.render_batches[0..0];
+            sb.render_batches = sb.render_batches[0..0];
+        } else {
+            sa.render_commands = sa.render_commands[0..0];
+            sb.render_commands = sb.render_commands[0..0];
+        }
+        sa.pipeline_cache_entries = sa.pipeline_cache_entries[0..0];
+        sb.pipeline_cache_entries = sb.pipeline_cache_entries[0..0];
+        const err = if (batch) error.RenderBatchListFull else error.RenderListFull;
+        try std.testing.expectError(err, list.framePlan(null, .{}, sa));
+        family_calls = .{0} ** 6;
+        planning_calls = .{0} ** 2;
+        try std.testing.expectError(err, list.framePlan(null, .{ .render_cache_policy = observedPolicy, .render_plan_policy = observedPolicy }, sb));
+        try exact([_]usize{0} ** 6, family_calls);
+        try exact([_]usize{ 1, @intFromBool(batch) }, planning_calls);
+        try exact(a.value, b.value);
+        core.rt.frameReset();
+    }
+}
+
+test "render planning and cache ownership remain independently selectable" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var a = try Storage.init();
+    defer a.deinit();
+    var b = try Storage.init();
+    defer b.deinit();
+    const list = canvas.DisplayList{ .commands = &scene };
+    const reference = try list.framePlan(null, .{}, a.value);
+    for ([_]bool{ false, true }) |plan| {
+        family_calls = .{0} ** 6;
+        planning_calls = .{0} ** 2;
+        const compiled = try list.framePlan(null, .{ .render_cache_policy = if (plan) null else observedPolicy, .render_plan_policy = if (plan) observedPolicy else null }, b.value);
+        try frameEqual(reference, compiled);
+        try exact([_]usize{if (plan) 0 else 1} ** 6, family_calls);
+        try exact([_]usize{if (plan) 1 else 0} ** 2, planning_calls);
+        core.rt.frameReset();
+    }
 }
