@@ -112,6 +112,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 4) return nscvGridLayout(request);
   if (request[0] === 5) return nscvContainerLayout(request);
   if (request[0] === 6) return nscvIntrinsicLayout(request);
+  if (request[0] === 7) return nscvWrappedLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -994,4 +995,60 @@ function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
     width = op === 3 ? 0 : paddedWidth(width); height = paddedHeight(height);
   }
   out.setFloat32(4, width, true); out.setFloat32(8, height, true); return result;
+}
+
+/** Width-aware sizing over stable widget-kind codes and native paragraph,
+ * theme and row/bubble measurements. Operation 0 plans widths; 1 composes
+ * measured heights; 2 measures the accordion's hidden content independently
+ * of its own height, padding and depth guard. Results own their bytes.
+ */
+function nscvWrappedLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 80 || request[0] !== 7) throw new Error("invalid wrapped layout request");
+  const op = request[1]!, kind = request[2]!, flags = request[3]!;
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(4, true);
+  if (op > 2 || kind > 62 || flags > 31 || request.length !== 80 + count * 16 || op === 2 && kind !== 14)
+    throw new Error("invalid wrapped layout operation, kind, flags or length");
+  const f = Math.fround, max = nscvSurfaceMax;
+  const v = (at: number): number => wire.getFloat32(at, true);
+  let mode = 0;
+  if ((kind === 26 || kind === 44) && (flags & 1) !== 0) mode = 1;
+  else if (kind === 2 || kind === 7 || kind === 4 || kind === 5 || kind === 24 || kind === 25) mode = (flags & 2) !== 0 ? 0 : 2;
+  else if (kind === 0 || kind === 22 || kind === 18 || kind === 15 || kind === 16 || kind === 23) mode = 3;
+  else if (kind === 17) mode = 4;
+  else if (kind === 14) mode = 5;
+  else if (kind === 1 || kind === 43 || kind === 8 || kind === 9 || kind === 10 || kind === 11 || kind === 12 || kind === 13 || kind === 44 && count > 0 || kind === 42 && (flags & 16) !== 0) mode = 6;
+  if (op === 2) mode = 7;
+  const stopped = wire.getUint32(8, true) >= wire.getUint32(12, true);
+  const action = op === 2 ? 3 : stopped ? 0 : v(20) > 0 ? 1 : mode === 0 ? 0 : mode === 1 ? 2 : mode === 5 && (flags & 8) === 0 ? 4 : 3;
+  const inner = op === 2 ? v(16) : max(0, f(f(v(16) - v(32)) - v(36)));
+  const result = new Uint8Array(20 + count * 8), out = new DataView(result.buffer);
+  out.setUint32(0, count, true); out.setUint32(4, action, true); out.setFloat32(8, inner, true); out.setUint32(16, mode, true);
+  let content = 0, flows = 0;
+  for (let i = 0; i < count; i++) {
+    const at = 80 + i * 16, childFlags = wire.getUint32(at, true);
+    if (childFlags > 7) throw new Error("invalid wrapped child flags");
+    if ((childFlags & 1) === 0 || action !== 3) continue;
+    flows++;
+    let width = v(at + 4) > 0 ? v(at + 4) : mode === 4 && (flags & 4) !== 0 ? max(0, f(inner - v(56))) : inner;
+    let query = 0;
+    if (mode === 6) { query = (childFlags & 4) !== 0 ? 0 : 1; width = v(at + 8); }
+    else if (mode === 2 && (childFlags & 2) !== 0 && !(v(at + 4) > 0)) {
+      query = (childFlags & 4) !== 0 ? 0 : 2; width = v(at + 8);
+    }
+    out.setFloat32(20 + i * 8, width, true); out.setUint32(24 + i * 8, query, true);
+    content = mode === 2 ? f(content + v(at + 12)) : max(content, v(at + 12));
+  }
+  let height = action === 0 ? v(68) : action === 1 ? v(20) : action === 2 ? v(64) : action === 4 ? v(52) : content;
+  if (action === 3 && mode === 2 && flows > 1) height = f(height + f(max(0, v(48)) * f(flows - 1)));
+  if (action === 3 && mode === 4) {
+    if ((flags & 4) !== 0) height = f(v(52) + (height > 0 ? f(v(76) + height) : 0));
+    const floor = max(v(60), f(v(52) + f(v(72) * 2)));
+    height = max(height, f(f(floor - v(40)) - v(44)));
+  }
+  if (action === 3 && mode === 5) height = f(f(v(52) + (height > 0 ? max(0, v(48)) : 0)) + height);
+  if (op !== 2 && action !== 0) {
+    if (action !== 1) height = f(f(height + v(40)) + v(44));
+    height = nscvSurfaceBound(height, v(24), v(28));
+  }
+  out.setFloat32(12, height, true); return result;
 }

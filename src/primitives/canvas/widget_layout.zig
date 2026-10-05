@@ -1053,6 +1053,7 @@ fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
 /// content composes from and falls back to the classic intrinsic extent
 /// everywhere else.
 fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, false);
     if (depth >= max_widget_depth) return preferredMainExtent(widget, .vertical, tokens);
     if (widget.frame.height > 0) return clampMainExtent(widget, .vertical, widget.frame.height);
     const padding = widgetLayoutPadding(widget, tokens);
@@ -1744,6 +1745,7 @@ fn layoutVariableVirtualChild(
 /// non-virtual list_item keeps its classic intrinsic sizing
 /// byte-identically.
 fn variableVirtualRowExtent(child: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (child.kind == .list_item and tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(child, width, tokens, depth, true, false);
     if (child.kind != .list_item) return wrappedVerticalExtentForWidth(child, width, tokens, depth);
     if (depth >= max_widget_depth) return preferredMainExtent(child, .vertical, tokens);
     if (child.frame.height > 0) return clampMainExtent(child, .vertical, child.frame.height);
@@ -2065,6 +2067,7 @@ fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: Design
 /// vertical extent uses, replayed so a closed pose can hand children
 /// full-size frames.
 fn accordionOpenContentExtent(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, true);
     var max_height: f32 = 0;
     for (widget.children) |child| {
         if (!widgetTakesFlowSlot(child)) continue;
@@ -2072,6 +2075,73 @@ fn accordionOpenContentExtent(widget: Widget, width: f32, tokens: DesignTokens, 
         max_height = @max(max_height, wrappedVerticalExtentForWidth(child, child_width, tokens, depth + 1));
     }
     return max_height;
+}
+
+/// Native supplies measurement capabilities and owns copied storage while
+/// TypeScript selects widths, short circuits and complete height composition.
+/// Recursive calls never invalidate a borrowed core/view result.
+fn compiledWrappedExtent(widget: Widget, width: f32, tokens: DesignTokens, depth: usize, variable_row: bool, accordion_content: bool) f32 {
+    const wrapped = @import("wrapped_layout_policy.zig");
+    const padding = if (variable_row) widget.layout.padding else widgetLayoutPadding(widget, tokens);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const title_height = if (widget.kind == .accordion) accordionHeaderHeight(widget, tokens) else widgetLineHeight(text_size);
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = wrapped.Plan.init(scratch.get(), tokens.intrinsic_layout_policy.?, widget.children.len, .{
+        .kind = widget.kind,
+        .spans = widget.spans.len > 0,
+        .virtualized = widget.layout.virtualized,
+        .titled = widget.text.len > 0,
+        .open = accordionChildrenVisible(widget),
+        .variable_row = variable_row,
+        .depth = depth,
+        .depth_limit = max_widget_depth,
+        .width = width,
+        .authored_height = widget.frame.height,
+        .min_height = widget.layout.min_size.height,
+        .max_height = widget.layout.max_size.height,
+        .padding = padding,
+        .gap = widget.layout.gap,
+        .title_height = title_height,
+        .indent = widgetSizedDensityValue(widget, tokens, 16) + widgetControlInset(widget, tokens, tokens.spacing.md),
+        .floor = widgetSizedDensityValue(widget, tokens, 52),
+        .inset = widgetAlertInset(widget, tokens),
+        .title_gap = densityValue(tokens, tokens.spacing.xs),
+    }) catch @panic("wrapped layout allocation failed");
+    defer plan.deinit();
+    for (widget.children, 0..) |child, index| {
+        if (widgetTakesFlowSlot(child)) plan.setChild(index, child.frame.width, bubbleThreadCapEligible(child));
+    }
+    const operation: u8 = if (accordion_content) 2 else 0;
+    plan.run(operation);
+    switch (plan.action()) {
+        .fallback => plan.setFallback(preferredMainExtent(widget, .vertical, tokens)),
+        .paragraph => plan.setParagraph(spanParagraphHeight(widget, plan.innerWidth(), tokens)),
+        .authored, .header => {},
+        .children => {
+            var resolved = false;
+            for (widget.children, 0..) |child, index| {
+                switch (plan.query(index)) {
+                    0 => {},
+                    1 => {
+                        plan.resolveWidth(index, rowChildWidth(widget, plan.innerWidth(), index, tokens));
+                        resolved = true;
+                    },
+                    2 => {
+                        const available = plan.innerWidth();
+                        plan.resolveWidth(index, bubbleThreadWidthCap(child, available, @min(available, intrinsicWidgetSizeDepth(child, tokens, depth + 1).width)));
+                        resolved = true;
+                    },
+                    else => @panic("invalid wrapped measurement query"),
+                }
+            }
+            if (resolved) plan.run(operation);
+            for (widget.children, 0..) |child, index| {
+                if (widgetTakesFlowSlot(child)) plan.setHeight(index, wrappedVerticalExtentForWidth(child, plan.width(index), tokens, depth + 1));
+            }
+        },
+    }
+    plan.run(if (accordion_content) 2 else 1);
+    return plan.height();
 }
 
 pub fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {

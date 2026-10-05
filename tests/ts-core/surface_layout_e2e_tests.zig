@@ -669,3 +669,101 @@ test "intrinsic composition cost is measured beside the native reference" {
 test "compiled content surface records preserve defaults captions nested content and owned bytes" {
     try @import("surface_decoder").testContentSurfaceRecords();
 }
+
+test "wrapped measurement preserves complete nested paragraph geometry semantics and display commands" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const paragraph = canvas.Widget{ .id = 4, .kind = .text, .spans = &.{.{ .text = "Measured café words wrap at their actual child width.\nA second line survives composition." }} };
+    const children = [_]canvas.Widget{
+        .{ .id = 3, .kind = .column, .layout = .{ .grow = 1, .padding = .all(0.125) }, .children = &.{paragraph} },
+        .{ .id = 5, .kind = .text, .spans = &.{.{ .text = "An explicitly sized paragraph measures independently." }}, .frame = .init(0, 0, 72, 0) },
+        .{ .id = 6, .kind = .dialog, .text = "Hoisted" },
+    };
+    for ([_]canvas.WidgetKind{ .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu, .stack, .panel, .card, .bubble, .resizable, .popover, .alert, .accordion, .row, .data_row, .data_cell, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group }) |kind| {
+        for ([_]bool{ false, true }) |open| {
+            for ([_]f32{ 72, 240.00002, 640 }) |width| {
+                const nested = canvas.Widget{ .id = 2, .kind = kind, .text = "Measured title", .value = if (open) 1 else 0, .children = &children, .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 7, .bottom = 11 }, .gap = 2.125 } };
+                const root = canvas.Widget{ .id = 1, .kind = .column, .children = &.{nested} };
+                expectTree(root, .init(0.125, -0.0, width, 480), .{}) catch |err| {
+                    std.debug.print("wrapped kind={t} open={} width={d}\n", .{ kind, open, width });
+                    return err;
+                };
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "wrapped authored heights numeric bounds padding and gaps retain native f32 ordering" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]canvas.WidgetKind{ .column, .stack, .alert, .accordion, .row }) |kind| {
+        var values = [_]f32{ 0, 3, 300, 2.125, 3, 5, 7, 11 };
+        for (0..values.len) |lane| {
+            const original = values[lane];
+            for (samples) |sample| {
+                values[lane] = sample;
+                const nested = canvas.Widget{ .id = 2, .kind = kind, .text = "Title", .value = 1, .frame = .init(0, 0, 0, values[0]), .layout = .{ .min_size = .init(0, values[1]), .max_size = .init(0, values[2]), .gap = values[3], .padding = .{ .left = values[4], .right = values[5], .top = values[6], .bottom = values[7] } }, .children = &.{.{ .id = 3, .kind = .text, .spans = &.{.{ .text = "Width-aware measured words with a newline.\nMore words." }} }} };
+                const root = canvas.Widget{ .id = 1, .kind = .column, .children = &.{nested} };
+                expectTree(root, .init(0, 0, 240, 480), .{}) catch |err| {
+                    std.debug.print("wrapped kind={t} lane={d} value={d}\n", .{ kind, lane, sample });
+                    return err;
+                };
+                core.rt.frameReset();
+            }
+            values[lane] = original;
+        }
+    }
+}
+
+test "wrapped empty virtualized and authored short circuits preserve full trees" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]canvas.WidgetKind{ .column, .list, .data_grid, .table, .stack, .alert, .accordion, .data_cell }) |kind| {
+        for ([_]bool{ false, true }) |virtual| {
+            for ([_]f32{ 0, 1.0000001, 80 }) |height| {
+                const nested = canvas.Widget{ .id = 2, .kind = kind, .value = 1, .frame = .init(0, 0, 0, height), .layout = .{ .virtualized = virtual, .padding = .all(4), .min_size = .init(3, 5) } };
+                try expectTree(.{ .id = 1, .kind = .column, .children = &.{nested} }, .init(0, 0, 240, 480), .{});
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "variable virtual list rows compose full width-aware geometry around their anchor" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const rows = [_]canvas.Widget{
+        .{ .id = 2, .kind = .list_item, .layout = .{ .padding = .all(3) }, .children = &.{.{ .id = 3, .kind = .text, .spans = &.{.{ .text = "First row wraps across a constrained virtual viewport." }} }} },
+        .{ .id = 4, .kind = .list_item, .children = &.{.{ .id = 5, .kind = .column, .layout = .{ .grow = 1 }, .children = &.{.{ .id = 6, .kind = .text, .spans = &.{.{ .text = "Second row has more words and another line.\nIts measured height changes the anchor neighbors." }} }} }} },
+    };
+    for ([_]f32{ 80, 240.00002, 480 }) |width| {
+        for ([_]f32{ -20, 0, 30, 100 }) |offset| {
+            const root = canvas.Widget{ .id = 1, .kind = .list, .value = offset, .layout = .{ .virtualized = true, .virtual_first_index = 3, .virtual_item_count = 10, .virtual_anchor_index = 4, .virtual_anchor_extent = 100, .virtual_total_extent = 500, .gap = 2.125 }, .children = &rows };
+            try expectTree(root, .init(0.125, -0.0, width, 240), .{});
+            core.rt.frameReset();
+        }
+    }
+}
+
+test "wrapped recursive results and large native scratch retain borrowed core and view bytes" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [256]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .column, .children = &.{.{ .id = 500, .kind = .text, .spans = &.{.{ .text = "One line\nTwo lines" }} }} };
+    const borrowed = core.rt.frameAlloc(u8, 8);
+    @memcpy(borrowed, "wrap\x00abi");
+    var view: [*]const u8 = undefined;
+    var view_len: usize = 0;
+    nsc_core_native_view(&view, &view_len);
+    const saved = try std.testing.allocator.dupe(u8, view[0..view_len]);
+    defer std.testing.allocator.free(saved);
+    const root = canvas.Widget{ .id = 1, .kind = .scroll_view, .scroll_axes = .horizontal, .children = &.{.{ .id = 600, .kind = .column, .children = &children, .layout = .{ .gap = 0.125 } }} };
+    const expected = canvas.intrinsicWidgetSize(root, .{});
+    const actual = canvas.intrinsicWidgetSize(root, .{ .intrinsic_layout_policy = core.nativeWindowPolicy, .container_layout_policy = core.nativeWindowPolicy });
+    try expectComplete(expected, actual);
+    try std.testing.expectEqualSlices(u8, "wrap\x00abi", borrowed);
+    try std.testing.expectEqualSlices(u8, saved, view[0..view_len]);
+    core.rt.frameReset();
+    try expectComplete(expected, actual);
+}
