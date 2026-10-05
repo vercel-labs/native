@@ -410,6 +410,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.surface_layout_policy = core.nativeWindowPolicy;
                 if (options.grid_layout_policy != null) @panic("TsUiApp owns grid_layout_policy - remove custom grid layout wiring");
                 stamped.grid_layout_policy = core.nativeWindowPolicy;
+                if (options.container_layout_policy != null) @panic("TsUiApp owns container_layout_policy - remove custom container layout wiring");
+                stamped.container_layout_policy = core.nativeWindowPolicy;
             }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;

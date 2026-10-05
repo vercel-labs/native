@@ -746,6 +746,37 @@ fn layoutAxisChildrenMode(
     }
     if (flow_count == 0) return;
 
+    if (tokens.container_layout_policy) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("container_layout_policy.zig").Plan.init(scratch.get(), policy, children.len, content, @intFromEnum(axis), @intFromEnum(style.main_alignment), @intFromEnum(style.cross_alignment), style.gap) catch @panic("container layout allocation failed");
+        defer plan.deinit();
+        var needs_wrapped = false;
+        for (children, 0..) |child, index| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            plan.setChild(index, containerChildFacts(child, axis, tokens, fill_primary_tabs, stretch_tab_triggers, true));
+            if (axis == .vertical and nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0)) needs_wrapped = true;
+        }
+        // Resolve cross sizes before measuring span paragraphs at their
+        // actual offered width. The measurements are native capabilities;
+        // allocation, bounds, theme floors and alignment are compiled policy.
+        if (needs_wrapped) {
+            plan.run(0);
+            for (children, 0..) |child, index| {
+                if (!widgetTakesFlowSlot(child)) continue;
+                if (nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0))
+                    plan.setMeasuredMain(index, wrappedVerticalExtentForWidth(child, plan.cross(index), tokens, 0));
+            }
+        }
+        plan.run(1);
+        if (!(plan.overflow() <= axis_layout_overflow_epsilon)) logAxisChildrenOverflow(output, parent_index, axis, if (axis == .horizontal) content.width else content.height, plan.used(), plan.overflow());
+        for (children, 0..) |child, index| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            const frame = plan.frame(index);
+            _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
+        }
+        return;
+    }
+
     const available_extent = switch (axis) {
         .horizontal => content.width,
         .vertical => content.height,
@@ -1150,6 +1181,23 @@ fn rowChildWidth(row: Widget, available_width: f32, index: usize, tokens: Design
 fn rowChildWidthMode(row: Widget, available_width: f32, index: usize, tokens: DesignTokens, comptime fill_primary_tabs: bool) f32 {
     const children = row.children;
     if (children.len == 0) return available_width;
+    if (tokens.container_layout_policy) |policy| {
+        if (widgetFlowChildCount(children) == 0) return available_width;
+        const gap = switch (row.kind) {
+            .button_group => buttonGroupGap(row, tokens),
+            .tabs => tabsGap(row, tokens),
+            else => row.layout.gap,
+        };
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("container_layout_policy.zig").Plan.init(scratch.get(), policy, children.len, .init(0, 0, available_width, 0), 0, 0, 0, gap) catch @panic("row measurement allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, child_index| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            plan.setChild(child_index, containerChildFacts(child, .horizontal, tokens, fill_primary_tabs, false, false));
+        }
+        plan.run(2);
+        return plan.frame(index).width;
+    }
     var flow_count: usize = 0;
     var fixed_extent: f32 = 0;
     var grow_total: f32 = 0;
@@ -1948,6 +1996,14 @@ pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
 }
 
 fn stackChildFrame(content: geometry.RectF, child: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.container_layout_policy) |policy| {
+        var scratch = std.heap.stackFallback(256, std.heap.page_allocator);
+        const plan = @import("container_layout_policy.zig").Plan.init(scratch.get(), policy, 1, content, 0, 0, 0, 0) catch @panic("stack layout allocation failed");
+        defer plan.deinit();
+        plan.setChild(0, .{ .flags = 1 | (if (primaryUnderlineTabsFillWidth(child, tokens)) @as(u32, 2) else 0), .main = child.frame.width, .cross = child.frame.height, .offset_main = child.frame.x, .offset_cross = child.frame.y, .min_main = child.layout.min_size.width, .max_main = child.layout.max_size.width, .min_cross = child.layout.min_size.height, .max_cross = child.layout.max_size.height });
+        plan.run(3);
+        return plan.frame(0);
+    }
     const width = if (child.frame.width > 0) child.frame.width else content.width;
     const height = if (child.frame.height > 0) child.frame.height else content.height;
     var frame = geometry.RectF.init(
@@ -2742,6 +2798,29 @@ fn intrinsicMainExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) f
     return switch (axis) {
         .horizontal => size.width,
         .vertical => size.height,
+    };
+}
+
+fn containerChildFacts(child: Widget, axis: LayoutAxis, tokens: DesignTokens, comptime fill_primary_tabs: bool, comptime stretch_tab_triggers: bool, measure_cross: bool) @import("container_layout_policy.zig").Child {
+    const horizontal = axis == .horizontal;
+    const authored_main = if (horizontal) child.frame.width else child.frame.height;
+    const authored_cross = if (horizontal) child.frame.height else child.frame.width;
+    return .{
+        .flags = 1 | (if (fill_primary_tabs and child.kind == .tabs and (child.variant == .default or child.variant == .primary)) @as(u32, 2) else 0) |
+            (if (primaryUnderlineTabsFillWidth(child, tokens)) @as(u32, 4) else 0) |
+            (if (child.kind == .bubble and child.variant != .ghost) @as(u32, 8) else 0) |
+            (if (stretch_tab_triggers and child.kind == .segmented_control) @as(u32, 16) else 0),
+        .grow = child.layout.grow,
+        .main = authored_main,
+        .cross = authored_cross,
+        .offset_main = if (horizontal) child.frame.x else child.frame.y,
+        .offset_cross = if (horizontal) child.frame.y else child.frame.x,
+        .min_main = if (horizontal) child.layout.min_size.width else child.layout.min_size.height,
+        .max_main = if (horizontal) child.layout.max_size.width else child.layout.max_size.height,
+        .min_cross = if (horizontal) child.layout.min_size.height else child.layout.min_size.width,
+        .max_cross = if (horizontal) child.layout.max_size.height else child.layout.max_size.width,
+        .measured_main = if (authored_main > 0 or nonNegative(child.layout.grow) > 0) 0 else intrinsicMainExtent(child, axis, tokens),
+        .measured_cross = if (!measure_cross or authored_cross > 0) 0 else intrinsicCrossExtent(child, axis, tokens),
     };
 }
 

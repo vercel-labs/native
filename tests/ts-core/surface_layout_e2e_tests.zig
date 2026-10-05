@@ -106,6 +106,7 @@ fn expectTree(widget: canvas.Widget, bounds: geometry.RectF, tokens: canvas.Desi
     var compiled_tokens = tokens;
     compiled_tokens.surface_layout_policy = core.nativeWindowPolicy;
     compiled_tokens.grid_layout_policy = core.nativeWindowPolicy;
+    compiled_tokens.container_layout_policy = core.nativeWindowPolicy;
     const actual = try canvas.layoutWidgetTreeWithTokens(widget, bounds, compiled_tokens, &compiled_nodes);
     try std.testing.expectEqual(expected.nodes.len, actual.nodes.len);
     for (expected.nodes, actual.nodes) |left, right| {
@@ -212,6 +213,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.container_layout_policy == core.nativeWindowPolicy);
     }
 }
 
@@ -378,4 +380,154 @@ test "grid planning cost is measured beside the native reference" {
 
 test "compiled grid view records own nodes and text with complete native construction parity" {
     try @import("surface_decoder").testGridRecords();
+}
+
+test "compiled container allocation preserves grow bounds alignment theme floors and hoisted surfaces" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = .init(3, 4, 80, 40) },
+        .{ .id = 3, .kind = .panel, .layout = .{ .grow = 1, .min_size = .init(24, 32), .max_size = .init(100, 70) } },
+        .{ .id = 4, .kind = .panel, .layout = .{ .grow = 2, .min_size = .init(40, 60) } },
+        .{ .id = 5, .kind = .tabs, .frame = .init(8, 2, 64, 24), .variant = .primary },
+        .{ .id = 6, .kind = .bubble, .text = "A measured message", .layout = .{ .min_size = .init(20, 30) } },
+        .{ .id = 7, .kind = .dialog, .frame = .init(0, 0, 160, 80) },
+        .{ .id = 8, .kind = .tabs, .variant = .primary, .layout = .{ .grow = 1 } },
+        .{ .id = 9, .kind = .bubble, .variant = .ghost, .text = "Uncapped ghost" },
+        .{ .id = 10, .kind = .bubble, .text = "Bounded bubble", .layout = .{ .max_size = .init(120, 0) } },
+        .{ .id = 11, .kind = .bubble, .frame = .init(0, 0, 240, 40), .text = "Authored width" },
+    };
+    for ([_]canvas.WidgetKind{ .row, .column }) |kind| {
+        for ([_]canvas.WidgetMainAlignment{ .start, .center, .end, .space_between }) |main| {
+            for ([_]canvas.WidgetCrossAlignment{ .stretch, .start, .center, .end }) |cross| {
+                for ([_]f32{ 0, 0.125, 80, 300.00003, 800.00006 }) |width| {
+                    for ([_]bool{ false, true }) |underline| {
+                        var tokens = canvas.DesignTokens{};
+                        if (underline) {
+                            tokens.controls.tabs_indicator = .underline;
+                            tokens.metrics.tabs_list_full_width = true;
+                        }
+                        try expectTree(.{ .id = 1, .kind = kind, .children = &children, .layout = .{ .main_alignment = main, .cross_alignment = cross, .gap = 8.000001 } }, .init(0.125, -0.0, width, 160.00002), tokens);
+                        core.rt.frameReset();
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "compiled container arithmetic preserves nonfinite signed zero and authored constraint fields" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]canvas.WidgetKind{ .row, .column, .stack }) |kind| {
+        for (samples) |sample| {
+            for (0..8) |field| {
+                var child = canvas.Widget{ .id = 2, .kind = .panel, .frame = .init(0.125, -0.0, 40, 60), .layout = .{ .grow = 1, .min_size = .init(2, 3), .max_size = .init(100, 120) } };
+                switch (field) {
+                    0 => child.frame.x = sample,
+                    1 => child.frame.y = sample,
+                    2 => child.frame.width = sample,
+                    3 => child.frame.height = sample,
+                    4 => child.layout.min_size.width = sample,
+                    5 => child.layout.max_size.height = sample,
+                    6 => child.layout.grow = sample,
+                    else => child.layout.min_size.height = sample,
+                }
+                try expectTree(.{ .id = 1, .kind = kind, .children = &.{ child, .{ .id = 3, .kind = .panel, .layout = .{ .grow = 2 } } }, .layout = .{ .gap = sample, .main_alignment = .center, .cross_alignment = .center } }, .init(0.125, -0.0, 300.00003, 160.00002), .{});
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "compiled measurement widths preserve complete nested wrapped paragraphs and bubble geometry" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const paragraph = canvas.Widget{ .id = 5, .kind = .text, .spans = &.{.{ .text = "A long café paragraph wraps at the allocated width beside its growing sibling and preserves every line." }} };
+    const root = canvas.Widget{ .id = 1, .kind = .column, .layout = .{ .gap = 8 }, .children = &.{
+        .{ .id = 2, .kind = .row, .layout = .{ .gap = 4 }, .children = &.{
+            .{ .id = 3, .kind = .column, .layout = .{ .grow = 1, .max_size = .init(180, 0) }, .children = &.{paragraph} },
+            .{ .id = 4, .kind = .text, .text = "Fixed", .frame = .init(0, 0, 50, 24) },
+        } },
+        .{ .id = 6, .kind = .bubble, .children = &.{.{ .id = 7, .kind = .text, .spans = &.{.{ .text = "This bubble hugs its message and measures all wrapped lines within the thread width." }} }} },
+    } };
+    for ([_]f32{ 80, 120.00001, 240.00002, 800 }) |width| {
+        try expectTree(root, .init(10, 20, width, 400), .{});
+        core.rt.frameReset();
+    }
+}
+
+test "compiled stacks preserve full width tabs offsets ceilings and authored overflow" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]f32{ -8, -0.0, 0.125, 80, 400.00003 }) |offset| {
+        for ([_]f32{ 0, 64, 800 }) |width| {
+            for ([_]f32{ 0, 120, 320 }) |ceiling| {
+                var tokens = canvas.DesignTokens{};
+                tokens.controls.tabs_indicator = .underline;
+                tokens.metrics.tabs_list_full_width = true;
+                try expectTree(.{ .id = 1, .kind = .stack, .children = &.{.{ .id = 2, .kind = .tabs, .variant = .primary, .frame = .init(offset, 2, width, 24), .layout = .{ .max_size = .init(ceiling, 0) } }} }, .init(0.125, 20, 300.00003, 160), tokens);
+                core.rt.frameReset();
+            }
+        }
+    }
+}
+
+test "container plans retain native owned frames and borrowed views across recursion and collection" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var view: [*]const u8 = undefined;
+    var view_len: usize = 0;
+    nsc_core_native_view(&view, &view_len);
+    const saved = try std.testing.allocator.dupe(u8, view[0..view_len]);
+    defer std.testing.allocator.free(saved);
+    const borrowed = core.rt.frameAlloc(u8, 8);
+    @memcpy(borrowed, "flow\x00abi");
+    const root = canvas.Widget{ .id = 1, .kind = .row, .layout = .{ .gap = 8 }, .children = &.{
+        .{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 }, .children = &.{.{ .id = 4, .kind = .panel }} },
+        .{ .id = 3, .kind = .panel, .layout = .{ .grow = 1 } },
+    } };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const tree = try canvas.layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 400), .{ .container_layout_policy = core.nativeWindowPolicy }, &nodes);
+    try std.testing.expectEqualSlices(u8, saved, view[0..view_len]);
+    try std.testing.expectEqualSlices(u8, "flow\x00abi", borrowed);
+    const frame = tree.nodes[3].frame;
+    core.rt.frameReset();
+    try expectRect(.init(304, 0, 296, 400), frame);
+}
+
+test "container planning cost is measured beside the native reference" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [20]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .panel, .layout = .{ .grow = 1 } };
+    var nodes: [21]canvas.WidgetLayoutNode = undefined;
+    var elapsed: [2]i128 = undefined;
+    for (0..2) |lane| {
+        const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+        for (0..1000) |_| {
+            _ = try canvas.layoutWidgetTreeWithTokens(.{ .id = 1, .kind = .row, .children = &children, .layout = .{ .gap = 8 } }, .init(0, 0, 600, 400), .{ .container_layout_policy = if (lane == 1) core.nativeWindowPolicy else null }, &nodes);
+            core.rt.frameReset();
+        }
+        elapsed[lane] = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - started;
+    }
+    std.debug.print("20-child row: native {d} ns, compiled {d} ns (including enclosing reset)\n", .{ @divTrunc(elapsed[0], 1000), @divTrunc(elapsed[1], 1000) });
+}
+
+test "compiled container batches exceed stack scratch without losing complete node ownership" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [128]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .panel, .layout = .{ .grow = @floatFromInt(1 + i % 3), .min_size = .init(2, 1) } };
+    const root = canvas.Widget{ .id = 1, .kind = .row, .children = &children, .layout = .{ .gap = 0.125, .main_alignment = .center } };
+    const expected_nodes = try std.testing.allocator.alloc(canvas.WidgetLayoutNode, 129);
+    defer std.testing.allocator.free(expected_nodes);
+    const actual_nodes = try std.testing.allocator.alloc(canvas.WidgetLayoutNode, 129);
+    defer std.testing.allocator.free(actual_nodes);
+    const expected = try canvas.layoutWidgetTreeWithTokens(root, .init(0.125, -0.0, 1024.0001, 80), .{}, expected_nodes);
+    const actual = try canvas.layoutWidgetTreeWithTokens(root, .init(0.125, -0.0, 1024.0001, 80), .{ .container_layout_policy = core.nativeWindowPolicy }, actual_nodes);
+    try expectComplete(expected.nodes, actual.nodes);
+    const last = actual.nodes[128].frame;
+    core.rt.frameReset();
+    try expectRect(expected.nodes[128].frame, last);
 }

@@ -110,6 +110,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 2) return nscvShellLayout(request);
   if (request[0] === 3) return nscvSurfaceLayout(request);
   if (request[0] === 4) return nscvGridLayout(request);
+  if (request[0] === 5) return nscvContainerLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -800,4 +801,118 @@ function nscvGridLayout(request: Uint8Array): Uint8Array {
 function nscvGridCount(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid grid columns");
   return value;
+}
+
+type NscContainerChild = {
+  flags: number; grow: number; main: number; cross: number; offsetMain: number; offsetCross: number;
+  minMain: number; maxMain: number; minCross: number; maxCross: number;
+  measuredMain: number; measuredCross: number;
+};
+
+/** Container allocation over owned native measurement facts. A cross-size
+ * pass supplies the width for wrapped text before the final allocation pass.
+ * The same allocation chooses row measurement widths; stacking is operation 3.
+ * Every arithmetic boundary follows the native f32 evaluation order.
+ */
+function nscvContainerLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 36 || request[0] !== 5) throw new Error("invalid container layout request");
+  const op = request[1]!, axis = request[2]!, main = request[3]!, cross = request[4]!;
+  if (op > 3 || axis > 1 || main > 3 || cross > 3 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid container layout operation or flags");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(8, true);
+  if (request.length !== 36 + count * 48 || op === 3 && (count !== 1 || axis !== 0)) throw new Error("invalid container layout length");
+  const f = Math.fround, max = nscvSurfaceMax, min = nscvSurfaceMin;
+  const x = wire.getFloat32(12, true), y = wire.getFloat32(16, true);
+  const available = wire.getFloat32(axis === 0 ? 20 : 24, true), band = wire.getFloat32(axis === 0 ? 24 : 20, true);
+  const gap = max(0, wire.getFloat32(28, true));
+  if (wire.getUint32(32, true) !== 0) throw new Error("invalid container layout reserved bytes");
+  const children: NscContainerChild[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 36 + i * 48, flags = wire.getUint32(at, true);
+    if (flags > 31 || op === 3 && (flags & 28) !== 0) throw new Error("invalid container child flags");
+    children.push({ flags, grow: max(0, wire.getFloat32(at + 4, true)), main: wire.getFloat32(at + 8, true),
+      cross: wire.getFloat32(at + 12, true), offsetMain: wire.getFloat32(at + 16, true), offsetCross: wire.getFloat32(at + 20, true),
+      minMain: wire.getFloat32(at + 24, true), maxMain: wire.getFloat32(at + 28, true), minCross: wire.getFloat32(at + 32, true),
+      maxCross: wire.getFloat32(at + 36, true), measuredMain: wire.getFloat32(at + 40, true), measuredCross: wire.getFloat32(at + 44, true) });
+  }
+  const result = new Uint8Array(12 + count * (op === 0 ? 4 : 16)), out = new DataView(result.buffer);
+  out.setUint32(0, count, true);
+  if (op === 3) {
+    const child = children[0]!, left = f(x + child.offsetMain), top = f(y + child.offsetCross);
+    let width = nscvSurfaceBound(child.main > 0 ? child.main : available, child.minMain, child.maxMain);
+    const height = nscvSurfaceBound(child.cross > 0 ? child.cross : band, child.minCross, child.maxCross);
+    if ((child.flags & 2) !== 0) width = nscvSurfaceBound(max(width, max(0, f(f(x + available) - left))), child.minMain, child.maxMain);
+    out.setFloat32(12, left, true); out.setFloat32(16, top, true); out.setFloat32(20, width, true); out.setFloat32(24, height, true);
+    return result;
+  }
+  if (op === 0) {
+    for (let i = 0; i < count; i++) out.setFloat32(12 + i * 4, (children[i]!.flags & 1) !== 0 ? nscvContainerCross(children[i]!, axis, band, cross) : 0, true);
+    return result;
+  }
+  let flowCount = 0, fillCount = 0, fixed = 0, growTotal = 0;
+  const preferred: number[] = [];
+  for (const child of children) {
+    let extent = nscvSurfaceBound(child.main > 0 ? child.main : child.measuredMain, max(0, child.minMain), child.maxMain);
+    if (axis === 0 && (child.flags & 8) !== 0 && child.main <= 0 && child.maxMain <= 0 && available > 0)
+      extent = min(extent, max(f(available * f(0.8)), max(0, child.minMain)));
+    preferred.push(extent);
+    if ((child.flags & 1) === 0) continue;
+    flowCount++;
+    if ((child.flags & 2) !== 0 && child.grow === 0) fillCount++;
+    else if (child.grow > 0) growTotal = f(growTotal + child.grow);
+    else fixed = f(fixed + extent);
+  }
+  const totalGap = flowCount > 0 ? f(gap * f(flowCount - 1)) : 0;
+  const flexible = max(0, f(f(available - fixed) - totalGap));
+  const fillShare = fillCount > 0 ? f(flexible / f(fillCount)) : 0;
+  let fillExtent = 0;
+  const extents: number[] = [];
+  for (let i = 0; i < count; i++) {
+    const child = children[i]!;
+    const fills = (child.flags & 2) !== 0 && child.grow === 0;
+    const extent = fills ? nscvSurfaceBound(max(preferred[i]!, fillShare), max(0, child.minMain), child.maxMain) : preferred[i]!;
+    extents.push(extent);
+    if ((child.flags & 1) !== 0 && fills) fillExtent = f(fillExtent + extent);
+  }
+  const remaining = max(0, f(flexible - fillExtent));
+  let assigned = f(fixed + fillExtent);
+  if (growTotal > 0) {
+    for (let i = 0; i < count; i++) {
+      const child = children[i]!;
+      if ((child.flags & 1) === 0 || child.grow <= 0) continue;
+      const extent = nscvSurfaceBound(f(f(remaining * child.grow) / growTotal), max(0, child.minMain), child.maxMain);
+      extents[i] = extent; assigned = f(assigned + extent);
+    }
+  }
+  const used = f(assigned + totalGap), free = max(0, f(available - used));
+  const overflow = f(used - available);
+  out.setFloat32(4, used, true); out.setFloat32(8, overflow <= 0.5 ? 0 : overflow, true);
+  const childGap = main === 3 && flowCount > 1 ? f(gap + f(free / f(flowCount - 1))) : gap;
+  let cursor = f((axis === 0 ? x : y) + (main === 1 ? f(free * 0.5) : main === 2 ? free : 0));
+  for (let i = 0; i < count; i++) {
+    const child = children[i]!;
+    if ((child.flags & 1) === 0) continue;
+    const size = nscvContainerCross(child, axis, band, cross);
+    const delta = f(band - size), shift = cross === 2 ? f(delta * 0.5) : cross === 3 ? max(0, delta) : 0;
+    const origin = f(f((axis === 0 ? y : x) + child.offsetCross) + shift);
+    const at = 12 + i * 16;
+    out.setFloat32(at, axis === 0 ? cursor : origin, true); out.setFloat32(at + 4, axis === 0 ? origin : cursor, true);
+    out.setFloat32(at + 8, axis === 0 ? extents[i]! : size, true); out.setFloat32(at + 12, axis === 0 ? size : extents[i]!, true);
+    cursor = f(cursor + f(extents[i]! + childGap));
+  }
+  return result;
+}
+
+function nscvContainerCross(child: NscContainerChild, axis: number, available: number, alignment: number): number {
+  const f = Math.fround, max = nscvSurfaceMax, min = nscvSurfaceMin;
+  if ((child.flags & 16) !== 0) return nscvSurfaceBound(available, child.minCross, child.maxCross);
+  if (axis === 1 && (child.flags & 4) !== 0)
+    return nscvSurfaceBound(max(child.cross, max(0, f(available - child.offsetCross))), child.minCross, child.maxCross);
+  if (child.cross > 0) return nscvSurfaceBound(child.cross, child.minCross, child.maxCross);
+  if (axis === 1 && (child.flags & 8) !== 0 && child.cross <= 0 && child.maxCross <= 0 && available > 0) {
+    const fitted = min(available, child.measuredCross);
+    return nscvSurfaceBound(min(fitted, max(f(available * f(0.8)), max(0, child.minCross))), child.minCross, child.maxCross);
+  }
+  if (alignment === 0) return nscvSurfaceBound(available, child.minCross, child.maxCross);
+  return nscvSurfaceBound(axis === 0 && alignment === 2 ? child.measuredCross : min(available, child.measuredCross), child.minCross, child.maxCross);
 }
