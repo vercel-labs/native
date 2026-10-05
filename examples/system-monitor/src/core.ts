@@ -1,6 +1,5 @@
-// system-monitor-ts core: the live CPU / memory / process monitor's whole
-// logic tier in the TypeScript app-core subset — the spawn-showcase port of
-// examples/system-monitor. Zero Zig in this tree: the build transpiles this
+// system-monitor core: the live CPU / memory / process monitor's whole
+// logic tier in the TypeScript app-core subset. The build compiles this
 // module and its imports, src/app.native is the whole view, app.zon the
 // manifest.
 //

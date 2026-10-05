@@ -1,6 +1,0 @@
-<!-- The memory sparkline: zero-baseline bars pinned to the absolute
-     0..1 domain (fraction of total memory), same plot box as the CPU
-     tile. -->
-<chart width="239" height="32" y-min="0" y-max="1" label="Memory history">
-  <series kind="bar" values="{memSpark}" />
-</chart>

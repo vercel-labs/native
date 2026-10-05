@@ -53,8 +53,8 @@ App cores use a checked TypeScript subset and compile to native code. To write a
 The Soundboard example rendered by the Native SDK engine. More apps are in [examples/](./examples):
 
 - [Chatbot](./examples/chatbot): streaming responses, text editing, and TypeScript effects.
-- [Soundboard](./examples/soundboard-ts): audio playback, search, assets, and context menus.
-- [System monitor](./examples/system-monitor-ts): subprocess effects, tables, charts, and timers.
+- [Soundboard](./examples/soundboard): audio playback, search, assets, and context menus.
+- [System monitor](./examples/system-monitor): subprocess effects, tables, charts, and timers.
 - [Calculator](./examples/calculator): markup, keyboard input, and theming.
 
 See the [example catalog](./examples/README.md) for additional apps and their authoring languages.

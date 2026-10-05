@@ -1,27 +1,8 @@
-//! habits: a small habit tracker authored in markup + Zig.
-//!
-//! The view lives in `habits.native`; this file is the logic: `Model`, `Msg`,
-//! and `update`. Rows carry a markup `global-key` pinned to the habit id,
-//! so a row keeps its widget identity across rebuilds and filtering.
-//!
-//! The markup runs on one of two engines depending on the build mode:
-//! release builds use `canvas.CompiledMarkupView` — the source is parsed
-//! entirely at comptime, so the binary carries no markup parser and a
-//! markup mistake is a compile error — while debug builds additionally
-//! ship the runtime interpreter and watch `src/habits.native`: the compiled
-//! view renders until the file first changes on disk, then hot reload
-//! takes over without losing streak state.
-
+// Native behavior reference for the compiled Habits core and view.
 const std = @import("std");
-const builtin = @import("builtin");
-const runner = @import("runner");
 const native_sdk = @import("native_sdk");
-
-pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
-
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
-
 const canvas_label = "habits-canvas";
 const window_width: f32 = 720;
 const window_height: f32 = 520;
@@ -45,7 +26,7 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     // it through the STARTUP window create): the header row IS the
     // titlebar — it pads its leading edge past the traffic lights via
     // `on_chrome` and is the window's drag surface (`window-drag` in
-    // habits.native).
+    // app.native).
     .titlebar = .hidden_inset_tall,
     .views = &shell_views,
 }};
@@ -180,20 +161,11 @@ pub fn onChrome(chrome: native_sdk.WindowChrome) ?Msg {
 // ------------------------------------------------------------------- view
 
 pub const HabitsUi = canvas.Ui(Msg);
-pub const habits_markup = @embedFile("habits.native");
+pub const habits_markup = @embedFile("habits_reference.native");
 
 /// The comptime-compiled engine: same tree, ids, and handlers as the
 /// interpreter, no parser in the binary.
 pub const CompiledHabitsView = canvas.CompiledMarkupView(Model, Msg, habits_markup);
-
-// -------------------------------------------------------------------- app
-
-/// Debug builds keep the runtime markup engine for hot reload; release
-/// builds compile it out entirely (`zig build` produces a release app —
-/// grep it for parser diagnostics to confirm nothing survived).
-const dev_markup_reload = builtin.mode == .Debug;
-
-const HabitsApp = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload });
 
 pub fn initialModel() Model {
     var model = Model{};
@@ -201,37 +173,4 @@ pub fn initialModel() Model {
     model.addHabit("Exercise", 0);
     model.addHabit("Read 20 pages", 9);
     return model;
-}
-
-pub fn main(init: std.process.Init) !void {
-    const app_state = try std.heap.page_allocator.create(HabitsApp);
-    defer std.heap.page_allocator.destroy(app_state);
-    app_state.* = HabitsApp.init(std.heap.page_allocator, initialModel(), .{
-        .name = "habits",
-        .scene = shell_scene,
-        .canvas_label = canvas_label,
-        .update = update,
-        .on_chrome = onChrome,
-        .view = CompiledHabitsView.build,
-        .markup = if (dev_markup_reload)
-            .{ .source = habits_markup, .watch_path = "src/habits.native", .io = init.io }
-        else
-            null,
-    });
-    defer app_state.deinit();
-    try runner.runWithOptions(app_state.app(), .{
-        .app_name = "habits",
-        .window_title = "Native SDK Habits",
-        .bundle_id = "dev.native_sdk.habits",
-        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .js_window_api = false,
-        .security = .{
-            .permissions = &app_permissions,
-            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
-        },
-    }, init);
-}
-
-test {
-    _ = @import("tests.zig");
 }

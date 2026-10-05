@@ -1739,3 +1739,29 @@ test("content surfaces preserve captions child boundaries explicit spacing and a
     assert.throws(() => compileView(`<${kind} on-dismiss="increment"/>`, contract), /unsupported/);
   }
 });
+
+test("unkeyed enum filters preserve structural identities and dispatch typed enum payloads", () => {
+  const c: ViewContract = {
+    model: "Model", types: { structs: [{ name: "Model", fields: [
+      { name: "filters", type: { kind: "slice", elem: { kind: "enum", name: "Filter" } } },
+      { name: "filter", type: { kind: "enum", name: "Filter" } },
+      { name: "other", type: { kind: "enum", name: "Other" } },
+    ] }], enums: [{ name: "Filter", members: ["all", "active"] }, { name: "Other", members: ["all", "active"] }] },
+    model_helpers: [], msg: { arms: [{ name: "set_filter", member: "filter", payload: { kind: "scalar", type: { kind: "enum", name: "Filter" } } }] },
+  };
+  const markup = '<radio-group label="Filter"><for each="filters" as="f"><radio checked="{f == filter}" on-toggle="set_filter:{f}">{f}</radio></for></radio-group>';
+  const js = ts.transpile(compileView(markup, c), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS });
+  const model = { filters: ["all", "active", "all"], filter: "active" }, messages: unknown[] = [];
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model,
+    nscfPackMsg: (msg: unknown) => { messages.push(msg); return Uint8Array.of(1, 1); } });
+  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  assert.deepEqual(nodes.slice(1).map((n: any) => [n.text, n.checked]), [["all", false], ["active", true], ["all", false]]);
+  assert.ok(nodes.slice(1).every((n: any) => n.key === undefined && n.keyInt === undefined && n.keySlot === undefined));
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ kind: "set_filter", filter: "all" }, { kind: "set_filter", filter: "active" }, { kind: "set_filter", filter: "all" }]);
+  model.filters = [];
+  assert.equal(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes.length, 1);
+  assert.throws(() => compileView(markup.replace("f == filter", "f == other"), c), /invalid operands/);
+  assert.throws(() => compileView(markup.replace("set_filter:{f}", "set_filter:{other}"), c), /matching scalar/);
+  assert.throws(() => compileView(markup.replace('as="f"', 'as="f" key=""'), c), /for requires/);
+});

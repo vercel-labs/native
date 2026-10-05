@@ -1,4 +1,4 @@
-// soundboard-ts library module: the committed music catalog and the pure
+// soundboard library module: the committed music catalog and the pure
 // catalog/presentation helpers over it — the data half of the core, one
 // import away from core.ts. The catalog is the same real data the Zig
 // soundboard ships (examples/soundboard/src/music_manifest.zon), flattened

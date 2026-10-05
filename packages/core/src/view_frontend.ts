@@ -197,7 +197,9 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         const logical = op === "&&" || op === "||", equality = ["==", "!=", "===", "!=="].includes(op!);
         const comparison = ["<", "<=", ">", ">="].includes(op!);
         let valid = category(left.type) === category(right.type) && (logical ? category(left.type) === "boolean" : category(left.type) === "number" || equality && category(left.type) === "boolean");
-        if (equality && [left.type.kind, right.type.kind].includes("enum")) {
+        if (equality && left.type.kind === "enum" && right.type.kind === "enum") {
+          valid = left.type.name === right.type.name;
+        } else if (equality && [left.type.kind, right.type.kind].includes("enum")) {
           const enumRef = left.type.kind === "enum" ? left : right, literal = left.type.kind === "string" ? left : right;
           valid = literal.type.kind === "string" && !!contract.types.enums?.find(item => item.name === enumRef.type.name)?.members.includes(literal.type.name!);
         }
@@ -308,7 +310,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     } else if (arm.payload.kind === "void") { if (payload) fail(node, "void Msg arm cannot take a payload"); }
     else {
       const type = arm.payload.kind === "number" ? { kind: arm.payload.class ?? "f64" } : arm.payload.kind === "scalar" ? arm.payload.type! : arm.payload;
-      if (!payload || !arm.member || category(type) !== category(payload.type) || !["number", "boolean", "bytes"].includes(category(type))) fail(node, "event requires a matching scalar Msg payload binding");
+      if (!payload || !arm.member || category(type) !== category(payload.type) || !["number", "boolean", "bytes", "enum"].includes(category(type)) || (type.kind === "enum" && type.name !== payload.type.name)) fail(node, "event requires a matching scalar Msg payload binding");
       props += `, ${JSON.stringify(arm.member)}: ${payload.code}`;
     }
     return `Array.from(nscfPackMsg({ ${props} }))`;
@@ -337,14 +339,15 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     }
     if (node.name === "for") {
       const each = node.attrs.get("each"), as = node.attrs.get("as"), field = node.attrs.get("key");
-      if (!each || !as || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(as) || !field || node.attrs.size !== 3 || node.text.trim()) fail(node, "for requires each, as, key and child elements");
+      if (!each || !as || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(as) || node.attrs.size !== (field === undefined ? 2 : 3) || field === "" || node.text.trim()) fail(node, "for requires each, as, an optional key and child elements");
       const items = path(each, node, scope);
       if (items.type.kind !== "slice" || !items.type.elem) fail(node, "each requires a list binding");
       const id = next++, variable = `nscvItem${id}`, inner = new Map(scope); inner.set(as, { code: variable, type: items.type.elem });
-      const base = key(`{${as}.${field}}`, node, inner);
+      const base = field === undefined ? null : key(`{${as}.${field}}`, node, inner);
       output.push(`for (const ${variable} of ${items.code}) {`, `const nscvFirst${id} = nscvNodes.length;`);
       emitChildren(node.children, inner, slot, stack, depth + 1);
-      output.push(`nscvLoopKeys(nscvNodes, nscvFirst${id}, ${base.code});`, "}"); return;
+      if (base !== null) output.push(`nscvLoopKeys(nscvNodes, nscvFirst${id}, ${base.code});`);
+      output.push("}"); return;
     }
     const stringAttr = (name: string, fallback = ""): string => {
       const raw = node.attrs.get(name);

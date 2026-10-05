@@ -5,7 +5,7 @@
 // runs as-is — byte for byte the same results.
 //
 // This is the TS counterpart of the runtime's TextBuffer, extracted from
-// the soundboard-ts and system-monitor-ts ports (which carried identical
+// the soundboard and system-monitor ports (which carried identical
 // private copies): UTF-8 byte splicing, caret and word movement, selection,
 // IME composition, capacity-refusal with a clamped-insert recovery, ASCII
 // trimming, and ASCII case-insensitive comparison. A core that binds a

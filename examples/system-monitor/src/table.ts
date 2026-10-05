@@ -1,4 +1,4 @@
-// system-monitor-ts table module: the process table's pure presentation
+// system-monitor table module: the process table's pure presentation
 // tier — search matching, the sort order, and the row formatting the
 // markup cells bind. core.ts's exported binding helpers (`visibleRows`,
 // `matchCount`) stay thin wrappers over these (the binding surface lives

@@ -1,4 +1,4 @@
-// system-monitor-ts parsers module: the pure byte parsers over the sampler
+// system-monitor parsers module: the pure byte parsers over the sampler
 // tools' output, plus the integer number tier and the byte/format helpers
 // they share — the TS counterpart of the Zig original's fixture-tested
 // sampler.zig, one import away from core.ts. Everything here is

@@ -249,7 +249,7 @@ test "shellConfigFrom yields the empty scene when app.zon declares none" {
 // Branch-budget regression guard: a scene substantially richer than any
 // shipped example — several windows, every enum-mapped shell field spelled
 // as a string, chrome — must CONVERT, not die on "evaluation exceeded N
-// backwards branches" in a comptime sort deep in std (the system-monitor-ts
+// backwards branches" in a comptime sort deep in std (the system-monitor
 // macOS build regression: one field richer than the smallest demo was
 // already over the default quota).
 test "shellConfigFrom converts a rich scene without exhausting the branch quota" {

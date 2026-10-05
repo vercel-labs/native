@@ -1,4 +1,4 @@
-// soundboard-ts player module: the pure playback state machine — track
+// soundboard player module: the pure playback state machine — track
 // starts, queue advance, and the launch-override stream URL rule. Everything here takes the committed Model in and returns the
 // next value out; the audioPlay/pause/seek COMMANDS themselves are built
 // inline in core.ts's update returns (commands live in update's return

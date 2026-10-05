@@ -1,7 +1,7 @@
-//! End-to-end proof battery for examples/soundboard-ts — the launch-gate
+//! End-to-end proof battery for examples/soundboard — the launch-gate
 //! port: a soundboard-complexity app authored in TypeScript + Native
 //! markup with ZERO hand-written Zig. The build compiles the example's
-//! REAL core (examples/soundboard-ts/src/core.ts) and this suite drives
+//! REAL core (examples/soundboard/src/core.ts) and this suite drives
 //! it through `TsUiApp` with the example's SHIPPING markup
 //! (app.native, staged beside this file), so every pin here is the
 //! product path, not a fixture:
@@ -89,7 +89,7 @@ fn commandId(name: []const u8, prefix: []const u8) ?i64 {
 
 fn appOptions() App.Options {
     return .{
-        .name = "soundboard-ts-e2e",
+        .name = "soundboard-e2e",
         .scene = app_scene,
         .canvas_label = canvas_label,
         // The comptime-compiled engine over the example's shipping markup
@@ -661,7 +661,7 @@ fn recordSession(buffer: *JournalBuffer) !SoundboardSnapshot {
     const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
     defer std.heap.page_allocator.destroy(recorder);
     recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
-    recorder.begin(.{ .platform_name = "test", .app_name = "soundboard-ts-e2e", .window_width = 1080, .window_height = 720 });
+    recorder.begin(.{ .platform_name = "test", .app_name = "soundboard-e2e", .window_width = 1080, .window_height = 720 });
 
     const h = try Harness.createRecorded(recorder);
     defer h.destroy();
@@ -1167,7 +1167,7 @@ test "the manifest accent layers the original's pink over the pack (high contras
 // the homepage-shots recipe):
 //
 //   mkdir -p /tmp/soundboard-art
-//   for f in examples/soundboard/src/art/*.jpg; do
+//   for f in examples/soundboard/assets/art/*.jpg; do
 //     magick "$f" -depth 8 rgba:/tmp/soundboard-art/"$(basename "${f%.jpg}")".rgba
 //   done
 //   PARITY_SHOTS=1 zig build test-ts-core-e2e

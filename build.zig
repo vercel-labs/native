@@ -1219,6 +1219,26 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&text_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&text_policy_driver_run.step);
         test_step.dependOn(&text_policy_driver_run.step);
+        const habits_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        habits_reference_run.setCwd(b.path("examples/habits"));
+        habits_reference_run.has_side_effects = true;
+        habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
+        _ = habits_reference_run.captureStdOut(.{});
+        _ = habits_reference_run.captureStdErr(.{});
+        const habits_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        habits_driver_run.setCwd(b.path("examples/habits"));
+        habits_driver_run.has_side_effects = true;
+        habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
+        _ = habits_driver_run.captureStdOut(.{});
+        _ = habits_driver_run.captureStdErr(.{});
+        habits_driver_run.step.dependOn(&habits_reference_run.step);
+        native_driver_step.dependOn(&habits_driver_run.step);
+        ts_core_e2e_step.dependOn(&habits_driver_run.step);
+        test_step.dependOn(&habits_driver_run.step);
+        b.step("test-habits", "Compare complete Habits snapshots and replay across view backends").dependOn(&habits_driver_run.step);
+
         const code_workbench_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         code_workbench_reference_run.setCwd(b.path("examples/code-workbench"));
         code_workbench_reference_run.has_side_effects = true;
@@ -1252,8 +1272,14 @@ pub fn build(b: *std.Build) void {
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
+        const habits_e2e_run = b.addRunArtifact(ts_core_artifacts.habits);
+        addTestStep(b, "test-ts-habits-e2e", "Compare compiled Habits with the native behavior reference", ts_core_artifacts.habits);
+        ts_core_e2e_step.dependOn(&habits_e2e_run.step);
+        test_step.dependOn(&habits_e2e_run.step);
         const soundboard_e2e_run = b.addRunArtifact(ts_core_artifacts.soundboard);
         const monitor_e2e_run = b.addRunArtifact(ts_core_artifacts.system_monitor);
+        addTestStep(b, "test-ts-soundboard-e2e", "Run the compiled Soundboard application battery", ts_core_artifacts.soundboard);
+        addTestStep(b, "test-ts-system-monitor-e2e", "Run the compiled System Monitor application battery", ts_core_artifacts.system_monitor);
         const scaffold_ide_e2e_run = b.addRunArtifact(ts_core_artifacts.scaffold_ide);
         // The suite scaffolds and typechecks real trees under .zig-cache;
         // no build inputs/outputs to hash, so always run it.
@@ -2437,7 +2463,6 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-video-player", "Run video player example tests", "examples/video-player", .managed),
-        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard-ts", "Run soundboard-ts example tests", "examples/soundboard-ts", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-voice-memo", "Run voice memo example tests", "examples/voice-memo", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer", .managed),
@@ -2448,7 +2473,6 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-terminal", "Run terminal example tests", "examples/terminal", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-workbench", "Run workbench example tests", "examples/workbench", .owned),
-        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor-ts", "Run system-monitor-ts example tests", "examples/system-monitor-ts", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-channel-monitor", "Run channel monitor example tests", "examples/channel-monitor", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
@@ -3930,7 +3954,7 @@ fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
 }
 
 /// The two transpiled-core end-to-end test binaries: the host/markup
-/// fixture suite (tests/ts-core) and the soundboard-ts example suite —
+/// fixture suite (tests/ts-core) and the soundboard example suite —
 /// the launch-gate port driven as a REAL app (its committed core, its
 /// shipping markup). Each runs the @native-sdk/core transpiler (node)
 /// over the TS core at build time, pairs the emitted core with its rt
@@ -3948,6 +3972,7 @@ const TsCoreE2eArtifacts = struct {
     /// — every fixture battery links exactly its own core.
     markup: *std.Build.Step.Compile,
     kanban: *std.Build.Step.Compile,
+    habits: *std.Build.Step.Compile,
     soundboard: *std.Build.Step.Compile,
     system_monitor: *std.Build.Step.Compile,
     /// The stock-IDE contract: a fresh scaffold (and the committed TS
@@ -4139,19 +4164,35 @@ fn tsCoreE2eArtifact(
     kanban_mod.addImport("native_sdk", desktop_mod);
     kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
 
-    // The soundboard-ts example's core and markup, tested as one app:
+    const habits_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/habits/src/core.ts",
+        .src_dir = b.path("examples/habits/src"),
+        .name = "habits_core",
+        .typescript_view = true,
+    });
+    const habits_stage = b.addWriteFiles();
+    const habits_root = habits_stage.addCopyFile(b.path("tests/ts-core/habits_e2e_tests.zig"), "habits_e2e_tests.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference.zig"), "habits_reference.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference_tests.zig"), "habits_reference_tests.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference.native"), "habits_reference.native");
+    _ = habits_stage.addCopyFile(b.path("examples/habits/src/app.native"), "app.native");
+    const habits_mod = b.createModule(.{ .root_source_file = habits_root, .target = target, .optimize = optimize });
+    habits_mod.addImport("native_sdk", desktop_mod);
+    habits_mod.addImport("ts_habits_core", habits_fixture.module);
+
+    // The soundboard example's core and markup, tested as one app:
     // the test root stages beside a copy of the example's app.native so
     // the compiled markup engine builds the SHIPPING view over the
     // core's model.
     const soundboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
-        .entry = "examples/soundboard-ts/src/core.ts",
-        .src_dir = b.path("examples/soundboard-ts/src"),
+        .entry = "examples/soundboard/src/core.ts",
+        .src_dir = b.path("examples/soundboard/src"),
         .name = "soundboard_core",
     });
     const soundboard_core_mod = soundboard_fixture.module;
     const soundboard_stage = b.addWriteFiles();
     const soundboard_root = soundboard_stage.addCopyFile(b.path("tests/ts-core/soundboard_e2e_tests.zig"), "soundboard_e2e_tests.zig");
-    _ = soundboard_stage.addCopyFile(b.path("examples/soundboard-ts/src/app.native"), "app.native");
+    _ = soundboard_stage.addCopyFile(b.path("examples/soundboard/src/app.native"), "app.native");
     const soundboard_mod = b.createModule(.{
         .root_source_file = soundboard_root,
         .target = target,
@@ -4160,20 +4201,20 @@ fn tsCoreE2eArtifact(
     soundboard_mod.addImport("native_sdk", desktop_mod);
     soundboard_mod.addImport("ts_soundboard_core", soundboard_core_mod);
 
-    // The system-monitor-ts example's core and markup, tested the same
+    // The system-monitor example's core and markup, tested the same
     // way — plus the ORIGINAL Zig example's committed sampler captures,
     // staged as fixtures so both ports parse the same recorded truth.
     const monitor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
-        .entry = "examples/system-monitor-ts/src/core.ts",
-        .src_dir = b.path("examples/system-monitor-ts/src"),
+        .entry = "examples/system-monitor/src/core.ts",
+        .src_dir = b.path("examples/system-monitor/src"),
         .name = "system_monitor_core",
     });
     const monitor_core_mod = monitor_fixture.module;
     const monitor_stage = b.addWriteFiles();
     const monitor_root = monitor_stage.addCopyFile(b.path("tests/ts-core/system_monitor_e2e_tests.zig"), "system_monitor_e2e_tests.zig");
-    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/app.native"), "app.native");
-    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/windows/settings.native"), "settings.native");
-    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor-ts/src/windows/components/sampling.native"), "components/sampling.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/app.native"), "app.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/windows/settings.native"), "settings.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/windows/components/sampling.native"), "components/sampling.native");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/sysctl.txt"), "fixtures/sysctl.txt");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/ps.txt"), "fixtures/ps.txt");
     _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/vm_stat.txt"), "fixtures/vm_stat.txt");
@@ -4488,6 +4529,7 @@ fn tsCoreE2eArtifact(
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
+        .habits = filteredTestArtifact(b, habits_mod, "ts-habits-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),

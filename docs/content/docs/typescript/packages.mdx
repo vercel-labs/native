@@ -171,7 +171,7 @@ case "render":
   ];
 ```
 
-Cancellation (`Cmd.cancel("render")`), the exit code on the `exit` arm, and machine-readable failure reasons all follow the standard effect contract — see [the streaming ops](/docs/typescript#effects-are-cmd-data). `examples/system-monitor-ts` is the reference for the collect shape: spawn a tool, parse its whole output in the core.
+Cancellation (`Cmd.cancel("render")`), the exit code on the `exit` arm, and machine-readable failure reasons all follow the standard effect contract — see [the streaming ops](/docs/typescript#effects-are-cmd-data). `examples/system-monitor` is the reference for the collect shape: spawn a tool, parse its whole output in the core.
 
 ## Pure utilities
 

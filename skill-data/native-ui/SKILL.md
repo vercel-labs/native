@@ -17,7 +17,7 @@ The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` buil
 
 Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it.
 
-Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/chatbot`, `examples/soundboard-ts`, and `examples/system-monitor-ts` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
+Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/chatbot`, `examples/soundboard`, and `examples/system-monitor` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
 
 ## Menu-bar status items (TypeScript default)
 
@@ -64,8 +64,8 @@ pub fn main(init: std.process.Init) !void {
         .canvas_label = "habits-canvas",  // must match the ShellView label
         .update = update,
         .markup = .{
-            .source = @embedFile("habits.native"),
-            .watch_path = "src/habits.native", // dev hot reload; omit in release
+            .source = @embedFile("app.native"),
+            .watch_path = "src/app.native", // dev hot reload; omit in release
             .io = init.io,
         },
     });
@@ -84,13 +84,13 @@ The runtime owns the loop: install on first GPU frame, presentation, resize, poi
 ```zig
 const dev = @import("builtin").mode == .Debug;
 const App = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev });
-const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("habits.native"));
+const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("app.native"));
 // options:
 .view = CompiledView.build,
-.markup = if (dev) .{ .source = ..., .watch_path = "src/habits.native", .io = init.io } else null,
+.markup = if (dev) .{ .source = ..., .watch_path = "src/app.native", .io = init.io } else null,
 ```
 
-With both set (dev), the compiled view renders until the watched file first changes, then the interpreter hot-reloads it. See `examples/habits` for the full pattern.
+With both set (dev), the compiled view renders until the watched file first changes, then the interpreter hot-reloads it. See the native reference fixture in `tests/ts-core/habits_reference.zig` for this Zig wiring pattern.
 
 ### Webview panes: canvas + live web content in one window
 
@@ -937,7 +937,7 @@ export type Msg = /* ... */ | {
 export const chromeMsg = "chrome_changed";
 ```
 
-Handle that arm by storing `msg.insets.left` and `Math.max(headerNaturalHeight, msg.insets.top)` in fields such as `chromeLeading`/`headerHeight`; markup binds those exact TypeScript spellings (`<spacer width="{chromeLeading}" />`). `examples/system-monitor-ts` is the complete reference. In a Zig core, the equivalent hook is `Options.on_chrome: fn (platform.WindowChrome) ?Msg`, with snake-case bindings such as `{chrome_leading}` when the Zig model uses those names.
+Handle that arm by storing `msg.insets.left` and `Math.max(headerNaturalHeight, msg.insets.top)` in fields such as `chromeLeading`/`headerHeight`; markup binds those exact TypeScript spellings (`<spacer width="{chromeLeading}" />`). `examples/system-monitor` is the complete reference. In a Zig core, the equivalent hook is `Options.on_chrome: fn (platform.WindowChrome) ?Msg`, with snake-case bindings such as `{chrome_leading}` when the Zig model uses those names.
 
 macOS-first like `resizable = false`: GTK/Win32 keep standard chrome and the whole channel is harmless there. Full retrofit: `examples/markdown-viewer` (tall band; toolbar row is the drag region and tracks the band height). Tests: the null platform records `startWindowDrag` calls (`window_drag_starts`), per-window `window_titlebar`, and serves settable `window_chrome` (insets + buttons frame).
 

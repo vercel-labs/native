@@ -59,12 +59,12 @@ case "$fixture" in
     contract="ai-chat"
     ;;
   soundboard)
-    source_root="examples/soundboard-ts/src"
+    source_root="examples/soundboard/src"
     sources="core.ts library.ts player.ts"
     contract="soundboard"
     ;;
   system-monitor)
-    source_root="examples/system-monitor-ts/src"
+    source_root="examples/system-monitor/src"
     sources="core.ts parsers.ts table.ts"
     contract="system-monitor"
     ;;

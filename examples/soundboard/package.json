@@ -1,5 +1,5 @@
 {
-  "name": "system-monitor-ts",
+  "name": "soundboard",
   "private": true,
   "description": "Editor and versioning surface only: stock TypeScript tooling resolves @native-sdk/core from here. The native CLI never reads it and builds with node_modules absent.",
   "dependencies": {

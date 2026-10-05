@@ -1,4 +1,4 @@
-// soundboard-ts core: the soundboard's whole logic tier in the TypeScript
+// soundboard core: the soundboard's whole logic tier in the TypeScript
 // app-core subset — playback through the audio Cmd stream, search, the
 // play-next queue, and the clipboard copy. Zero Zig in this tree: the build
 // transpiles this module and its imports, src/app.native is the whole view,

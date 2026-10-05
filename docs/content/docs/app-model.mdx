@@ -154,7 +154,7 @@ pub fn rootView(ui: *Ui, model: *const Model) Ui.Node {
 // options: .view = rootView,
 ```
 
-`examples/calculator` is the smallest live reference (`CompiledKeypadView.build(ui, model)` inside a hand-written root); `system-monitor`, `soundboard`, and `deck` use the same shape. Widget ids, handlers, and dispatch are identical to a pure-markup tree, so tests and automation address the fragment's widgets the usual way.
+`examples/calculator` is the smallest live reference (`CompiledKeypadView.build(ui, model)` inside a hand-written root); `deck` uses the same shape. Widget ids, handlers, and dispatch are identical to a pure-markup tree, so tests and automation address the fragment's widgets the usual way.
 
 A Zig-root app keeps dev-time hot reload for its embedded fragments too: build with `UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev_markup_reload })` and pass `.markup = .{ .source = ..., .watch_path = "src/header.native", .io = init.io }` gated on `builtin.mode == .Debug` (`null` otherwise) — the wiring in `examples/notes`. Debug builds then reload edits to the watched file in place; release builds compile the runtime engine out entirely.
 

@@ -806,7 +806,7 @@ export function chained(model: Model, id: number): number {
     // R7 fusion over a TERNARY initializer: `const x = c ? f(a) : g(a);
     // if (x === null) <exit>` lowers to `(if (c) f else g) orelse <exit>`
     // — the conditional must parenthesize, or Zig binds the orelse to the
-    // ELSE arm alone (the system-monitor-ts memory-sampler shape).
+    // ELSE arm alone (the system-monitor memory-sampler shape).
     name: "orelse fusion over a ternary initializer parenthesizes the conditional",
     src: `
 export interface Sample { readonly used: number; }

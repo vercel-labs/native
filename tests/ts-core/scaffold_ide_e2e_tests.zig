@@ -109,7 +109,7 @@ test "the committed TS example ports typecheck under stock tsc (multi-file cores
     const bundled = try tooling.ts_core.bundledSdkVersion(allocator, io, ".");
     defer allocator.free(bundled);
 
-    const ports = [_][]const u8{ "examples/kanban", "examples/soundboard-ts", "examples/system-monitor-ts" };
+    const ports = [_][]const u8{ "examples/kanban", "examples/habits", "examples/soundboard", "examples/system-monitor" };
     for (ports, 0..) |port, index| {
         var stage_buffer: [128]u8 = undefined;
         const stage = try std.fmt.bufPrint(&stage_buffer, ".zig-cache/e2e-ide-port-{d}", .{index});

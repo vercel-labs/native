@@ -1,6 +1,6 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const main = @import("main.zig");
+const main = @import("habits_reference.zig");
 
 const canvas = native_sdk.canvas;
 const testing = std.testing;
@@ -211,7 +211,6 @@ test "the habits view lays out through the canvas engine" {
     }
     try testing.expect(saw_button);
 }
-
 
 test "a11y audit sweep: every interactive widget is named, reachable, and unambiguous" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
