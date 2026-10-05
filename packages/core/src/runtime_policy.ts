@@ -119,6 +119,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 11) return nscvTextCachePolicy(request);
   if (request[0] === 12) return nscvRenderCachePolicy(request);
   if (request[0] === 13) return nscvRenderPlanPolicy(request);
+  if (request[0] === 14) return nscvRenderOverridePolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1649,6 +1650,89 @@ function nscvRenderCachePolicy(request: Uint8Array): Uint8Array {
  * Every arithmetic intermediate rounds in the native f32 evaluation order.
  */
 interface NscRenderAffine { readonly a: number; readonly b: number; readonly c: number; readonly d: number; readonly tx: number; readonly ty: number; }
+/** Override coordination copies exact ID words and numerical command facts.
+ * Native retains payloads, geometry providers, animation clocks and resources.
+ * Merging preserves every accepted/replaced prefix on capacity failure.
+ */
+function nscvRenderOverridePolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 32 || request[1]! > 1 || request[2]! > 15 || request[3] !== 0) throw new Error("invalid render override header");
+  const w = new DataView(request.buffer, request.byteOffset, request.byteLength), mode = request[1]!, flags = request[2]!;
+  const first = w.getUint32(4, true), second = w.getUint32(8, true), commands = w.getUint32(12, true), entries = w.getUint32(16, true), capacity = w.getUint32(20, true);
+  const commandAt = 32 + (first + second) * 40, entryAt = commandAt + commands * 92;
+  if (request.length !== entryAt + entries * 28 || w.getUint32(24, true) !== 0 || w.getUint32(28, true) !== 0 || (mode === 0 && (commands !== 0 || entries !== 0)) || (mode === 1 && capacity !== 0)) throw new Error("invalid render override shape");
+  const idEqual = (a: number, b: number): boolean => w.getUint32(a, true) === w.getUint32(b, true) && w.getUint32(a + 4, true) === w.getUint32(b + 4, true);
+  for (let i = 0; i < first + second; i++) if (w.getUint32(32 + i * 40 + 8, true) > 3) throw new Error("invalid render override flags");
+  for (let i = 0; i < commands; i++) if (w.getUint32(commandAt + i * 92 + 8, true) > 1 || w.getUint32(commandAt + i * 92 + 72, true) > 1) throw new Error("invalid render command flags");
+  for (let i = 0; i < entries; i++) if (w.getUint32(entryAt + i * 28 + 8, true) > 1) throw new Error("invalid render damage flags");
+  if (mode === 0) {
+    const sources = new Uint32Array(Math.min(first + second, capacity));
+    let count = 0, failed = false;
+    for (let i = 0; i < first; i++) {
+      if (count >= capacity) { failed = true; break; }
+      sources[count++] = i;
+    }
+    if (!failed) for (let i = first; i < first + second; i++) {
+      let found = -1;
+      for (let j = 0; j < count; j++) if (idEqual(32 + sources[j]! * 40, 32 + i * 40)) { found = j; break; }
+      if (found >= 0) { sources[found] = i; continue; }
+      if (count >= capacity) { failed = true; break; }
+      sources[count++] = i;
+    }
+    const result = new Uint8Array(16 + count * 4), out = new DataView(result.buffer);
+    out.setUint32(0, count, true); out.setUint32(4, failed ? 1 : 0, true);
+    for (let i = 0; i < count; i++) out.setUint32(16 + i * 4, sources[i]!, true);
+    return result;
+  }
+  const find = (id: number, start: number, count: number): number => {
+    for (let i = 0; i < count; i++) { const at = 32 + (start + i) * 40; if (idEqual(id, at)) return at; }
+    return -1;
+  };
+  const equal = (a: number, b: number): boolean => {
+    if (a < 0 || b < 0) return a === b;
+    const mask = w.getUint32(a + 8, true);
+    if (mask !== w.getUint32(b + 8, true) || !idEqual(a, b)) return false;
+    if ((mask & 1) !== 0 && w.getFloat32(a + 12, true) !== w.getFloat32(b + 12, true)) return false;
+    if ((mask & 2) !== 0) for (let i = 0; i < 6; i++) if (w.getFloat32(a + 16 + i * 4, true) !== w.getFloat32(b + 16 + i * 4, true)) return false;
+    return true;
+  };
+  const union = (a: NscSurfaceRect | null, b: NscSurfaceRect | null): NscSurfaceRect | null => a === null ? b : b === null ? a : nscvRenderUnion(a, b, flags);
+  const transformed = (at: number, override: number): NscSurfaceRect | null => {
+    let transform = nscvRenderAffine(w, at + 16);
+    if (override >= 0 && (w.getUint32(override + 8, true) & 2) !== 0) transform = nscvRenderMultiply(transform, nscvRenderAffine(w, override + 16));
+    let bounds = nscvRenderTransform(transform, nscvRenderRect(w, at + 40), flags);
+    const clip = nscvRenderOptional(w, at + 72);
+    if (clip !== null) bounds = nscvRenderIntersection(bounds, clip, flags);
+    bounds = nscvSurfaceNormalize(bounds);
+    return nscvRenderEmpty(bounds) ? null : bounds;
+  };
+  let dirty: NscSurfaceRect | null = null, bounds: NscSurfaceRect | null = null, animationDirty: NscSurfaceRect | null = null;
+  const result = new Uint8Array(64 + commands * 44), out = new DataView(result.buffer);
+  out.setUint32(0, commands, true);
+  // Damage observes original command transforms, before any override applies.
+  for (let i = 0; i < commands; i++) {
+    const at = commandAt + i * 92, hasId = w.getUint32(at + 8, true) === 1;
+    const old = hasId ? find(at, 0, first) : -1, next = hasId ? find(at, first, second) : -1;
+    if (!equal(old, next)) { dirty = union(dirty, transformed(at, old)); dirty = union(dirty, transformed(at, next)); }
+    let opacity = w.getFloat32(at + 12, true), transform = nscvRenderAffine(w, at + 16), rect = nscvRenderRect(w, at + 56);
+    if (next >= 0) {
+      const mask = w.getUint32(next + 8, true);
+      if ((mask & 1) !== 0) opacity = Math.fround(opacity * nscvRenderExtreme(0, nscvRenderExtreme(w.getFloat32(next + 12, true), 1, flags, false), flags, true));
+      if ((mask & 2) !== 0) { transform = nscvRenderMultiply(transform, nscvRenderAffine(w, next + 16)); rect = transformed(at, next) ?? { x: 0, y: 0, width: 0, height: 0 }; }
+    }
+    const target = 64 + i * 44;
+    out.setFloat32(target, opacity, true); nscvRenderPutAffine(out, target + 4, transform); nscvRenderPutRect(out, target + 28, rect);
+    bounds = union(bounds, rect);
+  }
+  for (let i = 0; i < entries; i++) {
+    const at = entryAt + i * 28;
+    if (find(at, 0, first) < 0 && find(at, first, second) < 0) continue;
+    const rect = nscvRenderOptional(w, at + 8);
+    if (rect === null) { if (animationDirty !== null) animationDirty = nscvSurfaceNormalize(animationDirty); }
+    else animationDirty = animationDirty === null ? nscvSurfaceNormalize(rect) : nscvRenderUnion(animationDirty, rect, flags);
+  }
+  nscvRenderPutOptional(out, 4, bounds); nscvRenderPutOptional(out, 24, dirty); nscvRenderPutOptional(out, 44, animationDirty);
+  return result;
+}
 function nscvRenderExtreme(a: number, b: number, flags: number, maximum: boolean): number {
   if (a === 0 && b === 0) {
     const an = 1 / a < 0, bn = 1 / b < 0;

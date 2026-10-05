@@ -487,6 +487,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+            render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
             canvas_label: []const u8,
             /// Fixed design tokens for an app that owns its look. Leave
             /// null (the default) and the stock tokens FOLLOW THE SYSTEM
@@ -1512,6 +1513,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .text_cache_policy = self.options.text_cache_policy,
                 .render_cache_policy = self.options.render_cache_policy,
                 .render_plan_policy = self.options.render_plan_policy,
+                .render_override_policy = self.options.render_override_policy,
                 .event_fn = eventFn,
                 .stop_fn = stopFn,
                 .replay_fn = replayFn,

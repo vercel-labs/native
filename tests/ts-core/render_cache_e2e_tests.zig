@@ -110,9 +110,9 @@ test "six compiled cache calls reuse native buffers and preserve borrowed core b
     }
 }
 
-const Storage = struct {
+pub const Storage = struct {
     value: canvas.CanvasFrameStorage,
-    fn init() !Storage {
+    pub fn init() !Storage {
         var result: Storage = undefined;
         inline for (@typeInfo(canvas.CanvasFrameStorage).@"struct".fields) |field| {
             const E = @typeInfo(field.type).pointer.child;
@@ -122,7 +122,7 @@ const Storage = struct {
         }
         return result;
     }
-    fn deinit(self: Storage) void {
+    pub fn deinit(self: Storage) void {
         inline for (@typeInfo(canvas.CanvasFrameStorage).@"struct".fields) |field| std.testing.allocator.free(@field(self.value, field.name));
     }
 };
@@ -243,7 +243,7 @@ test "render state batching and six cache cost include frame buffers copying and
     }
 }
 
-fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame) !void {
+pub fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame) !void {
     inline for (@typeInfo(canvas.CanvasFrame).@"struct".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "dirty_rects")) try exact(@field(a, field.name), @field(b, field.name));
     }

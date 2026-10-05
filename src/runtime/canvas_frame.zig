@@ -222,6 +222,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
             if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
+            if (frame_options.render_override_policy == null) frame_options.render_override_policy = self.render_override_policy;
             if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
@@ -881,6 +882,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
             if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
+            if (frame_options.render_override_policy == null) frame_options.render_override_policy = self.render_override_policy;
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
@@ -913,17 +915,19 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 frame_options.timestamp_ns,
                 &self.canvas_frame_render_override_samples,
             );
-            const render_overrides = try mergeCanvasRenderOverrides(
-                scheduled_render_overrides,
-                frame_options.render_overrides,
-                &self.canvas_frame_render_override_combined,
-            );
-            if (frame_options.previous_render_overrides.len == 0) {
-                frame_options.previous_render_overrides = self.views[index].canvasFrameRenderOverrides();
-            }
+            if (frame_options.previous_render_overrides.len == 0) frame_options.previous_render_overrides = self.views[index].canvasFrameRenderOverrides();
+            const display_list = self.views[index].canvasDisplayList();
+            var cache_workspace: ?canvas.RenderCacheWorkspace = null;
+            defer if (cache_workspace) |*workspace| workspace.deinit();
+            const render_overrides = if (frame_options.render_override_policy) |owner| blk: {
+                // Empty merging writes nothing and can take the retained no-op
+                // frame path without allocating copied planning buffers.
+                if (scheduled_render_overrides.len == 0 and frame_options.render_overrides.len == 0) break :blk self.canvas_frame_render_override_combined[0..0];
+                cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, scheduled_render_overrides.len, self.views[index].canvas_render_animation_dirty_bounds_count, self.canvas_frame_render_override_combined.len);
+                break :blk try canvas.RenderOverridePolicy.merge(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined, owner, &cache_workspace.?);
+            } else try mergeCanvasRenderOverrides(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined);
             frame_options.render_overrides = render_overrides;
 
-            const display_list = self.views[index].canvasDisplayList();
             const canvas_changed = self.views[index].canvas_revision != self.views[index].presented_canvas_revision;
             const canvas_surface_changed = !sizesEqual(self.views[index].presented_canvas_surface_size, frame_options.surface_size) or
                 self.views[index].presented_canvas_scale != frame_options.scale;
@@ -949,14 +953,21 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 return canvas_frame;
             }
 
-            var cache_workspace = canvas.RenderCacheWorkspace.forFrame(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len);
-            defer if (cache_workspace) |*workspace| workspace.deinit();
+            if (cache_workspace == null) cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, 0, self.views[index].canvas_render_animation_dirty_bounds_count, 0);
             const planning_workspace: ?*canvas.RenderCacheWorkspace = if (cache_workspace) |*workspace| workspace else null;
             const cache_owner: ?*canvas.RenderCacheWorkspace = if (frame_options.render_cache_policy != null) planning_workspace else null;
             var render_plan = try display_list.renderPlanWithWorkspace(storage.render_commands, frame_options.render_plan_policy, planning_workspace);
-            const render_override_dirty_bounds = canvas.renderOverrideDirtyBounds(render_plan.commands, frame_options.previous_render_overrides, frame_options.render_overrides);
-            const render_animation_dirty_bounds = self.views[index].canvasRenderAnimationDirtyBoundsForOverrides(frame_options.previous_render_overrides, frame_options.render_overrides);
-            render_plan.bounds = canvas.applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], frame_options.render_overrides);
+            const override_result = if (frame_options.render_override_policy) |owner|
+                canvas.RenderOverridePolicy.applyAndDamage(storage.render_commands[0..render_plan.commandCount()], frame_options.previous_render_overrides, frame_options.render_overrides, self.views[index].canvas_render_animation_dirty_bounds[0..self.views[index].canvas_render_animation_dirty_bounds_count], owner, planning_workspace.?)
+            else blk: {
+                const dirty = canvas.renderOverrideDirtyBounds(render_plan.commands, frame_options.previous_render_overrides, frame_options.render_overrides);
+                const animation_dirty = self.views[index].canvasRenderAnimationDirtyBoundsForOverrides(frame_options.previous_render_overrides, frame_options.render_overrides);
+                const bounds = canvas.applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], frame_options.render_overrides);
+                break :blk canvas.RenderOverridePolicy.Result{ .bounds = bounds, .dirty = dirty, .animation_dirty = animation_dirty };
+            };
+            const render_override_dirty_bounds = override_result.dirty;
+            const render_animation_dirty_bounds = override_result.animation_dirty;
+            render_plan.bounds = override_result.bounds;
             const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, frame_options.render_plan_policy, planning_workspace);
             const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
                 canvas.RenderPipelineCachePlan{}

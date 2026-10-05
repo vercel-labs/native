@@ -262,6 +262,7 @@ pub const Runtime = struct {
     text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Reused by runtime-created window restoration. `Store.loadWindow`
     /// needs the whole bounded state file plus decoded-string scratch; keep
     /// that 64-KiB workspace on the already heap-owned Runtime instead of
@@ -1267,6 +1268,10 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub fn mergeCanvasRenderOverrides(scheduled: []const canvas.CanvasRenderOverride, explicit: []const canvas.CanvasRenderOverride, output: []canvas.CanvasRenderOverride) ![]const canvas.CanvasRenderOverride {
+        return canvas_frame_helpers.mergeCanvasRenderOverrides(scheduled, explicit, output);
+    }
+
     pub const nativeShellPlan = shell_layout.referenceShellPlan;
     pub const compiledShellPlan = shell_layout.compiledShellPlan;
     pub const encodeShellPlanRequest = shell_layout.encodeShellPlanRequest;

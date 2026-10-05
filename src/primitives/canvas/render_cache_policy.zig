@@ -22,6 +22,10 @@ pub const Workspace = struct {
         return initBytes(policy, 16 + command_count * 48 + 864 + command_count * 68, @max(864 + command_count * 68, 32 + batch_count * 52));
     }
 
+    pub fn initOverrides(policy: Policy, first: usize, second: usize, commands: usize, entries: usize, capacity: usize) Workspace {
+        return initBytes(policy, 32 + (first + second) * 40 + commands * 92 + entries * 28, @max(64 + commands * 44, 16 + @min(first + second, capacity) * 4));
+    }
+
     fn initBytes(policy: Policy, request_bytes: usize, result_bytes: usize) Workspace {
         return .{
             .policy = policy,
@@ -31,7 +35,11 @@ pub const Workspace = struct {
     }
 
     pub fn forFrame(policy: ?Policy, storage: anytype, options: anytype, command_count: usize) ?Workspace {
-        const owner = policy orelse options.render_plan_policy orelse return null;
+        return forFrameWithOverrides(policy, storage, options, command_count, 0, 0, 0);
+    }
+
+    pub fn forFrameWithOverrides(policy: ?Policy, storage: anytype, options: anytype, command_count: usize, scheduled_count: usize, dirty_count: usize, merge_capacity: usize) ?Workspace {
+        const owner = policy orelse options.render_plan_policy orelse options.render_override_policy orelse return null;
         var facts: usize = 0;
         var entries: usize = 0;
         var actions: usize = 0;
@@ -52,6 +60,12 @@ pub const Workspace = struct {
             const draws = @min(command_count, storage.render_commands.len);
             request_bytes = @max(request_bytes, 16 + command_count * 48 + 864 + draws * 68);
             result_bytes = @max(result_bytes, @max(864 + draws * 68, 32 + @min(draws, storage.render_batches.len) * 52));
+        }
+        if (options.render_override_policy != null) {
+            const draws = @min(command_count, storage.render_commands.len);
+            const merged = scheduled_count + options.render_overrides.len;
+            request_bytes = @max(request_bytes, 32 + (options.previous_render_overrides.len + merged) * 40 + draws * 92 + dirty_count * 28);
+            result_bytes = @max(result_bytes, @max(64 + draws * 44, 16 + @min(merged, merge_capacity) * 4));
         }
         return initBytes(owner, request_bytes, result_bytes);
     }

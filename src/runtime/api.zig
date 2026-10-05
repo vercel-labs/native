@@ -431,6 +431,7 @@ pub fn App(comptime Runtime: type) type {
         text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
         render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
         render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+        render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
         start_fn: ?StartFn = null,
         event_fn: ?EventFn = null,
         stop_fn: ?StopFn = null,

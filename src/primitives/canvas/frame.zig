@@ -457,6 +457,7 @@ pub const CanvasFrameOptions = struct {
     text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -521,8 +522,15 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const planning_workspace: ?*render_cache.Workspace = if (cache_workspace) |*workspace| workspace else null;
     const cache_owner: ?*render_cache.Workspace = if (options.render_cache_policy != null) planning_workspace else null;
     var render_plan = try next.renderPlanWithWorkspace(storage.render_commands, options.render_plan_policy, planning_workspace);
-    const render_override_dirty_bounds = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
-    render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
+    const render_override_dirty_bounds = if (options.render_override_policy) |owner| blk: {
+        const result = @import("render_override_policy.zig").applyAndDamage(storage.render_commands[0..render_plan.commandCount()], options.previous_render_overrides, options.render_overrides, &[_]@import("render_override_policy.zig").DamageEntry{}, owner, planning_workspace.?);
+        render_plan.bounds = result.bounds;
+        break :blk result.dirty;
+    } else blk: {
+        const dirty = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
+        render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
+        break :blk dirty;
+    };
     const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, options.render_plan_policy, planning_workspace);
     const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
         RenderPipelineCachePlan{}
