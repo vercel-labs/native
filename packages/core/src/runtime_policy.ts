@@ -116,6 +116,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 8) return nscvVirtualFlow(request);
   if (request[0] === 9) return nscvSemanticTree(request);
   if (request[0] === 10) return nscvExtentPolicy(request);
+  if (request[0] === 11) return nscvTextCachePolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1516,5 +1517,60 @@ function nscvExtentCorrections(request:Uint8Array):Uint8Array{
   const result=new Uint8Array(32+measured.length*16),out=new DataView(result.buffer);
   nscvFlowWrite(out,0,anchor);out.setFloat32(8,before,true);out.setFloat32(12,pending,true);out.setFloat32(16,total,true);out.setUint32(20,dirty?1:0,true);out.setUint32(24,measured.length,true);
   for(let i=0;i<measured.length;i++){const at=32+i*16,e=measured[i]!;nscvFlowWrite(out,at,e.index);out.setFloat32(at+8,e.delta,true);out.setFloat32(at+12,e.prefix,true);}
+  return result;
+}
+
+/** Ordered text-layout and glyph-cache reconciliation over copied key facts.
+ * Native supplies hash buckets and stores resources; equality, admission,
+ * retention and eviction belong here. No pointers or arena reset cross this call.
+ */
+function nscvTextCachePolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 48 || request[1]! > 1 || request[2] !== 0 || request[3] !== 0) throw new Error("invalid text cache request");
+  const w = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const current = w.getUint32(4,true), previous = w.getUint32(8,true), capacity = w.getUint32(12,true), actionCapacity = w.getUint32(16,true), total = current + previous;
+  if (total > 4294967295 || request.length !== 48 + total * 80 || w.getUint32(20,true)!==0 || w.getUint32(40,true)!==0 || w.getUint32(44,true)!==0) throw new Error("invalid text cache shape");
+  const glyph = request[1] === 1, slots = glyph ? 32768 : 8192, indexed = (current >= 64 || previous >= 64) && total <= slots / 2;
+  const equal = (a:number,b:number):boolean => {
+    const x=48+a*80,y=48+b*80;
+    const floats = glyph ? 1 : 6;
+    for(let i=0;i<floats;i++) if(w.getFloat32(x+i*4,true)!==w.getFloat32(y+i*4,true))return false;
+    const start=glyph?4:24,end=glyph?24:64;
+    for(let i=start;i<end;i++)if(request[x+i]!==request[y+i])return false;
+    return true;
+  };
+  const entries:number[]=[],actions:number[]=[];
+  const prevHeads=new Uint32Array(indexed?slots:0),entryHeads=new Uint32Array(indexed?slots:0),prevNext=new Uint32Array(indexed?previous:0),entryNext=new Uint32Array(indexed?Math.min(capacity,total):0);
+  if(indexed) {
+    // Reverse insertion retains the lowest original index at each chain head.
+    for(let i=previous-1;i>=0;i--){const source=current+i,bucket=w.getUint32(48+source*80+72,true)&(slots-1);prevNext[i]=prevHeads[bucket]!;prevHeads[bucket]=i+1;}
+  }
+  const lookup = (source:number,old:boolean):number => {
+    if(indexed){const heads=old?prevHeads:entryHeads,next=old?prevNext:entryNext,bucket=w.getUint32(48+source*80+72,true)&(slots-1);let match=-1;
+      for(let stored=heads[bucket]!;stored>0;stored=next[stored-1]!){const i=stored-1;if(equal(source,old?current+i:entries[i]!) && (match<0 || i<match))match=i;}
+      return match;
+    }
+    const count=old?previous:entries.length;
+    for(let i=0;i<count;i++)if(equal(source,old?current+i:entries[i]!))return i;
+    return -1;
+  };
+  let failed=false;
+  const appendEntry=(source:number):boolean=>{if(entries.length>=capacity)return false;const index=entries.length;entries.push(source);if(indexed){const bucket=w.getUint32(48+source*80+72,true)&(slots-1);entryNext[index]=entryHeads[bucket]!;entryHeads[bucket]=index+1;}return true;};
+  const appendAction=(kind:number,source:number,cache:number):boolean=>{if(actions.length/3>=actionCapacity)return false;actions.push(kind,source,cache);return true;};
+  for(let i=0;i<current;i++){
+    if(lookup(i,false)>=0)continue;
+    const old=lookup(i,true);
+    if(!appendEntry(i) || !appendAction(old<0?0:1,i,old)){failed=true;break;}
+  }
+  if(!failed)for(let i=0;i<previous;i++){
+    const source=current+i;if(lookup(source,false)>=0)continue;
+    const last={low:w.getUint32(48+source*80+64,true),high:w.getUint32(48+source*80+68,true)},frame={low:w.getUint32(24,true),high:w.getUint32(28,true)},retention={low:w.getUint32(32,true),high:w.getUint32(36,true)};
+    const warm=!nscvFlowZero(retention) && (nscvFlowCompare(frame,last)<=0 || nscvFlowCompare(nscvFlowSubtract(frame,last),retention)<=0);
+    if(warm && entries.length<capacity){if(!appendEntry(source) || !appendAction(1,source,i)){failed=true;break;}}
+    else if(!appendAction(2,source,i)){failed=true;break;}
+  }
+  const result=new Uint8Array(16+entries.length*4+actions.length*4),out=new DataView(result.buffer);
+  out.setUint32(0,entries.length,true);out.setUint32(4,actions.length/3,true);out.setUint32(8,failed?1:0,true);
+  for(let i=0;i<entries.length;i++)out.setUint32(16+i*4,entries[i]!,true);
+  for(let i=0;i<actions.length;i++)out.setUint32(16+entries.length*4+i*4,actions[i]!<0?4294967295:actions[i]!,true);
   return result;
 }

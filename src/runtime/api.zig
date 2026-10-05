@@ -428,6 +428,7 @@ pub fn App(comptime Runtime: type) type {
         /// Portable shell frame planning. Results are copied into native
         /// storage before any OS operation; the owning core cycle resets.
         shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+        text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
         start_fn: ?StartFn = null,
         event_fn: ?EventFn = null,
         stop_fn: ?StopFn = null,

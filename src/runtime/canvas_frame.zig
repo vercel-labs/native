@@ -219,6 +219,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
             var frame_options = options;
+            if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
@@ -875,6 +876,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             launch_timing.lapOnce("first_plan_begin");
             defer launch_timing.lapOnce("first_plan_done");
             var frame_options = options;
+            if (frame_options.text_cache_policy == null) frame_options.text_cache_policy = self.text_cache_policy;
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
@@ -1017,7 +1019,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     storage.visual_effect_cache_actions,
                 );
             const glyph_atlas_plan = try display_list.glyphAtlasPlan(storage.glyph_atlas_entries);
-            const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithRetention(
+            const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
+                frame_options.text_cache_policy,
                 frame_options.previous_glyph_atlas_cache,
                 frame_options.frame_index,
                 frame_options.glyph_atlas_cache_retention_frames,
@@ -1044,7 +1047,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const text_layout_cache_plan = if (storage.text_layout_cache_entries.len == 0 and storage.text_layout_cache_actions.len == 0)
                 canvas.TextLayoutCachePlan{}
             else
-                try text_layout_plan.cachePlanWithRetention(
+                try text_layout_plan.cachePlanWithPolicy(
+                    frame_options.text_cache_policy,
                     frame_options.previous_text_layout_cache,
                     frame_options.frame_index,
                     frame_options.text_layout_cache_retention_frames,

@@ -453,6 +453,7 @@ pub const CanvasFrame = struct {
 };
 
 pub const CanvasFrameOptions = struct {
+    text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -585,7 +586,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.visual_effect_cache_actions,
         );
     const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
-    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithRetention(
+    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
+        options.text_cache_policy,
         options.previous_glyph_atlas_cache,
         options.frame_index,
         options.glyph_atlas_cache_retention_frames,
@@ -596,7 +598,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const text_layout_cache_plan = if (storage.text_layout_cache_entries.len == 0 and storage.text_layout_cache_actions.len == 0)
         TextLayoutCachePlan{}
     else
-        try text_layout_plan.cachePlanWithRetention(
+        try text_layout_plan.cachePlanWithPolicy(
+            options.text_cache_policy,
             options.previous_text_layout_cache,
             options.frame_index,
             options.text_layout_cache_retention_frames,

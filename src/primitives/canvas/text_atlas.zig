@@ -1,3 +1,4 @@
+const compiled_cache = @import("text_cache_policy.zig");
 const std = @import("std");
 const canvas = @import("root.zig");
 const text_interaction = @import("text_interaction.zig");
@@ -47,6 +48,11 @@ pub const GlyphAtlasPlan = struct {
 
     pub fn cachePlanWithRetention(self: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
         var planner = GlyphAtlasCachePlanner.init(entries, actions);
+        return planner.build(self, previous, frame_index, retention_frames);
+    }
+    pub fn cachePlanWithPolicy(self: GlyphAtlasPlan, policy: ?compiled_cache.Policy, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
+        var planner = GlyphAtlasCachePlanner.init(entries, actions);
+        if (policy) |owner| return planner.buildCompiled(self, previous, frame_index, retention_frames, owner);
         return planner.build(self, previous, frame_index, retention_frames);
     }
 };
@@ -285,6 +291,29 @@ pub const GlyphAtlasCachePlanner = struct {
             .entries = self.entries[0..self.entry_len],
             .actions = self.actions[0..self.action_len],
         };
+    }
+
+    pub fn buildCompiled(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, policy: compiled_cache.Policy) Error!GlyphAtlasCachePlan {
+        self.reset();
+        const current = plan.entries;
+        var decision = compiled_cache.Plan.init(true, current.len, previous.len, self.entries.len, self.actions.len, frame_index, retention_frames);
+        defer decision.deinit();
+        for (current, 0..) |entry, i| decision.fact(i, entry.key, glyphAtlasKeyHash(entry.key), 0);
+        for (previous, 0..) |entry, i| decision.fact(current.len + i, entry.key, glyphAtlasKeyHash(entry.key), entry.last_used_frame);
+        decision.run(policy);
+        for (0..decision.entry_count) |i| {
+            const source = decision.source(i);
+            self.entries[i] = if (source < current.len) .{ .key = current[source].key, .last_used_frame = frame_index } else previous[source - current.len];
+        }
+        self.entry_len = decision.entry_count;
+        for (0..decision.action_count) |i| {
+            const action = decision.action(i);
+            const source = action.source;
+            self.actions[i] = .{ .kind = @enumFromInt(action.kind), .key = if (source < current.len) current[source].key else previous[source - current.len].key, .atlas_index = if (source < current.len) source else null, .cache_index = action.cache };
+        }
+        self.action_len = decision.action_count;
+        if (decision.failed) return error.GlyphAtlasCacheListFull;
+        return .{ .entries = self.entries[0..self.entry_len], .actions = self.actions[0..self.action_len] };
     }
 
     /// First appended entry equal to `key`, walking the entry index's

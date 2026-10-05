@@ -1,3 +1,4 @@
+const compiled_cache = @import("text_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_layout_types = @import("text_layout_types.zig");
@@ -47,6 +48,11 @@ pub const TextLayoutPlanSet = struct {
 
     pub fn cachePlanWithRetention(self: TextLayoutPlanSet, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
         var planner = TextLayoutCachePlanner.init(entries, actions);
+        return planner.buildMany(self.plans, previous, frame_index, retention_frames);
+    }
+    pub fn cachePlanWithPolicy(self: TextLayoutPlanSet, policy: ?compiled_cache.Policy, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64, entries: []TextLayoutCacheEntry, actions: []TextLayoutCacheAction) Error!TextLayoutCachePlan {
+        var planner = TextLayoutCachePlanner.init(entries, actions);
+        if (policy) |owner| return planner.buildCompiled(self, previous, frame_index, retention_frames, owner);
         return planner.buildMany(self.plans, previous, frame_index, retention_frames);
     }
 };
@@ -198,6 +204,29 @@ pub const TextLayoutCachePlanner = struct {
             .entries = self.entries[0..self.entry_len],
             .actions = self.actions[0..self.action_len],
         };
+    }
+
+    pub fn buildCompiled(self: *TextLayoutCachePlanner, plan: TextLayoutPlanSet, previous: []const TextLayoutCacheEntry, frame_index: u64, retention_frames: u64, policy: compiled_cache.Policy) Error!TextLayoutCachePlan {
+        self.reset();
+        const current = plan.plans;
+        var decision = compiled_cache.Plan.init(false, current.len, previous.len, self.entries.len, self.actions.len, frame_index, retention_frames);
+        defer decision.deinit();
+        for (current, 0..) |entry, i| decision.fact(i, entry.key, textLayoutKeyHash(entry.key), 0);
+        for (previous, 0..) |entry, i| decision.fact(current.len + i, entry.key, textLayoutKeyHash(entry.key), entry.last_used_frame);
+        decision.run(policy);
+        for (0..decision.entry_count) |i| {
+            const source = decision.source(i);
+            self.entries[i] = if (source < current.len) .{ .key = current[source].key, .line_count = current[source].lineCount(), .bounds = current[source].layout.bounds, .last_used_frame = frame_index } else previous[source - current.len];
+        }
+        self.entry_len = decision.entry_count;
+        for (0..decision.action_count) |i| {
+            const action = decision.action(i);
+            const source = action.source;
+            self.actions[i] = .{ .kind = @enumFromInt(action.kind), .key = if (source < current.len) current[source].key else previous[source - current.len].key, .layout_index = if (source < current.len) source else null, .cache_index = action.cache };
+        }
+        self.action_len = decision.action_count;
+        if (decision.failed) return error.TextLayoutCacheListFull;
+        return .{ .entries = self.entries[0..self.entry_len], .actions = self.actions[0..self.action_len] };
     }
 
     /// First appended entry equal to `key`, walking the entry index's

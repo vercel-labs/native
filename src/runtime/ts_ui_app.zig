@@ -424,6 +424,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (comptime @hasDecl(core, "nativeWindowPolicy")) {
                 if (options.shell_layout_policy != null) @panic("TsUiApp owns shell_layout_policy - remove custom shell layout wiring");
                 stamped.shell_layout_policy = core.nativeWindowPolicy;
+                if (options.text_cache_policy != null) @panic("TsUiApp owns text_cache_policy - remove custom text cache wiring");
+                stamped.text_cache_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeTabFocusPolicy")) {
                 if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");

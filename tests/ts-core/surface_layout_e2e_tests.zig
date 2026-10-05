@@ -46,6 +46,7 @@ pub fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!voi
 test {
     _ = @import("semantic_tree_e2e_tests.zig");
     _ = @import("virtual_extent_e2e_tests.zig");
+    _ = @import("text_cache_e2e_tests.zig");
 }
 
 test "compiled modal defaults and f32 boundaries match the native reference" {
@@ -216,6 +217,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
     for (0..3) |mode| {
         const app = try Adapter.create(std.testing.allocator, .{}, .{ .name = "surface-layout", .scene = .{}, .canvas_label = "canvas", .view = Factory.view, .window_view = Factory.windowView, .tokens = if (mode == 1) .{} else null, .tokens_fn = if (mode == 2) Factory.tokens else null });
         defer app.destroy();
+        try std.testing.expect(app.app().text_cache_policy == core.nativeWindowPolicy);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
@@ -245,6 +247,7 @@ test "app token paths retain adapter placement and consume supplied frames" {
     for (0..3) |mode| {
         const app = try App.create(std.testing.allocator, .{ .name = "surface-layout", .scene = .{}, .canvas_label = "canvas", .surface_layout_policy = Factory.policy, .intrinsic_layout_policy = core.nativeWindowPolicy, .view = Factory.view, .update = Factory.update, .tokens = if (mode == 1) .{} else null, .tokens_fn = if (mode == 2) Factory.tokens else null });
         defer app.destroy();
+        try std.testing.expect(app.app().text_cache_policy == null);
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == Factory.policy);
         try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
