@@ -213,6 +213,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "fonts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "path"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 64, "maximum": 9007199254740991 },
+              "path": { "type": "string", "pattern": "^assets/", "minLength": 8 }
+            }
+          }
+        },
         "images": {
           "type": "array",
           "items": {

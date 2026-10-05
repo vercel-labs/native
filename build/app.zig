@@ -1476,7 +1476,7 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
 /// contract remains byte-identical. Public for the repository fixture graph,
 /// which exercises the same compiler boundary as app builds.
 pub fn addStagedCoreSdkInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
-    for ([_][]const u8{ "text.ts", "events.ts" }) |source| {
+    for ([_][]const u8{ "text.ts", "events.ts", "theme.ts" }) |source| {
         stage.addFileInput(sdk_builder.path(b.fmt("packages/core/sdk/{s}", .{source})));
     }
 }
