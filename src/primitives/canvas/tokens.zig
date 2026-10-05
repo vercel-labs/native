@@ -1909,6 +1909,7 @@ pub const DesignTokens = struct {
     surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
     grid_layout_policy: ?@import("grid_layout_policy.zig").Policy = null,
     container_layout_policy: ?@import("container_layout_policy.zig").Policy = null,
+    intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and

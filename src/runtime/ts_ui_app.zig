@@ -412,6 +412,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.grid_layout_policy = core.nativeWindowPolicy;
                 if (options.container_layout_policy != null) @panic("TsUiApp owns container_layout_policy - remove custom container layout wiring");
                 stamped.container_layout_policy = core.nativeWindowPolicy;
+                if (options.intrinsic_layout_policy != null) @panic("TsUiApp owns intrinsic_layout_policy - remove custom intrinsic layout wiring");
+                stamped.intrinsic_layout_policy = core.nativeWindowPolicy;
             }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;

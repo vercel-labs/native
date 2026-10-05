@@ -107,6 +107,7 @@ fn expectTree(widget: canvas.Widget, bounds: geometry.RectF, tokens: canvas.Desi
     compiled_tokens.surface_layout_policy = core.nativeWindowPolicy;
     compiled_tokens.grid_layout_policy = core.nativeWindowPolicy;
     compiled_tokens.container_layout_policy = core.nativeWindowPolicy;
+    compiled_tokens.intrinsic_layout_policy = core.nativeWindowPolicy;
     const actual = try canvas.layoutWidgetTreeWithTokens(widget, bounds, compiled_tokens, &compiled_nodes);
     try std.testing.expectEqual(expected.nodes.len, actual.nodes.len);
     for (expected.nodes, actual.nodes) |left, right| {
@@ -214,6 +215,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         try std.testing.expect(tokens.surface_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.container_layout_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
     }
 }
 
@@ -236,10 +238,11 @@ test "app token paths retain adapter placement and consume supplied frames" {
         }
     };
     for (0..3) |mode| {
-        const app = try App.create(std.testing.allocator, .{ .name = "surface-layout", .scene = .{}, .canvas_label = "canvas", .surface_layout_policy = Factory.policy, .view = Factory.view, .update = Factory.update, .tokens = if (mode == 1) .{} else null, .tokens_fn = if (mode == 2) Factory.tokens else null });
+        const app = try App.create(std.testing.allocator, .{ .name = "surface-layout", .scene = .{}, .canvas_label = "canvas", .surface_layout_policy = Factory.policy, .intrinsic_layout_policy = core.nativeWindowPolicy, .view = Factory.view, .update = Factory.update, .tokens = if (mode == 1) .{} else null, .tokens_fn = if (mode == 2) Factory.tokens else null });
         defer app.destroy();
         const tokens = app.effectiveTokens().withOverrides(.{});
         try std.testing.expect(tokens.surface_layout_policy == Factory.policy);
+        try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
         var nodes: [1]canvas.WidgetLayoutNode = undefined;
         const tree = try canvas.layoutWidgetTreeWithTokens(.{ .id = 1, .kind = .dialog }, .init(0, 0, 640, 480), tokens, &nodes);
         try expectRect(.init(11, 13, 17, 19), tree.nodes[0].frame);
@@ -530,4 +533,135 @@ test "compiled container batches exceed stack scratch without losing complete no
     const last = actual.nodes[128].frame;
     core.rt.frameReset();
     try expectRect(expected.nodes[128].frame, last);
+}
+
+fn expectIntrinsic(widget: canvas.Widget, tokens: canvas.DesignTokens) !void {
+    const expected = canvas.intrinsicWidgetSize(widget, tokens);
+    var compiled = tokens;
+    compiled.intrinsic_layout_policy = core.nativeWindowPolicy;
+    compiled.container_layout_policy = core.nativeWindowPolicy;
+    compiled.grid_layout_policy = core.nativeWindowPolicy;
+    try expectComplete(expected, canvas.intrinsicWidgetSize(widget, compiled));
+}
+
+test "compiled intrinsic composition preserves every container and decorated surface kind" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .text, .text = "Measured café", .layout = .{ .min_size = .init(3, 4), .max_size = .init(180, 40) } },
+        .{ .id = 3, .kind = .separator },
+        .{ .id = 4, .kind = .panel, .frame = .init(0, 0, 70, 55), .layout = .{ .min_size = .init(5, 6) } },
+        .{ .id = 5, .kind = .dialog, .text = "Hoisted", .frame = .init(0, 0, 900, 700) },
+    };
+    for ([_]canvas.WidgetKind{ .row, .column, .stack, .grid, .list, .table, .tabs, .button_group, .data_cell, .card, .dialog, .drawer, .sheet, .alert, .accordion, .bubble, .panel, .scroll_view }) |kind| {
+        for ([_]bool{ false, true }) |titled| {
+            const widget = canvas.Widget{ .id = 1, .kind = kind, .text = if (titled) "Intrinsic title" else "", .value = 1, .children = &children, .scroll_axes = .horizontal, .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 7, .bottom = 11 }, .gap = 2.125, .columns = 2, .min_size = .init(20, 10) } };
+            try expectIntrinsic(widget, .{});
+            try expectTree(widget, .init(0.125, 0, 640, 480), .{});
+            core.rt.frameReset();
+        }
+    }
+}
+
+test "intrinsic composition keeps complete f32 child constraints padding gap and numeric boundaries" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]canvas.WidgetKind{ .row, .column, .stack, .grid, .card, .dialog, .alert, .accordion }) |kind| {
+        var values = [_]f32{ 40, 20, 4, 3, 120, 80, 0.125, 2, 5 };
+        for (0..values.len) |lane| {
+            const original = values[lane];
+            for (samples) |value| {
+                values[lane] = value;
+                const widget = canvas.Widget{ .id = 1, .kind = kind, .text = "Title", .value = 1, .layout = .{ .gap = values[6], .padding = .{ .left = values[7], .right = values[8], .top = 1, .bottom = 3 }, .columns = 2 }, .children = &.{
+                    .{ .id = 2, .kind = .panel, .frame = .init(0, 0, values[0], values[1]), .layout = .{ .min_size = .init(values[2], values[3]), .max_size = .init(values[4], values[5]) } },
+                    .{ .id = 3, .kind = .separator },
+                } };
+                expectIntrinsic(widget, .{}) catch |err| {
+                    std.debug.print("intrinsic kind={t} lane={d} value={d}\n", .{ kind, lane, value });
+                    return err;
+                };
+                core.rt.frameReset();
+            }
+            values[lane] = original;
+        }
+    }
+}
+
+test "intrinsic grids preserve exact large declarations and native conversion facts" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]usize{ 0, 1, 2, 3, 16777217, 9007199254740993, std.math.maxInt(usize) }) |columns| {
+        try expectIntrinsic(.{ .id = 1, .kind = .grid, .layout = .{ .columns = columns, .gap = 0.125 }, .children = &.{ .{ .id = 2, .kind = .panel, .frame = .init(0, 0, 7, 9) }, .{ .id = 3, .kind = .panel, .frame = .init(0, 0, 11, 13) } } }, .{});
+        core.rt.frameReset();
+    }
+}
+
+test "intrinsic empty hoisted virtual zero and depth limited containers preserve their own contracts" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for ([_]canvas.WidgetKind{ .row, .column, .stack, .grid, .list, .card, .accordion, .scroll_view }) |kind| {
+        const root = canvas.Widget{ .id = 1, .kind = kind, .scroll_axes = .horizontal, .layout = .{ .padding = .all(4), .min_size = .init(3, 5) } };
+        try expectIntrinsic(root, .{});
+        var hoisted = root;
+        hoisted.children = &.{.{ .id = 2, .kind = .dialog }};
+        try expectIntrinsic(hoisted, .{});
+        var zero = hoisted;
+        zero.layout.zero_intrinsic = true;
+        try expectIntrinsic(zero, .{});
+        var virtual = hoisted;
+        virtual.layout.virtualized = true;
+        try expectIntrinsic(virtual, .{});
+        core.rt.frameReset();
+    }
+    var chain: [80]canvas.Widget = undefined;
+    for (&chain, 0..) |*widget, i| widget.* = .{ .id = @intCast(i + 1), .kind = .column, .layout = .{ .padding = .all(1), .min_size = .init(2, 3) } };
+    for (0..chain.len - 1) |i| chain[i].children = chain[i + 1 .. i + 2];
+    try expectIntrinsic(chain[0], .{});
+}
+
+test "intrinsic scroll measurement retains unwrapped multiline spans and native metrics" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const root = canvas.Widget{ .id = 1, .kind = .scroll_view, .scroll_axes = .horizontal, .layout = .{ .padding = .all(3) }, .children = &.{.{ .id = 2, .kind = .column, .children = &.{.{ .id = 3, .kind = .text, .spans = &.{.{ .text = "First café line\nSecond line retains its full height" }} }} }} };
+    try expectIntrinsic(root, .{});
+    try expectTree(root, .init(0, 0, 240, 160), .{});
+}
+
+test "intrinsic large batches retain copied measurements and borrowed ABI data across recursion" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [128]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .stack, .children = &.{.{ .id = 500, .kind = .text, .text = "Nested" }}, .layout = .{ .padding = .all(0.125) } };
+    const borrowed = core.rt.frameAlloc(u8, 8);
+    @memcpy(borrowed, "size\x00abi");
+    var view: [*]const u8 = undefined;
+    var view_len: usize = 0;
+    nsc_core_native_view(&view, &view_len);
+    const saved = try std.testing.allocator.dupe(u8, view[0..view_len]);
+    defer std.testing.allocator.free(saved);
+    const widget = canvas.Widget{ .id = 1, .kind = .row, .children = &children, .layout = .{ .gap = 0.125 } };
+    try expectIntrinsic(widget, .{});
+    const result = canvas.intrinsicWidgetSize(widget, .{ .intrinsic_layout_policy = core.nativeWindowPolicy });
+    try std.testing.expectEqualSlices(u8, "size\x00abi", borrowed);
+    try std.testing.expectEqualSlices(u8, saved, view[0..view_len]);
+    core.rt.frameReset();
+    try expectComplete(canvas.intrinsicWidgetSize(widget, .{}), result);
+}
+
+test "intrinsic composition cost is measured beside the native reference" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var children: [20]canvas.Widget = undefined;
+    for (&children, 0..) |*child, i| child.* = .{ .id = @intCast(i + 2), .kind = .panel, .frame = .init(0, 0, 40, 30) };
+    const widget = canvas.Widget{ .id = 1, .kind = .row, .children = &children, .layout = .{ .gap = 8 } };
+    var elapsed: [2]i128 = undefined;
+    for (0..2) |lane| {
+        const started = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds;
+        for (0..1000) |_| {
+            std.mem.doNotOptimizeAway(canvas.intrinsicWidgetSize(widget, .{ .intrinsic_layout_policy = if (lane == 1) core.nativeWindowPolicy else null }));
+            core.rt.frameReset();
+        }
+        elapsed[lane] = std.Io.Timestamp.now(std.testing.io, .awake).nanoseconds - started;
+    }
+    std.debug.print("20-child intrinsic row: native {d} ns, compiled {d} ns (including enclosing reset)\n", .{ @divTrunc(elapsed[0], 1000), @divTrunc(elapsed[1], 1000) });
 }

@@ -111,6 +111,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 3) return nscvSurfaceLayout(request);
   if (request[0] === 4) return nscvGridLayout(request);
   if (request[0] === 5) return nscvContainerLayout(request);
+  if (request[0] === 6) return nscvIntrinsicLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -915,4 +916,82 @@ function nscvContainerCross(child: NscContainerChild, axis: number, available: n
   }
   if (alignment === 0) return nscvSurfaceBound(available, child.minCross, child.maxCross);
   return nscvSurfaceBound(axis === 0 && alignment === 2 ? child.measuredCross : min(available, child.measuredCross), child.minCross, child.maxCross);
+}
+
+/** Intrinsic composition over native text/leaf measurements. Child bounds,
+ * separator contributions, flow aggregation, padding and surface chrome are
+ * portable policy. Native copies every result before recursive measurement;
+ * collection belongs to the enclosing app cycle, never to this operation.
+ */
+function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 96 || request[0] !== 6) throw new Error("invalid intrinsic layout request");
+  const op = request[1]!, axis = request[2]!, flags = request[3]!;
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(4, true);
+  if (op > 10 || axis > 1 || flags > 3 || wire.getUint32(92, true) !== 0 || request.length !== 96 + count * 40)
+    throw new Error("invalid intrinsic layout operation, flags or length");
+  const f = Math.fround, max = nscvSurfaceMax, min = nscvSurfaceMin;
+  const v = (at: number): number => wire.getFloat32(at, true);
+  const minWidth = v(24), minHeight = v(28), left = v(32), right = v(36), top = v(40), bottom = v(44);
+  const gap = max(0, v(48)), stopped = (flags & 1) !== 0, hasTitle = (flags & 2) !== 0;
+  const result = new Uint8Array(12 + count * 12), out = new DataView(result.buffer); out.setUint32(0, count, true);
+  let flows = 0, width = 0, height = 0;
+  for (let i = 0; i < count; i++) {
+    const at = 96 + i * 40, childFlags = wire.getUint32(at, true);
+    if (childFlags > 3) throw new Error("invalid intrinsic child flags");
+    if ((childFlags & 1) === 0) continue;
+    flows++;
+    let w = nscvSurfaceBound(max(v(at + 4), max(0, v(at + 12))), v(at + 20), v(at + 28));
+    let h = nscvSurfaceBound(max(v(at + 8), max(0, v(at + 16))), v(at + 24), v(at + 32));
+    if (op === 1 && axis === 0 && (childFlags & 2) !== 0 && v(at + 12) <= 0) {
+      const thin = min(w, h); w = max(max(0, v(at + 20)), thin); h = max(max(0, v(at + 24)), thin);
+    }
+    out.setFloat32(12 + i * 12, w, true); out.setFloat32(16 + i * 12, h, true);
+    out.setFloat32(20 + i * 12, v(at + 12) > 0 ? v(at + 12) : w, true);
+    if (op === 1) {
+      width = axis === 0 ? f(width + w) : max(width, w);
+      height = axis === 0 ? max(height, h) : f(height + h);
+    } else { width = max(width, w); height = max(height, op === 3 ? v(at + 36) : h); }
+  }
+  if (op === 0) return result;
+  const paddedWidth = (w: number): number => max(f(f(w + left) + right), minWidth);
+  const paddedHeight = (h: number): number => max(f(f(h + top) + bottom), minHeight);
+  if (op === 6) { width = paddedWidth(v(52)); height = paddedHeight(v(56)); }
+  else if (op === 7) {
+    width = paddedWidth(width); height = paddedHeight(f(f(v(64) + (height > 0 ? gap : 0)) + height));
+  } else if (op >= 8) {
+    const childrenWidth = width, childrenHeight = height;
+    width = max(v(68), f(v(60) + f(v(76) * 2)));
+    height = max(v(72), hasTitle ? f(v(64) + f(v(76) * 2)) : 0);
+    if (op === 10) {
+      width = max(v(68), f(f(f(f(v(60) + left) + right) + v(80)) + v(84)));
+      height = max(v(72), f(f(v(64) + top) + bottom));
+      if (childrenHeight > 0) {
+        if (hasTitle) {
+          height = max(height, f(f(f(f(v(64) + v(88)) + childrenHeight) + top) + bottom));
+          width = max(width, f(f(f(f(childrenWidth + v(80)) + v(84)) + left) + right));
+        } else { height = max(height, f(f(childrenHeight + top) + bottom)); width = max(width, f(f(childrenWidth + left) + right)); }
+      }
+    } else if (childrenHeight > 0) {
+      const childHeight = f(f(childrenHeight + top) + bottom);
+      height = op === 8 ? max(height, childHeight) : hasTitle ? max(childHeight, f(v(64) + f(v(76) * 2))) : childHeight;
+      width = max(width, f(f(childrenWidth + left) + right));
+    }
+  } else if (op === 5) {
+    if (stopped) { width = 0; height = 0; }
+  } else if (stopped || count === 0 || (op === 1 || op === 4) && flows === 0) {
+    width = op === 3 ? 0 : max(0, minWidth); height = max(0, minHeight);
+  } else {
+    if (op === 1) {
+      const gaps = f(gap * f(flows - 1));
+      if (axis === 0) width = f(width + gaps); else height = f(height + gaps);
+    } else if (op === 4) {
+      const declared = wire.getUint32(8, true) + wire.getUint32(12, true) * 4294967296;
+      const columns = declared > 0 ? declared : flows, rows = 1 + Math.floor((flows - 1) / columns);
+      const columnsF = declared > 0 ? v(16) : f(flows), columnsMinusF = declared > 0 ? v(20) : f(flows - 1);
+      width = f(f(width * columnsF) + f(gap * columnsMinusF));
+      height = f(f(height * f(rows)) + f(gap * f(rows - 1)));
+    }
+    width = op === 3 ? 0 : paddedWidth(width); height = paddedHeight(height);
+  }
+  out.setFloat32(4, width, true); out.setFloat32(8, height, true); return result;
 }
