@@ -64,6 +64,8 @@ pub const WidgetLayoutTree = struct {
     /// of every node so root-authored modals retain their window-space
     /// contract without widening the hot node array.
     root_bounds: ?geometry.RectF = null,
+    /// Portable observation policy; the retained node array stays unchanged.
+    semantic_policy: ?@import("surface_layout_policy.zig").Policy = null,
 
     pub fn nodeCount(self: WidgetLayoutTree) usize {
         return self.nodes.len;
@@ -217,7 +219,7 @@ pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens
     const root_bounds = bounds.normalized();
     var len: usize = 0;
     _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
-    return .{ .nodes = output[0..len], .root_bounds = root_bounds };
+    return .{ .nodes = output[0..len], .root_bounds = root_bounds, .semantic_policy = tokens.intrinsic_layout_policy };
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

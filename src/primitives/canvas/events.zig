@@ -2099,7 +2099,7 @@ comptime {
         @compileError("update the compiled semantic action protocol for new actions");
 }
 
-fn semanticActionBits(actions: WidgetActions) u16 {
+pub fn semanticActionBits(actions: WidgetActions) u16 {
     var bits: u16 = 0;
     inline for (semantic_action_fields, 0..) |field, bit| {
         if (@field(actions, field)) bits |= @as(u16, 1) << bit;
@@ -2107,7 +2107,7 @@ fn semanticActionBits(actions: WidgetActions) u16 {
     return bits;
 }
 
-fn semanticActionsFromBits(bits: u16) WidgetActions {
+pub fn semanticActionsFromBits(bits: u16) WidgetActions {
     var actions = WidgetActions{};
     inline for (semantic_action_fields, 0..) |field, bit| {
         @field(actions, field) = bits & (@as(u16, 1) << bit) != 0;

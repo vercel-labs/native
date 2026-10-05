@@ -114,6 +114,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 6) return nscvIntrinsicLayout(request);
   if (request[0] === 7) return nscvWrappedLayout(request);
   if (request[0] === 8) return nscvVirtualFlow(request);
+  if (request[0] === 9) return nscvSemanticTree(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1144,4 +1145,172 @@ function nscvVirtualFlow(request: Uint8Array): Uint8Array {
     for (const [offset, value] of [[8, childX], [12, childY], [16, childWidth], [20, childHeight]]) out.setFloat32(target + offset!, value!, true);
   }
   return result;
+}
+
+const nscvSemanticRoles = [1,1,1,1,14,14,1,11,1,1,1,19,1,1,1,1,1,1,1,8,8,8,1,8,9,9,2,4,4,4,2,5,5,5,5,6,6,6,6,6,7,10,12,13,15,2,16,17,18,20,5,21,22,0,0,22,23,1,26,24,1,4,6];
+type NscSemanticMetric = { present: boolean; offset: number; viewport: number; content: number };
+type NscSemanticScroll = { vertical: NscSemanticMetric; horizontal: NscSemanticMetric; primary: NscSemanticMetric; value: number; scrollable: boolean };
+
+/** Exact unsigned division for authored grid columns and child counts. No
+ * pointer, usize, or declared index crosses through a floating JS number. */
+function nscvSemanticDivide(value: NscFlowInteger, divisor: NscFlowInteger): { quotient: NscFlowInteger; remainder: NscFlowInteger } {
+  if (nscvFlowZero(divisor)) throw new Error("zero semantic grid divisor");
+  let low = 0, high = 0, quotientLow = 0, quotientHigh = 0;
+  for (let bit = 63; bit >= 0; bit--) {
+    const carry = high >= 2147483648;
+    high = (high * 2 + Math.floor(low / 2147483648)) % 4294967296;
+    low = (low * 2 + ((bit >= 32 ? value.high >>> (bit - 32) : value.low >>> bit) & 1)) % 4294967296;
+    if (carry || nscvFlowCompare({ low, high }, divisor) >= 0) {
+      const borrow = low < divisor.low ? 1 : 0;
+      low = (low - divisor.low + 4294967296) % 4294967296;
+      high = (high - divisor.high - borrow + 4294967296) % 4294967296;
+      if (bit >= 32) quotientHigh += 2 ** (bit - 32); else quotientLow += 2 ** bit;
+    }
+  }
+  return { quotient: { low: quotientLow, high: quotientHigh }, remainder: { low, high } };
+}
+
+/** Complete semantic reduction over measured native tree facts. String and
+ * text-range storage stays native-owned; selectors choose those borrowed
+ * fields. The established semantic-action policy supplies action facts. */
+function nscvSemanticTree(request: Uint8Array): Uint8Array {
+  if (request.length < 16 || request[0] !== 9 || request[1]! > 1 || request[2]! > 1 || request[3] !== 0) throw new Error("invalid semantic tree header");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const count = wire.getUint32(4, true), target = wire.getUint32(8, true), capacity = wire.getUint32(12, true), query = request[1] === 1;
+  if (request.length !== 16 + count * 128 || (query ? target >= count : target !== 0)) throw new Error("invalid semantic tree length or target");
+  const word = (i: number, at: number): number => wire.getUint32(16 + i * 128 + at, true);
+  const value = (i: number, at: number): number => wire.getFloat32(16 + i * 128 + at, true);
+  const integer = (i: number, at: number): NscFlowInteger => nscvFlowInteger(wire, 16 + i * 128 + at);
+  for (let i = 0; i < count; i++) {
+    if (word(i, 0) > 62 || word(i, 4) > 26 || word(i, 16) > 32767 || word(i, 20) > 1023 || word(i, 24) > 2047 ||
+        (word(i, 12) !== 4294967295 && word(i, 12) >= count)) throw new Error("invalid semantic node facts");
+    for (let at = 104; at < 128; at += 4) if (word(i, at) !== 0) throw new Error("invalid semantic node reserved bytes");
+  }
+  const result = new Uint8Array(16 + (query ? 1 : count) * 144), out = new DataView(result.buffer), f = Math.fround, max = nscvSurfaceMax;
+  const missing = 4294967295, flag = (i: number, bit: number): boolean => (word(i, 16) & bit) !== 0;
+  const kind = (i: number): number => word(i, 0), parent = (i: number): number => word(i, 12), depth = (i: number): number => word(i, 8);
+  const modal = (i: number): boolean => kind(i) >= 19 && kind(i) <= 21;
+  const skip = (i: number): number => { let next = i + 1; while (next < count && depth(next) > depth(i)) next++; return next; };
+  const childCount = (p: number, k: number): number => { let total = 0; for (let i = 0; i < count; i++) if (parent(i) === p && (k < 0 || kind(i) === k)) total++; return total; };
+  const ordinal = (p: number, child: number, k: number): number => { let at = 0; for (let i = 0; i < count; i++) if (parent(i) === p && (k < 0 || kind(i) === k)) { if (i === child) return at; at++; } return missing; };
+  const columns = (i: number): NscFlowInteger => { const children = integer(i, 44), authored = integer(i, 36); return nscvFlowZero(children) ? children : nscvFlowZero(authored) ? children : authored; };
+  const rows = (i: number, cols: NscFlowInteger): NscFlowInteger => {
+    if (flag(i, 4096)) return nscvFlowSmall(word(i, 28));
+    const children = integer(i, 44);
+    return nscvFlowZero(children) || nscvFlowZero(cols) ? nscvFlowSmall(0) : nscvFlowAdd(nscvFlowSmall(1), nscvSemanticDivide(nscvFlowSubtract(children, nscvFlowSmall(1)), cols).quotient, true);
+  };
+  const table = (i: number): boolean => kind(i) === 4 || kind(i) === 5;
+  const tableRows = (i: number): number => flag(i, 4096) ? word(i, 28) : childCount(i, 43);
+  const scroll = (i: number): NscSemanticScroll => {
+    const vx = value(i, 68), vy = value(i, 72), vw = value(i, 76), vh = value(i, 80), virtual = flag(i, 4);
+    const empty = { present: false, offset: 0, viewport: 0, content: 0 };
+    let vertical: NscSemanticMetric = empty, horizontal: NscSemanticMetric = empty;
+    for (let axis = 0; axis < 2; axis++) {
+      if (axis === 0 ? kind(i) === 6 && !virtual && !flag(i, 64) : kind(i) !== 6 || virtual || !flag(i, 32)) continue;
+      const extent = axis === 0 ? vh : vw, origin = axis === 0 ? vy : vx, raw = value(i, axis === 0 ? 84 : 88);
+      let reach = f(origin + extent), content: number;
+      if (axis === 0 && virtual) content = max(extent, value(i, 100));
+      else {
+        let child = i + 1;
+        while (child < count && depth(child) > depth(i)) {
+          if (axis === 0 ? modal(child) || flag(child, 8) && parent(child) === i : modal(child) || flag(child, 8)) { child = skip(child); continue; }
+          reach = max(reach, f(f(value(child, axis === 0 ? 56 : 52) + value(child, axis === 0 ? 64 : 60)) + raw));
+          if (axis === 0 ? kind(child) === 14 : kind(child) === 6 || flag(child, 16) || flag(child, 4) || kind(child) === 14 && !flag(child, 128)) child = skip(child); else child++;
+        }
+        content = max(0, f(reach - origin));
+      }
+      const maximum = max(0, f(content - extent));
+      const metric = { present: true, offset: nscvSurfaceClamp(raw < 0 ? 0 : raw, 0, maximum, request[2] === 1), viewport: extent, content };
+      if (axis === 0) vertical = metric; else horizontal = metric;
+    }
+    const verticalRange = vertical.present && vertical.content > vertical.viewport, horizontalRange = horizontal.present && horizontal.content > horizontal.viewport;
+    let primary = verticalRange || vertical.present && !horizontalRange ? vertical : horizontal.present ? horizontal : vertical;
+    const exposes = kind(i) === 6 || virtual && (kind(i) === 3 || kind(i) === 7 || table(i));
+    if (!exposes || vw <= 0 || vh <= 0) primary = empty;
+    const maximum = max(0, f(primary.content - primary.viewport));
+    return { vertical, horizontal, primary, value: maximum > 0 ? f(primary.offset / maximum) : 0, scrollable: primary.present && maximum > 0 };
+  };
+  let emitted = 0, hidden = missing, concealed = missing;
+  const stack: number[] = []; for (let d = 0; d < 32; d++) stack.push(missing);
+  for (let i = query ? target : 0; i < (query ? target + 1 : count); i++) {
+    const d = depth(i), k = kind(i), state = word(i, 20), disabled = (state & 8) !== 0;
+    const role = word(i, 4) || nscvSemanticRoles[k]!;
+    if (!query) {
+      if (d >= 32) { out.setUint32(4, 1, true); break; }
+      if (hidden !== missing) { if (d > hidden) continue; hidden = missing; }
+      if (concealed !== missing) { if (d > concealed) continue; concealed = missing; }
+      for (let level = d + 1; level < 32; level++) stack[level] = missing;
+      if (flag(i, 1)) { hidden = d; continue; }
+      if (k === 14 && !flag(i, 128)) concealed = d;
+      if (role === 0 || flag(i, 2)) continue;
+      if (emitted >= capacity) { out.setUint32(4, 2, true); break; }
+    }
+    const at = 16 + emitted * 144, s = scroll(i);
+    out.setUint32(at, i, true);
+    let ancestor = missing; if (!query) for (let level = d - 1; level >= 0; level--) if (stack[level] !== missing) { ancestor = stack[level]!; break; }
+    out.setUint32(at + 4, ancestor, true); out.setUint32(at + 8, role, true);
+    let actions = word(i, 24); if (s.scrollable && !disabled) actions |= 1 | 8 | 16;
+    const selected = (state & 16) !== 0 || value(i, 84) >= 0.5;
+    let composedState = state;
+    if ((state & 256) === 0) {
+      if (k === 14) composedState |= 256 | (selected ? 512 : 0);
+      else if (k === 34 || k === 38) composedState |= 256;
+      else if (k === 23 || k === 24 || k === 25) composedState |= 256 | 512;
+    }
+    let hasValue = flag(i, 512), semanticValue = value(i, 92);
+    if (!hasValue) {
+      if (k === 48 || k === 42 || k === 41 || k === 44 || k === 46 || k === 14 || k === 47 || k === 49 || k === 50 || k === 32) { hasValue = true; semanticValue = selected ? 1 : 0; }
+      else if (k === 51 || k === 52 || k === 58) { hasValue = true; semanticValue = nscvSurfaceClamp(value(i, 84), 0, 1, request[2] === 1); }
+      else if (k === 56 && flag(i, 1024)) { hasValue = true; semanticValue = value(i, 96); }
+    }
+    if (s.primary.present) { hasValue = true; semanticValue = s.value; }
+    const focusable = !disabled && !flag(i, 1) && !flag(i, 2) && (flag(i, 8192) || flag(i, 16384) || (actions & 1) !== 0);
+    const text = k >= 35 && k <= 39 || k === 62, placeholder = k >= 34 && k <= 39;
+    out.setUint32(at + 12, (flag(i, 256) ? 1 : 0) | (text ? 2 : 0) | (placeholder ? 4 : 0) | (focusable ? 8 : 0) | (hasValue ? 16 : 0), true);
+    out.setUint32(at + 16, composedState, true); out.setUint32(at + 20, actions, true); out.setFloat32(at + 24, semanticValue, true);
+    const p = parent(i);
+    if (p !== missing && kind(p) === 7) {
+      let listCount = 0, listIndex = missing;
+      if (flag(i, 2048) && flag(i, 4096)) { listCount = word(i, 28); listIndex = word(i, 32); }
+      else if (k === 42) { listCount = childCount(p, 42); if (listCount > 0) listIndex = ordinal(p, i, 42); }
+      if (listIndex !== missing || flag(i, 2048) && flag(i, 4096)) {
+        out.setUint32(at + 28, 1, true); out.setUint32(at + 32, listIndex, true); out.setUint32(at + 36, listCount, true);
+      }
+    }
+    let gridMask = 0;
+    const gridValue = (bit: number, offset: number, value: NscFlowInteger): void => { gridMask |= bit; nscvFlowWrite(out, at + offset, value); };
+    let gridParent = p;
+    if (k === 3) {
+      if (word(i, 4) === 14) { const cols = columns(i); gridValue(4, 60, rows(i, cols)); gridValue(8, 68, cols); }
+    } else if (table(i)) {
+      let maximum = 0; for (let child = 0; child < count; child++) if (parent(child) === i && kind(child) === 43) maximum = Math.max(maximum, childCount(child, 44));
+      gridValue(4, 60, nscvFlowSmall(tableRows(i))); gridValue(8, 68, nscvFlowSmall(maximum));
+    } else {
+      if (gridParent !== missing && kind(gridParent) === 3 && word(gridParent, 4) === 14) {
+        const cols = columns(gridParent), index = flag(i, 2048) ? word(i, 32) : ordinal(gridParent, i, -1);
+        if (!nscvFlowZero(cols) && (index !== missing || flag(i, 2048))) { const divided = nscvSemanticDivide(nscvFlowSmall(index), cols); gridValue(1, 44, divided.quotient); gridValue(2, 52, divided.remainder); gridValue(4, 60, rows(gridParent, cols)); gridValue(8, 68, cols); }
+      } else if (k === 43 || k === 44) {
+        const row = k === 43 ? i : p;
+        if (row !== missing && kind(row) === 43) {
+          gridParent = parent(row);
+          if (gridParent !== missing && table(gridParent)) {
+            const index = flag(row, 2048) ? word(row, 32) : ordinal(gridParent, row, 43);
+            if (index !== missing || flag(row, 2048)) gridValue(1, 44, nscvFlowSmall(index));
+            if (k === 44) { const cell = ordinal(row, i, 44); if (cell !== missing) gridValue(2, 52, nscvFlowSmall(cell)); }
+            gridValue(4, 60, nscvFlowSmall(tableRows(gridParent))); gridValue(8, 68, nscvFlowSmall(childCount(row, 44)));
+          }
+        }
+      }
+    }
+    out.setUint32(at + 40, gridMask, true);
+    for (let axis = 0; axis < 3; axis++) {
+      const metric = axis === 0 ? s.primary : axis === 1 ? s.vertical : s.horizontal;
+      const offset = axis === 0 ? 76 : axis === 1 ? 100 : 116;
+      out.setUint32(at + offset, metric.present ? 1 : 0, true); out.setFloat32(at + offset + 4, metric.offset, true); out.setFloat32(at + offset + 8, metric.viewport, true); out.setFloat32(at + offset + 12, metric.content, true);
+    }
+    out.setFloat32(at + 92, s.value, true); out.setUint32(at + 96, s.scrollable ? 1 : 0, true);
+    if (!query) stack[d] = emitted;
+    emitted++;
+  }
+  out.setUint32(0, emitted, true); return result;
 }

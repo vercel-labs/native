@@ -19,7 +19,7 @@ fn expectRect(expected: geometry.RectF, actual: geometry.RectF) !void {
     }
 }
 
-fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!void {
+pub fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!void {
     const T = @TypeOf(expected);
     switch (@typeInfo(T)) {
         .float => if (std.math.isNan(expected)) try std.testing.expect(std.math.isNan(actual)) else try std.testing.expectEqual(@as(std.meta.Int(.unsigned, @bitSizeOf(T)), @bitCast(expected)), @as(std.meta.Int(.unsigned, @bitSizeOf(T)), @bitCast(actual))),
@@ -41,6 +41,10 @@ fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!void {
         } else @compileError("untagged value in layout evidence"),
         else => try std.testing.expectEqual(expected, actual),
     }
+}
+
+test {
+    _ = @import("semantic_tree_e2e_tests.zig");
 }
 
 test "compiled modal defaults and f32 boundaries match the native reference" {
