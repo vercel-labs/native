@@ -432,6 +432,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.render_plan_policy = core.nativeWindowPolicy;
                 if (options.render_override_policy != null) @panic("TsUiApp owns render_override_policy - remove custom render override wiring");
                 stamped.render_override_policy = core.nativeWindowPolicy;
+                if (options.render_damage_policy != null) @panic("TsUiApp owns render_damage_policy - remove custom render damage wiring");
+                stamped.render_damage_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeTabFocusPolicy")) {
                 if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");

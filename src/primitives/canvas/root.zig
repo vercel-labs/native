@@ -1,3 +1,4 @@
+pub const RenderDamagePolicy = @import("render_damage_policy.zig");
 const std = @import("std");
 pub const RenderOverridePolicy = @import("render_override_policy.zig");
 pub const RenderCacheWorkspace = @import("render_cache_policy.zig").Workspace;

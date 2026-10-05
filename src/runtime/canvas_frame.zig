@@ -223,6 +223,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
             if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
             if (frame_options.render_override_policy == null) frame_options.render_override_policy = self.render_override_policy;
+            if (frame_options.render_damage_policy == null) frame_options.render_damage_policy = self.render_damage_policy;
             if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
@@ -283,7 +284,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const presentation_scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
             // Widen BEFORE the packet build so the scissor-culled
             // command subset rides the widened scissor.
-            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
+            if (options.render_damage_policy orelse self.render_damage_policy) |owner|
+                canvas.RenderDamagePolicy.widen(&canvas_frame, presentation_scale, owner)
+            else
+                widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
             var packet = try canvas_frame.gpuPacket(output);
             packet.scale = presentation_scale;
             if (!packet.requiresRender()) return packet;
@@ -339,7 +343,10 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             // Widen BEFORE the packet build (and the pixel fallback below)
             // so the scissor-culled command subset rides the widened
             // scissor.
-            widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
+            if (options.render_damage_policy orelse self.render_damage_policy) |owner|
+                canvas.RenderDamagePolicy.widen(&canvas_frame, presentation_scale, owner)
+            else
+                widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
 
             const services = self.options.platform.services;
             const packet_requested = canvasGpuPacketPresentationRequested(self, window_id, label);
@@ -883,6 +890,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (frame_options.render_cache_policy == null) frame_options.render_cache_policy = self.render_cache_policy;
             if (frame_options.render_plan_policy == null) frame_options.render_plan_policy = self.render_plan_policy;
             if (frame_options.render_override_policy == null) frame_options.render_override_policy = self.render_override_policy;
+            if (frame_options.render_damage_policy == null) frame_options.render_damage_policy = self.render_damage_policy;
             frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
@@ -923,7 +931,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 // Empty merging writes nothing and can take the retained no-op
                 // frame path without allocating copied planning buffers.
                 if (scheduled_render_overrides.len == 0 and frame_options.render_overrides.len == 0) break :blk self.canvas_frame_render_override_combined[0..0];
-                cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, scheduled_render_overrides.len, self.views[index].canvas_render_animation_dirty_bounds_count, self.canvas_frame_render_override_combined.len);
+                cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, scheduled_render_overrides.len, self.views[index].canvas_render_animation_dirty_bounds_count, self.canvas_frame_render_override_combined.len, self.views[index].canvas_packet_baseline_count);
                 break :blk try canvas.RenderOverridePolicy.merge(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined, owner, &cache_workspace.?);
             } else try mergeCanvasRenderOverrides(scheduled_render_overrides, frame_options.render_overrides, &self.canvas_frame_render_override_combined);
             frame_options.render_overrides = render_overrides;
@@ -953,7 +961,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 return canvas_frame;
             }
 
-            if (cache_workspace == null) cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, 0, self.views[index].canvas_render_animation_dirty_bounds_count, 0);
+            if (cache_workspace == null) cache_workspace = canvas.RenderCacheWorkspace.forFrameWithOverrides(frame_options.render_cache_policy, storage, frame_options, display_list.commands.len, 0, self.views[index].canvas_render_animation_dirty_bounds_count, 0, self.views[index].canvas_packet_baseline_count);
             const planning_workspace: ?*canvas.RenderCacheWorkspace = if (cache_workspace) |*workspace| workspace else null;
             const cache_owner: ?*canvas.RenderCacheWorkspace = if (frame_options.render_cache_policy != null) planning_workspace else null;
             var render_plan = try display_list.renderPlanWithWorkspace(storage.render_commands, frame_options.render_plan_policy, planning_workspace);
@@ -1091,7 +1099,36 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try self.views[index].diffPresentedCanvasSummary(storage.changes);
             var dirty_rects: [canvas.max_canvas_frame_dirty_rects]geometry.RectF = undefined;
             var dirty_rect_count: usize = 0;
-            var dirty_bounds: ?geometry.RectF = if (full_repaint)
+            var dirty_bounds: ?geometry.RectF = if (frame_options.render_damage_policy) |owner| compiled: {
+                var refinement: ?canvas.RenderDamagePolicy.Patch = null;
+                if (!full_repaint and canvas_changed and
+                    self.views[index].canvas_packet_baseline_valid and
+                    sizesEqual(self.views[index].canvas_packet_baseline_surface_size, frame_options.surface_size) and
+                    self.views[index].canvas_packet_baseline_scale == frame_options.scale)
+                {
+                    if (gatherCanvasPacketCurrentCommandsFromPlan(render_plan.commands, frame_options.surface_size, render_plan.bounds)) |current| {
+                        const view = &self.views[index];
+                        const baseline_count = view.canvas_packet_baseline_count;
+                        const scratch = canvas_frame_scratch.get();
+                        refinement = canvas.RenderDamagePolicy.patch(view.canvas_packet_baseline_keys[0..baseline_count], view.canvas_packet_baseline_fingerprints[0..baseline_count], view.canvas_packet_baseline_bounds[0..baseline_count], current, scratch.packet_baseline_matched[0..baseline_count], scratch.packet_baseline_stable[0..baseline_count], scratch.packet_upsert[0..current.len], owner, planning_workspace.?);
+                    }
+                }
+                const result = canvas.RenderDamagePolicy.finalize(.{
+                    .presentation = true,
+                    .full_repaint = full_repaint,
+                    .surface_size = frame_options.surface_size,
+                    .scale = frame_options.scale,
+                    .render_bounds = render_plan.bounds,
+                    .override_bounds = render_override_dirty_bounds,
+                    .animation_bounds = render_animation_dirty_bounds,
+                    .refinement = refinement,
+                    .sample_extent_multiplier = frame_options.backdrop_blur_sample_extent_multiplier,
+                }, changes, render_plan.commands, &dirty_rects, owner, planning_workspace.?);
+                full_repaint = result.full_repaint;
+                dirty_rect_count = result.rect_count;
+                if (full_repaint) changes = storage.changes[0..0];
+                break :compiled result.bounds;
+            } else if (full_repaint)
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
             else dirty: {
                 // Every incremental dirty rect leaves here through
@@ -1161,7 +1198,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 }
                 break :dirty bleedAlignedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.scale, 1, frame_options.surface_size);
             };
-            if (!full_repaint and incrementalCanvasDamageIntersectsBackdropBlur(
+            if (frame_options.render_damage_policy == null and !full_repaint and incrementalCanvasDamageIntersectsBackdropBlur(
                 render_plan.commands,
                 dirty_bounds,
                 dirty_rects[0..dirty_rect_count],
@@ -1922,4 +1959,21 @@ fn canvasRotationCircumscribedBounds(rect: geometry.RectF, center: geometry.Poin
         radius = @max(radius, @sqrt(dx * dx + dy * dy));
     }
     return geometry.RectF.init(center.x - radius, center.y - radius, radius * 2, radius * 2);
+}
+
+pub const DamageCurrentCommand = CanvasPacketCurrentCommand;
+pub const referenceDamageSnap = bleedAlignedCanvasDirtyBounds;
+pub const referenceDamageWiden = widenCanvasFrameDirtyForPresentationScale;
+pub fn referenceDamagePatch(view: anytype, current: []const DamageCurrentCommand, matched: []bool, stable: []bool, upsert: []bool) ?canvas.RenderDamagePolicy.Patch {
+    const value = canvasPacketPatchDirtyBounds(view, current);
+    const scratch = canvas_frame_scratch.get();
+    @memcpy(matched, scratch.packet_baseline_matched[0..matched.len]);
+    @memcpy(stable, scratch.packet_baseline_stable[0..stable.len]);
+    @memcpy(upsert, scratch.packet_upsert[0..upsert.len]);
+    if (value) |patch| {
+        var result = canvas.RenderDamagePolicy.Patch{ .bounds = patch.bounds, .rect_count = patch.rect_count };
+        @memcpy(result.rects[0..patch.rect_count], patch.rects[0..patch.rect_count]);
+        return result;
+    }
+    return null;
 }

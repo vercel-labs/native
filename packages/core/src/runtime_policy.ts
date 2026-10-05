@@ -120,6 +120,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 12) return nscvRenderCachePolicy(request);
   if (request[0] === 13) return nscvRenderPlanPolicy(request);
   if (request[0] === 14) return nscvRenderOverridePolicy(request);
+  if (request[0] === 15) return nscvRenderDamagePolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1861,3 +1862,184 @@ function nscvRenderBatches(w: DataView, count: number, capacity: number, flags: 
   out.setUint32(0, emitted, true); out.setUint32(4, failed, true);
   return result.subarray(0, 32 + emitted * 52);
 }
+
+/** Final damage coordination uses copied numeric and exact-key facts. Native
+ * owns drawing payloads, fingerprints, platform sampling support and storage.
+ * Modes: diagnostic, presentation, effective-scale widening, retained edits.
+ * Device clipping precedes f32 encoding; edge walks compare exact f64 products.
+ */
+function nscvRenderDamagePolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 128 || request[1]! > 3 || request[2]! > 15 || request[3]! > 3) throw new Error("invalid render damage header");
+  const w = new DataView(request.buffer, request.byteOffset, request.byteLength), mode = request[1]!, flags = request[2]!;
+  const changes = w.getUint32(104, true), rectCount = w.getUint32(108, true), blurs = w.getUint32(112, true), baseline = w.getUint32(116, true), current = w.getUint32(120, true), capacity = w.getUint32(124, true);
+  const rectAt = 128 + changes * 20, blurAt = rectAt + rectCount * 16, baselineAt = blurAt + blurs * 68, currentAt = baselineAt + baseline * 32;
+  if (request.length !== currentAt + current * 32 || capacity < 1 || capacity > 8 || rectCount > capacity || (mode !== 3 && (baseline !== 0 || current !== 0)) || (mode === 3 && (changes !== 0 || rectCount !== 0 || blurs !== 0))) throw new Error("invalid render damage shape");
+  for (let i = 0; i < 4; i++) if (w.getUint32(16 + i * 20, true) > 1) throw new Error("invalid render damage bounds");
+  for (let i = 0; i < changes; i++) if (w.getUint32(128 + i * 20, true) > 1) throw new Error("invalid render damage change");
+  for (let i = 0; i < blurs; i++) if (w.getUint32(blurAt + i * 68 + 40, true) > 1) throw new Error("invalid render damage clip");
+  const f = Math.fround, extreme = (a: number, b: number, maximum: boolean): number => nscvRenderExtreme(a, b, flags, maximum);
+  const union = (a: NscSurfaceRect | null, b: NscSurfaceRect | null): NscSurfaceRect | null => a === null ? b === null ? null : nscvSurfaceNormalize(b) : b === null ? nscvSurfaceNormalize(a) : nscvRenderUnion(a, b, flags);
+  const intersects = (a: NscSurfaceRect, b: NscSurfaceRect): boolean => !nscvRenderEmpty(nscvRenderIntersection(a, b, flags));
+  const clusters: NscSurfaceRect[] = [];
+  let bounds: NscSurfaceRect | null = null;
+  const add = (rect: NscSurfaceRect): void => {
+    const normalized = nscvSurfaceNormalize(rect);
+    if (nscvRenderEmpty(normalized)) return;
+    bounds = union(bounds, normalized);
+    for (let i = 0; i < clusters.length; i++) if (intersects(clusters[i]!, normalized)) { clusters[i] = nscvRenderUnion(clusters[i]!, normalized, flags); return; }
+    if (clusters.length < capacity) { clusters.push(normalized); return; }
+    let best = 0, cost = 3.4028234663852886e38;
+    for (let i = 0; i < clusters.length; i++) {
+      const cluster = clusters[i]!, merged = nscvRenderUnion(cluster, normalized, flags), delta = f(f(merged.width * merged.height) - f(cluster.width * cluster.height));
+      if (delta < cost) { best = i; cost = delta; }
+    }
+    clusters[best] = nscvRenderUnion(clusters[best]!, normalized, flags);
+  };
+  const matched = new Uint8Array(baseline), stable = new Uint8Array(baseline), upsert = new Uint8Array(current);
+  let valid = true;
+  if (mode === 3) {
+    // Open addressing changes lookup cost, never first-match or draw order.
+    let slots = 64;
+    while (slots < baseline * 2) slots *= 2;
+    const table = new Uint32Array(slots);
+    const equalKey = (a: number, b: number): boolean => w.getUint32(a, true) === w.getUint32(b, true) && w.getUint32(a + 4, true) === w.getUint32(b + 4, true);
+    const hash = (at: number): number => (w.getUint32(at, true) ^ w.getUint32(at + 4, true)) >>> 0;
+    for (let i = 0; i < baseline; i++) {
+      const at = baselineAt + i * 32;
+      let slot = hash(at) % slots;
+      while (table[slot]! !== 0 && !equalKey(at, baselineAt + (table[slot]! - 1) * 32)) slot = (slot + 1) % slots;
+      if (table[slot]! === 0) table[slot] = i + 1;
+    }
+    for (let i = 0; i < current; i++) {
+      const at = currentAt + i * 32;
+      let slot = hash(at) % slots;
+      while (table[slot]! !== 0 && !equalKey(at, baselineAt + (table[slot]! - 1) * 32)) slot = (slot + 1) % slots;
+      upsert[i] = 1;
+      if (table[slot]! !== 0) {
+        const index = table[slot]! - 1, old = baselineAt + index * 32;
+        matched[index] = 1;
+        if (w.getUint32(at + 8, true) === w.getUint32(old + 8, true) && w.getUint32(at + 12, true) === w.getUint32(old + 12, true)) { stable[index] = 1; upsert[i] = 0; continue; }
+        add(nscvRenderRect(w, old + 16));
+      }
+      add(nscvRenderRect(w, at + 16));
+    }
+    for (let i = 0; i < baseline; i++) if (matched[i] === 0) add(nscvRenderRect(w, baselineAt + i * 32 + 16));
+    let walk = 0;
+    for (let i = 0; i < current; i++) {
+      if (upsert[i] !== 0) continue;
+      while (walk < baseline && stable[walk] === 0) walk++;
+      if (walk >= baseline || !equalKey(baselineAt + walk * 32, currentAt + i * 32)) { valid = false; break; }
+      walk++;
+    }
+  }
+  const scale = w.getFloat32(12, true), surface = nscvSurfaceNormalize({ x: 0, y: 0, width: w.getFloat32(4, true), height: w.getFloat32(8, true) });
+  const render = nscvRenderOptional(w, 16), fullBounds = nscvRenderEmpty(surface) ? render : surface;
+  let full = (request[3]! & 1) !== 0, count = clusters.length;
+  const written: NscSurfaceRect[] = [];
+  if (mode === 3) for (const cluster of clusters) written.push(cluster);
+  else if (mode === 2) {
+    bounds = render;
+    if (full || scale === w.getFloat32(100, true)) {
+      for (let i = 0; i < rectCount; i++) written.push(nscvRenderRect(w, rectAt + i * 16));
+      count = rectCount;
+    } else {
+      bounds = nscvDamageSnap(bounds, scale, w.getFloat32(4, true), w.getFloat32(8, true), flags);
+      for (let i = 0; i < rectCount; i++) { const rect = nscvDamageSnap(nscvRenderRect(w, rectAt + i * 16), scale, w.getFloat32(4, true), w.getFloat32(8, true), flags); if (rect !== null) written.push(rect); }
+      count = written.length < 2 ? 0 : written.length;
+    }
+  } else if (full) bounds = fullBounds;
+  else {
+    const overrides = mode === 0 ? nscvRenderOptional(w, 36) : union(nscvRenderOptional(w, 36), nscvRenderOptional(w, 56));
+    if (mode === 1 && (request[3]! & 2) !== 0) {
+      bounds = nscvRenderOptional(w, 76);
+      for (let i = 0; i < rectCount; i++) clusters.push(nscvRenderRect(w, rectAt + i * 16));
+      if (overrides !== null) add(overrides);
+      bounds = nscvDamageSnap(bounds, scale, w.getFloat32(4, true), w.getFloat32(8, true), flags);
+      if (bounds !== null && clusters.length > 1) for (const cluster of clusters) { const aligned = nscvDamageSnap(cluster, scale, w.getFloat32(4, true), w.getFloat32(8, true), flags); if (aligned !== null) written.push(aligned); }
+    } else {
+      for (let i = 0; i < changes; i++) bounds = union(bounds, nscvRenderOptional(w, 128 + i * 20));
+      bounds = nscvDamageSnap(union(bounds, overrides), scale, w.getFloat32(4, true), w.getFloat32(8, true), flags);
+    }
+    count = written.length < 2 ? 0 : written.length;
+    const requested = w.getFloat32(96, true), multiplier = Number.isFinite(requested) ? extreme(1, requested, true) : 1;
+    for (let i = 0; i < blurs; i++) {
+      const at = blurAt + i * 68, radius = w.getFloat32(at + 64, true), opacity = w.getFloat32(at + 60, true);
+      if (!(radius > 0) || !(opacity > 0)) continue;
+      const rect = nscvSurfaceNormalize(nscvRenderRect(w, at)), transform = nscvRenderAffine(w, at + 16), clip = nscvRenderOptional(w, at + 40);
+      let output = nscvRenderTransform(transform, rect, flags);
+      if (clip !== null) output = nscvRenderIntersection(output, nscvSurfaceNormalize(clip), flags);
+      if (nscvRenderEmpty(output)) continue;
+      let footprint: NscSurfaceRect;
+      if (multiplier === 1) footprint = nscvSurfaceNormalize(nscvRenderTransform(transform, nscvDamageInflate(rect, extreme(0, radius, true)), flags));
+      else {
+        const x = f(Math.sqrt(f(f(transform.a * transform.a) + f(transform.b * transform.b)))), y = f(Math.sqrt(f(f(transform.c * transform.c) + f(transform.d * transform.d))));
+        const extent = f(f(extreme(0, radius, true) * extreme(f(0.0001), extreme(x, y, true), true)) * multiplier);
+        footprint = nscvDamageInflate(nscvSurfaceNormalize(output), extent);
+      }
+      if (count === 0 ? bounds !== null && intersects(footprint, nscvSurfaceNormalize(bounds)) : written.some((dirty) => intersects(footprint, nscvSurfaceNormalize(dirty)))) { full = true; bounds = fullBounds; count = 0; break; }
+    }
+  }
+  const result = new Uint8Array(64 + written.length * 16 + baseline * 2 + current), out = new DataView(result.buffer);
+  out.setUint32(0, full ? 1 : 0, true); out.setUint32(4, count, true); out.setUint32(8, written.length, true); out.setUint32(12, valid ? 1 : 0, true);
+  nscvRenderPutOptional(out, 16, bounds);
+  for (let i = 0; i < written.length; i++) nscvRenderPutRect(out, 64 + i * 16, written[i]!);
+  let at = 64 + written.length * 16;
+  for (let i = 0; i < baseline; i++) { result[at++] = matched[i]!; result[at++] = stable[i]!; }
+  for (let i = 0; i < current; i++) result[at++] = upsert[i]!;
+  return result;
+}
+function nscvDamageInflate(r: NscSurfaceRect, extent: number): NscSurfaceRect {
+  const f = Math.fround;
+  return { x: f(r.x - extent), y: f(r.y - extent), width: f(f(r.width + extent) + extent), height: f(f(r.height + extent) + extent) };
+}
+function nscvDamageSnap(bounds: NscSurfaceRect | null, scale: number, width: number, height: number, flags: number): NscSurfaceRect | null {
+  if (bounds === null) return null;
+  const f = Math.fround, r = nscvSurfaceNormalize(bounds), device = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const bits = new DataView(new ArrayBuffer(4));
+  const next = (value: number, up: boolean): number => {
+    if (Number.isNaN(value) || value === (up ? Infinity : -Infinity)) return value;
+    if (value === 0) { bits.setUint32(0, up ? 1 : 2147483649, true); return bits.getFloat32(0, true); }
+    bits.setFloat32(0, value, true);
+    const raw = bits.getUint32(0, true); bits.setUint32(0, raw + ((value > 0) === up ? 1 : -1), true);
+    return bits.getFloat32(0, true);
+  };
+  const extreme = (a: number, b: number, maximum: boolean): number => nscvRenderExtreme(a, b, flags, maximum);
+  const nudge = (value: number, up: boolean): number => {
+    if (Number.isNaN(value)) return 0;
+    const limit = 3.4028234663852886e38;
+    let edge = extreme(-limit, extreme(value, limit, false), true);
+    edge = next(next(edge, up), up);
+    return extreme(-limit, extreme(edge, limit, false), true);
+  };
+  const axis = (low: number, high: number, extent: number): NscDamageAxis | null => {
+    let min = f(Math.floor(f(low * device)) - 1), max = f(Math.ceil(f(high * device)) + 1);
+    if (Number.isFinite(extent) && extent > 0) {
+      const surface = Math.ceil(f(extent * device));
+      if (Number.isFinite(surface)) {
+        min = extreme(0, extreme(min, surface, false), true); max = extreme(0, extreme(max, surface, false), true);
+        if (!(max > min)) return null;
+      }
+    }
+    if (!(min >= -16777216 && min <= 16777216 && max >= -16777216 && max <= 16777216)) {
+      const edge = nudge(f(min / device), false), end = nudge(f(max / device), true);
+      let span = extreme(0, nudge(f(end - edge), true), true);
+      while (span > 0 && !Number.isFinite(f(edge + span))) span = next(span, false);
+      return { edge, span };
+    }
+    let edge = f(min / device);
+    while (edge * device >= min) edge = next(edge, false);
+    while (edge * device < min) edge = next(edge, true);
+    if (edge === 0) edge = 0;
+    let target = f(max / device);
+    while (target * device <= max) target = next(target, true);
+    while (target * device > max) target = next(target, false);
+    if (target <= edge) return { edge, span: 0 };
+    let span = f(target - edge);
+    while (span > 0 && edge + span > target) { const smaller = next(span, false); if (smaller === span) return { edge, span: 0 }; span = smaller; }
+    return { edge, span: span <= 0 ? 0 : span };
+  };
+  const x = axis(r.x, nscvSurfaceRight(r), width), y = axis(r.y, nscvSurfaceBottom(r), height);
+  if (x === null || y === null || x.span <= 0 || y.span <= 0) return null;
+  return { x: x.edge, y: y.edge, width: x.span, height: y.span };
+}
+interface NscDamageAxis { readonly edge: number; readonly span: number; }

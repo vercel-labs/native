@@ -458,6 +458,7 @@ pub const CanvasFrameOptions = struct {
     render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -632,7 +633,21 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     var changes: []const DiffChange = storage.changes[0..0];
     var dirty_bounds: ?geometry.RectF = null;
 
-    if (full_repaint) {
+    if (options.render_damage_policy) |owner| {
+        if (!full_repaint) changes = try DisplayList.diff(previous.?, next, storage.changes);
+        var rects: [max_canvas_frame_dirty_rects]geometry.RectF = undefined;
+        const result = @import("render_damage_policy.zig").finalize(.{
+            .full_repaint = full_repaint,
+            .surface_size = options.surface_size,
+            .scale = options.scale,
+            .render_bounds = render_plan.bounds,
+            .override_bounds = render_override_dirty_bounds,
+            .sample_extent_multiplier = options.backdrop_blur_sample_extent_multiplier,
+        }, changes, render_plan.commands, &rects, owner, planning_workspace.?);
+        full_repaint = result.full_repaint;
+        dirty_bounds = result.bounds;
+        if (full_repaint) changes = storage.changes[0..0];
+    } else if (full_repaint) {
         dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
     } else {
         changes = try DisplayList.diff(previous.?, next, storage.changes);

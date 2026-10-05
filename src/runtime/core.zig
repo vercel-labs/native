@@ -263,6 +263,7 @@ pub const Runtime = struct {
     render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
     render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Reused by runtime-created window restoration. `Store.loadWindow`
     /// needs the whole bounded state file plus decoded-string scratch; keep
     /// that 64-KiB workspace on the already heap-owned Runtime instead of
@@ -1268,6 +1269,10 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub const DamageCurrentCommand = @import("canvas_frame.zig").DamageCurrentCommand;
+    pub const referenceDamageSnap = @import("canvas_frame.zig").referenceDamageSnap;
+    pub const referenceDamageWiden = @import("canvas_frame.zig").referenceDamageWiden;
+    pub const referenceDamagePatch = @import("canvas_frame.zig").referenceDamagePatch;
     pub fn mergeCanvasRenderOverrides(scheduled: []const canvas.CanvasRenderOverride, explicit: []const canvas.CanvasRenderOverride, output: []canvas.CanvasRenderOverride) ![]const canvas.CanvasRenderOverride {
         return canvas_frame_helpers.mergeCanvasRenderOverrides(scheduled, explicit, output);
     }

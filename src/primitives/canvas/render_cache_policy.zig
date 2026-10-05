@@ -26,6 +26,16 @@ pub const Workspace = struct {
         return initBytes(policy, 32 + (first + second) * 40 + commands * 92 + entries * 28, @max(64 + commands * 44, 16 + @min(first + second, capacity) * 4));
     }
 
+    pub fn initDamage(policy: Policy, changes: usize, commands: usize, baseline: usize, current: usize) Workspace {
+        const bytes = damageBytes(changes, commands, baseline, current);
+        return initBytes(policy, bytes[0], bytes[1]);
+    }
+
+    fn damageBytes(changes: usize, commands: usize, baseline: usize, current: usize) [2]usize {
+        const rect_bytes = @import("frame.zig").max_canvas_frame_dirty_rects * 16;
+        return .{ @max(128 + changes * 20 + commands * 68 + rect_bytes, 128 + (baseline + current) * 32), 64 + rect_bytes + baseline * 2 + current };
+    }
+
     fn initBytes(policy: Policy, request_bytes: usize, result_bytes: usize) Workspace {
         return .{
             .policy = policy,
@@ -35,11 +45,11 @@ pub const Workspace = struct {
     }
 
     pub fn forFrame(policy: ?Policy, storage: anytype, options: anytype, command_count: usize) ?Workspace {
-        return forFrameWithOverrides(policy, storage, options, command_count, 0, 0, 0);
+        return forFrameWithOverrides(policy, storage, options, command_count, 0, 0, 0, 0);
     }
 
-    pub fn forFrameWithOverrides(policy: ?Policy, storage: anytype, options: anytype, command_count: usize, scheduled_count: usize, dirty_count: usize, merge_capacity: usize) ?Workspace {
-        const owner = policy orelse options.render_plan_policy orelse options.render_override_policy orelse return null;
+    pub fn forFrameWithOverrides(policy: ?Policy, storage: anytype, options: anytype, command_count: usize, scheduled_count: usize, dirty_count: usize, merge_capacity: usize, baseline_count: usize) ?Workspace {
+        const owner = policy orelse options.render_plan_policy orelse options.render_override_policy orelse options.render_damage_policy orelse return null;
         var facts: usize = 0;
         var entries: usize = 0;
         var actions: usize = 0;
@@ -66,6 +76,11 @@ pub const Workspace = struct {
             const merged = scheduled_count + options.render_overrides.len;
             request_bytes = @max(request_bytes, 32 + (options.previous_render_overrides.len + merged) * 40 + draws * 92 + dirty_count * 28);
             result_bytes = @max(result_bytes, @max(64 + draws * 44, 16 + @min(merged, merge_capacity) * 4));
+        }
+        if (options.render_damage_policy != null) {
+            const bytes = damageBytes(storage.changes.len, @min(command_count, storage.render_commands.len), baseline_count, @min(command_count, storage.render_commands.len));
+            request_bytes = @max(request_bytes, bytes[0]);
+            result_bytes = @max(result_bytes, bytes[1]);
         }
         return initBytes(owner, request_bytes, result_bytes);
     }
