@@ -86,7 +86,8 @@ export function native_theme_policy(request: Uint8Array): Uint8Array {
     for (let i = 1; i < 4; i++) if (request[i]! > 1) throw new Error("invalid theme control flag");
     result[0] = request[1] === 1 ? 1 : request[2] === 1 ? 2 : 0;
     result[1] = result[0] === 0 && (request[3] === 0 || request[4] === 0) ? 1 : 0;
-    result[2] = request[1] === 1 || request[3] === 1 || result[1] === 1 || request[5] === 1 ? 1 : 0;
+    const overrides = request.length === 6 && request[5] === 1;
+    result[2] = request[1] === 1 || request[3] === 1 || result[1] === 1 || overrides ? 1 : 0;
     return result;
   }
   throw new Error("unknown theme policy operation");

@@ -111,3 +111,25 @@ test "compiled themes retain forced scheme, accessibility and complete-register 
     restamp(&reference, app.effectiveTokens());
     try std.testing.expectEqualDeep(reference, app.effectiveTokens());
 }
+
+test "compiled theme control retains five-byte ABI and validates the optional overrides flag" {
+    defer core.rt.frameReset();
+    for (0..2) |function| for (0..2) |fixed| for (0..2) |helper| for (0..3) |scheme| {
+        const follows = function == 0 and fixed == 0 and (helper == 0 or scheme == 0);
+        const derives = function != 0 or helper != 0 or follows;
+        var result: [4]u8 = undefined;
+        const legacy = [_]u8{ 2, @intCast(function), @intCast(fixed), @intCast(helper), @intCast(scheme) };
+        const reference = [_]u8{ if (function != 0) 1 else if (fixed != 0) 2 else 0, @intFromBool(follows), @intFromBool(derives), 0 };
+        try std.testing.expectEqual(result.len, core.nativeThemePolicy(&legacy, &result));
+        try std.testing.expectEqualSlices(u8, &reference, &result);
+        core.rt.frameReset();
+        for (0..2) |overrides| {
+            const request = [_]u8{ 2, @intCast(function), @intCast(fixed), @intCast(helper), @intCast(scheme), @intCast(overrides) };
+            var expected_result = reference;
+            expected_result[2] = @intFromBool(derives or overrides != 0);
+            try std.testing.expectEqual(result.len, core.nativeThemePolicy(&request, &result));
+            try std.testing.expectEqualSlices(u8, &expected_result, &result);
+            core.rt.frameReset();
+        }
+    };
+}
