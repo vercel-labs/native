@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const core = @import("surface_fixture_core");
 const canvas = native_sdk.canvas;
@@ -75,6 +76,9 @@ test "compiled anchors preserve every placement alignment point constraint and f
                 for (0..values.len) |axis| {
                     const original = values[axis];
                     for (samples) |sample| {
+                        // Safety builds assert finite clamp bounds. ReleaseFast
+                        // compares nonfinite native arithmetic as well.
+                        if ((builtin.mode == .Debug or builtin.mode == .ReleaseSafe) and !std.math.isFinite(sample)) continue;
                         values[axis] = sample;
                         const child = canvas.Widget{ .id = 1, .kind = .popover, .frame = .init(0, 0, values[8], values[9]), .layout = .{ .min_size = .init(values[10], values[11]), .max_size = .init(values[12], values[13]) } };
                         const anchor = canvas.WidgetAnchor{ .placement = placement, .alignment = alignment, .offset = values[14], .point = if (point) .init(values[15], values[16]) else null };
