@@ -1,3 +1,4 @@
+// Native behavior reference for the compiled ui-inbox core and view.
 //! ui-inbox: a native-rendered task inbox authored in markup + Zig.
 //!
 //! The view lives in `inbox.native` (embedded into the binary, and watched for
@@ -8,7 +9,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -31,7 +31,6 @@ const max_task_title = 32;
 /// back to when no titlebar band overlays the content (fullscreen,
 /// standard chrome, tests).
 pub const header_natural_height: f32 = 52;
-
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
@@ -162,7 +161,6 @@ pub const Model = struct {
         return model.task_count - model.openCount();
     }
 
-
     pub fn visible(model: *const Model, arena: std.mem.Allocator) []const Task {
         const out = arena.alloc(Task, model.task_count) catch return &.{};
         var count: usize = 0;
@@ -218,7 +216,7 @@ pub fn onChrome(chrome: native_sdk.WindowChrome) ?Msg {
 // ------------------------------------------------------------------- view
 
 pub const InboxUi = canvas.Ui(Msg);
-pub const inbox_markup = @embedFile("inbox.native");
+pub const inbox_markup = @embedFile("inbox_reference.native");
 pub const CompiledInboxView = canvas.CompiledMarkupView(Model, Msg, inbox_markup);
 
 /// Debug builds keep the interpreter for .native hot reload; release builds
@@ -259,37 +257,4 @@ pub fn mobileOptions() native_sdk.UiApp(Model, Msg).Options {
         .update = update,
         .view = CompiledInboxView.build,
     };
-}
-
-pub fn main(init: std.process.Init) !void {
-    const app_state = try std.heap.page_allocator.create(InboxApp);
-    defer std.heap.page_allocator.destroy(app_state);
-    app_state.* = InboxApp.init(std.heap.page_allocator, initialModel(), .{
-        .name = "ui-inbox",
-        .scene = shell_scene,
-        .canvas_label = canvas_label,
-        .update = update,
-        .on_chrome = onChrome,
-        .view = CompiledInboxView.build,
-        .markup = if (dev_markup_reload)
-            .{ .source = inbox_markup, .watch_path = "src/inbox.native", .io = init.io }
-        else
-            null,
-    });
-    defer app_state.deinit();
-    try runner.runWithOptions(app_state.app(), .{
-        .app_name = "ui-inbox",
-        .window_title = "Native SDK Inbox",
-        .bundle_id = "dev.native_sdk.ui_inbox",
-        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .js_window_api = false,
-        .security = .{
-            .permissions = &app_permissions,
-            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app" } },
-        },
-    }, init);
-}
-
-test {
-    _ = @import("tests.zig");
 }

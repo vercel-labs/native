@@ -89,6 +89,24 @@ This creates native chrome and controls in the platform host while the `main` We
 
 ## Canvas + WebView In One Window
 
+A TypeScript canvas app exports `webPanes(model): readonly WebViewPane[]` to coordinate a manifest-declared child WebView with its canvas layout:
+
+```ts:src/core.ts
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: asciiBytes("preview-pane"),
+    x: 0, y: 0, width: 0, height: 0,
+    url: asciiBytes(model.docs ? "https://native-sdk.dev/" : "https://example.com/"),
+    reloadToken: model.reloadToken }];
+}
+```
+
+Reserve the region in `app.native` with `<panel grow="1" label="preview-pane"/>`. The label names an existing WebView in the manifest; the anchor follows the widget's measured bounds. With `anchor: null`, the explicit frame applies. Changing the URL navigates, and changing `reloadToken` reloads. The first four descriptors apply in order. Geometry is finite f32 canvas points with nonnegative dimensions; tokens are nonnegative safe integers. The adapter copies labels (64 bytes), anchors (256 bytes), and URLs (the platform URL budget) into native storage. Navigation retains the manifest's origin policy. See the TypeScript [Canvas Preview example](https://github.com/vercel-labs/native/tree/main/examples/canvas-preview).
+
+Zig cores and runtime extensions use the corresponding `UiApp.Options.web_panes` seam:
+
 A canvas-first `UiApp` can host a live webview next to its native-rendered widgets — the "native, web, or both per window" composition. The scene declares the webview shell view (parent it to the canvas view so frames share the canvas coordinate space), and `UiApp.Options.web_panes` keeps it snapped to a canvas widget's layout frame and drives navigation from the model:
 
 ```zig

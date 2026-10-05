@@ -1901,3 +1901,24 @@ export function tokenOverrides(model: Model): PartialTokens { return {}; }
 `);
   assert.ok(ruleIds(wrong).includes("NS1033"));
 });
+
+
+test("NS1033 webPanes requires the complete model-derived pane descriptor", () => {
+  const source = `
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+export interface Model { readonly docs: boolean; }
+export type Msg = { readonly kind: "show" } | { readonly kind: "hide" };
+export function initialModel(): Model { return { docs: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: null, url: asciiBytes("zero://app"), x: 0.125, y: 0, width: 400, height: 300, reloadToken: 0 }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly WebViewPane[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("webPanes(model: Model)", "webPanes(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
+});

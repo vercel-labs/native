@@ -377,3 +377,22 @@ test("wyhash matches the reference test vectors", () => {
   }
   assert.equal(wyhashHex(0n, enc.encode("")), "0409638ee2bde459");
 });
+
+
+test("webPanes emits canonical f64 descriptors and an unbound shell helper", () => {
+  const doc = contractOf(`
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+export interface Model { readonly docs: boolean; }
+export type Msg = { readonly kind: "show" } | { readonly kind: "hide" };
+export function initialModel(): Model { return { docs: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: null, url: asciiBytes("zero://app"), x: 0, y: 0, width: 400, height: 300, reloadToken: 0 }];
+}
+`);
+  assert.deepEqual(doc.model_unbound, ["webPanes"]);
+  const pane = (doc.types as { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] }).structs.find(record => record.name === "WebViewPane")!;
+  for (const name of ["x", "y", "width", "height", "reloadToken"])
+    assert.equal(pane.fields.find(field => field.name === name)!.type.kind, "f64", name);
+});

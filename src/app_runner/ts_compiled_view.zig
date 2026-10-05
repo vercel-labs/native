@@ -20,7 +20,7 @@ const SpanRecord = struct {
 
 const Record = struct {
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable },
     text: []const u8,
     placeholder: []const u8 = "",
     command: []const u8 = "",
@@ -78,6 +78,7 @@ const Record = struct {
     codeLineDigits: ?u8 = null,
     codeAddedLines: ?[]const u8 = null,
     codeRemovedLines: ?[]const u8 = null,
+    contextMenu: []const ContextMenuRecord = &.{},
     press: ?[]const u8 = null,
     hold: ?[]const u8 = null,
     hoverEnter: ?[]const u8 = null,
@@ -95,6 +96,12 @@ const Record = struct {
     anchorAlignment: sdk.canvas.WidgetAnchorAlignment = .start,
     anchorOffset: f32 = 4,
     tooltipDelay: ?i32 = null,
+};
+const ContextMenuRecord = struct {
+    label: []const u8,
+    press: ?[]const u8 = null,
+    enabled: bool,
+    separator: bool,
 };
 const Tree = struct { format: u32, nodes: []const Record };
 
@@ -159,7 +166,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.change != null and value.kind != .radio and value.kind != .slider) return error.InvalidView;
     if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
-    const text_entry = value.kind == .input or value.kind == .search_field or value.kind == .textarea;
+    const text_entry = value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea;
     if (value.submitOnEnter and value.kind != .textarea) return error.InvalidView;
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
@@ -198,7 +205,20 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .scroll => .scroll_view,
         inline else => |tag| @field(sdk.canvas.WidgetKind, @tagName(tag)),
     };
+    if (value.contextMenu.len > 32) return error.InvalidView;
+    const non_hit_target = switch (value.kind) {
+        .row, .column, .stack, .list, .grid, .split, .tree, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .badge, .avatar, .tooltip, .separator, .spacer => true,
+        else => false,
+    };
+    if (value.contextMenu.len > 0 and non_hit_target and value.press == null and value.toggle == null and value.hold == null and value.drag == null) return error.InvalidView;
+    const context_menu = try ui.arena.alloc(Ui.ContextMenuItem, value.contextMenu.len);
+    for (value.contextMenu, context_menu) |item, *slot| {
+        if (item.separator and (item.label.len != 0 or item.press != null) or
+            !item.separator and (item.label.len == 0 or item.press == null)) return error.InvalidView;
+        slot.* = .{ .label = item.label, .msg = if (item.press) |bytes| try event(ui, bytes) else null, .enabled = item.enabled, .separator = item.separator };
+    }
     var result = ui.el(kind, .{
+        .context_menu = context_menu,
         .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
         .text = value.text,
@@ -468,6 +488,47 @@ test "compiled view strings belong to the native tree arena" {
         try std.testing.expectEqualStrings("café", result.widget.text);
         try std.testing.expectEqualStrings("label", result.key.?.str);
         try std.testing.expectEqualStrings("run.café", result.widget.command);
+    } else return error.SkipZigTest;
+}
+
+test "compiled context menus reject malformed rows and preserve owned dispatch" {
+    try testContextMenuRecords();
+}
+
+pub fn testContextMenuRecords() !void {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            "{\"label\":\"\",\"enabled\":true,\"separator\":false,\"press\":[1,0]}",
+            "{\"label\":\"Missing handler\",\"enabled\":true,\"separator\":false}",
+            "{\"label\":\"Bad handler\",\"enabled\":true,\"separator\":false,\"press\":[1,255]}",
+            "{\"label\":\"Separator text\",\"enabled\":true,\"separator\":true}",
+            "{\"label\":\"\",\"enabled\":true,\"separator\":true,\"press\":[1,0]}",
+        }) |row| {
+            const source = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"contextMenu\":[{s}]}}]}}", .{row});
+            try std.testing.expectError(error.InvalidView, decode(&ui, source));
+        }
+        const oversized = try ui.arena.alloc(ContextMenuRecord, 33);
+        @memset(oversized, .{ .label = "", .enabled = true, .separator = true });
+        const records = [_]Record{.{ .end = 1, .kind = .list_item, .text = "", .contextMenu = oversized }};
+        try std.testing.expectError(error.InvalidView, node(&ui, &records, 0, 1, 0));
+        inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
+            if (comptime field.type == void) {
+                const source = try std.fmt.allocPrint(std.testing.allocator, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"list_item\",\"text\":\"Task\",\"contextMenu\":[{{\"label\":\"Café\",\"press\":[1,{d}],\"enabled\":false,\"separator\":false}},{{\"label\":\"\",\"enabled\":true,\"separator\":true}}]}}]}}", .{tag});
+                defer std.testing.allocator.free(source);
+                const result = try decode(&ui, source);
+                @memset(source, 0);
+                const items = result.context_menu;
+                try std.testing.expectEqual(@as(usize, 2), items.len);
+                try std.testing.expectEqualStrings("Café", items[0].label);
+                try std.testing.expectEqual(@as(core.Msg, @unionInit(core.Msg, field.name, {})), items[0].msg.?);
+                try std.testing.expect(!items[0].enabled);
+                try std.testing.expect(items[1].separator and items[1].msg == null);
+                break;
+            }
+        }
     } else return error.SkipZigTest;
 }
 

@@ -512,6 +512,7 @@ export class SubsetChecker {
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
     this.checkWindowsHelper();
+    this.checkWebPanesHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -1524,6 +1525,24 @@ export class SubsetChecker {
   /// `windows(model)` is the TypeScript launcher's model-declared secondary
   /// window set. Keep the descriptor exact: the Zig adapter projects it into
   /// UiApp.WindowDescriptor, including close-command routing and closePolicy.
+  private checkWebPanesHelper(): void {
+    const decl = this.entryExportedFunction("webPanes");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "webPanes" && candidate.decl === decl);
+    const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
+    const descriptor = returns?.k === "slice" && returns.elem.k === "struct" ? this.table.structs.get(returns.elem.name) : undefined;
+    const fields = descriptor?.fields ?? [];
+    const field = (name: string) => fields.find(candidate => candidate.tsName === name)?.type;
+    const numeric = (name: string) => ["number", "i64", "f64", "numAlias"].includes(field(name)?.k ?? "");
+    const anchor = field("anchor");
+    if (helper === undefined || fields.map(candidate => candidate.tsName).sort().join(",") !== "anchor,height,label,reloadToken,url,width,x,y" ||
+        field("label")?.k !== "bytes" || field("url")?.k !== "bytes" ||
+        anchor?.k !== "optional" || anchor.inner.k !== "bytes" ||
+        !["x", "y", "width", "height", "reloadToken"].every(numeric)) {
+      this.report("NS1033", "`webPanes` must be a single-Model helper returning `readonly WebViewPane[]`; import WebViewPane from `@native-sdk/core/events`.", decl.type ?? decl);
+    }
+  }
+
   private checkWindowsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -2033,7 +2052,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

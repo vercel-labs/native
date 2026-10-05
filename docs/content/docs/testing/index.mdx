@@ -42,6 +42,10 @@ For drag and scroll tests, `drag(widget, { x, y })` sends a physical pointer ges
 
 For secondary windows, `snapshot.windows` lists live window identities, labels, titles, bounds, focus, and hidden state. `frame()` presents all live canvases. Select controls with `findWidget(snapshot, { role, name, view })`; pointer, text, and keyboard operations route to that canvas. `closeWindow(window)` sends a native user-close notification, including the window's close command. `menu(command, windowId)` addresses a specific window and defaults to the primary window.
 
+`contextPress(widget)` presents the declared native menu. `snapshot.contextMenu` contains the exact target, correlation token, pointer position, and all item records; labels remain lossless byte arrays. Pass that record to `contextMenuAction(menu, itemId)` to select an item, or use item `0` to dismiss. A superseded record exercises the native stale-token path and cannot select a successor menu. These events replay through the normal runtime.
+
+`snapshot.webViews` lists every open WebView's URL, bounds, layer, transparency, bridge setting, and zoom. The test host enforces the app manifest's permissions and navigation origins during startup and replay, so undeclared navigation fails as it does in a shipping app.
+
 ### Models, effects, and replay
 
 `snapshot.model` is the committed native model's JSON projection: byte values become number arrays, enums become strings, and tagged unions use the generated mirror's `{arm: payload}` shape. Its TypeScript type is a JSON record. `snapshot.widgets` contains accessibility state, bounds, and available actions. Each widget's `value` reports its applied numeric accessibility value, or `null` when it has none; use it to assert slider and split-divider positions, including retained values outside the model. The `fingerprint` covers the native accessibility tree.

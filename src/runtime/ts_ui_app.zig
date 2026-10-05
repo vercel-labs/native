@@ -526,6 +526,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                     stamped.window_policy = core.nativeWindowPolicy;
                 }
             }
+            if (comptime @hasDecl(Model, "webPanes")) {
+                if (options.web_panes != null) @panic("TsUiApp owns web_panes from webPanes - remove custom pane wiring");
+                comptime validateWebPanesHelper();
+                stamped.web_panes = webPanesAdapter;
+            }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
             // teaching compile error in the adapter below). A wiring that
@@ -818,6 +823,88 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 };
             }
             return scratch.status_items[0..raw_states.len];
+        }
+
+        const PaneStrings = struct {
+            label: [64]u8 = undefined,
+            anchor: [256]u8 = undefined,
+            url: [platform.max_webview_url_bytes]u8 = undefined,
+        };
+        // The helper's frame may expire as soon as the next compiled call
+        // runs. OS reconciliation receives only bounded native-owned bytes.
+        var pane_strings: [@import("ui_app.zig").max_web_panes]PaneStrings = undefined;
+
+        fn paneBytes(out: []u8, source: []const u8) []const u8 {
+            if (source.len > out.len) @panic("TsUiApp: webPanes text exceeds the native pane budget");
+            @memcpy(out[0..source.len], source);
+            return out[0..source.len];
+        }
+
+        fn paneNumber(value: anytype) f64 {
+            return switch (@typeInfo(@TypeOf(value))) {
+                .int => @floatFromInt(value),
+                .float => @floatCast(value),
+                else => unreachable,
+            };
+        }
+
+        fn paneCoordinate(value: anytype) error{InvalidWebPane}!f32 {
+            const number = paneNumber(value);
+            if (!std.math.isFinite(number) or @abs(number) > std.math.floatMax(f32)) return error.InvalidWebPane;
+            return @floatCast(number);
+        }
+
+        fn paneDimension(value: anytype) error{InvalidWebPane}!f32 {
+            const number = try paneCoordinate(value);
+            if (number < 0) return error.InvalidWebPane;
+            return number;
+        }
+
+        fn paneReloadToken(value: anytype) error{InvalidWebPane}!u64 {
+            const number = paneNumber(value);
+            if (!std.math.isFinite(number) or number < 0 or number > 9007199254740991 or @floor(number) != number) return error.InvalidWebPane;
+            return @intFromFloat(number);
+        }
+
+        fn webPanesAdapter(model: *const Model, out: []App.WebViewPane) usize {
+            const params = @typeInfo(@TypeOf(Model.webPanes)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.webPanes() else model.webPanes(core.rt.frameAllocator());
+            const count = @min(raw.len, @min(out.len, pane_strings.len));
+            if (raw.len > pane_strings.len) ts_ui_app_log.warn("webPanes declared {d} panes; the budget is {d}; excess panes are ignored", .{ raw.len, count });
+            for (raw[0..count], 0..) |raw_pane, index| {
+                const pane = if (comptime @typeInfo(@TypeOf(raw_pane)) == .pointer) raw_pane.* else raw_pane;
+                const token = paneReloadToken(pane.reloadToken) catch @panic("TsUiApp: webPanes reloadToken must be a nonnegative safe integer");
+                const width = paneDimension(pane.width) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
+                const height = paneDimension(pane.height) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
+                out[index] = .{
+                    .label = paneBytes(&pane_strings[index].label, pane.label),
+                    .anchor = if (pane.anchor) |anchor| paneBytes(&pane_strings[index].anchor, anchor) else null,
+                    .url = paneBytes(&pane_strings[index].url, pane.url),
+                    .frame = @import("geometry").RectF.init(paneCoordinate(pane.x) catch @panic("TsUiApp: invalid pane x"), paneCoordinate(pane.y) catch @panic("TsUiApp: invalid pane y"), width, height),
+                    .reload_token = token,
+                };
+            }
+            return count;
+        }
+
+        fn validateWebPanesHelper() void {
+            const teaching = "TsUiApp: export webPanes(model: Model): readonly WebViewPane[]; import WebViewPane from @native-sdk/core/events";
+            const info = @typeInfo(@TypeOf(Model.webPanes));
+            if (info != .@"fn") @compileError(teaching);
+            const function = info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type != *const Model) @compileError(teaching);
+            if (function.params.len == 2 and function.params[1].type != std.mem.Allocator) @compileError(teaching);
+            const returned = @typeInfo(function.return_type orelse @compileError(teaching));
+            if (returned != .pointer or returned.pointer.size != .slice or !returned.pointer.is_const) @compileError(teaching);
+            const Pane = statusItemRecordType(returned.pointer.child, teaching);
+            if (@typeInfo(Pane).@"struct".fields.len != 8) @compileError(teaching);
+            inline for (.{ "label", "url" }) |name| {
+                if (!@hasField(Pane, name) or @FieldType(Pane, name) != []const u8) @compileError(teaching);
+            }
+            if (!@hasField(Pane, "anchor") or @FieldType(Pane, "anchor") != ?[]const u8) @compileError(teaching);
+            inline for (.{ "x", "y", "width", "height", "reloadToken" }) |name| {
+                if (!@hasField(Pane, name) or !statusItemNumericType(@FieldType(Pane, name))) @compileError(teaching);
+            }
         }
 
         fn windowsAdapter(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
@@ -2015,4 +2102,55 @@ test "TypeScript window close commands refuse missing and unmapped command callb
     Adapter.command_store = mappedWindowCloseCommand;
     try std.testing.expectError(error.UnmappedCommand, Adapter.windowCloseMsg("settings.missing"));
     try std.testing.expectEqual(WindowCloseCommandTestCore.Msg.closed, (try Adapter.windowCloseMsg("settings.closed")).?);
+}
+
+const WebPanesAdapterTestCore = struct {
+    const Pane = struct { label: []const u8, anchor: ?[]const u8, url: []const u8, x: f64, y: f64, width: f64, height: f64, reloadToken: f64 };
+    var label = [_]u8{ 'p', 'a', 'n', 'e' };
+    var anchor = [_]u8{ 's', 'l', 'o', 't' };
+    var url = [_]u8{ 'z', 'e', 'r', 'o', ':', '/', '/', 'a', 'p', 'p' };
+    var panes = [_]Pane{.{ .label = &label, .anchor = &anchor, .url = &url, .x = -2.125, .y = 4.5, .width = 100.25, .height = 48.5, .reloadToken = 9007199254740991 }} ** 5;
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        pub fn webPanes(_: *const Model) []const Pane {
+            return &panes;
+        }
+    };
+};
+
+test "TypeScript pane adapter copies result bytes and preserves bounded fractional geometry" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    comptime Adapter.validateWebPanesHelper();
+    const model = WebPanesAdapterTestCore.Model{};
+    var panes: [4]Adapter.App.WebViewPane = undefined;
+    try std.testing.expectEqual(@as(usize, 4), Adapter.webPanesAdapter(&model, &panes));
+    const saved = panes[0];
+    WebPanesAdapterTestCore.label[0] = 'x';
+    WebPanesAdapterTestCore.anchor[0] = 'x';
+    WebPanesAdapterTestCore.url[0] = 'x';
+    defer {
+        WebPanesAdapterTestCore.label[0] = 'p';
+        WebPanesAdapterTestCore.anchor[0] = 's';
+        WebPanesAdapterTestCore.url[0] = 'z';
+    }
+    try std.testing.expectEqualStrings("pane", saved.label);
+    try std.testing.expectEqualStrings("slot", saved.anchor.?);
+    try std.testing.expectEqualStrings("zero://app", saved.url);
+    try std.testing.expectEqual(@import("geometry").RectF.init(-2.125, 4.5, 100.25, 48.5), saved.frame);
+    try std.testing.expectEqual(@as(u64, 9007199254740991), saved.reload_token);
+    try std.testing.expectEqual(@as(usize, 1), Adapter.webPanesAdapter(&model, panes[0..1]));
+    WebPanesAdapterTestCore.panes[0].anchor = null;
+    defer WebPanesAdapterTestCore.panes[0].anchor = &WebPanesAdapterTestCore.anchor;
+    _ = Adapter.webPanesAdapter(&model, &panes);
+    try std.testing.expect(panes[0].anchor == null);
+}
+
+test "TypeScript pane boundary rejects invalid coordinates dimensions and reload tokens" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 3.5e38 }) |value|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneCoordinate(value));
+    try std.testing.expectError(error.InvalidWebPane, Adapter.paneDimension(@as(f64, -0.25)));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -1, 0.125, 9007199254740992 }) |value|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(value));
+    try std.testing.expectEqual(@as(f32, 0), try Adapter.paneDimension(@as(f64, 0)));
 }

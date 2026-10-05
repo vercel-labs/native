@@ -563,7 +563,7 @@ export class IntInference {
       // model may return fractional positions or dimensions through the same
       // SDK record. Mark the descriptor's immediate number fields as boundary
       // values, exactly like a host-constructed event record in reverse.
-      if (stmt.name?.text === "windows" && stmt.type) {
+      if ((stmt.name?.text === "windows" || stmt.name?.text === "webPanes") && stmt.type) {
         const returned = this.table.resolveTypeNode(stmt.type);
         if (returned.k === "slice" && returned.elem.k === "struct") {
           const descriptor = this.table.structs.get(returned.elem.name);

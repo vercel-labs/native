@@ -1239,6 +1239,44 @@ pub fn build(b: *std.Build) void {
         native_driver_step.dependOn(&text_policy_driver_run.step);
         ts_core_e2e_step.dependOn(&text_policy_driver_run.step);
         test_step.dependOn(&text_policy_driver_run.step);
+        const inbox_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        inbox_reference_run.setCwd(b.path("examples/ui-inbox"));
+        inbox_reference_run.has_side_effects = true;
+        inbox_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        inbox_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/inbox-view-reference"));
+        _ = inbox_reference_run.captureStdOut(.{});
+        _ = inbox_reference_run.captureStdErr(.{});
+        const inbox_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        inbox_driver_run.setCwd(b.path("examples/ui-inbox"));
+        inbox_driver_run.has_side_effects = true;
+        inbox_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        inbox_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/inbox-view-reference"));
+        _ = inbox_driver_run.captureStdOut(.{});
+        _ = inbox_driver_run.captureStdErr(.{});
+        inbox_driver_run.step.dependOn(&inbox_reference_run.step);
+        b.step("test-ts-inbox-driver", "Compare complete ui-inbox snapshots and sealed replay across view backends").dependOn(&inbox_driver_run.step);
+        native_driver_step.dependOn(&inbox_driver_run.step);
+        ts_core_e2e_step.dependOn(&inbox_driver_run.step);
+        test_step.dependOn(&inbox_driver_run.step);
+        const canvas_preview_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        canvas_preview_reference_run.setCwd(b.path("examples/canvas-preview"));
+        canvas_preview_reference_run.has_side_effects = true;
+        canvas_preview_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        canvas_preview_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/canvas_preview-view-reference"));
+        _ = canvas_preview_reference_run.captureStdOut(.{});
+        _ = canvas_preview_reference_run.captureStdErr(.{});
+        const canvas_preview_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
+        canvas_preview_driver_run.setCwd(b.path("examples/canvas-preview"));
+        canvas_preview_driver_run.has_side_effects = true;
+        canvas_preview_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        canvas_preview_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/canvas_preview-view-reference"));
+        _ = canvas_preview_driver_run.captureStdOut(.{});
+        _ = canvas_preview_driver_run.captureStdErr(.{});
+        canvas_preview_driver_run.step.dependOn(&canvas_preview_reference_run.step);
+        b.step("test-ts-canvas-preview-driver", "Compare complete canvas-preview snapshots and sealed replay across view backends").dependOn(&canvas_preview_driver_run.step);
+        native_driver_step.dependOn(&canvas_preview_driver_run.step);
+        ts_core_e2e_step.dependOn(&canvas_preview_driver_run.step);
+        test_step.dependOn(&canvas_preview_driver_run.step);
         const habits_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
         habits_reference_run.setCwd(b.path("examples/habits"));
         habits_reference_run.has_side_effects = true;
@@ -1292,6 +1330,14 @@ pub fn build(b: *std.Build) void {
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
+        const inbox_run = b.addRunArtifact(ts_core_artifacts.inbox);
+        b.step("test-ts-inbox-e2e", "Compare compiled Inbox with the native behavior reference").dependOn(&inbox_run.step);
+        ts_core_e2e_step.dependOn(&inbox_run.step);
+        test_step.dependOn(&inbox_run.step);
+        const canvas_preview_run = b.addRunArtifact(ts_core_artifacts.canvas_preview);
+        b.step("test-ts-canvas-preview-e2e", "Compare compiled Canvas Preview with the native behavior reference").dependOn(&canvas_preview_run.step);
+        ts_core_e2e_step.dependOn(&canvas_preview_run.step);
+        test_step.dependOn(&canvas_preview_run.step);
         const habits_e2e_run = b.addRunArtifact(ts_core_artifacts.habits);
         addTestStep(b, "test-ts-habits-e2e", "Compare compiled Habits with the native behavior reference", ts_core_artifacts.habits);
         ts_core_e2e_step.dependOn(&habits_e2e_run.step);
@@ -2473,7 +2519,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-examples-native-shard-3", "Run the third native-first example test shard"),
         b.step("test-examples-native-shard-4", "Run the fourth native-first example test shard"),
     };
-    const ui_inbox_example_step = addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned);
+    const ui_inbox_example_step = addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .managed);
     const native_example_steps = [_]*std.Build.Step{
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned),
@@ -2535,7 +2581,7 @@ pub fn build(b: *std.Build) void {
     if (b.graph.host.result.os.tag == .macos) {
         // The optimized test and model-contract links retain AppKit's C host
         // without analyzing the app's runtime entry point.
-        const optimized_ui_inbox = b.addSystemCommand(&.{ "zig", "build", "test", "-Doptimize=ReleaseFast", "-Dplatform=macos" });
+        const optimized_ui_inbox = managedExampleRun(b, host_cli_exe, &.{ "test", "-Doptimize=ReleaseFast", "-Dplatform=macos" });
         optimized_ui_inbox.setCwd(b.path("examples/ui-inbox"));
         optimized_ui_inbox.step.dependOn(ui_inbox_example_step);
         const optimized_step = b.step("test-example-ui-inbox-macos-optimized", "Link optimized macOS app tests and model contract against AppKit");
@@ -4002,6 +4048,8 @@ const TsCoreE2eArtifacts = struct {
     markup: *std.Build.Step.Compile,
     kanban: *std.Build.Step.Compile,
     habits: *std.Build.Step.Compile,
+    inbox: *std.Build.Step.Compile,
+    canvas_preview: *std.Build.Step.Compile,
     soundboard: *std.Build.Step.Compile,
     system_monitor: *std.Build.Step.Compile,
     /// The stock-IDE contract: a fresh scaffold (and the committed TS
@@ -4193,6 +4241,45 @@ fn tsCoreE2eArtifact(
     });
     kanban_mod.addImport("native_sdk", desktop_mod);
     kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
+
+    const inbox_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/ui-inbox/src/core.ts",
+        .src_dir = b.path("examples/ui-inbox/src"),
+        .name = "inbox_core",
+        .typescript_view = true,
+    });
+    const inbox_stage = b.addWriteFiles();
+    const inbox_root = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_e2e_tests.zig"), "inbox_e2e_tests.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference.zig"), "inbox_reference.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference_tests.zig"), "inbox_reference_tests.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference.native"), "inbox_reference.native");
+    _ = inbox_stage.addCopyFile(b.path("examples/ui-inbox/src/app.native"), "app.native");
+    const inbox_mod = b.createModule(.{ .root_source_file = inbox_root, .target = target, .optimize = optimize });
+    inbox_mod.addImport("native_sdk", desktop_mod);
+    inbox_mod.addImport("inbox_core", inbox_fixture.module);
+    const inbox_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    inbox_decoder.addImport("native_sdk", desktop_mod);
+    inbox_decoder.addImport("core.zig", inbox_fixture.module);
+    inbox_mod.addImport("inbox_decoder", inbox_decoder);
+
+    const canvas_preview_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/canvas-preview/src/core.ts",
+        .src_dir = b.path("examples/canvas-preview/src"),
+        .name = "canvas_preview_core",
+        .typescript_view = true,
+    });
+    const canvas_preview_stage = b.addWriteFiles();
+    const canvas_preview_root = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_e2e_tests.zig"), "canvas_preview_e2e_tests.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_reference.zig"), "canvas_preview_reference.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_reference_tests.zig"), "canvas_preview_reference_tests.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("examples/canvas-preview/src/app.native"), "app.native");
+    const canvas_preview_mod = b.createModule(.{ .root_source_file = canvas_preview_root, .target = target, .optimize = optimize });
+    canvas_preview_mod.addImport("native_sdk", desktop_mod);
+    canvas_preview_mod.addImport("canvas_preview_core", canvas_preview_fixture.module);
+    const canvas_preview_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    canvas_preview_decoder.addImport("native_sdk", desktop_mod);
+    canvas_preview_decoder.addImport("core.zig", canvas_preview_fixture.module);
+    canvas_preview_mod.addImport("canvas_preview_decoder", canvas_preview_decoder);
 
     const habits_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/habits/src/core.ts",
@@ -4572,6 +4659,8 @@ fn tsCoreE2eArtifact(
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
+        .inbox = filteredTestArtifact(b, inbox_mod, "ts-inbox-e2e-tests", &.{}),
+        .canvas_preview = filteredTestArtifact(b, canvas_preview_mod, "ts-canvas-preview-e2e-tests", &.{}),
         .habits = filteredTestArtifact(b, habits_mod, "ts-habits-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),

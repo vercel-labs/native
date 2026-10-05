@@ -148,8 +148,11 @@ pub fn testMain(init: std.process.Init) !void {
     defer boot_fonts.deinit();
     var options = appOptions(null);
     options.fonts = boot_fonts.entries[0..boot_fonts.len];
-    try native_sdk.native_testing.runWithCoreOptions(Adapter, init, options, .{
+    try native_sdk.native_testing.runWithSecurity(Adapter, init, options, .{
         .service_results = if (comptime services.enabled) .{ .index_fn = services.indexOf, .streaming_fn = services.isStreaming, .decode_fn = services.resultDecoder(core) } else null,
+    }, .{
+        .permissions = app_permissions,
+        .navigation = .{ .allowed_origins = allowed_origins },
     });
 }
 

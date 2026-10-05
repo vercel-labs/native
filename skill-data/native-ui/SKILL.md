@@ -94,6 +94,10 @@ With both set (dev), the compiled view renders until the watched file first chan
 
 ### Webview panes: canvas + live web content in one window
 
+For TypeScript apps, export `webPanes(model: Model): readonly WebViewPane[]` from `core.ts`. Import the descriptor from `@native-sdk/core/events`; return `label`, nullable `anchor`, `url`, `x`, `y`, `width`, `height`, and `reloadToken`. The label identifies an existing manifest WebView; the anchor identifies a widget label such as `<panel label="preview-pane" grow="1"/>`. See `examples/canvas-preview` for pane, frame, and tray coordination in one compiled core. The native adapter copies bytes and validates finite geometry and safe integer tokens; the OS owns WebView hosting and navigation policy.
+
+For Zig cores and extensions:
+
 Declare the webview in the scene next to the gpu_surface (parent it to the canvas view), reserve its region with an empty panel carrying a semantics label, and let `Options.web_panes` snap the webview to that widget's layout frame while the model drives navigation:
 
 ```zig
@@ -170,6 +174,8 @@ Markup declares the menu as a `<context-menu>` element — a DIRECT child of the
   </context-menu>
 </list-item>
 ```
+
+The compiled TypeScript view supports one direct menu with at most 32 labeled `menu-item` leaves and bare separators. Items require `on-press` and may bind `disabled`; structure tags inside menus currently remain on the native markup backend. The menu is copied into the native tree arena before the compiled result expires.
 
 The Zig builder's mirror is `ElementOptions.context_menu` — per-widget items in the chrome-menu shape with typed messages:
 

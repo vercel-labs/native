@@ -1,3 +1,4 @@
+// Native behavior reference for the compiled Canvas Preview app.
 //! canvas-preview: the "both architectures in one window" dogfood app.
 //!
 //! One window hosts a native-sdk canvas (native-rendered toolbar and
@@ -14,7 +15,6 @@
 //! toolbar buttons do, through the ordinary `on_command` path.
 
 const std = @import("std");
-const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
@@ -184,24 +184,3 @@ pub fn options() PreviewApp.Options {
 }
 
 // -------------------------------------------------------------------- app
-
-pub fn main(init: std.process.Init) !void {
-    const app_state = try std.heap.page_allocator.create(PreviewApp);
-    defer std.heap.page_allocator.destroy(app_state);
-    app_state.* = PreviewApp.init(std.heap.page_allocator, .{}, options());
-    defer app_state.deinit();
-    try runner.runWithOptions(app_state.app(), .{
-        .app_name = "canvas-preview",
-        .window_title = "Native SDK Canvas Preview",
-        .bundle_id = "dev.native_sdk.canvas_preview",
-        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .js_window_api = false,
-        .security = .{
-            .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app", "https://example.com", "https://native-sdk.dev" } },
-        },
-    }, init);
-}
-
-test {
-    _ = @import("tests.zig");
-}

@@ -122,6 +122,10 @@ const WebLayerOption = web_layer_contract.WebViewLayer;
 
 pub const AppOptions = struct {
     name: []const u8,
+    /// Expose the embed archive on a desktop host as well as mobile targets.
+    /// The core is staged through the ordinary app build, including compiled
+    /// TypeScript wiring, before addMobileLib consumes it.
+    mobile_lib: bool = false,
     /// Explicit manifest path. Null auto-detects app.json first, then app.zon,
     /// so older owned build.zig files can adopt JSON without a build edit.
     manifest: ?[]const u8 = null,
@@ -1845,7 +1849,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // `-Dtarget`. Desktop targets keep the step absent. A TypeScript core
     // roots the library's app module at the staged mobile wiring and
     // merges the compiled archives into it.
-    if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
+    if (app_options.mobile_lib or target.result.os.tag == .ios or target.result.abi.isAndroid()) {
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),

@@ -221,10 +221,18 @@ export function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextIn
     cursor: event.cursor === null && shifted === stripped.length ? null : Math.trunc(shifted) };
 }
 
+// Byte ranges cross the same integer ABI as caret selections. State the
+// ordered bounds and whole-byte intent at the record construction boundary.
+function textRangeAt(start: number, end: number): TextRange {
+  const wholeStart = start >= 0 && start <= 9007199254740991 ? Math.trunc(start) : 0;
+  const wholeEnd = end >= 0 && end <= 9007199254740991 ? Math.trunc(end) : 0;
+  return { start: wholeStart, end: wholeEnd };
+}
+
 function rangeNormalized(r: TextRange, textLen: number): TextRange {
   const start = Math.min(r.start, textLen);
   const end = Math.min(r.end, textLen);
-  return start <= end ? { start: start, end: end } : { start: end, end: start };
+  return start <= end ? textRangeAt(start, end) : textRangeAt(end, start);
 }
 
 function rangeByteLen(r: TextRange, textLen: number): number {
@@ -238,7 +246,7 @@ function rangeIsCollapsed(r: TextRange, textLen: number): boolean {
 }
 
 function selectionRange(s: TextSelection, textLen: number): TextRange {
-  return rangeNormalized({ start: s.anchor, end: s.focus }, textLen);
+  return rangeNormalized(textRangeAt(s.anchor, s.focus), textLen);
 }
 
 /** Source-byte range for Copy/Cut. Clamp and order the selection, then snap
@@ -425,10 +433,7 @@ function snapTextCaretSelection(text: Uint8Array, selection: TextSelection): Tex
 function snapTextRange(text: Uint8Array, range: TextRange): TextRange {
   const normalized = rangeNormalized(range, text.length);
   return rangeNormalized(
-    {
-      start: snapTextOffset(text, normalized.start),
-      end: snapTextOffset(text, normalized.end),
-    },
+    textRangeAt(snapTextOffset(text, normalized.start), snapTextOffset(text, normalized.end)),
     text.length,
   );
 }
@@ -508,7 +513,7 @@ function setTextComposition(
   return {
     text: result.text,
     selection: caretSelectionAt(absoluteCursor, absoluteCursor),
-    composition: { start: result.insertedStart, end: result.insertedEnd },
+    composition: textRangeAt(result.insertedStart, result.insertedEnd),
   };
 }
 
@@ -538,7 +543,7 @@ function deleteBackwardTextEdit(state: TextEditState, capacity: number): TextEdi
   }
   return replaceTextEditRange(
     state,
-    { start: previousTextCaretOffset(state.text, caret), end: caret },
+    textRangeAt(previousTextCaretOffset(state.text, caret), caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -558,7 +563,7 @@ function deleteForwardTextEdit(state: TextEditState, capacity: number): TextEdit
   }
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextCaretOffset(state.text, caret) },
+    textRangeAt(caret, nextTextCaretOffset(state.text, caret)),
     new Uint8Array(0),
     capacity,
     null,
@@ -577,7 +582,7 @@ function deleteWordBackwardTextEdit(state: TextEditState, capacity: number): Tex
   }
   return replaceTextEditRange(
     state,
-    { start: previousTextWordOffset(state.text, caret), end: caret },
+    textRangeAt(previousTextWordOffset(state.text, caret), caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -597,7 +602,7 @@ function deleteWordForwardTextEdit(state: TextEditState, capacity: number): Text
   }
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextWordOffset(state.text, caret) },
+    textRangeAt(caret, nextTextWordOffset(state.text, caret)),
     new Uint8Array(0),
     capacity,
     null,
@@ -622,7 +627,7 @@ function deleteToStartTextEdit(state: TextEditState, capacity: number): TextEdit
   }
   return replaceTextEditRange(
     state,
-    { start: 0, end: caret },
+    textRangeAt(0, caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -642,7 +647,7 @@ function deleteToLineStartTextEdit(state: TextEditState, capacity: number): Text
   }
   return replaceTextEditRange(
     state,
-    { start: lineStart, end: caret },
+    textRangeAt(lineStart, caret),
     new Uint8Array(0),
     capacity,
     null,

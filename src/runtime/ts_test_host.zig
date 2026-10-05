@@ -9,7 +9,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, tray, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, context_menu, tray, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
     app_data_directory: []const u8 = "",
     width: u32 = 640,
     height: u32 = 480,
@@ -41,6 +41,7 @@ const Request = struct {
     status_item: u32 = 1,
     item: u32 = 1,
     widget: []const u8 = "0",
+    token: []const u8 = "0",
     text_action: enum { set_text, set_selection, set_composition, commit_composition, cancel_composition } = .set_text,
     text: []const u8 = "",
     input: enum { pointer_move, pointer_down, pointer_drag, pointer_up, pointer_cancel, scroll } = .pointer_down,
@@ -71,6 +72,12 @@ pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Opti
 /// Generated service result codecs remain active under the fake executor.
 /// Tests feed serialized results without launching production transports.
 pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, options: Adapter.Options, core_options: Adapter.CoreOptions) !void {
+    try runWithSecurity(Adapter, init, options, core_options, .{});
+}
+
+/// The generated launcher supplies the same manifest policy to test startup
+/// and replay. Test callers cannot grant undeclared navigation or permissions.
+pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: Adapter.Options, core_options: Adapter.CoreOptions, security: sdk.SecurityPolicy) !void {
     const gpa = std.heap.page_allocator;
     const Host = struct {
         harness: *sdk.TestHarness(),
@@ -82,7 +89,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
         app_data_roots: [1][]const u8 = .{""},
         env_values: []Adapter.EnvValue = &.{},
 
-        fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions, replaying: bool) !*@This() {
+        fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions, policy: sdk.SecurityPolicy, replaying: bool) !*@This() {
             if (config.width == 0 or config.width > 8192 or config.height == 0 or config.height > 8192) return error.InvalidSurfaceSize;
             // Times cross JavaScript exactly; reject out-of-range input.
             if (config.wall_ms < -9007199254740991 or config.wall_ms > 9007199254740991) return error.InvalidClock;
@@ -99,6 +106,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
             errdefer self.harness.destroy(gpa);
             self.harness.null_platform.gpu_surfaces = true;
             self.harness.null_platform.image_decode = true;
+            self.harness.runtime.options.security = policy;
             var core_wiring = wiring;
             if (!replaying and config.app_data_directory.len > 0) {
                 if (!std.fs.path.isAbsolute(config.app_data_directory)) return error.InvalidAppDataDirectory;
@@ -189,6 +197,33 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                 });
             }
             try json.endArray();
+            try json.objectField("webViews");
+            try json.beginArray();
+            for (self.harness.null_platform.webviews[0..self.harness.null_platform.webview_count]) |view| {
+                if (!view.open) continue;
+                try json.write(.{ .window = view.window_id, .label = view.label, .url = view.url, .bounds = view.frame, .layer = view.layer, .transparent = view.transparent, .bridgeEnabled = view.bridge_enabled, .zoom = view.zoom });
+            }
+            try json.endArray();
+            try json.objectField("contextMenu");
+            if (self.harness.runtime.canvas_widget_context_menu_pending) |pending| {
+                const platform = &self.harness.null_platform;
+                try json.beginObject();
+                try json.objectField("window");
+                try json.write(platform.context_menu_window_id);
+                try json.objectField("view");
+                try json.write(platform.contextMenuLabel());
+                try json.objectField("token");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{pending.token}));
+                try json.objectField("target");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{pending.target_id}));
+                try json.objectField("point");
+                try json.write(platform.context_menu_point);
+                try json.objectField("items");
+                json.options.emit_strings_as_arrays = true;
+                try json.write(platform.contextMenuItems());
+                json.options.emit_strings_as_arrays = false;
+                try json.endObject();
+            } else try json.write(null);
             try json.objectField("statusItems");
             try json.beginArray();
             for (&self.harness.null_platform.status_items) |*item| {
@@ -445,7 +480,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
         if (request.op == .start) {
             if (host != null) return error.AlreadyStarted;
             config = request;
-            host = try Host.create(config, options, core_options, false);
+            host = try Host.create(config, options, core_options, security, false);
             recorder.begin(.{ .platform_name = "test", .app_name = options.name, .window_width = @floatFromInt(config.width), .window_height = @floatFromInt(config.height) });
             host.?.harness.runtime.options.session_recorder = recorder;
             try host.?.harness.start(host.?.state.app());
@@ -491,6 +526,12 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     .paths = request.paths,
                 } }),
                 .menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .menu_command = .{ .name = request.command, .window_id = request.window } }),
+                .context_menu => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .context_menu_action = .{
+                    .window_id = request.window,
+                    .view_label = request.view,
+                    .token = try std.fmt.parseInt(u64, request.token, 10),
+                    .item_id = request.item,
+                } }),
                 .tray => try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .{ .tray_action = .{ .status_item_id = request.status_item, .item_id = request.item } }),
                 .window_close => {
                     const event = value.harness.null_platform.userCloseWindow(request.window) orelse return error.WindowNotFound;
@@ -554,7 +595,7 @@ pub fn runWithCoreOptions(comptime Adapter: type, init: std.process.Init, option
                     defer gpa.free(model_before);
                     value.destroy();
                     host = null;
-                    host = try Host.create(config, options, core_options, true);
+                    host = try Host.create(config, options, core_options, security, true);
                     const report = try sdk.runtime.replaySession(&host.?.harness.runtime, host.?.state.app(), journal.bytes.items, .{
                         .verify = true,
                         .require_same_platform = false,

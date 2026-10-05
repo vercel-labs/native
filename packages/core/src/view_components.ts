@@ -5,6 +5,7 @@
 import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, textClipboardRange as nscvClipboardRange, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
 type NscViewSpan = { text: string; weight?: string; color?: string; scale?: number; monospace?: boolean; italic?: boolean; underline?: boolean };
+type NscContextMenuItem = { label: string; press?: number[]; enabled: boolean; separator: boolean };
 
 type NscViewNode = {
   end: number; kind: string; text: string; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
@@ -23,6 +24,7 @@ type NscViewNode = {
   spanWeight?: string; spanColor?: string; spanScale?: number;
   codeLanguage?: string; codeLineDigits?: number;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
+  contextMenu?: readonly NscContextMenuItem[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   hoverEnter?: number[]; hoverLeave?: number[];

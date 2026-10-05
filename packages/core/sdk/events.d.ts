@@ -1,4 +1,14 @@
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.js";
+export interface WebViewPane {
+    readonly label: Uint8Array;
+    readonly anchor: Uint8Array | null;
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly url: Uint8Array;
+    readonly reloadToken: number;
+}
 export type ThemeStatePack = "house" | "geist";
 export type ThemeStateColorScheme = "light" | "dark" | "system";
 export type ThemeState = {

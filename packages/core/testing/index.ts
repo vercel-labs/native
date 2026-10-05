@@ -52,6 +52,12 @@ export interface NativeSnapshot {
   readonly model: Readonly<Record<string, JsonValue>>;
   readonly fingerprint: string;
   readonly windows: readonly NativeWindow[];
+  readonly webViews: readonly {
+    readonly window: number; readonly label: string; readonly url: string;
+    readonly bounds: NativeWindow["bounds"]; readonly layer: number;
+    readonly transparent: boolean; readonly bridgeEnabled: boolean; readonly zoom: number;
+  }[];
+  readonly contextMenu: NativeContextMenu | null;
   readonly statusItems: readonly NativeStatusItem[];
   readonly widgets: readonly NativeWidget[];
   readonly effects: {
@@ -89,6 +95,14 @@ export interface NativeSnapshot {
       readonly tables: readonly string[];
     }[];
   };
+}
+export interface NativeContextMenu {
+  readonly window: number;
+  readonly view: string;
+  readonly token: string;
+  readonly target: string;
+  readonly point: NativePoint;
+  readonly items: readonly { readonly id: number; readonly label: readonly number[]; readonly enabled: boolean; readonly separator: boolean }[];
 }
 export interface NativeReplay {
   readonly events: number;
@@ -242,6 +256,12 @@ export class NativeApp implements AsyncDisposable {
   }
   contextPress(widget: NativeWidget): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "automation", command: `widget-context-press ${token(widget.view)} ${identity(widget.id)}` });
+  }
+  /** Resolve the exact presented native menu, including stale-token behavior.
+   * Item 0 dismisses it; other ids come from snapshot.contextMenu.items. */
+  contextMenuAction(menu: NativeContextMenu, item: number): Promise<NativeSnapshot> {
+    if (!Number.isSafeInteger(item) || item < 0 || item > 0xffffffff) throw new Error("Expected a native context-menu item id");
+    return this.#snapshot({ op: "context_menu", window: menu.window, view: token(menu.view), token: identity(menu.token), item });
   }
   /** Deliver the reserved timer while a manually driven gesture is armed. */
   fireHoldTimer(): Promise<NativeSnapshot> { return this.#snapshot({ op: "hold_timer" }); }

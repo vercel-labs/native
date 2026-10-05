@@ -1806,3 +1806,39 @@ test("text entry border tokens preserve the authored surface blend", () => {
   assert.equal(node.borderColor, "background");
   assert.throws(() => compileView('<input border-color="invalid" />', contract), /unsupported border-color/);
 });
+
+
+test("context-menu metadata retains typed dispatch, disabled rows and structural children", () => {
+  const { model, view } = evaluate('<list-item label="Task"><text>Content</text><context-menu><menu-item on-press="increment" disabled="{ticking}">Toggle</menu-item><separator/><menu-item on-press="reset">Reset</menu-item></context-menu></list-item>');
+  let nodes = view().nodes;
+  assert.equal(nodes.length, 2); assert.equal(nodes[0].end, 2);
+  assert.equal(nodes[1].text, "Content");
+  assert.deepEqual(nodes[0].contextMenu, [
+    { label: "Toggle", enabled: false, separator: false, press: [1, 3] },
+    { label: "", enabled: true, separator: true },
+    { label: "Reset", enabled: true, separator: false, press: [1, 5] },
+  ]);
+  model.ticking = false; assert.equal(view().nodes[0].contextMenu[0].enabled, true);
+  for (const markup of [
+    '<list-item><context-menu/><context-menu/></list-item>',
+    '<list-item><context-menu><menu-item>Missing handler</menu-item></context-menu></list-item>',
+    '<column><context-menu><menu-item on-press="increment">Wrong host</menu-item></context-menu></column>',
+    '<list-item><context-menu><button>Wrong</button></context-menu></list-item>',
+    '<list-item><context-menu><menu-item on-press="unknown">Wrong</menu-item></context-menu></list-item>',
+    '<list-item><context-menu><separator on-press="increment"/></context-menu></list-item>',
+    `<list-item><context-menu>${'<menu-item>Row</menu-item>'.repeat(33)}</context-menu></list-item>`,
+  ]) assert.throws(() => compileView(markup, contract), /compiled TypeScript view/);
+});
+
+test("compiled text-field retains its native kind rather than the input composite identity", () => {
+  const { view } = evaluate('<text-field text="{status}" placeholder="Task" on-submit="increment"/>');
+  assert.equal(view().nodes[0].kind, "text_field");
+  assert.deepEqual(view().nodes[0].submit, [1, 3]);
+});
+
+test("model-derived variants stay within the closed widget vocabulary", () => {
+  const input: ViewContract = { ...contract, types: { ...contract.types, enums: [{ name: "Variant", members: ["primary", "secondary"] }] }, model_helpers: [{ name: "variant", params: [], returns: { kind: "enum", name: "Variant" } }] };
+  assert.match(compileView('<button variant="{variant}"/>', input), /variant:/);
+  assert.throws(() => compileView('<button variant="{status}"/>', input), /variant/);
+  assert.throws(() => compileView('<button variant="{variant}"/>', { ...input, types: { ...input.types, enums: [{ name: "Variant", members: ["primary", "unknown"] }] } }), /variant/);
+});

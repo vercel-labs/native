@@ -46,6 +46,23 @@
 
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
 
+/// One scene-declared WebView driven by committed model state. Export
+/// `webPanes(model): readonly WebViewPane[]` to anchor it to a canvas widget
+/// label, or provide an explicit frame when `anchor` is null. Changing `url`
+/// navigates; changing `reloadToken` reloads the same URL. Native owns the
+/// WebView and applies the manifest's navigation policy. At most four panes
+/// are applied in declaration order.
+export interface WebViewPane {
+  readonly label: Uint8Array;
+  readonly anchor: Uint8Array | null;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly url: Uint8Array;
+  readonly reloadToken: number;
+}
+
 /// The stock theme axes a TypeScript core may derive from committed model
 /// state. Omit `pack`/`accent` to inherit app.zon; omit `colorScheme` (or
 /// return `"system"`) to follow the OS. High contrast and reduced motion
