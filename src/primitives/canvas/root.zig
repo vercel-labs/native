@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const RenderCacheWorkspace = @import("render_cache_policy.zig").Workspace;
 const command_model = @import("commands.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");

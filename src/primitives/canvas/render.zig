@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
@@ -535,6 +536,11 @@ pub const RenderBatchPlan = struct {
         var planner = RenderPipelineCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index);
     }
+    pub fn cachePlanWithWorkspace(self: RenderBatchPlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderPipelineCacheEntry, frame_index: u64, entries: []RenderPipelineCacheEntry, actions: []RenderPipelineCacheAction) Error!RenderPipelineCachePlan {
+        var planner = RenderPipelineCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
+        return planner.build(self, previous, frame_index);
+    }
 };
 
 pub const RenderBatchPlanner = struct {
@@ -648,6 +654,10 @@ pub const RenderPipelineCachePlanner = struct {
         self.action_len = 0;
     }
 
+    pub fn buildCompiled(self: *RenderPipelineCachePlanner, plan: RenderBatchPlan, previous: []const RenderPipelineCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderPipelineCachePlan {
+        return compiled_cache.build(.pipeline, RenderPipelineCachePlan, self, plan.batches, previous, frame_index, workspace, renderPipelineCacheKey, null, error.RenderPipelineCacheListFull);
+    }
+
     pub fn build(self: *RenderPipelineCachePlanner, batch_plan: RenderBatchPlan, previous: []const RenderPipelineCacheEntry, frame_index: u64) Error!RenderPipelineCachePlan {
         self.reset();
         for (batch_plan.batches, 0..) |batch, batch_index| {
@@ -744,4 +754,8 @@ fn unionOptionalBounds(a: ?geometry.RectF, b: ?geometry.RectF) ?geometry.RectF {
 
 fn affinesEqual(a: Affine, b: Affine) bool {
     return equality_model.affinesEqual(a, b);
+}
+
+fn renderPipelineCacheKey(batch: RenderBatch) RenderPipelineKind {
+    return batch.pipeline;
 }

@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -52,6 +53,11 @@ pub const RenderResourcePlan = struct {
 
     pub fn cachePlan(self: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64, entries: []RenderResourceCacheEntry, actions: []RenderResourceCacheAction) Error!RenderResourceCachePlan {
         var planner = RenderResourceCachePlanner.init(entries, actions);
+        return planner.build(self, previous, frame_index);
+    }
+    pub fn cachePlanWithWorkspace(self: RenderResourcePlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderResourceCacheEntry, frame_index: u64, entries: []RenderResourceCacheEntry, actions: []RenderResourceCacheAction) Error!RenderResourceCachePlan {
+        var planner = RenderResourceCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
         return planner.build(self, previous, frame_index);
     }
 };
@@ -218,6 +224,10 @@ pub const RenderResourceCachePlanner = struct {
     pub fn reset(self: *RenderResourceCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderResourceCachePlanner, plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderResourceCachePlan {
+        return compiled_cache.build(.resource, RenderResourceCachePlan, self, plan.resources, previous, frame_index, workspace, renderResourceKey, renderResourceKeyHash, error.RenderResourceCacheListFull);
     }
 
     pub fn build(self: *RenderResourceCachePlanner, resource_plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64) Error!RenderResourceCachePlan {

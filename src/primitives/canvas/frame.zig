@@ -1,3 +1,4 @@
+const render_cache = @import("render_cache_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
@@ -454,6 +455,7 @@ pub const CanvasFrame = struct {
 
 pub const CanvasFrameOptions = struct {
     text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -516,11 +518,14 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     var render_plan = try next.renderPlan(storage.render_commands);
     const render_override_dirty_bounds = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
     render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
+    var cache_workspace = render_cache.Workspace.forFrame(options.render_cache_policy, storage, options);
+    defer if (cache_workspace) |*workspace| workspace.deinit();
     const batch_plan = try render_plan.batchPlan(storage.render_batches);
     const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
         RenderPipelineCachePlan{}
     else
-        try batch_plan.cachePlan(
+        try batch_plan.cachePlanWithWorkspace(
+            if (cache_workspace) |*workspace| workspace else null,
             options.previous_pipeline_cache,
             options.frame_index,
             storage.pipeline_cache_entries,
@@ -533,7 +538,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
         RenderPathGeometryCachePlan{}
     else
-        try path_geometry_plan.cachePlan(
+        try path_geometry_plan.cachePlanWithWorkspace(
+            if (cache_workspace) |*workspace| workspace else null,
             options.previous_path_geometry_cache,
             options.frame_index,
             storage.path_geometry_cache_entries,
@@ -546,7 +552,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
         RenderImageCachePlan{}
     else
-        try image_plan.cachePlan(
+        try image_plan.cachePlanWithWorkspace(
+            if (cache_workspace) |*workspace| workspace else null,
             options.previous_image_cache,
             options.frame_index,
             storage.image_cache_entries,
@@ -559,14 +566,16 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const layer_cache_plan = if (storage.layer_cache_entries.len == 0 and storage.layer_cache_actions.len == 0)
         RenderLayerCachePlan{}
     else
-        try layer_plan.cachePlan(
+        try layer_plan.cachePlanWithWorkspace(
+            if (cache_workspace) |*workspace| workspace else null,
             options.previous_layer_cache,
             options.frame_index,
             storage.layer_cache_entries,
             storage.layer_cache_actions,
         );
     const resource_plan = try next.resourcePlan(storage.resources);
-    const resource_cache_plan = try resource_plan.cachePlan(
+    const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
+        if (cache_workspace) |*workspace| workspace else null,
         options.previous_resource_cache,
         options.frame_index,
         storage.resource_cache_entries,
@@ -579,7 +588,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const visual_effect_cache_plan = if (storage.visual_effect_cache_entries.len == 0 and storage.visual_effect_cache_actions.len == 0)
         VisualEffectCachePlan{}
     else
-        try visual_effect_plan.cachePlan(
+        try visual_effect_plan.cachePlanWithWorkspace(
+            if (cache_workspace) |*workspace| workspace else null,
             options.previous_visual_effect_cache,
             options.frame_index,
             storage.visual_effect_cache_entries,

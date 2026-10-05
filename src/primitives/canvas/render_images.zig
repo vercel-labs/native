@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -36,6 +37,11 @@ pub const RenderImagePlan = struct {
 
     pub fn cachePlan(self: RenderImagePlan, previous: []const RenderImageCacheEntry, frame_index: u64, entries: []RenderImageCacheEntry, actions: []RenderImageCacheAction) Error!RenderImageCachePlan {
         var planner = RenderImageCachePlanner.init(entries, actions);
+        return planner.build(self, previous, frame_index);
+    }
+    pub fn cachePlanWithWorkspace(self: RenderImagePlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderImageCacheEntry, frame_index: u64, entries: []RenderImageCacheEntry, actions: []RenderImageCacheAction) Error!RenderImageCachePlan {
+        var planner = RenderImageCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
         return planner.build(self, previous, frame_index);
     }
 };
@@ -164,6 +170,10 @@ pub const RenderImageCachePlanner = struct {
     pub fn reset(self: *RenderImageCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderImageCachePlanner, plan: RenderImagePlan, previous: []const RenderImageCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderImageCachePlan {
+        return compiled_cache.build(.image, RenderImageCachePlan, self, plan.images, previous, frame_index, workspace, renderImageKey, null, error.ImageCacheListFull);
     }
 
     pub fn build(self: *RenderImageCachePlanner, image_plan: RenderImagePlan, previous: []const RenderImageCacheEntry, frame_index: u64) Error!RenderImageCachePlan {

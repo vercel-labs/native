@@ -229,6 +229,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .app_start => {
                     self.shell_layout_policy = app.shell_layout_policy;
                     self.text_cache_policy = app.text_cache_policy;
+                    self.render_cache_policy = app.render_cache_policy;
                     // A startup failure must be loud and attributable.
                     // Without this record the error unwinds into the
                     // platform stop path and the only trace is a bare

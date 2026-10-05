@@ -117,6 +117,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 9) return nscvSemanticTree(request);
   if (request[0] === 10) return nscvExtentPolicy(request);
   if (request[0] === 11) return nscvTextCachePolicy(request);
+  if (request[0] === 12) return nscvRenderCachePolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1572,5 +1573,70 @@ function nscvTextCachePolicy(request: Uint8Array): Uint8Array {
   out.setUint32(0,entries.length,true);out.setUint32(4,actions.length/3,true);out.setUint32(8,failed?1:0,true);
   for(let i=0;i<entries.length;i++)out.setUint32(16+i*4,entries[i]!,true);
   for(let i=0;i<actions.length;i++)out.setUint32(16+entries.length*4+i*4,actions[i]!<0?4294967295:actions[i]!,true);
+  return result;
+}
+
+/** Copied render-cache keys. Native retains fingerprints, resources and GPU objects. */
+function nscvRenderCachePolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 24 || request[1]! > 5 || request[2] !== 0 || request[3] !== 0) throw new Error("invalid render cache request");
+  const input = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const current = input.getUint32(4, true), previous = input.getUint32(8, true);
+  const capacity = input.getUint32(12, true), actionCapacity = input.getUint32(16, true), total = current + previous;
+  if (total > 4294967295 || request.length !== 24 + total * 56 || input.getUint32(20, true) !== 0) throw new Error("invalid render cache shape");
+  for (let i = 0; i < total; i++) if (input.getUint32(24 + i * 56 + 52, true) !== 0) throw new Error("invalid render cache fact");
+  const indexed = request[1] === 4 && (current >= 64 || previous >= 64) && current <= 2048 && previous <= 2048;
+  const entries = new Uint32Array(Math.min(capacity, current));
+  const actions = new Uint32Array(Math.min(actionCapacity, total) * 3);
+  const previousHeads = new Uint32Array(indexed ? 4096 : 0), entryHeads = new Uint32Array(indexed ? 4096 : 0);
+  const previousNext = new Uint32Array(indexed ? previous : 0), entryNext = new Uint32Array(indexed ? Math.min(capacity, current) : 0);
+  if (indexed) for (let i = previous - 1; i >= 0; i--) {
+    const bucket = input.getUint32(24 + (current + i) * 56 + 48, true) & 4095;
+    previousNext[i] = previousHeads[bucket]!; previousHeads[bucket] = i + 1;
+  }
+  const equal = (a: number, b: number): boolean => {
+    const x = 24 + a * 56, y = 24 + b * 56;
+    for (let i = 0; i < 48; i++) if (request[x + i] !== request[y + i]) return false;
+    return true;
+  };
+  let entryCount = 0, actionCount = 0, failed = false;
+  const lookup = (source: number, old: boolean): number => {
+    if (indexed) {
+      const heads = old ? previousHeads : entryHeads, next = old ? previousNext : entryNext;
+      const bucket = input.getUint32(24 + source * 56 + 48, true) & 4095;
+      let match = -1;
+      for (let stored = heads[bucket]!; stored > 0; stored = next[stored - 1]!) {
+        const i = stored - 1;
+        if (equal(source, old ? current + i : entries[i]!) && (match < 0 || i < match)) match = i;
+      }
+      return match;
+    }
+    for (let i = 0; i < (old ? previous : entryCount); i++) if (equal(source, old ? current + i : entries[i]!)) return i;
+    return -1;
+  };
+  for (let i = 0; i < current; i++) {
+    if (lookup(i, false) >= 0) continue;
+    const old = lookup(i, true);
+    if (actionCount >= actionCapacity) { failed = true; break; }
+    actions[actionCount * 3] = old < 0 ? 0 : 1;
+    actions[actionCount * 3 + 1] = i; actions[actionCount * 3 + 2] = old < 0 ? 4294967295 : old; actionCount++;
+    // Native writes the action first, including when entry capacity then fails.
+    if (entryCount >= capacity) { failed = true; break; }
+    entries[entryCount] = i;
+    if (indexed) {
+      const bucket = input.getUint32(24 + i * 56 + 48, true) & 4095;
+      entryNext[entryCount] = entryHeads[bucket]!; entryHeads[bucket] = entryCount + 1;
+    }
+    entryCount++;
+  }
+  if (!failed) for (let i = 0; i < previous; i++) {
+    const source = current + i;
+    if (lookup(source, false) >= 0) continue;
+    if (actionCount >= actionCapacity) { failed = true; break; }
+    actions[actionCount * 3] = 2; actions[actionCount * 3 + 1] = source; actions[actionCount * 3 + 2] = i; actionCount++;
+  }
+  const result = new Uint8Array(16 + entryCount * 4 + actionCount * 12), output = new DataView(result.buffer);
+  output.setUint32(0, entryCount, true); output.setUint32(4, actionCount, true); output.setUint32(8, failed ? 1 : 0, true);
+  for (let i = 0; i < entryCount; i++) output.setUint32(16 + i * 4, entries[i]!, true);
+  for (let i = 0; i < actionCount * 3; i++) output.setUint32(16 + entryCount * 4 + i * 4, actions[i]!, true);
   return result;
 }

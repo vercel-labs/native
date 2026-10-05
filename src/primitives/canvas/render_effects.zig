@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -56,6 +57,11 @@ pub const VisualEffectPlan = struct {
             if (effect.kind == kind) count += 1;
         }
         return count;
+    }
+    pub fn cachePlanWithWorkspace(self: VisualEffectPlan, workspace: ?*compiled_cache.Workspace, previous: []const VisualEffectCacheEntry, frame_index: u64, entries: []VisualEffectCacheEntry, actions: []VisualEffectCacheAction) Error!VisualEffectCachePlan {
+        var planner = VisualEffectCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
+        return planner.build(self, previous, frame_index);
     }
 };
 
@@ -182,6 +188,10 @@ pub const VisualEffectCachePlanner = struct {
     pub fn reset(self: *VisualEffectCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *VisualEffectCachePlanner, plan: VisualEffectPlan, previous: []const VisualEffectCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!VisualEffectCachePlan {
+        return compiled_cache.build(.effect, VisualEffectCachePlan, self, plan.effects, previous, frame_index, workspace, visualEffectKey, null, error.VisualEffectCacheListFull);
     }
 
     pub fn build(self: *VisualEffectCachePlanner, effect_plan: VisualEffectPlan, previous: []const VisualEffectCacheEntry, frame_index: u64) Error!VisualEffectCachePlan {

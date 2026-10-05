@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -59,6 +60,11 @@ pub const RenderPathGeometryPlan = struct {
 
     pub fn cachePlan(self: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64, entries: []RenderPathGeometryCacheEntry, actions: []RenderPathGeometryCacheAction) Error!RenderPathGeometryCachePlan {
         var planner = RenderPathGeometryCachePlanner.init(entries, actions);
+        return planner.build(self, previous, frame_index);
+    }
+    pub fn cachePlanWithWorkspace(self: RenderPathGeometryPlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderPathGeometryCacheEntry, frame_index: u64, entries: []RenderPathGeometryCacheEntry, actions: []RenderPathGeometryCacheAction) Error!RenderPathGeometryCachePlan {
+        var planner = RenderPathGeometryCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
         return planner.build(self, previous, frame_index);
     }
 };
@@ -287,6 +293,10 @@ pub const RenderPathGeometryCachePlanner = struct {
     pub fn reset(self: *RenderPathGeometryCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderPathGeometryCachePlanner, plan: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderPathGeometryCachePlan {
+        return compiled_cache.build(.path, RenderPathGeometryCachePlan, self, plan.geometries, previous, frame_index, workspace, renderPathGeometryKey, null, error.PathGeometryCacheListFull);
     }
 
     pub fn build(self: *RenderPathGeometryCachePlanner, geometry_plan: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64) Error!RenderPathGeometryCachePlan {

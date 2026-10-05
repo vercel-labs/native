@@ -260,6 +260,7 @@ pub const Runtime = struct {
     shell_layout_count: usize = 0,
     shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
     text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Reused by runtime-created window restoration. `Store.loadWindow`
     /// needs the whole bounded state file plus decoded-string scratch; keep
     /// that 64-KiB workspace on the already heap-owned Runtime instead of
