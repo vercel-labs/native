@@ -68,3 +68,36 @@ test("extent scalar queries preserve f32 grouping and copied result ownership",(
  const negative=fixed(11,24);negative[3]=1;new DataView(negative.buffer).setFloat32(4,-10,true);assert.equal(float(run(negative)),0);
  for(const example of [estimates(9,[1]),estimates(10,[1]),fixed(11,24),search(2n)]){for(let n=1;n<example.length;n++)assert.throws(()=>run(example.subarray(0,n)));assert.throws(()=>run(new Uint8Array([...example,0])));}
 });
+function queryPlan(count:bigint,index:bigint,base=0n,covered=count<262144n?count:262144n,mode=1,checked=true){const b=fixed(13,48),w=new DataView(b.buffer);b[3]=mode|(checked?4:0);[count,index,base,covered,(covered+63n)/64n].forEach((v,i)=>w.setBigUint64(8+i*8,v,true));return b;}
+function decodePlan(b:Uint8Array){const w=new DataView(b.buffer,b.byteOffset,b.byteLength);return {index:w.getBigUint64(0,true),logical:w.getBigUint64(8,true),start:w.getBigUint64(16,true),extra:w.getBigUint64(24,true),gapCount:w.getBigUint64(32,true),chunk:w.getUint32(40,true),samples:w.getUint32(44,true),tail:w.getUint32(48,true),empty:w.getUint32(52,true)};}
+function rebuildPlan(count:bigint,first:bigint){const b=fixed(14,24),w=new DataView(b.buffer);w.setBigUint64(8,count,true);w.setBigUint64(16,first,true);return b;}
+function composed(values:readonly number[],flags=0,prefix=0,total=0,extra=0,covered=0,delta=0,gap=0,gapCount=0){const b=fixed(15,40+values.length*4),w=new DataView(b.buffer);b[3]=flags;w.setUint32(4,values.length,true);[prefix,total,extra,covered,delta,gap,gapCount].forEach((v,i)=>w.setFloat32(8+i*4,v,true));values.forEach((v,i)=>w.setFloat32(40+i*4,v,true));return b;}
+test("extent query plans own physical clamp cache addresses tails and exact logical identities",()=>{
+ for(const count of [0n,1n,63n,64n,65n,262143n,262144n,262145n,9007199254740997n])for(const index of [0n,1n,63n,64n,count,count+1n]){
+  const base=9007199254740993n,r=decodePlan(run(queryPlan(count,index,base)));const clamped=index<count?index:count,covered=count<262144n?count:262144n,tail=clamped>covered;
+  assert.deepEqual(r,{index:clamped,logical:base+clamped,start:tail?covered:clamped/64n*64n,extra:tail?clamped-covered:0n,gapCount:clamped,chunk:Number(tail?(covered+63n)/64n:clamped/64n),samples:tail?0:Number(clamped%64n),tail:tail?1:0,empty:0});
+ }
+ const zero=decodePlan(run(queryPlan(0n,99n,0n,0n,2)));assert.equal(zero.empty,1);assert.equal(zero.gapCount,0n);
+ const total=decodePlan(run(queryPlan(9007199254740997n,1n,0xffffffffffffffffn,262144n,2)));assert.equal(total.index,9007199254740997n);assert.equal(total.logical,0n);assert.equal(total.gapCount,9007199254740996n);
+ assert.throws(()=>run(queryPlan(3n,2n,0xffffffffffffffffn)),/overflow/);assert.equal(decodePlan(run(queryPlan(3n,2n,0xffffffffffffffffn,3n,1,false))).logical,1n);
+});
+test("extent rebuild planning admits bounded batches and covers all cached rows exactly",()=>{
+ for(const count of [0n,1n,64n,65n,1025n,262143n,262144n,0xffffffffffffffffn]){
+  const covered=Number(count<262144n?count:262144n);let first=0n,seen=0,calls=0;
+  while(true){const out=run(rebuildPlan(count,first)),w=new DataView(out.buffer);assert.equal(w.getUint32(0,true),covered);assert.equal(w.getUint32(4,true),Math.ceil(covered/64));if(!w.getUint32(24,true)){assert.equal(w.getUint32(16,true),covered);assert.equal(w.getUint32(20,true),covered);break;}const start=w.getUint32(16,true),end=w.getUint32(20,true);assert.equal(start,seen);assert.ok(end>start&&end-start<=1024);seen=end;first=BigInt(w.getUint32(12,true));assert.ok(++calls<=256);}
+  assert.equal(seen,covered);assert.equal(new DataView(run(rebuildPlan(count,0xffffffffffffffffn)).buffer).getUint32(24,true),0);
+ }
+});
+test("composed extent facts preserve prefix gap and measured f32 ordering without extra round trips",()=>{
+ let out=run(composed([1,1],0,16777216,0,0,0,1,1,1));assert.equal(float(out),16777216);assert.equal(float(out,4),1);assert.equal(float(out,8),16777216);
+ out=run(composed([],1,262144,262144,17,262144,0.25,0.125,262161));assert.equal(float(out),262161);assert.equal(float(out,4),Math.fround(0.125*262161));assert.equal(float(out,8),Math.fround(Math.fround(262161+0.25)+float(out,4)));
+ assert.equal(float(run(composed([],2,0,0,0,0,NaN,Infinity,0)),8),0);
+});
+test("extent planning rejects malformed shapes reserved lanes and composed fact mismatches",()=>{
+ const examples=[queryPlan(65n,64n),rebuildPlan(65n,0n),composed([1])];for(const b of examples){for(let n=1;n<b.length;n++)assert.throws(()=>run(b.subarray(0,n)));assert.throws(()=>run(new Uint8Array([...b,0])));}
+ const shape=queryPlan(64n,1n);new DataView(shape.buffer).setBigUint64(40,2n,true);assert.throws(()=>run(shape),/shape/);
+ const reserved=rebuildPlan(65n,0n);reserved[4]=1;assert.throws(()=>run(reserved),/plan/);
+ assert.throws(()=>run(composed([1],1,0,1,1,1)),/tail/);assert.throws(()=>run(composed([],1,0,1,1,0)),/tail/);
+ assert.throws(()=>run(composed(new Array(64).fill(1))),/facts/);
+ const output=run(queryPlan(65n,64n)),saved=output.slice();for(let i=0;i<8;i++)run(queryPlan(123n,BigInt(i)));assert.deepEqual(output,saved);
+});

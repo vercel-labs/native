@@ -157,39 +157,76 @@ pub fn shift(policy: Policy, pending: f32, delta: f32, subtract: bool) f32 {
 /// Estimate callbacks are sampled by native code. Chunk arithmetic crosses
 /// in batches of at most sixteen chunks, without copying retained sparse state.
 pub fn rebuild(policy: Policy, table: anytype, first: usize) void {
-    var chunk = @min(first, table.chunk_count);
-    while (chunk < table.chunk_count) {
-        const end_chunk = @min(chunk + 16, table.chunk_count);
-        const start = chunk * 64;
-        const end = @min(table.covered_count, end_chunk * 64);
-        var request = header(32 + 1024 * 4, 9);
-        putWord(&request, 4, @intCast(end - start));
-        putFloat(&request, 8, table.chunk_prefix[chunk]);
-        for (start..end) |i| putFloat(&request, 32 + (i - start) * 4, table.estimateAt(i));
+    var cursor = first;
+    while (true) {
+        var request = header(24, 14);
+        putInt(&request, 8, table.item_count);
+        putInt(&request, 16, cursor);
+        var plan: [40]u8 = undefined;
+        run(policy, &request, &plan);
+        const covered = getWord(&plan, 0);
+        const chunks = getWord(&plan, 4);
+        const chunk = getWord(&plan, 8);
+        const end_chunk = getWord(&plan, 12);
+        const start = getWord(&plan, 16);
+        const end = getWord(&plan, 20);
+        const active = getWord(&plan, 24);
+        if (covered > 262144 or chunks > 4096 or chunk > end_chunk or end_chunk > chunks or end_chunk - chunk > 16 or end > covered or end < start or end - start > 1024 or active > 1) @panic("invalid compiled extent rebuild plan");
+        table.covered_count = covered;
+        table.chunk_count = chunks;
+        if (active == 0) return;
+        if (end_chunk == chunk) @panic("nonprogressing compiled extent rebuild plan");
+        var facts = header(32 + 1024 * 4, 9);
+        putWord(&facts, 4, end - start);
+        putFloat(&facts, 8, table.chunk_prefix[chunk]);
+        for (start..end) |i| putFloat(&facts, 32 + (i - start) * 4, table.estimateAt(i));
         var result: [16 * 4]u8 = undefined;
-        run(policy, request[0 .. 32 + (end - start) * 4], result[0 .. (end_chunk - chunk) * 4]);
+        run(policy, facts[0 .. 32 + (end - start) * 4], result[0 .. (end_chunk - chunk) * 4]);
         for (chunk..end_chunk) |i| table.chunk_prefix[i + 1] = getFloat(&result, (i - chunk) * 4);
-        chunk = end_chunk;
+        cursor = end_chunk;
     }
 }
+pub const Query = struct { prefix: f32, gap: f32, offset: f32 };
+/// TypeScript selects the physical/cache/logical plan. Native reads only the
+/// requested storage and callback samples and supplies exact conversion facts.
+pub fn query(policy: Policy, table: anytype, index: usize, mode: u8) Query {
+    const builtin = @import("builtin");
+    var request = header(48, 13);
+    request[3] = mode | @as(u8, if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) 4 else 0);
+    putInt(&request, 8, table.item_count);
+    putInt(&request, 16, index);
+    putInt(&request, 24, table.index_base);
+    putInt(&request, 32, table.covered_count);
+    putInt(&request, 40, table.chunk_count);
+    var plan: [64]u8 = undefined;
+    run(policy, &request, &plan);
+    const physical = getInt(&plan, 0);
+    const logical = getInt(&plan, 8);
+    const start = getInt(&plan, 16);
+    const extra = getInt(&plan, 24);
+    const gap_count = getInt(&plan, 32);
+    const chunk = getWord(&plan, 40);
+    const count = getWord(&plan, 44);
+    const tail = getWord(&plan, 48);
+    const empty = getWord(&plan, 52);
+    if (physical > table.item_count or chunk > table.chunk_count or count > 63 or tail > 1 or empty > 1 or start > table.covered_count or count > table.covered_count - start) @panic("invalid compiled extent query plan");
+    var facts = header(40 + 63 * 4, 15);
+    facts[3] = @intCast(tail | (empty << 1));
+    putWord(&facts, 4, count);
+    putFloat(&facts, 8, if (empty == 1) 0 else table.chunk_prefix[chunk]);
+    putFloat(&facts, 12, if (empty == 1) 0 else table.chunk_prefix[table.chunk_count]);
+    putFloat(&facts, 16, @floatFromInt(extra));
+    putFloat(&facts, 20, @floatFromInt(table.covered_count));
+    putFloat(&facts, 24, if (mode == 1) table.measuredDeltaBefore(logical) else if (mode == 2) table.measured_total_delta else 0);
+    putFloat(&facts, 28, table.gap);
+    putFloat(&facts, 32, @floatFromInt(gap_count));
+    for (0..count) |i| putFloat(&facts, 40 + i * 4, table.estimateAt(start + i));
+    var result: [12]u8 = undefined;
+    run(policy, facts[0 .. 40 + count * 4], &result);
+    return .{ .prefix = getFloat(&result, 0), .gap = getFloat(&result, 4), .offset = getFloat(&result, 8) };
+}
 pub fn prefix(policy: Policy, table: anytype, index: usize) f32 {
-    const clamped = @min(index, table.item_count);
-    const tail = clamped > table.covered_count;
-    const chunk = if (tail) table.chunk_count else clamped / 64;
-    const start = chunk * 64;
-    const count = if (tail) 0 else clamped - start;
-    var request = header(32 + 63 * 4, 10);
-    putWord(&request, 4, @intCast(count));
-    putFloat(&request, 8, table.chunk_prefix[chunk]);
-    if (tail) {
-        putFloat(&request, 12, table.chunk_prefix[table.chunk_count]);
-        putFloat(&request, 16, @floatFromInt(clamped - table.covered_count));
-        putFloat(&request, 20, @floatFromInt(table.covered_count));
-    }
-    for (0..count) |i| putFloat(&request, 32 + i * 4, table.estimateAt(start + i));
-    var result: [4]u8 = undefined;
-    run(policy, request[0 .. 32 + count * 4], &result);
-    return getFloat(&result, 0);
+    return query(policy, table, index, 0).prefix;
 }
 pub fn scalar(policy: Policy, estimate: f32, delta: f32, gap: f32, count: usize, extent: bool) f32 {
     var request = header(24, 11);

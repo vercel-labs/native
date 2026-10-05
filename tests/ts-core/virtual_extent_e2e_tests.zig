@@ -200,8 +200,8 @@ test "compiled extent hot queries use bounded scalar records and preserve borrow
     const owned = try std.testing.allocator.dupe(u8, borrowed);
     defer std.testing.allocator.free(owned);
     const Recorder = struct {
-        var counts = [_]usize{0} ** 13;
-        var bytes = [_]usize{0} ** 13;
+        var counts = [_]usize{0} ** 16;
+        var bytes = [_]usize{0} ** 16;
         var largest: usize = 0;
         fn call(request: []const u8, output: []u8) usize {
             if (request.len > 1 and request[0] == 10) {
@@ -212,28 +212,32 @@ test "compiled extent hot queries use bounded scalar records and preserve borrow
             return core.nativeWindowPolicy(request, output);
         }
     };
-    Recorder.counts = [_]usize{0} ** 13;
-    Recorder.bytes = [_]usize{0} ** 13;
+    Recorder.counts = [_]usize{0} ** 16;
+    Recorder.bytes = [_]usize{0} ** 16;
     var table = Table{ .policy = Recorder.call };
     _ = table.sync(.{ .id = 7, .item_count = 3000, .uniform_estimate = 10, .gap = 1 });
     try std.testing.expectEqual(@as(usize, 3), Recorder.counts[9]);
+    try std.testing.expectEqual(@as(usize, 4), Recorder.counts[14]);
     try std.testing.expect(Recorder.largest <= 4128);
     var rows: [2048]Measure = undefined;
     for (&rows, 0..) |*row, i| row.* = .{ .physical = i, .extent = 12 };
     table.applyMeasurements(20, null, &rows);
     try std.testing.expectEqual(@as(usize, 1), Recorder.counts[1]);
     try std.testing.expectEqual(@as(usize, 64 + 2048 * 16), Recorder.bytes[1]);
-    Recorder.counts = [_]usize{0} ** 13;
-    Recorder.bytes = [_]usize{0} ** 13;
+    Recorder.counts = [_]usize{0} ** 16;
+    Recorder.bytes = [_]usize{0} ** 16;
     _ = table.sync(.{ .id = 7, .item_count = 3000, .uniform_estimate = 10, .gap = 1 });
     _ = canvas.virtualVariableListRange(.{ .item_count = 3000, .viewport_extent = 100, .scroll_offset = 1234, .overscan = 3 }, &table);
     try std.testing.expectEqual(@as(usize, 0), Recorder.counts[1]);
-    try std.testing.expect(Recorder.bytes[10] <= Recorder.counts[10] * 284);
+    try std.testing.expect(Recorder.bytes[15] <= Recorder.counts[15] * 292);
+    try std.testing.expectEqual(Recorder.counts[13], Recorder.counts[15]);
+    try std.testing.expectEqual(@as(usize, 0), Recorder.counts[10]);
+    try std.testing.expectEqual(@as(usize, 0), Recorder.counts[11]);
     var total: usize = 0;
     for (Recorder.bytes) |count| total += count;
     // Two logarithmic searches, each with <=63 estimate facts per step.
     // No chunk/sparse table snapshot is allowed on a hot query.
-    try std.testing.expect(Recorder.counts[9] == 0);
+    try std.testing.expect(Recorder.counts[9] == 0 and Recorder.counts[14] == 0);
     try std.testing.expect(Recorder.counts[12] > 0 and Recorder.counts[12] <= 26);
     try std.testing.expect(total <= 10000);
     try std.testing.expectEqualSlices(u8, owned, borrowed);
@@ -266,4 +270,40 @@ test "compiled estimate queries preserve adversarial f32 grouping and exact larg
     try sync(&tables, args);
     for ([_]usize{ 9007199254740991, 9007199254740993, 9007199254740997 }) |index| try exact(tables[0].offsetAtPhysical(index), tables[1].offsetAtPhysical(index));
     for ([_]f32{ 1.0e12, 1.0e15, 1.0e16 }) |offset| try exact(tables[0].indexAtOffset(offset), tables[1].indexAtOffset(offset));
+}
+
+test "compiled extent plans preserve callback sampling cache boundaries and empty totals" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    const Samples = struct {
+        count: usize = 0,
+        hash: u64 = 0,
+        fn read(context: ?*const anyopaque, logical: u64) f32 {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(context.?)));
+            self.count += 1;
+            self.hash = (self.hash *% 31) +% logical;
+            return @as(f32, @floatFromInt(logical % 13)) * 0.125;
+        }
+    };
+    var native_samples = Samples{};
+    var compiled_samples = Samples{};
+    var tables = pair();
+    // totalExtent on a newly reset table must not read undefined cache bytes.
+    try exact(tables[0].totalExtent(), tables[1].totalExtent());
+    for ([_]usize{ 0, 1, 63, 64, 65, 1023, 1024, 1025, 262143, 262144, 262145 }) |count| {
+        const args = canvas.VirtualExtentSyncArgs{ .id = 83, .item_count = count, .index_base = 9007199254740993, .gap = 0.125, .estimate_fn = Samples.read, .estimate_context = &native_samples };
+        var compiled_args = args;
+        compiled_args.estimate_context = &compiled_samples;
+        try exact(tables[0].sync(args), tables[1].sync(compiled_args));
+        try std.testing.expectEqual(native_samples.count, compiled_samples.count);
+        try std.testing.expectEqual(native_samples.hash, compiled_samples.hash);
+        for ([_]usize{ 0, 1, 63, 64, count, count + 1 }) |index| {
+            try exact(tables[0].offsetAtPhysical(index), tables[1].offsetAtPhysical(index));
+            try std.testing.expectEqual(native_samples.count, compiled_samples.count);
+            try std.testing.expectEqual(native_samples.hash, compiled_samples.hash);
+        }
+        try exact(tables[0].totalExtent(), tables[1].totalExtent());
+        try std.testing.expectEqual(native_samples.count, compiled_samples.count);
+        try std.testing.expectEqual(native_samples.hash, compiled_samples.hash);
+    }
 }

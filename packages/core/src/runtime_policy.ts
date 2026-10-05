@@ -1427,6 +1427,35 @@ function nscvExtentPolicy(request: Uint8Array): Uint8Array {
     const active=nscvFlowCompare(low,high)<0,result=new Uint8Array(32),out=new DataView(result.buffer);
     nscvFlowWrite(out,0,low);nscvFlowWrite(out,8,high);nscvFlowWrite(out,16,active?midpoint(low,high):low);out.setUint32(24,active?1:0,true);out.setFloat32(28,target,true);return result;
   }
+  if (op === 13) {
+    fixed(48);if(request[3]!>6 || (request[3]!&3)>2 || w.getUint32(4,true)!==0)throw new Error("invalid extent query plan");
+    const mode=request[3]!&3,count=integer(8),index=mode===2?count:nscvFlowMin(integer(16),count),covered=integer(32),chunks=integer(40);
+    if(nscvFlowCompare(covered,nscvFlowSmall(262144))>0 || nscvFlowCompare(covered,count)>0 || chunks.high!==0 || chunks.low!==Math.ceil(covered.low/64))throw new Error("invalid extent cache shape");
+    const tail=nscvFlowCompare(index,covered)>0;
+    const chunk=tail?chunks.low:Math.floor(index.low/64),start=tail?covered:nscvFlowSmall(chunk*64),samples=tail?0:nscvFlowSubtract(index,start).low;
+    const extra=tail?nscvFlowSubtract(index,covered):nscvFlowSmall(0),gapCount=mode===2?nscvFlowSubtract(count,nscvFlowSmall(1)):index;
+    const logical=mode===1?nscvFlowAdd(integer(24),index,(request[3]!&4)!==0):nscvFlowSmall(0);
+    const result=new Uint8Array(64),out=new DataView(result.buffer);
+    nscvFlowWrite(out,0,index);nscvFlowWrite(out,8,logical);nscvFlowWrite(out,16,start);nscvFlowWrite(out,24,extra);nscvFlowWrite(out,32,gapCount);
+    out.setUint32(40,chunk,true);out.setUint32(44,samples,true);out.setUint32(48,tail?1:0,true);out.setUint32(52,mode===2&&nscvFlowZero(count)?1:0,true);return result;
+  }
+  if (op === 14) {
+    fixed(24);if(request[3]!==0 || w.getUint32(4,true)!==0)throw new Error("invalid extent rebuild plan");
+    const covered=nscvFlowMin(integer(8),nscvFlowSmall(262144)),chunks=Math.ceil(covered.low/64),first=nscvFlowMin(integer(16),nscvFlowSmall(chunks)).low,end=Math.min(first+16,chunks);
+    const result=new Uint8Array(40),out=new DataView(result.buffer);
+    out.setUint32(0,covered.low,true);out.setUint32(4,chunks,true);out.setUint32(8,first,true);out.setUint32(12,end,true);
+    out.setUint32(16,Math.min(covered.low,first*64),true);out.setUint32(20,Math.min(covered.low,end*64),true);out.setUint32(24,first<chunks?1:0,true);return result;
+  }
+  if (op === 15) {
+    if(request.length<40 || request[3]!>3)throw new Error("invalid extent composed query");
+    const count=w.getUint32(4,true);if(count>63 || request.length!==40+count*4 || w.getUint32(36,true)!==0)throw new Error("invalid extent composed facts");
+    const tail=(request[3]!&1)!==0,empty=(request[3]!&2)!==0;
+    if((tail&&count!==0) || (tail&&!(v(20)>0)))throw new Error("invalid extent tail facts");
+    let prefix=v(8);for(let i=0;i<count;i++)prefix=f(prefix+v(40+i*4));
+    if(tail)prefix=f(prefix+f(v(16)*f(v(12)/v(20))));
+    const gap=f(v(28)*v(32)),result=new Uint8Array(12),out=new DataView(result.buffer);
+    out.setFloat32(0,prefix,true);out.setFloat32(4,gap,true);out.setFloat32(8,empty?0:f(f(prefix+v(24))+gap),true);return result;
+  }
   throw new Error("unknown extent policy operation");
 }
 function nscvExtentClean(value:number):number{return !Number.isFinite(value) || value < 0 ? 0 : value;}

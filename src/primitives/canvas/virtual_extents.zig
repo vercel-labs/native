@@ -183,12 +183,12 @@ pub const VirtualExtentTable = struct {
     }
 
     fn rebuildChunkPrefixFrom(self: *VirtualExtentTable, first_chunk: usize) void {
-        self.covered_count = @min(self.item_count, max_virtual_extent_items);
-        self.chunk_count = (self.covered_count + virtual_extent_chunk - 1) / virtual_extent_chunk;
         if (self.policy) |policy| {
             compiled.rebuild(policy, self, first_chunk);
             return;
         }
+        self.covered_count = @min(self.item_count, max_virtual_extent_items);
+        self.chunk_count = (self.covered_count + virtual_extent_chunk - 1) / virtual_extent_chunk;
         var chunk = first_chunk;
         if (chunk > self.chunk_count) chunk = self.chunk_count;
         while (chunk < self.chunk_count) : (chunk += 1) {
@@ -226,7 +226,7 @@ pub const VirtualExtentTable = struct {
     }
 
     /// Sum of measured deltas for logical indices < `logical`.
-    fn measuredDeltaBefore(self: *const VirtualExtentTable, logical: u64) f32 {
+    pub fn measuredDeltaBefore(self: *const VirtualExtentTable, logical: u64) f32 {
         std.debug.assert(!self.measured_prefix_dirty);
         // Lowest measured slot whose index is >= logical.
         var low: usize = 0;
@@ -268,8 +268,8 @@ pub const VirtualExtentTable = struct {
     /// Leading edge of item `physical` (gaps between prior rows
     /// included).
     pub fn offsetAtPhysical(self: *const VirtualExtentTable, physical: usize) f32 {
+        if (self.policy) |policy| return compiled.query(policy, self, physical, 1).offset;
         const clamped = @min(physical, self.item_count);
-        if (self.policy) |policy| return compiled.scalar(policy, self.estimatePrefix(clamped), self.measuredDeltaBefore(self.index_base + @as(u64, clamped)), self.gap, clamped, false);
         return self.estimatePrefix(clamped) +
             self.measuredDeltaBefore(self.index_base + @as(u64, clamped)) +
             self.gap * @as(f32, @floatFromInt(clamped));
@@ -277,8 +277,8 @@ pub const VirtualExtentTable = struct {
 
     /// Total content extent: every extent plus the gaps between rows.
     pub fn totalExtent(self: *const VirtualExtentTable) f32 {
+        if (self.policy) |policy| return compiled.query(policy, self, self.item_count, 2).offset;
         if (self.item_count == 0) return 0;
-        if (self.policy) |policy| return compiled.scalar(policy, self.estimatePrefix(self.item_count), self.measured_total_delta, self.gap, self.item_count - 1, false);
         return self.estimatePrefix(self.item_count) + self.measured_total_delta +
             self.gap * @as(f32, @floatFromInt(self.item_count - 1));
     }
@@ -403,8 +403,8 @@ pub const VirtualExtentTable = struct {
     /// methods remain available with the same native/compiled ownership.
     pub fn applyMeasurements(self: *VirtualExtentTable, anchor: usize, rendered_offset: ?f32, rows: []const VirtualExtentMeasurement) void {
         if (self.policy) |policy| {
-            const clamped = @min(anchor, self.item_count);
-            compiled.corrections(policy, self, 3, anchor, rendered_offset, rows, self.estimatePrefix(clamped), self.gap * @as(f32, @floatFromInt(clamped)));
+            const facts = compiled.query(policy, self, anchor, 0);
+            compiled.corrections(policy, self, 3, anchor, rendered_offset, rows, facts.prefix, facts.gap);
             return;
         }
         self.beginCorrections(anchor, rendered_offset);
@@ -442,8 +442,8 @@ pub const VirtualExtentTable = struct {
     pub fn beginCorrections(self: *VirtualExtentTable, anchor_physical: usize, rendered_offset: ?f32) void {
         std.debug.assert(!self.measured_prefix_dirty);
         if (self.policy) |policy| {
-            const clamped = @min(anchor_physical, self.item_count);
-            compiled.corrections(policy, self, 0, anchor_physical, rendered_offset, &.{}, self.estimatePrefix(clamped), self.gap * @as(f32, @floatFromInt(clamped)));
+            const facts = compiled.query(policy, self, anchor_physical, 0);
+            compiled.corrections(policy, self, 0, anchor_physical, rendered_offset, &.{}, facts.prefix, facts.gap);
             return;
         }
         self.anchor_physical = @min(anchor_physical, self.item_count);
@@ -510,7 +510,8 @@ pub const VirtualExtentTable = struct {
     /// where the user sees it.
     pub fn endCorrections(self: *VirtualExtentTable) void {
         if (self.policy) |policy| {
-            compiled.corrections(policy, self, 2, self.anchor_physical, null, &.{}, self.estimatePrefix(self.anchor_physical), self.gap * @as(f32, @floatFromInt(self.anchor_physical)));
+            const facts = compiled.query(policy, self, self.anchor_physical, 0);
+            compiled.corrections(policy, self, 2, self.anchor_physical, null, &.{}, facts.prefix, facts.gap);
             return;
         }
         if (self.measured_prefix_dirty) self.rebuildMeasuredPrefix();
