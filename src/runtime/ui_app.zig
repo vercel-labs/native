@@ -4884,14 +4884,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // rebuilding so layout and the re-emitted display lists
                 // charge the registered face's advances.
                 try self.rebuildForRegisteredFonts(runtime);
-            } else if (self.options.web_panes != null) {
-                // Re-snap the webview panes each presented frame: a shell
-                // relayout that stomped a pane frame also invalidated the
-                // canvas, so the reconciliation ride-along here converges
-                // without a dedicated event.
-                if (runtime.canvasWidgetLayout(frame_event.window_id, self.options.canvas_label)) |layout| {
-                    self.applyWebPanes(runtime, frame_event.window_id, layout);
-                } else |_| {}
             }
             // Terminal outbound pacing: a child that read without
             // echoing freed stdin-FIFO room no output event announces,
@@ -4909,6 +4901,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 installing,
                 self.effectiveTokens().colors.background,
             );
+            // The first native present can show the window and synchronously
+            // report its frame. Shell relayout then resets child WebViews to
+            // their manifest frames after rebuild applied the model's panes.
+            // Restore pane ownership before this event commits, so recording
+            // and flat replay observe the same anchored first-frame state.
+            if (self.options.web_panes != null) {
+                if (runtime.canvasWidgetLayout(frame_event.window_id, self.options.canvas_label)) |layout| {
+                    self.applyWebPanes(runtime, frame_event.window_id, layout);
+                } else |_| {}
+            }
             if (installing) return;
             const on_frame = self.options.on_frame orelse return;
             const gpu_frame = runtime.gpuSurfaceFrame(frame_event.window_id, self.options.canvas_label) catch return;

@@ -196,3 +196,101 @@ test "compiled pane and tray reconciliation retains native navigation counts, re
 test {
     _ = @import("canvas_preview_reference_tests.zig");
 }
+
+const FirstPresent = struct {
+    runtime: *native_sdk.Runtime,
+    app: native_sdk.App,
+    original: *const fn (?*anyopaque, native_sdk.platform.GpuSurfacePacket) anyerror!void,
+    reentered: bool = false,
+    var active: ?*FirstPresent = null;
+
+    fn present(context: ?*anyopaque, packet: native_sdk.platform.GpuSurfacePacket) anyerror!void {
+        const self = active.?;
+        try self.original(context, packet);
+        if (self.reentered) return;
+        self.reentered = true;
+        // Showing the first native present synchronously reports window
+        // geometry. This nested shell relayout follows the installing build.
+        try self.runtime.dispatchPlatformEvent(self.app, .{ .window_frame_changed = .{
+            .id = 1,
+            .label = "main",
+            .frame = .init(0, 0, 960, 640),
+            .focused = false,
+            .open = true,
+        } });
+        try testing.expectEqualDeep(geometry.RectF.init(240, 76, 704, 548), self.runtime.webViewLocalFrame(1, main.webview_label).?);
+    }
+};
+
+const JournalBuffer = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    fn write(context: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *JournalBuffer = @ptrCast(@alignCast(context));
+        try self.bytes.appendSlice(testing.allocator, bytes);
+    }
+};
+
+fn firstPresentReplay(comptime compiled: bool) !void {
+    var buffer: JournalBuffer = .{};
+    defer buffer.bytes.deinit(testing.allocator);
+    const recorder = try testing.allocator.create(native_sdk.runtime.SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = .init(.{ .context = &buffer, .write_fn = JournalBuffer.write });
+    recorder.begin(native_sdk.runtime.sessionHeaderNow(native_sdk.runtime.sessionPlatformName(), "canvas-preview", 960, 640));
+    var fingerprint: u64 = 0;
+    {
+        const state = if (compiled) try createApp() else try testing.allocator.create(native_sdk.UiApp(main.Model, main.Msg));
+        if (!compiled) state.* = native_sdk.UiApp(main.Model, main.Msg).init(std.heap.page_allocator, .{}, main.options());
+        defer if (compiled) state.destroy() else {
+            state.deinit();
+            testing.allocator.destroy(state);
+        };
+        const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = .init(960, 640) });
+        defer harness.destroy(testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.security.navigation.allowed_origins = &preview_origins;
+        harness.runtime.options.session_recorder = recorder;
+        try harness.start(state.app());
+        var first: FirstPresent = .{ .runtime = &harness.runtime, .app = state.app(), .original = harness.runtime.options.platform.services.present_gpu_surface_packet_fn.? };
+        FirstPresent.active = &first;
+        defer FirstPresent.active = null;
+        harness.runtime.options.platform.services.present_gpu_surface_packet_binary_fn = null;
+        harness.runtime.options.platform.services.present_gpu_surface_packet_fn = FirstPresent.present;
+        try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{
+            .label = main.canvas_label,
+            .size = .init(960, 640),
+            .scale_factor = 1,
+            .frame_index = 0,
+            .timestamp_ns = 1_000_000,
+        } });
+        try testing.expect(first.reentered);
+        try testing.expect(!state.model.gpu_frames_seen);
+        try testing.expectEqualDeep(geometry.RectF.init(224, 56, 736, 584), harness.runtime.webViewLocalFrame(1, main.webview_label).?);
+        try harness.runtime.dispatchPlatformEvent(state.app(), .frame_requested);
+        fingerprint = harness.runtime.sessionStateFingerprint();
+        recorder.finish();
+        try testing.expect(!recorder.failed);
+    }
+    const state = if (compiled) try createApp() else try testing.allocator.create(native_sdk.UiApp(main.Model, main.Msg));
+    if (!compiled) state.* = native_sdk.UiApp(main.Model, main.Msg).init(std.heap.page_allocator, .{}, main.options());
+    defer if (compiled) state.destroy() else {
+        state.deinit();
+        testing.allocator.destroy(state);
+    };
+    const harness = try native_sdk.TestHarness().create(testing.allocator, .{ .size = .init(960, 640) });
+    defer harness.destroy(testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.security.navigation.allowed_origins = &preview_origins;
+    const report = try native_sdk.runtime.replaySession(&harness.runtime, state.app(), buffer.bytes.items, .{ .require_same_platform = false });
+    try testing.expect(report.ok());
+    try testing.expectEqual(recorder.event_count, report.events_replayed);
+    try testing.expectEqual(recorder.checkpoint_count, report.checkpoints_verified);
+    try testing.expectEqual(@as(u64, 0), report.effects_fed);
+    try testing.expectEqual(fingerprint, harness.runtime.sessionStateFingerprint());
+    try testing.expect(!state.model.gpu_frames_seen);
+}
+
+test "first native present reentry preserves anchored panes and every replay checkpoint" {
+    try firstPresentReplay(false);
+    try firstPresentReplay(true);
+}

@@ -1926,6 +1926,13 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // cached object plus the tiny generated markup-data object. A markup edit
     // therefore avoids re-analyzing the SDK and app runner entirely.
     const exe_root = if (ts_stage) |stage| root: {
+        // COFF has no relocatable link for merging the compiled core archive
+        // and platform C/C++ objects into one object. Keep all those inputs
+        // on the executable's final link instead, including Debug markup.
+        if (target.result.os.tag == .windows) {
+            if (app_optimize == .Debug) app_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+            break :root app_mod;
+        }
         const app_code = b.addObject(.{
             .name = b.fmt("{s}-app-code", .{app_options.name}),
             .root_module = app_mod,
