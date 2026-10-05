@@ -6,7 +6,7 @@ pub const SyncPlan = struct { mode: u8, flags: u8, gap: f32, old_total: f32, fir
 
 /// Native owns every request/result allocation, callback and retained table.
 /// Compiled policy consumes copied sparse state once per measurement batch.
-/// Cached estimate-prefix and index queries are explicit numeric capabilities;
+/// Estimate samples and exact storage lookups are explicit native capabilities;
 /// no native address or borrowed model/view slice is stored by the reducer.
 pub fn sync(policy: Policy, table: anytype, args: anytype, old_total: f32) SyncPlan {
     var request = header(72, 0);
@@ -153,6 +153,77 @@ pub fn shift(policy: Policy, pending: f32, delta: f32, subtract: bool) f32 {
     var result: [4]u8 = undefined;
     run(policy, &request, &result);
     return getFloat(&result, 0);
+}
+/// Estimate callbacks are sampled by native code. Chunk arithmetic crosses
+/// in batches of at most sixteen chunks, without copying retained sparse state.
+pub fn rebuild(policy: Policy, table: anytype, first: usize) void {
+    var chunk = @min(first, table.chunk_count);
+    while (chunk < table.chunk_count) {
+        const end_chunk = @min(chunk + 16, table.chunk_count);
+        const start = chunk * 64;
+        const end = @min(table.covered_count, end_chunk * 64);
+        var request = header(32 + 1024 * 4, 9);
+        putWord(&request, 4, @intCast(end - start));
+        putFloat(&request, 8, table.chunk_prefix[chunk]);
+        for (start..end) |i| putFloat(&request, 32 + (i - start) * 4, table.estimateAt(i));
+        var result: [16 * 4]u8 = undefined;
+        run(policy, request[0 .. 32 + (end - start) * 4], result[0 .. (end_chunk - chunk) * 4]);
+        for (chunk..end_chunk) |i| table.chunk_prefix[i + 1] = getFloat(&result, (i - chunk) * 4);
+        chunk = end_chunk;
+    }
+}
+pub fn prefix(policy: Policy, table: anytype, index: usize) f32 {
+    const clamped = @min(index, table.item_count);
+    const tail = clamped > table.covered_count;
+    const chunk = if (tail) table.chunk_count else clamped / 64;
+    const start = chunk * 64;
+    const count = if (tail) 0 else clamped - start;
+    var request = header(32 + 63 * 4, 10);
+    putWord(&request, 4, @intCast(count));
+    putFloat(&request, 8, table.chunk_prefix[chunk]);
+    if (tail) {
+        putFloat(&request, 12, table.chunk_prefix[table.chunk_count]);
+        putFloat(&request, 16, @floatFromInt(clamped - table.covered_count));
+        putFloat(&request, 20, @floatFromInt(table.covered_count));
+    }
+    for (0..count) |i| putFloat(&request, 32 + i * 4, table.estimateAt(start + i));
+    var result: [4]u8 = undefined;
+    run(policy, request[0 .. 32 + count * 4], &result);
+    return getFloat(&result, 0);
+}
+pub fn scalar(policy: Policy, estimate: f32, delta: f32, gap: f32, count: usize, extent: bool) f32 {
+    var request = header(24, 11);
+    request[3] = if (extent) 1 else 0;
+    putFloat(&request, 4, estimate);
+    putFloat(&request, 8, delta);
+    putFloat(&request, 12, gap);
+    putFloat(&request, 16, @floatFromInt(count));
+    var result: [4]u8 = undefined;
+    run(policy, &request, &result);
+    return getFloat(&result, 0);
+}
+pub fn search(policy: Policy, table: anytype, offset: f32) usize {
+    const builtin = @import("builtin");
+    var request = header(40, 12);
+    request[3] = if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) 1 else 0;
+    putInt(&request, 8, table.item_count);
+    putFloat(&request, 32, offset);
+    var result: [32]u8 = undefined;
+    while (true) {
+        run(policy, &request, &result);
+        const active = getWord(&result, 24);
+        if (active > 1) @panic("invalid compiled extent search result");
+        const low = getInt(&result, 0);
+        const high = getInt(&result, 8);
+        const mid = getInt(&result, 16);
+        if (low > high or (table.item_count != 0 and high >= table.item_count) or mid < low or mid > high) @panic("invalid compiled extent search bounds");
+        if (active == 0) return low;
+        putInt(&request, 16, low);
+        putInt(&request, 24, high);
+        putFloat(&request, 32, getFloat(&result, 28));
+        putFloat(&request, 36, table.offsetAtPhysical(mid));
+        request[3] |= 2;
+    }
 }
 fn header(comptime length: usize, operation: u8) [length]u8 {
     var request = [_]u8{0} ** length;

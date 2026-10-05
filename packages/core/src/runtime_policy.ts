@@ -1316,8 +1316,7 @@ function nscvSemanticTree(request: Uint8Array): Uint8Array {
   out.setUint32(0, emitted, true); return result;
 }
 
-/** Retained variable-window transitions. Cached estimate/index queries remain
- * explicit native capabilities; sparse corrections cross once per measured
+/** Retained variable-window transitions. Estimate arithmetic and search decisions use bounded copied facts; sparse corrections cross once per measured
  * batch and hot window coordination uses small scalar records. No retained
  * native address or borrowed model bytes escape this copied boundary. */
 function nscvExtentPolicy(request: Uint8Array): Uint8Array {
@@ -1393,6 +1392,40 @@ function nscvExtentPolicy(request: Uint8Array): Uint8Array {
   if (op === 8) {
     fixed(16);if(request[3]! > 1 || w.getUint32(12,true) !== 0)throw new Error("invalid extent pending shift");
     const result=new Uint8Array(4);new DataView(result.buffer).setFloat32(0,request[3] === 1 ? f(v(4)-v(8)) : f(v(4)+v(8)),true);return result;
+  }
+  if (op === 9 || op === 10) {
+    if (request.length < 32 || request[3] !== 0) throw new Error("invalid extent estimate header");
+    const count=w.getUint32(4,true);
+    if (count > (op === 9 ? 1024 : 63) || request.length !== 32+count*4 || w.getUint32(28,true)!==0) throw new Error("invalid extent estimate batch");
+    if (op === 9) {
+      const result=new Uint8Array(4*Math.ceil(count/64)),out=new DataView(result.buffer);let prefix=v(8);
+      for(let chunk=0;chunk<Math.ceil(count/64);chunk++){
+        let sum=0;for(let i=chunk*64;i<Math.min(count,(chunk+1)*64);i++)sum=f(sum+v(32+i*4));
+        prefix=f(prefix+sum);out.setFloat32(chunk*4,prefix,true);
+      }
+      return result;
+    }
+    let prefix=v(8);for(let i=0;i<count;i++)prefix=f(prefix+v(32+i*4));
+    if(v(16)>0)prefix=f(prefix+f(v(16)*f(v(12)/v(20))));
+    const result=new Uint8Array(4);new DataView(result.buffer).setFloat32(0,prefix,true);return result;
+  }
+  if (op === 11) {
+    fixed(24);if(request[3]!>1 || w.getUint32(20,true)!==0)throw new Error("invalid extent scalar query");
+    const result=new Uint8Array(4),out=new DataView(result.buffer);
+    out.setFloat32(0,request[3]===1?max(0,f(v(4)+v(8))):f(f(v(4)+v(8))+f(v(12)*v(16))),true);return result;
+  }
+  if (op === 12) {
+    fixed(40);if(request[3]!>3 || w.getUint32(4,true)!==0)throw new Error("invalid extent search continuation");
+    const checked=(request[3]!&1)!==0,continued=(request[3]!&2)!==0,count=integer(8),target=max(0,v(32));
+    let low=continued?integer(16):nscvFlowSmall(0),high=continued?integer(24):nscvFlowSubtract(count,nscvFlowSmall(1));
+    const midpoint=(a:NscFlowInteger,b:NscFlowInteger):NscFlowInteger=>{
+      const sum=nscvFlowAdd(nscvFlowAdd(a,b,checked),nscvFlowSmall(1),checked);
+      return {low:Math.floor(sum.low/2)+(sum.high%2)*2147483648,high:Math.floor(sum.high/2)};
+    };
+    if(nscvFlowCompare(low,high)>0 || (!nscvFlowZero(count)&&nscvFlowCompare(high,count)>=0) || (continued&&nscvFlowCompare(low,high)>=0))throw new Error("invalid extent search bounds");
+    if(continued){const mid=midpoint(low,high);if(v(36)<=target)low=mid;else high=nscvFlowSubtract(mid,nscvFlowSmall(1));}
+    const active=nscvFlowCompare(low,high)<0,result=new Uint8Array(32),out=new DataView(result.buffer);
+    nscvFlowWrite(out,0,low);nscvFlowWrite(out,8,high);nscvFlowWrite(out,16,active?midpoint(low,high):low);out.setUint32(24,active?1:0,true);out.setFloat32(28,target,true);return result;
   }
   throw new Error("unknown extent policy operation");
 }

@@ -185,6 +185,10 @@ pub const VirtualExtentTable = struct {
     fn rebuildChunkPrefixFrom(self: *VirtualExtentTable, first_chunk: usize) void {
         self.covered_count = @min(self.item_count, max_virtual_extent_items);
         self.chunk_count = (self.covered_count + virtual_extent_chunk - 1) / virtual_extent_chunk;
+        if (self.policy) |policy| {
+            compiled.rebuild(policy, self, first_chunk);
+            return;
+        }
         var chunk = first_chunk;
         if (chunk > self.chunk_count) chunk = self.chunk_count;
         while (chunk < self.chunk_count) : (chunk += 1) {
@@ -208,6 +212,7 @@ pub const VirtualExtentTable = struct {
 
     /// Sum of estimates for physical items [0, index).
     fn estimatePrefix(self: *const VirtualExtentTable, index: usize) f32 {
+        if (self.policy) |policy| return compiled.prefix(policy, self, index);
         const clamped = @min(index, self.item_count);
         if (clamped > self.covered_count) {
             const extra = @as(f32, @floatFromInt(clamped - self.covered_count));
@@ -249,6 +254,11 @@ pub const VirtualExtentTable = struct {
     /// estimate otherwise.
     pub fn extentAtPhysical(self: *const VirtualExtentTable, physical: usize) f32 {
         const base = self.estimateAt(physical);
+        if (self.policy) |policy| {
+            const slot = self.measuredSlot(self.index_base + @as(u64, physical));
+            // Unmeasured estimates retain signed zero without a max operation.
+            return if (slot) |i| compiled.scalar(policy, base, self.measured_delta[i], 0, 0, true) else base;
+        }
         if (self.measuredSlot(self.index_base + @as(u64, physical))) |slot| {
             return @max(0, base + self.measured_delta[slot]);
         }
@@ -259,6 +269,7 @@ pub const VirtualExtentTable = struct {
     /// included).
     pub fn offsetAtPhysical(self: *const VirtualExtentTable, physical: usize) f32 {
         const clamped = @min(physical, self.item_count);
+        if (self.policy) |policy| return compiled.scalar(policy, self.estimatePrefix(clamped), self.measuredDeltaBefore(self.index_base + @as(u64, clamped)), self.gap, clamped, false);
         return self.estimatePrefix(clamped) +
             self.measuredDeltaBefore(self.index_base + @as(u64, clamped)) +
             self.gap * @as(f32, @floatFromInt(clamped));
@@ -267,6 +278,7 @@ pub const VirtualExtentTable = struct {
     /// Total content extent: every extent plus the gaps between rows.
     pub fn totalExtent(self: *const VirtualExtentTable) f32 {
         if (self.item_count == 0) return 0;
+        if (self.policy) |policy| return compiled.scalar(policy, self.estimatePrefix(self.item_count), self.measured_total_delta, self.gap, self.item_count - 1, false);
         return self.estimatePrefix(self.item_count) + self.measured_total_delta +
             self.gap * @as(f32, @floatFromInt(self.item_count - 1));
     }
@@ -275,6 +287,7 @@ pub const VirtualExtentTable = struct {
     /// a scroll offset). Monotone bisection over `offsetAtPhysical`.
     pub fn indexAtOffset(self: *const VirtualExtentTable, offset: f32) usize {
         if (self.item_count == 0) return 0;
+        if (self.policy) |policy| return compiled.search(policy, self, offset);
         const target = @max(0, offset);
         // Largest index whose leading edge is <= target.
         var low: usize = 0;

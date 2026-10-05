@@ -38,3 +38,33 @@ test("extent protocol rejects truncation padding flags invalid ordering and dirt
 test("extent output owns bytes across offset views repeated policies and later mutation",()=>{
  const b=correction(3,[],[{physical:1n,estimate:1,extent:10}]);const padded=new Uint8Array(b.length+10);padded.set(b,7);const out=run(padded.subarray(7,7+b.length)),saved=out.slice();padded.fill(0);for(let i=0;i<12;i++)run(correction(3));assert.deepEqual(out,saved);
 });
+function estimates(op:number,values:readonly number[],prefix=0,total=0,extra=0,covered=0){const b=fixed(op,32+values.length*4),w=new DataView(b.buffer);w.setUint32(4,values.length,true);[prefix,total,extra,covered].forEach((v,i)=>w.setFloat32(8+i*4,v,true));values.forEach((v,i)=>w.setFloat32(32+i*4,v,true));return b;}
+const float=(b:Uint8Array,at=0)=>new DataView(b.buffer,b.byteOffset,b.byteLength).getFloat32(at,true);
+test("estimate batches preserve chunk grouping and partial-prefix rounding",()=>{
+ const values=Array.from({length:1024},(_,i)=>Math.fround(i%5===0?16777216:i%3===0?0.125:1));let prefix=123.125;
+ const result=run(estimates(9,values,prefix));for(let c=0;c<16;c++){let sum=0;for(const value of values.slice(c*64,c*64+64))sum=Math.fround(sum+value);prefix=Math.fround(prefix+sum);assert.equal(float(result,c*4),prefix);}
+ assert.equal(float(run(estimates(10,[1,1],16777216))),16777216);
+ assert.equal(float(run(estimates(10,[],262144,262144,17,262144))),262161);
+ assert.equal(run(estimates(9,[],0)).length,0);
+ assert.throws(()=>run(estimates(9,new Array(1025).fill(1))),/batch/);
+ assert.throws(()=>run(estimates(10,new Array(64).fill(1))),/batch/);
+ const bad=estimates(10,[]);new DataView(bad.buffer).setUint32(28,1,true);assert.throws(()=>run(bad),/batch/);
+});
+function search(count:bigint,low=0n,high=0n,flags=1,target=10,probe=0){const b=fixed(12,40),w=new DataView(b.buffer);b[3]=flags;[count,low,high].forEach((v,i)=>w.setBigUint64(8+i*8,v,true));w.setFloat32(32,target,true);w.setFloat32(36,probe,true);return b;}
+test("query continuation owns exact uint64 midpoints ties zero and overflow modes",()=>{
+ const count=9007199254740997n;let out=run(search(count)),w=new DataView(out.buffer);assert.equal(w.getBigUint64(16,true),(count)/2n);
+ let low=w.getBigUint64(0,true),high=w.getBigUint64(8,true),steps=0;const wanted=9007199254740987n;
+ while(w.getUint32(24,true)){const mid=w.getBigUint64(16,true);out=run(search(count,low,high,3,10,mid<=wanted?10:11));w=new DataView(out.buffer);low=w.getBigUint64(0,true);high=w.getBigUint64(8,true);steps++;assert.ok(steps<=54);}
+ assert.equal(low,wanted);assert.equal(w.getBigUint64(16,true),wanted);
+ assert.equal(new DataView(run(search(0n)).buffer).getUint32(24,true),0);
+ assert.equal(new DataView(run(search(1n)).buffer).getBigUint64(0,true),0n);
+ assert.throws(()=>run(search(0xffffffffffffffffn,0xfffffffffffffffdn,0xfffffffffffffffen,3)),/overflow/);
+ assert.throws(()=>run(search(4n,2n,1n,3)),/bounds/);
+ const wrapped=run(search(0xffffffffffffffffn,0xfffffffffffffffdn,0xfffffffffffffffen,2));assert.ok(wrapped.length===32);
+ const nan=run(search(2n,0n,0n,1,NaN));assert.equal(float(nan,28),0);
+});
+test("extent scalar queries preserve f32 grouping and copied result ownership",()=>{
+ const b=fixed(11,24),w=new DataView(b.buffer);[16777216,1,1,1].forEach((v,i)=>w.setFloat32(4+i*4,v,true));const out=run(b);assert.equal(float(out),16777216);const saved=out.slice();b.fill(0);run(search(99n));assert.deepEqual(out,saved);
+ const negative=fixed(11,24);negative[3]=1;new DataView(negative.buffer).setFloat32(4,-10,true);assert.equal(float(run(negative)),0);
+ for(const example of [estimates(9,[1]),estimates(10,[1]),fixed(11,24),search(2n)]){for(let n=1;n<example.length;n++)assert.throws(()=>run(example.subarray(0,n)));assert.throws(()=>run(new Uint8Array([...example,0])));}
+});
