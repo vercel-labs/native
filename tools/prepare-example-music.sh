@@ -70,8 +70,8 @@ CATALOG=(
     "Color TV|Channel Surfing|Color TV|1|color tv.png"
 )
 
-# Committed album art lands beside the manifest, under each example's
-# src/ (the module root `@embedFile` reaches). 512px JPEG: the display
+# Soundboard registers committed album art from assets/; Deck keeps its
+# embedded copies under src/ (the module root `@embedFile` reaches). 512px JPEG: the display
 # register is ~256pt at 2x, and JPEG is the only route that keeps real
 # artwork well under the commit budget — the repo's own PNG codec
 # writes stored (uncompressed) deflate only, which is ~1MB at this
@@ -81,7 +81,7 @@ CATALOG=(
 # decode JPEG, so the hermetic suites exercise the honest initials /
 # pure-vector fallback instead — the same state a codec-less host shows.
 ART_SRC="$SRC_ROOT/art"
-ART_OUT="$REPO_ROOT/examples/soundboard/src/art"
+ART_OUT="$REPO_ROOT/examples/soundboard/assets/art"
 DECK_ART_OUT="$REPO_ROOT/examples/deck/src/art"
 
 # Downscale, strip, and verify one album's art. Prints nothing; the

@@ -30,14 +30,14 @@
     // platform) skip honestly and every cover keeps its initials.
     .assets = .{
         .images = .{
-            .{ .id = 1, .path = "src/art/exit-signs.jpg" },
-            .{ .id = 2, .path = "src/art/blue-season.jpg" },
-            .{ .id = 3, .path = "src/art/second-nature.jpg" },
-            .{ .id = 4, .path = "src/art/no-good-way-out.jpg" },
-            .{ .id = 5, .path = "src/art/glass-flowers.jpg" },
-            .{ .id = 6, .path = "src/art/night-bloom.jpg" },
-            .{ .id = 7, .path = "src/art/motion-picture.jpg" },
-            .{ .id = 8, .path = "src/art/channel-surfing.jpg" },
+            .{ .id = 1, .path = "assets/art/exit-signs.jpg" },
+            .{ .id = 2, .path = "assets/art/blue-season.jpg" },
+            .{ .id = 3, .path = "assets/art/second-nature.jpg" },
+            .{ .id = 4, .path = "assets/art/no-good-way-out.jpg" },
+            .{ .id = 5, .path = "assets/art/glass-flowers.jpg" },
+            .{ .id = 6, .path = "assets/art/night-bloom.jpg" },
+            .{ .id = 7, .path = "assets/art/motion-picture.jpg" },
+            .{ .id = 8, .path = "assets/art/channel-surfing.jpg" },
         },
     },
     .shell = .{
