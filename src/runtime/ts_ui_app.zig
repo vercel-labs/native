@@ -405,6 +405,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
+                stamped.surface_layout_policy = core.nativeWindowPolicy;
+            }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;
             lifecycle_flush_after_update = false;

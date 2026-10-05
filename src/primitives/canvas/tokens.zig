@@ -1905,6 +1905,8 @@ pub const DesignTokens = struct {
     /// so a header that never consumed the chrome insets still keeps
     /// its trailing status text out from under the caption buttons.
     window_controls: ?geometry.RectF = null,
+    /// Portable surface placement supplied by the app adapter, outside theme overrides.
+    surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and

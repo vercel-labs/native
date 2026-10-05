@@ -1264,6 +1264,10 @@ pub fn build(b: *std.Build) void {
         addTestStep(b, "test-ts-shell-layout-e2e", "Run compiled shell planning, ownership, and OS application parity", ts_core_artifacts.shell_layout);
         ts_core_e2e_step.dependOn(&shell_layout_e2e_run.step);
         test_step.dependOn(&shell_layout_e2e_run.step);
+        const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
+        b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
+        ts_core_e2e_step.dependOn(&surface_layout_run.step);
+        test_step.dependOn(&surface_layout_run.step);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
         const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
         markup_components_e2e_step.dependOn(&markup_e2e_run.step);
@@ -3956,6 +3960,7 @@ const TsCoreE2eArtifacts = struct {
     /// child, the shipping markup, and record→replay without either.
     feed_reader: *std.Build.Step.Compile,
     shell_layout: *std.Build.Step.Compile,
+    surface_layout: *std.Build.Step.Compile,
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
@@ -4221,6 +4226,9 @@ fn tsCoreE2eArtifact(
     const shell_layout_mod = module(b, target, optimize, "tests/ts-core/shell_layout_e2e_tests.zig");
     shell_layout_mod.addImport("native_sdk", desktop_mod);
     shell_layout_mod.addImport("shell_fixture_core", feed_reader_fixture.module);
+    const surface_layout_mod = module(b, target, optimize, "tests/ts-core/surface_layout_e2e_tests.zig");
+    surface_layout_mod.addImport("native_sdk", desktop_mod);
+    surface_layout_mod.addImport("surface_fixture_core", feed_reader_fixture.module);
     const feed_reader_service = externalServiceFixture(
         b,
         target,
@@ -4484,6 +4492,7 @@ fn tsCoreE2eArtifact(
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
         .shell_layout = filteredTestArtifact(b, shell_layout_mod, "ts-shell-layout-e2e-tests", &.{}),
+        .surface_layout = filteredTestArtifact(b, surface_layout_mod, "ts-surface-layout-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
         .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
         .mobile_battery = mobile_battery,

@@ -108,6 +108,7 @@ function themeHexNibble(byte: number): number {
  */
 export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 2) return nscvShellLayout(request);
+  if (request[0] === 3) return nscvSurfaceLayout(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -619,4 +620,104 @@ function nscvShellDefaultHeight(kind: number, parent: number): number {
     case 2: return 36;
     default: return 0;
   }
+}
+
+/** Floating-surface placement over measured native geometry. The existing
+ * window ABI's operation 3 carries modal, anchored, and caption-clearance
+ * requests. Each arithmetic intermediate preserves native f32 ordering.
+ * Consumers copy the result; the enclosing view/cycle owns arena collection.
+ */
+interface NscSurfaceRect { readonly x: number; readonly y: number; readonly width: number; readonly height: number; }
+function nscvSurfaceMax(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.max(a, b); }
+function nscvSurfaceMin(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.min(a, b); }
+function nscvSurfaceClamp(v: number, lo: number, hi: number): number {
+  // Native clamp retains the lower endpoint, including its signed zero.
+  const result = nscvSurfaceMax(lo, nscvSurfaceMin(v, hi));
+  return result === lo ? lo : result;
+}
+function nscvSurfaceBound(v: number, lo: number, hi: number): number { return nscvSurfaceMax(lo, hi > 0 ? nscvSurfaceMin(v, hi) : v); }
+function nscvSurfaceNormalize(r: NscSurfaceRect): NscSurfaceRect {
+  return { x: r.width < 0 ? Math.fround(r.x + r.width) : r.x, y: r.height < 0 ? Math.fround(r.y + r.height) : r.y,
+    width: r.width < 0 ? -r.width : r.width, height: r.height < 0 ? -r.height : r.height };
+}
+function nscvSurfaceRight(r: NscSurfaceRect): number { return Math.fround(r.x + r.width); }
+function nscvSurfaceBottom(r: NscSurfaceRect): number { return Math.fround(r.y + r.height); }
+function nscvSurfaceLayout(request: Uint8Array): Uint8Array {
+  if (request.length < 4 || request[0] !== 3) throw new Error("invalid surface layout request");
+  const operation = request[1]!, a = request[2]!, b = request[3]!;
+  const length = operation === 0 ? 56 : operation === 1 ? 80 : operation === 2 ? 36 : 0;
+  if (request.length !== length) throw new Error("invalid surface layout length");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const v: number[] = [];
+  for (let at = 4; at < request.length; at += 4) v.push(wire.getFloat32(at, true));
+  const bounds = nscvSurfaceNormalize({ x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! });
+  let frame: NscSurfaceRect = bounds, present = true;
+  if (operation === 0) {
+    // Kind 0/1/2 is dialog/drawer/sheet; 255 preserves unsupported-kind null.
+    if (a !== 0 && a !== 1 && a !== 2 && a !== 255 || b > 1) throw new Error("invalid modal layout flags");
+    if (a === 255 || bounds.width <= 0 || bounds.height <= 0) present = false;
+    else {
+      let width = v[4]!, height = v[5]!;
+      if (b === 1) {
+        width = nscvSurfaceBound(width > 0 ? width : v[6]!, v[8]!, v[10]!);
+        height = nscvSurfaceBound(height > 0 ? height : v[7]!, v[9]!, v[11]!);
+      }
+      width = Number.isFinite(width) && width > 0 ? width : a === 0 ? 420 : a === 1 ? 360 : 320;
+      height = Number.isFinite(height) && height > 0 ? height : a === 0 ? 220 : a === 1 ? 280 : 420;
+      if (a === 0) {
+        const margin = nscvSurfaceMin(nscvSurfaceMax(0, Number.isFinite(v[12]!) ? v[12]! : 0), Math.fround(nscvSurfaceMin(bounds.width, bounds.height) * 0.5));
+        width = nscvSurfaceMin(width, nscvSurfaceMax(1, Math.fround(bounds.width - Math.fround(margin * 2))));
+        height = nscvSurfaceMin(height, nscvSurfaceMax(1, Math.fround(bounds.height - Math.fround(margin * 2))));
+        frame = { x: Math.fround(bounds.x + Math.fround(Math.fround(bounds.width - width) * 0.5)), y: Math.fround(bounds.y + Math.fround(Math.fround(bounds.height - height) * 0.5)), width, height };
+      } else if (a === 1) {
+        height = nscvSurfaceMin(nscvSurfaceMax(0, height), nscvSurfaceMax(1, bounds.height));
+        frame = { x: bounds.x, y: Math.fround(nscvSurfaceBottom(bounds) - height), width: nscvSurfaceMax(1, bounds.width), height };
+      } else {
+        width = nscvSurfaceMin(nscvSurfaceMax(0, width), nscvSurfaceMax(1, bounds.width));
+        frame = { x: Math.fround(nscvSurfaceRight(bounds) - width), y: bounds.y, width, height: nscvSurfaceMax(1, bounds.height) };
+      }
+    }
+  } else if (operation === 1) {
+    if (a > 1 || b > 6) throw new Error("invalid anchor layout flags");
+    const point = (b & 4) !== 0, alignment = b & 3;
+    if (alignment > 2) throw new Error("invalid anchor alignment");
+    const anchor = point ? { x: nscvSurfaceClamp(v[17]!, bounds.x, nscvSurfaceRight(bounds)), y: nscvSurfaceClamp(v[18]!, bounds.y, nscvSurfaceBottom(bounds)), width: 0, height: 0 }
+      : nscvSurfaceNormalize({ x: v[4]!, y: v[5]!, width: v[6]!, height: v[7]! });
+    let width = v[8]! > 0 ? v[8]! : v[10]!;
+    if (alignment === 2) width = nscvSurfaceMax(width, anchor.width);
+    width = nscvSurfaceMin(nscvSurfaceBound(width, v[12]!, v[14]!), bounds.width);
+    let height = nscvSurfaceBound(v[9]! > 0 ? v[9]! : v[11]!, v[13]!, v[15]!);
+    const offset = nscvSurfaceMax(0, v[16]!);
+    const belowSpace = Math.fround(Math.fround(nscvSurfaceBottom(bounds) - nscvSurfaceBottom(anchor)) - offset);
+    const aboveSpace = Math.fround(Math.fround(anchor.y - bounds.y) - offset);
+    const preferred = a === 0 ? belowSpace : aboveSpace, other = a === 0 ? aboveSpace : belowSpace;
+    const below = (a === 0) !== (height > preferred && other > preferred);
+    height = nscvSurfaceMin(height, nscvSurfaceMax(0, below ? belowSpace : aboveSpace));
+    const y = below ? Math.fround(nscvSurfaceBottom(anchor) + offset) : Math.fround(Math.fround(anchor.y - offset) - height);
+    const x = alignment === 1 ? Math.fround(nscvSurfaceRight(anchor) - width) : anchor.x;
+    frame = { x: nscvSurfaceClamp(x, bounds.x, nscvSurfaceMax(bounds.x, Math.fround(nscvSurfaceRight(bounds) - width))),
+      y: nscvSurfaceClamp(y, bounds.y, nscvSurfaceMax(bounds.y, Math.fround(nscvSurfaceBottom(bounds) - height))), width, height };
+  } else {
+    if (a > 1 || b > 1) throw new Error("invalid caption clearance flags");
+    // Content is already normalized by the layout. Preserve it verbatim
+    // when reservation is absent or the native control cluster misses it.
+    frame = { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! };
+    const controls = nscvSurfaceNormalize({ x: v[4]!, y: v[5]!, width: v[6]!, height: v[7]! });
+    const x0 = nscvSurfaceMax(frame.x, controls.x), y0 = nscvSurfaceMax(frame.y, controls.y);
+    const x1 = nscvSurfaceMin(nscvSurfaceRight(frame), nscvSurfaceRight(controls)), y1 = nscvSurfaceMin(nscvSurfaceBottom(frame), nscvSurfaceBottom(controls));
+    const misses = x1 <= x0 || y1 <= y0;
+    const emptyIntersection = Math.fround(x1 - x0) <= 0 || Math.fround(y1 - y0) <= 0;
+    if (a === 1 && b === 1 && !(controls.width <= 0 || controls.height <= 0) && !misses && !emptyIntersection) {
+      if (Math.fround(controls.x + Math.fround(controls.width / 2)) >= Math.fround(frame.x + Math.fround(frame.width / 2))) {
+        frame = { x: frame.x, y: frame.y, width: nscvSurfaceMax(0, Math.fround(nscvSurfaceMin(nscvSurfaceRight(frame), controls.x) - frame.x)), height: frame.height };
+      } else {
+        const start = nscvSurfaceMin(nscvSurfaceRight(frame), nscvSurfaceMax(frame.x, nscvSurfaceRight(controls)));
+        frame = { x: start, y: frame.y, width: nscvSurfaceMax(0, Math.fround(nscvSurfaceRight(frame) - start)), height: frame.height };
+      }
+    }
+  }
+  const result = new Uint8Array(17);result[0] = present ? 1 : 0;
+  const output = new DataView(result.buffer);
+  output.setFloat32(1, frame.x, true);output.setFloat32(5, frame.y, true);output.setFloat32(9, frame.width, true);output.setFloat32(13, frame.height, true);
+  return result;
 }

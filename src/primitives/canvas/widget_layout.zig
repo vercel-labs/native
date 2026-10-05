@@ -203,6 +203,14 @@ fn rootRelativeModalFrame(widget: Widget, proposed: geometry.RectF, root: geomet
         else => return proposed,
     };
     const intrinsic = intrinsicWidgetSizeDepth(widget, tokens, depth);
+    if (tokens.surface_layout_policy) |policy| {
+        return @import("surface_layout_policy.zig").frame(policy, 0, switch (kind) {
+            .dialog => 0,
+            .drawer => 1,
+            .sheet => 2,
+            else => unreachable,
+        }, 1, &.{ root.x, root.y, root.width, root.height, widget.frame.width, widget.frame.height, intrinsic.width, intrinsic.height, widget.layout.min_size.width, widget.layout.min_size.height, widget.layout.max_size.width, widget.layout.max_size.height, 24 }) orelse proposed;
+    }
     const preferred = geometry.SizeF.init(
         clampIntrinsicAxis(if (widget.frame.width > 0) widget.frame.width else intrinsic.width, widget.layout.min_size.width, widget.layout.max_size.width),
         clampIntrinsicAxis(if (widget.frame.height > 0) widget.frame.height else intrinsic.height, widget.layout.min_size.height, widget.layout.max_size.height),
@@ -263,6 +271,9 @@ fn layoutRootRelativeModalChildren(
 fn windowControlsClearedContent(content: geometry.RectF, widget: Widget, tokens: DesignTokens) geometry.RectF {
     if (!widget.window_drag) return content;
     const controls = (tokens.window_controls orelse return content).normalized();
+    if (tokens.surface_layout_policy) |policy| {
+        return @import("surface_layout_policy.zig").frame(policy, 2, 1, 1, &.{ content.x, content.y, content.width, content.height, controls.x, controls.y, controls.width, controls.height }) orelse @panic("invalid compiled caption frame");
+    }
     if (controls.width <= 0 or controls.height <= 0) return content;
     if (geometry.RectF.intersection(content, controls).isEmpty()) return content;
     var cleared = content;
@@ -513,6 +524,11 @@ pub fn anchoredWidgetFrame(
     window_rect: geometry.RectF,
     tokens: DesignTokens,
 ) geometry.RectF {
+    if (tokens.surface_layout_policy) |policy| {
+        const intrinsic = intrinsicWidgetSize(child, tokens);
+        const point = anchor.point orelse geometry.PointF.init(0, 0);
+        return @import("surface_layout_policy.zig").frame(policy, 1, @intFromEnum(anchor.placement), @as(u8, @intFromEnum(anchor.alignment)) | (if (anchor.point != null) @as(u8, 4) else 0), &.{ window_rect.x, window_rect.y, window_rect.width, window_rect.height, anchor_rect.x, anchor_rect.y, anchor_rect.width, anchor_rect.height, child.frame.width, child.frame.height, intrinsic.width, intrinsic.height, child.layout.min_size.width, child.layout.min_size.height, child.layout.max_size.width, child.layout.max_size.height, anchor.offset, point.x, point.y }) orelse @panic("invalid compiled anchor frame");
+    }
     const window = window_rect.normalized();
     const anchor_frame = if (anchor.point) |point| geometry.RectF.init(
         std.math.clamp(point.x, window.x, window.maxX()),

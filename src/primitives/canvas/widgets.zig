@@ -1237,6 +1237,7 @@ pub const BuiltinSurfacePlacementOptions = struct {
     bounds: geometry.RectF,
     preferred_size: geometry.SizeF = .{},
     margin: f32 = 24,
+    surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
 };
 
 /// The input-catcher behind a modal surface: a full-bounds panel whose
@@ -1356,6 +1357,14 @@ pub fn builtinStatusBarWidget(options: BuiltinStatusBarOptions) Widget {
 }
 
 pub fn builtinSurfaceFrame(kind: BuiltinComponentKind, options: BuiltinSurfacePlacementOptions) ?geometry.RectF {
+    if (options.surface_layout_policy) |policy| {
+        return @import("surface_layout_policy.zig").frame(policy, 0, switch (kind) {
+            .dialog => 0,
+            .drawer => 1,
+            .sheet => 2,
+            else => 255,
+        }, 0, &.{ options.bounds.x, options.bounds.y, options.bounds.width, options.bounds.height, options.preferred_size.width, options.preferred_size.height, 0, 0, 0, 0, 0, 0, options.margin });
+    }
     const bounds = options.bounds.normalized();
     if (bounds.isEmpty()) return null;
 
