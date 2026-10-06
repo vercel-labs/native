@@ -713,8 +713,14 @@ test "compiled primary and window view copies survive alternating scriptc arena 
         try std.testing.expectEqualSlices(u8, &.{1}, &checkable_state);
         try std.testing.expectEqual(@as(f32, 0.8), @as(f32, @bitCast(std.mem.readInt(u32, &slider_state, .little))));
     }
-    try std.testing.expect(std.mem.indexOf(u8, primary, "Service Feed Reader") != null);
-    try std.testing.expect(std.mem.indexOf(u8, secondary, "Native SDK Notes") != null);
+    // The wire may carry exact raw bytes instead of a JSON string. Keep
+    // the full buffer comparisons above and assert text through its consumer.
+    var primary_ui = canvas.Ui(core.Msg).init(allocator);
+    const primary_tree = try primary_ui.finalize(TsView.build(&primary_ui, Bridge.model()));
+    try std.testing.expect(findTextIn(primary_tree.root, "Service Feed Reader"));
+    var secondary_ui = canvas.Ui(core.Msg).init(allocator);
+    const secondary_tree = try secondary_ui.finalize(TsView.buildWindow(&secondary_ui, Bridge.model(), "feed"));
+    try std.testing.expect(findTextIn(secondary_tree.root, "Native SDK Notes"));
 }
 
 test "compiled scroll offsets preserve exact native f32 clamps and per-axis history" {
