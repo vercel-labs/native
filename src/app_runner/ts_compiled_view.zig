@@ -902,6 +902,16 @@ test "compiled code diff ordinals preserve every mask word and reject invalid tr
     }
 }
 
+// The native construction oracle supplies authored data. Compiled views also
+// attach the appearance owner to every node; compare that callback explicitly
+// instead of erasing it from the decoded tree.
+fn withCompiledAppearance(reference: Ui.Node) Ui.Node {
+    var result = reference;
+    if (comptime @hasDecl(core, "nativeWindowPolicy")) result.widget.appearance_policy = core.nativeWindowPolicy;
+    for (@constCast(result.nodes)) |*child| child.* = withCompiledAppearance(child.*);
+    return result;
+}
+
 test "compiled tooltip records match native anchored and static primitives" {
     if (comptime enabled) {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -915,7 +925,7 @@ test "compiled tooltip records match native anchored and static primitives" {
         var reference_ui = Ui.init(arena.allocator());
         const Reference = sdk.canvas.CompiledMarkupView(core.Model, core.Msg, "<stack><button>Run</button><tooltip anchor=\"above\" anchor-alignment=\"end\" anchor-offset=\"8\" tooltip-delay=\"250\">Run café</tooltip><tooltip>Static hint</tooltip></stack>");
         const model: core.Model = undefined;
-        const expected = Reference.build(&reference_ui, &model);
+        const expected = withCompiledAppearance(Reference.build(&reference_ui, &model));
         // The runtime-only callback differs by frontend; every authored
         // primitive field, child, owned string and anchor must match.
         actual.widget.interaction_policy = null;
@@ -957,6 +967,7 @@ pub fn testModalRecords() !void {
                     if (comptime @hasDecl(core, "nativeTextPolicy")) child.widget.interaction_policy = core.nativeTextPolicy;
                     var expected = expected_ui.el(kind, .{ .text = "Café", .min_width = 120, .max_width = 420, .height = 220, .on_dismiss = @unionInit(core.Msg, field.name, {}) }, .{child});
                     if (comptime @hasDecl(core, "nativeTextPolicy")) expected.widget.interaction_policy = core.nativeTextPolicy;
+                    expected = withCompiledAppearance(expected);
                     try std.testing.expectEqualDeep(expected, actual);
                 }
                 break;
@@ -980,7 +991,7 @@ pub fn testGridRecords() !void {
     var actual = try decode(&ui, bytes);
     @memset(bytes, 'x');
     var reference_ui = Ui.init(arena.allocator());
-    const expected = reference_ui.el(.grid, .{ .columns = 3, .virtualized = true, .virtual_item_extent = 40, .value = 24 }, .{reference_ui.text(.{}, "Café")});
+    const expected = withCompiledAppearance(reference_ui.el(.grid, .{ .columns = 3, .virtualized = true, .virtual_item_extent = 40, .value = 24 }, .{reference_ui.text(.{}, "Café")}));
     actual.widget.interaction_policy = null;
     for (@constCast(actual.nodes)) |*child| child.widget.interaction_policy = null;
     const actual_tree = try ui.finalize(actual);
@@ -1013,6 +1024,7 @@ pub fn testContentSurfaceRecords() !void {
                 if (comptime @hasDecl(core, "nativeTextPolicy")) child.widget.interaction_policy = core.nativeTextPolicy;
                 var expected = reference.el(kind, .{ .text = "Café", .width = 360, .min_width = 120, .max_width = 420, .padding = padding, .variant = variant }, .{child});
                 if (comptime @hasDecl(core, "nativeTextPolicy")) expected.widget.interaction_policy = core.nativeTextPolicy;
+                expected = withCompiledAppearance(expected);
                 try std.testing.expectEqualDeep(expected, actual);
                 const actual_tree = try ui.finalize(actual);
                 const reference_tree = try reference.finalize(expected);
@@ -1040,7 +1052,7 @@ pub fn testInlineParagraphRecords() !void {
         \\<text text-alignment="end" size="display" key="readout" label="Result">Value <span weight="medium" mono="true" italic="true" underline="true" scale="1.5" foreground="accent">café</span>.</text>
     );
     const model: core.Model = undefined;
-    const expected = Reference.build(&reference_ui, &model);
+    const expected = withCompiledAppearance(Reference.build(&reference_ui, &model));
     actual.widget.interaction_policy = null;
     const actual_tree = try ui.finalize(actual);
     const expected_tree = try reference_ui.finalize(expected);
