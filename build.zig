@@ -1445,7 +1445,7 @@ pub fn build(b: *std.Build) void {
         profile_step.dependOn(&profile_cli_tests.step);
         test_step.dependOn(&profile_cli_tests.step);
         const core_policy_step = b.step("test-corewire-policy", "Test compiled core contract policy and both projection adapters");
-        for ([_][]const u8{ "sidecar.zig", "emit.zig", "emit_facade.zig", "invocation_tests.zig" }) |source| {
+        for ([_][]const u8{ "contract_intake.zig", "sidecar.zig", "emit.zig", "emit_facade.zig", "invocation_tests.zig" }) |source| {
             const policy_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
             @import("build/corewire.zig").linkProfile(policy_mod, ts_core_artifacts.profile_archive);
             const run = b.addRunArtifact(testArtifact(b, policy_mod));
@@ -1461,6 +1461,16 @@ pub fn build(b: *std.Build) void {
         core_policy_cli_tests.setCwd(b.path("."));
         core_policy_step.dependOn(&core_policy_cli_tests.step);
         test_step.dependOn(&core_policy_cli_tests.step);
+        const intake_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        intake_cli_tests.addFileArg(b.path("tools/corewire/intake.test.ts"));
+        intake_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        for ([_][]const u8{ "intake_cases.ts", "intake_goldens.json", "core_cases.ts", "service_cases.ts" }) |source| {
+            intake_cli_tests.addFileInput(b.path(b.fmt("tools/corewire/{s}", .{source})));
+        }
+        intake_cli_tests.has_side_effects = true;
+        intake_cli_tests.setCwd(b.path("."));
+        core_policy_step.dependOn(&intake_cli_tests.step);
+        test_step.dependOn(&intake_cli_tests.step);
         const invocation_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
         invocation_cli_tests.addFileArg(b.path("tools/corewire/invocation.test.ts"));
         invocation_cli_tests.addArtifactArg(ts_core_artifacts.corewire);

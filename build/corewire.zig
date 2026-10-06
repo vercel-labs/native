@@ -6,7 +6,7 @@ pub fn profileArchive(b: *std.Build, sdk: *std.Build, node: []const u8) std.Buil
     _ = source.addCopyFile(sdk.path("tools/corewire/emit_profile.ts"), "emit_profile.ts");
     _ = source.addCopyFile(sdk.path("tools/corewire/emit_service.ts"), "emit_service.ts");
     _ = source.addCopyFile(sdk.path("tools/corewire/service_templates.ts"), "service_templates.ts");
-    for ([_][]const u8{ "invocation.ts", "invocation_usage.ts", "lossless_projection.ts", "profile_emission.ts", "core_contract.ts", "core_projection.ts", "core_vocabulary.ts", "core_policy.ts", "core_emission.ts", "emit_mirror.ts", "emit_facade.ts", "mirror_templates.ts", "facade_templates.ts" }) |file| {
+    for ([_][]const u8{ "contract_intake.ts", "invocation.ts", "invocation_usage.ts", "lossless_projection.ts", "profile_emission.ts", "core_contract.ts", "core_projection.ts", "core_vocabulary.ts", "core_policy.ts", "core_emission.ts", "emit_mirror.ts", "emit_facade.ts", "mirror_templates.ts", "facade_templates.ts" }) |file| {
         _ = source.addCopyFile(sdk.path(b.fmt("tools/corewire/{s}", .{file})), file);
     }
     _ = source.addCopyFile(sdk.path("tools/corewire/profile_library.json"), "profile_library.json");

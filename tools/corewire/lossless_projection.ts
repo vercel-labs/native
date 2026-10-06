@@ -1,8 +1,8 @@
 // A lossless tree over canonical JSON from the structural decoder. Scalar
 // lexemes retain exact native numeric spellings and complete additive fields.
-interface Member { key: string; name: string; value: JsonNode }
-interface JsonNode { kind: string; literal: string; members: Member[]; items: JsonNode[] }
-class Parser {
+export interface Member { key: string; name: string; value: JsonNode }
+export interface JsonNode { kind: string; literal: string; members: Member[]; items: JsonNode[] }
+export class Parser {
   source: string; at = 0;
   constructor(source: string) { this.source = source; }
   space(): void { while (/\s/.test(this.source.charAt(this.at)) && this.at < this.source.length) this.at++; }
@@ -54,7 +54,7 @@ function bytesEqual(text: string, raw: number[]): boolean {
   for (let i = 0; i < raw.length; i++) if (encoded[i] !== raw[i]) return false;
   return true;
 }
-function render(node: JsonNode, depth: number): string {
+export function render(node: JsonNode, depth: number): string {
   if (node.kind === "scalar") return node.literal;
   const object = node.kind === "object", length = object ? node.members.length : node.items.length;
   const open = object ? "{" : "[", close = object ? "}" : "]";

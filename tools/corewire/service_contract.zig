@@ -58,9 +58,24 @@ pub const Contract = struct {
 pub const Error = error{ InvalidContract, OutOfMemory, WriteFailed };
 
 pub fn read(arena: std.mem.Allocator, source: []const u8, writer: *std.Io.Writer) Error!Contract {
-    const parsed = std.json.parseFromSliceLeaky(Contract, arena, source, .{ .ignore_unknown_fields = false }) catch |err| {
+    _ = std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{ .parse_numbers = false, .duplicate_field_behavior = .use_last }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
         try writer.print("corewire: services contract is not valid schema-2 JSON: {t}\n", .{err});
         return error.InvalidContract;
+    };
+    const intake = @import("contract_intake.zig");
+    const input = try std.json.Stringify.valueAlloc(arena, .{
+        .canonical = source,
+        .integers = try intake.integerFacts(arena, source),
+    }, .{});
+    const result = try intake.call(struct { normalized: []const u8, @"error": []const u8 }, arena, input, "service");
+    if (result.@"error".len != 0) {
+        try writer.print("corewire: services contract is not valid schema-2 JSON: {s}\n", .{result.@"error"});
+        return error.InvalidContract;
+    }
+    const parsed = std.json.parseFromSliceLeaky(Contract, arena, result.normalized, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => @panic("corewire: malformed normalized service shape"),
     };
     try @import("service_projection.zig").validate(arena, parsed, writer);
     return parsed;

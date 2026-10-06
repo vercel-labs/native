@@ -12,6 +12,7 @@ import { planInvocation, aliasPolicy, emitCoreInvocation } from "./invocation.ts
 import type { CoreInvocationInput } from "./invocation.ts";
 import { projectEffective } from "./lossless_projection.ts";
 import type { ProfileInput } from "./profile_emission.ts";
+import { coreIntake, serviceIntake } from "./contract_intake.ts";
 export { emitProfile } from "./profile_emission.ts";
 export function generateMirror(input: string): string { return JSON.stringify(emitMirror(JSON.parse(input) as EmissionInput)); }
 export function generateFacade(input: string): string { return JSON.stringify(emitFacade(JSON.parse(input) as EmissionInput)); }
@@ -37,3 +38,8 @@ export function invocationAliases(input: string): string {
 }
 export function coreInvocation(input: string): string { return JSON.stringify(emitCoreInvocation(JSON.parse(input) as CoreInvocationInput)); }
 export function effectiveSidecar(input: string): string { return projectEffective(input); }
+export function contractIntake(input: string, mode: string): string {
+  if (mode === "core") return JSON.stringify(coreIntake(input));
+  if (mode === "service") return JSON.stringify(serviceIntake(input));
+  throw new Error("unknown contract intake mode");
+}
