@@ -442,6 +442,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (options.pty_key_resolver != null) @panic("TsUiApp owns pty_key_resolver - remove custom PTY identity wiring");
             stamped.pty_key_resolver = Host.resolvePtyKey;
             if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                if (options.construction_policy != null) @panic("TsUiApp owns construction_policy - remove custom construction wiring");
+                stamped.construction_policy = core.nativeWindowPolicy;
                 if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
                 stamped.surface_layout_policy = core.nativeWindowPolicy;
                 if (options.grid_layout_policy != null) @panic("TsUiApp owns grid_layout_policy - remove custom grid layout wiring");

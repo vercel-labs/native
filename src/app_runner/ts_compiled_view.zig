@@ -238,6 +238,7 @@ fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
 }
 
 fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) !Ui.Node {
+    if (comptime @hasDecl(core, "nativeWindowPolicy")) ui.construction_policy = core.nativeWindowPolicy;
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,

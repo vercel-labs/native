@@ -6,6 +6,10 @@ const std = @import("std");
 const native_sdk = @import("native_sdk");
 const core = @import("ts_persist_core");
 
+test {
+    _ = @import("component_construction_e2e_tests.zig");
+}
+
 const Adapter = native_sdk.TsUiApp(core);
 const Bridge = Adapter.Host;
 const App = Adapter.App;

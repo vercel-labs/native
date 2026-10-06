@@ -1190,6 +1190,9 @@ pub const Widget = struct {
 };
 
 pub const BuiltinComponentOptions = struct {
+    /// Explicit compiled construction for native toolkit extensions. Ordinary
+    /// TypeScript views receive the same owner through their Ui builder.
+    construction_policy: ?@import("component_construction_policy.zig").Policy = null,
     id: ObjectId = 0,
     frame: geometry.RectF = .{},
     opacity: f32 = 1,
@@ -1280,10 +1283,9 @@ pub const BuiltinSurfaceEnterAnimationOptions = struct {
 };
 
 pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinComponentOptions) Widget {
-    const descriptor = builtinComponentDescriptor(kind);
-    return .{
+    var widget: Widget = .{
         .id = options.id,
-        .kind = descriptor.root_widget_kind,
+        .kind = .stack,
         .frame = options.frame,
         .opacity = options.opacity,
         .transform = options.transform,
@@ -1304,13 +1306,24 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .layer = options.layer,
         .scrim = options.scrim,
         .state = options.state,
-        .layout = builtinComponentLayout(kind, options.size orelse builtinComponentDefaultSize(kind), options.layout),
-        .variant = options.variant orelse builtinComponentDefaultVariant(kind),
-        .size = options.size orelse builtinComponentDefaultSize(kind),
+        .layout = options.layout,
+        .variant = .default,
+        .size = .default,
         .style = options.style,
-        .semantics = builtinComponentSemantics(descriptor, options.semantics),
+        .semantics = options.semantics,
         .children = options.children,
     };
+    if (options.construction_policy) |policy| {
+        @import("component_construction_policy.zig").builtin(policy, kind, &widget, options);
+    } else {
+        const descriptor = builtinComponentDescriptor(kind);
+        widget.kind = descriptor.root_widget_kind;
+        widget.variant = options.variant orelse builtinComponentDefaultVariant(kind);
+        widget.size = options.size orelse builtinComponentDefaultSize(kind);
+        widget.layout = builtinComponentLayout(kind, widget.size, options.layout);
+        widget.semantics = builtinComponentSemantics(descriptor, options.semantics);
+    }
+    return widget;
 }
 
 pub fn widgetCommandPartId(part: WidgetCommandPart) ObjectId {

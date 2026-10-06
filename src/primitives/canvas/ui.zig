@@ -24,6 +24,7 @@ const code_model = @import("code.zig");
 const font_coverage = @import("font_coverage.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const construction = @import("component_construction_policy.zig");
 const reflect = @import("ui_markup_reflect.zig");
 const ui_provenance = @import("ui_provenance.zig");
 
@@ -430,6 +431,9 @@ pub fn Ui(comptime Msg: type) type {
 
         arena: std.mem.Allocator,
         failed: bool = false,
+        /// Compiled apps own portable construction; native builders retain
+        /// the reference implementation when this explicit owner is absent.
+        construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
         /// request's `viewport_fallback` at offset 0.
@@ -1588,7 +1592,7 @@ pub fn Ui(comptime Msg: type) type {
         pub fn el(self: *Self, kind: WidgetKind, options: ElementOptions, children: anytype) Node {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
-            var widget = widgetFromOptions(kind, options);
+            var widget = self.widgetFromOptions(kind, options);
             if (kind == .terminal and options.pty_name.len > 0) {
                 widget.terminal.pty = if (self.pty_key_resolver) |resolve| resolve(options.pty_name) else 0;
             }
@@ -3424,14 +3428,23 @@ pub fn Ui(comptime Msg: type) type {
             warnUncoveredText(widget.kind, widget.placeholder);
             warnInertWrap(widget.kind, node.wrap);
             warnTextSizeKind(widget.kind, widget.size);
-            applyStyleTokens(&widget.style, node.style_tokens, tokens);
+            const construction_plan: construction.FinalPlan = if (self.construction_policy) |policy|
+                construction.finalize(policy, &widget, node.style_tokens, tokens.*, node.wrap, node.nodes.len == 2, constructionHandlers(node))
+            else blk: {
+                applyStyleTokens(&widget.style, node.style_tokens, tokens);
+                if (node.wrap == false and widget.kind == .text) widget.text_no_wrap = true;
+                break :blk .{
+                    .make_span = node.wrap == true and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0,
+                    .split = widget.kind == .split and node.nodes.len == 2,
+                };
+            };
             // Opt-in text wrapping reuses the span paragraph machinery: a
             // wrapped text leaf becomes a single-span paragraph over its
             // own bytes (the span invariant: span text subslices
             // `widget.text`), so wrapping, intrinsic sizing, wrapped
             // height reservation, and rendering are all the existing span
             // path — no forked text pipeline.
-            if (node.wrap == true and widget.kind == .text and widget.spans.len == 0 and widget.text.len > 0) {
+            if (construction_plan.make_span) {
                 const spans = try self.arena.alloc(canvas.TextSpan, 1);
                 spans[0] = .{ .text = widget.text };
                 widget.spans = spans;
@@ -3444,9 +3457,6 @@ pub fn Ui(comptime Msg: type) type {
             // Span paragraphs honor the same explicit no-wrap policy.
             // `Ui.code` uses this to keep highlighted logical lines
             // intact inside its horizontal scroll region.
-            if (node.wrap == false and widget.kind == .text) {
-                widget.text_no_wrap = true;
-            }
             widget.id = if (node.global_key) |global_key|
                 structuralId(global_id_seed, widget.kind, global_key)
             else
@@ -3474,34 +3484,36 @@ pub fn Ui(comptime Msg: type) type {
                     sink.record(widget.id, source, key_trail.items(), key_trail.truncated);
                 }
             }
-            // Typed handlers imply the matching accessibility actions, the
-            // same way a stringly `command` does for engine-owned dispatch.
-            if (node.on_press != null) widget.semantics.actions.press = true;
-            if (node.on_drag != null) widget.semantics.actions.drag = true;
-            // A double-press handler makes the element pressable too:
-            // the double-click's first release must land somewhere, and
-            // an element that acts on double click without claiming
-            // presses would be unreachable by pointer at all.
-            if (node.on_double_press != null) widget.semantics.actions.press = true;
-            if (node.on_toggle != null) widget.semantics.actions.toggle = true;
-            // A hold handler makes the element pressable (hit target +
-            // press claimer), like on_press: the hold gesture starts as a
-            // press, and the classic list-row shape (press to open, hold
-            // for the menu) pairs the two on one element.
-            if (node.on_hold != null) widget.semantics.actions.press = true;
-            // Hover family: binding either edge makes the element
-            // hover-hittable (`Widget.hover_msgs` — the chart
-            // hover-details shape, a hit target that claims no
-            // presses), never pressable: hover is not an action a
-            // screen reader can invoke, so no semantic action is
-            // stamped.
-            if (node.on_hover_enter != null or node.on_hover_leave != null) widget.hover_msgs = true;
-            if (node.on_input != null) widget.semantics.actions.set_text = true;
-            if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
-                widget.semantics.actions.increment = true;
-                widget.semantics.actions.decrement = true;
+            if (self.construction_policy == null) {
+                // Typed handlers imply the matching accessibility actions, the
+                // same way a stringly `command` does for engine-owned dispatch.
+                if (node.on_press != null) widget.semantics.actions.press = true;
+                if (node.on_drag != null) widget.semantics.actions.drag = true;
+                // A double-press handler makes the element pressable too:
+                // the double-click's first release must land somewhere, and
+                // an element that acts on double click without claiming
+                // presses would be unreachable by pointer at all.
+                if (node.on_double_press != null) widget.semantics.actions.press = true;
+                if (node.on_toggle != null) widget.semantics.actions.toggle = true;
+                // A hold handler makes the element pressable (hit target +
+                // press claimer), like on_press: the hold gesture starts as a
+                // press, and the classic list-row shape (press to open, hold
+                // for the menu) pairs the two on one element.
+                if (node.on_hold != null) widget.semantics.actions.press = true;
+                // Hover family: binding either edge makes the element
+                // hover-hittable (`Widget.hover_msgs` — the chart
+                // hover-details shape, a hit target that claims no
+                // presses), never pressable: hover is not an action a
+                // screen reader can invoke, so no semantic action is
+                // stamped.
+                if (node.on_hover_enter != null or node.on_hover_leave != null) widget.hover_msgs = true;
+                if (node.on_input != null) widget.semantics.actions.set_text = true;
+                if (widget.kind == .slider and (node.on_value != null or node.on_change != null)) {
+                    widget.semantics.actions.increment = true;
+                    widget.semantics.actions.decrement = true;
+                }
             }
-            if (widget.kind == .split and node.nodes.len == 2) {
+            if (construction_plan.split) {
                 // Synthesize the draggable divider between the two panes.
                 // Both markup engines build through this finalize, so the
                 // handle exists everywhere a split does. Pane keys keep
@@ -3512,7 +3524,7 @@ pub fn Ui(comptime Msg: type) type {
                 // into the neighbor.
                 const child_widgets = try self.arena.alloc(Widget, 3);
                 child_widgets[0] = try self.finalizeNode(node.nodes[0], widget.id, node.nodes[0].key orelse UiKey{ .index = 0 }, handlers, handler_len, tokens, key_trail);
-                child_widgets[1] = splitDividerWidget(widget);
+                child_widgets[1] = try self.splitDividerWidget(widget);
                 child_widgets[2] = try self.finalizeNode(node.nodes[1], widget.id, node.nodes[1].key orelse UiKey{ .index = 1 }, handlers, handler_len, tokens, key_trail);
                 child_widgets[0].layout.clip_content = true;
                 child_widgets[2].layout.clip_content = true;
@@ -3620,10 +3632,26 @@ pub fn Ui(comptime Msg: type) type {
         /// native selection resolves.
         fn appendContextMenuFallbackSurface(self: *Self, widget: *Widget, declared: []const ContextMenuItem) error{OutOfMemory}!void {
             if (declared.len == 0) return;
-            const surface_id = structuralId(widget.id, .dropdown_menu, UiKey{ .str = "context-menu" });
+            var surface = if (self.construction_policy) |policy|
+                (try construction.synthesize(policy, 2, false, false, false, 0, self.context_menu_fallback_point, self.arena)).widget
+            else
+                Widget{ .kind = .dropdown_menu, .semantics = .{ .label = "Context menu" } };
+            const surface_id = structuralId(widget.id, surface.kind, UiKey{ .str = "context-menu" });
+            surface.id = surface_id;
+            surface.appearance_policy = widget.appearance_policy;
             const item_widgets = try self.arena.alloc(Widget, declared.len);
             const item_ids = try self.arena.alloc(ObjectId, declared.len);
             for (declared, 0..) |item, index| {
+                if (self.construction_policy) |policy| {
+                    const descriptor = try construction.synthesize(policy, 1, false, item.separator, item.enabled, 0, null, self.arena);
+                    var item_widget = descriptor.widget;
+                    item_widget.id = structuralId(surface_id, item_widget.kind, UiKey{ .int = @intCast(index) });
+                    item_widget.appearance_policy = widget.appearance_policy;
+                    if (descriptor.item_identity) item_widget.text = item.label;
+                    item_widgets[index] = item_widget;
+                    item_ids[index] = if (descriptor.item_identity) item_widget.id else 0;
+                    continue;
+                }
                 if (item.separator) {
                     item_widgets[index] = .{
                         .kind = .separator,
@@ -3644,20 +3672,14 @@ pub fn Ui(comptime Msg: type) type {
                 item_widgets[index] = item_widget;
                 item_ids[index] = item_widget.id;
             }
-            var surface = Widget{
-                .kind = .dropdown_menu,
-                .appearance_policy = widget.appearance_policy,
-                .id = surface_id,
-                .semantics = .{ .label = "Context menu" },
-                .children = item_widgets,
-            };
+            surface.children = item_widgets;
             // Anchor at the recorded click point when the request carried
             // one (offset 0: the surface corner sits at the pointer, the
             // native-menu convention); the widget-edge anchor remains the
             // pointer-less floor. Either way the anchored-surface edge
             // rules apply: flip above the anchor when the surface would
             // cross the bottom edge, clamp into the window.
-            surface.layout.anchor = if (self.context_menu_fallback_point) |point|
+            if (self.construction_policy == null) surface.layout.anchor = if (self.context_menu_fallback_point) |point|
                 .{ .placement = .below, .alignment = .start, .offset = 0, .point = point }
             else
                 .{ .placement = .below, .alignment = .start };
@@ -3670,6 +3692,14 @@ pub fn Ui(comptime Msg: type) type {
                 .surface_id = surface_id,
                 .item_ids = item_ids,
             };
+        }
+
+        fn constructionHandlers(node: Node) u16 {
+            var mask: u16 = 0;
+            inline for (.{ "on_press", "on_drag", "on_double_press", "on_toggle", "on_hold", "on_hover_enter", "on_hover_leave", "on_input", "on_value", "on_change" }, 0..) |name, i| {
+                if (@field(node, name) != null) mask |= @as(u16, 1) << @intCast(i);
+            }
+            return mask;
         }
 
         fn appendHandler(handlers: []Handler, handler_len: *usize, id: ObjectId, event: UiHandlerEvent, msg: ?Msg) void {
@@ -3772,7 +3802,7 @@ pub fn Ui(comptime Msg: type) type {
             }
         }
 
-        fn widgetFromOptions(kind: WidgetKind, options: ElementOptions) Widget {
+        fn widgetFromOptions(self: *Self, kind: WidgetKind, options: ElementOptions) Widget {
             warnStackContainerGap(kind, options.gap);
             warnUnknownIconName(options.icon);
             warnInertScrollAxis(kind, .{ .virtualized = options.virtualized, .axis = options.axis, .value_x = options.value_x });
@@ -3800,7 +3830,7 @@ pub fn Ui(comptime Msg: type) type {
                 .variant = options.variant,
                 .size = options.size,
                 .state = .{
-                    .selected = options.checked or options.selected,
+                    .selected = false,
                     .expanded = options.expanded,
                     .disabled = options.disabled,
                 },
@@ -3824,15 +3854,6 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
-                    .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
-                    // Explicit sizes are definite (min AND max). Resizable
-                    // is the exception: width documents the initial width
-                    // and the engine's drag handle keeps writing larger
-                    // frames past it.
-                    .max_size = if (kind == .resizable) .{} else .{
-                        .width = if (options.width > 0) options.width else options.max_width,
-                        .height = options.height,
-                    },
                 },
                 .style = options.style,
                 .semantics = options.semantics,
@@ -3842,6 +3863,18 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_easing = options.resize_easing,
                 .resize_origin = options.resize_origin,
                 .tooltip_delay_ms = options.tooltip_delay,
+            };
+            if (self.construction_policy) |policy| {
+                construction.element(policy, &widget, options);
+                return widget;
+            }
+            widget.state.selected = options.checked or options.selected;
+            widget.layout.min_size = .{ .width = @max(options.width, options.min_width), .height = options.height };
+            // Authored sizes are definite; resizable width seeds a frame
+            // that the drag capability may grow beyond that initial size.
+            widget.layout.max_size = if (kind == .resizable) .{} else .{
+                .width = if (options.width > 0) options.width else options.max_width,
+                .height = options.height,
             };
             // A checked radio starts with the same canonical value as a
             // retained selection, so activating it is not a change edge.
@@ -3855,7 +3888,14 @@ pub fn Ui(comptime Msg: type) type {
         /// Its `value` is stamped with the EFFECTIVE fraction by the
         /// layout pass; the authored value seeds keyboard steps before
         /// the first layout.
-        fn splitDividerWidget(split_widget: Widget) Widget {
+        fn splitDividerWidget(self: *Self, split_widget: Widget) error{OutOfMemory}!Widget {
+            if (self.construction_policy) |policy| {
+                var result = (try construction.synthesize(policy, 0, split_widget.state.disabled, false, false, split_widget.value, null, self.arena)).widget;
+                result.id = structuralId(split_widget.id, result.kind, UiKey{ .str = "divider" });
+                result.interaction_policy = split_widget.interaction_policy;
+                result.appearance_policy = split_widget.appearance_policy;
+                return result;
+            }
             return .{
                 .kind = .split_divider,
                 .id = structuralId(split_widget.id, .split_divider, UiKey{ .str = "divider" }),
