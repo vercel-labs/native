@@ -3627,6 +3627,7 @@ pub fn Ui(comptime Msg: type) type {
                 if (item.separator) {
                     item_widgets[index] = .{
                         .kind = .separator,
+                        .appearance_policy = widget.appearance_policy,
                         .id = structuralId(surface_id, .separator, UiKey{ .int = @intCast(index) }),
                     };
                     item_ids[index] = 0;
@@ -3634,6 +3635,7 @@ pub fn Ui(comptime Msg: type) type {
                 }
                 var item_widget = Widget{
                     .kind = .menu_item,
+                    .appearance_policy = widget.appearance_policy,
                     .id = structuralId(surface_id, .menu_item, UiKey{ .int = @intCast(index) }),
                     .text = item.label,
                     .state = .{ .disabled = !item.enabled },
@@ -3644,6 +3646,7 @@ pub fn Ui(comptime Msg: type) type {
             }
             var surface = Widget{
                 .kind = .dropdown_menu,
+                .appearance_policy = widget.appearance_policy,
                 .id = surface_id,
                 .semantics = .{ .label = "Context menu" },
                 .children = item_widgets,
@@ -3858,6 +3861,7 @@ pub fn Ui(comptime Msg: type) type {
                 .id = structuralId(split_widget.id, .split_divider, UiKey{ .str = "divider" }),
                 .value = split_widget.value,
                 .interaction_policy = split_widget.interaction_policy,
+                .appearance_policy = split_widget.appearance_policy,
                 .state = .{ .disabled = split_widget.state.disabled },
                 .semantics = .{ .label = "Split divider" },
             };

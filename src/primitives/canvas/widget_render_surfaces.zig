@@ -45,16 +45,10 @@ const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 const washHovered = widget_render_style.washHovered;
 const surfaceStateBackground = widget_render_style.surfaceStateBackground;
-const disabledWash = widget_render_style.disabledWash;
-const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
-const cardControlVisualTokens = widget_render_style.cardControlVisualTokens;
-const dialogControlVisualTokens = widget_render_style.dialogControlVisualTokens;
-const drawerControlVisualTokens = widget_render_style.drawerControlVisualTokens;
-const sheetControlVisualTokens = widget_render_style.sheetControlVisualTokens;
 const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualTokens;
 
 pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const visual = alertControlVisualTokens(tokens);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -119,30 +113,8 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// The alert's identity color: destructive alerts read in the
 /// destructive hue (the house style `text-destructive` treatment on a plain
 /// card surface); every other variant keeps the plain foreground.
-fn alertBackgroundColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
-    if (widget.variant != .destructive) return surfaceStateBackground(widget, visual, tokens);
-    if (widget.style.background) |color| return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
-    const hue = widget.style.accent orelse tokens.colors.destructive;
-    const wash = colorWithAlpha(hue, if (widget.state.pressed)
-        tokens.states.destructive_wash_pressed_alpha
-    else if (washHovered(widget))
-        tokens.states.destructive_wash_hover_alpha
-    else
-        tokens.states.destructive_wash_alpha);
-    return disabledWash(wash, widget.state.disabled, tokens.states.disabled_alpha);
-}
-
-fn alertBorderColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
-    const border = widget.style.border orelse if (widget.variant == .destructive)
-        // Destructive alerts use the callout edge from the house recipe:
-        // the destructive hue at half strength. ControlTokens has one
-        // shared alert table, not per-variant alert tables, so a flat
-        // neutral `alert.border` cannot masquerade as variant theming.
-        colorWithAlpha(widget.style.accent orelse tokens.colors.destructive, 0.5)
-    else
-        visual.border orelse tokens.colors.border;
-    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
-}
+const alertBackgroundColor = widget_render_style.alertBackgroundColor;
+const alertBorderColor = widget_render_style.alertBorderColor;
 
 fn alertVariantForeground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
     return switch (widget.variant) {
@@ -168,7 +140,7 @@ pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, fr
 }
 
 pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const visual = cardControlVisualTokens(tokens);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -207,15 +179,15 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
 }
 
 pub fn emitDialogSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, dialogControlVisualTokens(tokens), tokens.radius.xl);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
 }
 
 pub fn emitDrawerSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, drawerControlVisualTokens(tokens), tokens.radius.xl);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
 }
 
 pub fn emitSheetSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, sheetControlVisualTokens(tokens), tokens.radius.lg);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
 }
 
 pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, fallback_radius: f32) Error!void {
@@ -517,7 +489,7 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
-    const visual = widget_render_style.accordionControlVisualTokens(tokens);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (widget.style.background orelse visual.background) |background| {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),

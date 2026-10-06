@@ -1317,6 +1317,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&code_workbench_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_appearance.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
         _ = native_api_tests.captureStdOut(.{});
@@ -1328,6 +1329,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        b.step("test-ts-control-appearance", "Compare complete compiled control appearance with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-component-policy", "Compare compiled component coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-replay-policy", "Compare compiled replay admission with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
@@ -5217,6 +5219,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/view_frontend.ts"));
     stage_run.addFileInput(b.path("packages/core/src/view_components.ts"));
     stage_run.addFileInput(b.path("packages/core/src/runtime_policy.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);

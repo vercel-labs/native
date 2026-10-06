@@ -1,4 +1,5 @@
 const std = @import("std");
+const appearance = @import("control_appearance_policy.zig");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
 const token_model = @import("tokens.zig");
@@ -91,6 +92,7 @@ pub fn focusRingRadius(radius: Radius, tokens: DesignTokens) Radius {
 /// beside it — the soft focus-ring gray that used to fill this role
 /// hints at focus but disappears as an insertion point.
 pub fn textEditingInkColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 14, appearance.visual(widget, tokens, .text_input), .{});
     const visual = textInputControlVisualTokens(widget, tokens);
     return widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
 }
@@ -102,6 +104,7 @@ pub fn textEditingInkColor(widget: Widget, tokens: DesignTokens) Color {
 /// schemes, including the monochrome register where the accent is
 /// near-black on light surfaces.
 pub fn textSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 15, .{}, .{});
     return widget.style.accent orelse tokens.colors.accent;
 }
 
@@ -109,6 +112,7 @@ pub fn textSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
 /// foreground, so the selected run inverts against the solid fill the
 /// way filled-primary controls pair accent with accent_text.
 pub fn textSelectionTextColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 16, .{}, .{});
     return widget.style.accent_foreground orelse tokens.colors.accent_text;
 }
 
@@ -118,6 +122,7 @@ pub fn textSelectionTextColor(widget: Widget, tokens: DesignTokens) Color {
 /// (links, emphasis, code), so the highlight sits under them as a
 /// translucent band instead of inverting them like editable fields do.
 pub fn staticTextSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 17, .{}, .{});
     return colorWithAlpha(widget.style.accent orelse tokens.colors.accent, tokens.states.selection_wash_alpha);
 }
 
@@ -153,37 +158,45 @@ pub fn widgetBorderFill(widget: Widget, fallback: Color) Fill {
 }
 
 pub fn widgetFocusRingFill(widget: Widget, tokens: DesignTokens) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 27, .{}, tokens.colors.focus_ring));
     return colorFill(widget.style.focus_ring orelse tokens.colors.focus_ring);
 }
 
 pub fn widgetBackgroundColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 28, .{}, fallback);
     return widget.style.background orelse fallback;
 }
 
 pub fn widgetAccentColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 29, .{}, fallback);
     return widget.style.accent orelse fallback;
 }
 
 pub fn widgetBorderColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 30, .{}, fallback);
     return widget.style.border orelse fallback;
 }
 
 pub fn widgetForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 12, .{}, fallback);
     const color = widget.style.foreground orelse fallback;
     return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
 }
 
 pub fn widgetAccentForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 13, .{}, fallback);
     const color = widget.style.accent_foreground orelse fallback;
     return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
 }
 
 pub fn widgetRadius(widget: Widget, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 18, .{}, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(widgetSizedRadiusValue(widget, fallback)));
 }
 
 pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 19, visual, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(widgetSizedRadiusValue(widget, visual.radius orelse fallback)));
 }
@@ -194,6 +207,7 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 /// never the full size-stepped scale of `controlRadius` (a lg button
 /// with a 12px corner starts reading as a card).
 pub fn buttonControlRadius(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, tokens, 20, visual, 0));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     const fallback = switch (widget.size) {
         .sm => tokens.radius.md,
@@ -203,6 +217,7 @@ pub fn buttonControlRadius(widget: Widget, visual: ControlVisualTokens, tokens: 
 }
 
 pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 22, .{}, fallback);
     return switch (widget.size) {
         .sm => @max(0, fallback - 2),
         // heading/display are text-leaf typography rungs; radii are
@@ -213,10 +228,12 @@ pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
 }
 
 pub fn widgetStrokeWidth(widget: Widget, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 23, .{}, fallback);
     return nonNegative(widget.style.stroke_width orelse fallback);
 }
 
 pub fn controlStrokeWidth(widget: Widget, visual: ControlVisualTokens, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 24, visual, fallback);
     return nonNegative(widget.style.stroke_width orelse visual.stroke_width orelse fallback);
 }
 
@@ -225,6 +242,7 @@ pub fn buttonFill(widget: Widget, tokens: DesignTokens) Fill {
 }
 
 pub fn buttonFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 2, appearance.visual(widget, tokens, .button), .{});
     // Disabled keeps the variant's identity at the disabled-wash
     // strength (`states.disabled_alpha`) — the same wash the selection
     // controls wear — instead of collapsing every variant to one gray
@@ -361,6 +379,7 @@ pub fn disabledWash(color: Color, disabled: bool, alpha: f32) Color {
 }
 
 pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 3, appearance.visual(widget, tokens, .button), .{});
     // Disabled ink normally keeps the variant's own ink at the
     // disabled-wash strength. A filled primary is the exception: CSS
     // opacity composites its knockout label and fill as ONE layer, so
@@ -402,6 +421,7 @@ pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
 }
 
 pub fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 4, appearance.visual(widget, tokens, .button), tokens.colors.border));
     // The disabled edge is the variant's own edge at half strength, so
     // it fades in lockstep with the half-strength fill and ink — a
     // full-strength edge around a washed body would read as a live
@@ -474,10 +494,12 @@ fn compositeOver(foreground: Color, background: Color, opacity: f32) Color {
 /// keeping full corners. Never true under the house register's default
 /// tokens, so no-pack rendering cannot take this path.
 pub fn buttonInDetachedGroup(widget: Widget, tokens: DesignTokens) bool {
+    if (widget.appearance_policy != null) return appearance.detached(widget, tokens);
     return widget.group_segment != .none and tokens.controls.button_group_style == .detached;
 }
 
 pub fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .button);
     // A detached-register group member wears the group's own control
     // table — the chip treatment replaces variant chrome, so the strip
     // reads as ONE exclusive-choice affordance rather than a row of
@@ -493,6 +515,11 @@ pub fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVi
     };
     if (widget.kind == .toggle_button or widget.kind == .toggle) return controlVisualTokensWithFallback(tokens.controls.toggle_button, variant);
     return variant;
+}
+
+pub fn selectControlVisualTokensForWidget(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .select);
+    return selectControlVisualTokens(tokens);
 }
 
 pub fn selectControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
@@ -532,6 +559,7 @@ pub fn controlStateBackground(visual: ControlVisualTokens, pressed: bool, active
 }
 
 pub fn textInputControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .text_input);
     return switch (widget.kind) {
         .input => controlVisualTokensWithFallback(tokens.controls.input, tokens.controls.text_field),
         .search_field => tokens.controls.search_field,
@@ -545,6 +573,7 @@ pub fn textInputControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn textInputFill(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 10, visual, .{}));
     if (widget.state.disabled) {
         if (visual.disabled_background) |color| return colorFill(color);
         const rest = restStateWidget(widget);
@@ -558,6 +587,7 @@ pub fn textInputFill(widget: Widget, tokens: DesignTokens, visual: ControlVisual
 }
 
 pub fn textInputBorderFill(widget: Widget, visual: ControlVisualTokens, fallback: Color) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, DesignTokens{}, 11, visual, fallback));
     return colorFill(widgetBorderColor(widget, visual.border orelse fallback));
 }
 
@@ -590,6 +620,7 @@ pub fn sheetControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
 }
 
 pub fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .list);
     return switch (widget.kind) {
         .data_cell => controlVisualTokensWithFallback(tokens.controls.data_cell, tokens.controls.list_item),
         .menu_item => controlVisualTokensWithFallback(tokens.controls.menu_item, tokens.controls.list_item),
@@ -599,6 +630,7 @@ pub fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) Control
 }
 
 pub fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .selection);
     return switch (widget.kind) {
         .segmented_control => tokens.controls.segmented_control,
         .checkbox => tokens.controls.checkbox,
@@ -611,6 +643,7 @@ pub fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .surface);
     return switch (widget.kind) {
         .accordion => accordionControlVisualTokens(tokens),
         .alert => alertControlVisualTokens(tokens),
@@ -634,6 +667,7 @@ pub fn resizableControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
 }
 
 pub fn componentControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .component);
     return switch (widget.kind) {
         .avatar => tokens.controls.avatar,
         .badge => tokens.controls.badge,
@@ -645,12 +679,14 @@ pub fn componentControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn componentPillRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 21, visual, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     if (visual.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(fallback));
 }
 
 pub fn badgeBackgroundColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 5, visual, .{});
     if (widget.state.disabled) {
         if (visual.disabled_background) |color| return color;
         return disabledWash(badgeBackgroundColor(restStateWidget(widget), tokens, visual), true, tokens.states.disabled_alpha);
@@ -674,6 +710,7 @@ pub fn badgeBackgroundColor(widget: Widget, tokens: DesignTokens, visual: Contro
 }
 
 pub fn badgeBorderColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 6, visual, tokens.colors.border);
     const border = widget.style.border orelse switch (widget.variant) {
         .default, .primary => widgetAccentColor(widget, visual.border orelse tokens.colors.accent),
         .destructive => widgetAccentColor(widget, visual.border orelse tokens.colors.destructive),
@@ -684,6 +721,7 @@ pub fn badgeBorderColor(widget: Widget, tokens: DesignTokens, visual: ControlVis
 }
 
 pub fn badgeTextColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 7, visual, .{});
     if (widget.state.disabled) {
         if (visual.disabled_foreground) |color| return color;
         return disabledWash(badgeTextColor(restStateWidget(widget), tokens, visual), true, tokens.states.disabled_alpha);
@@ -697,6 +735,7 @@ pub fn badgeTextColor(widget: Widget, tokens: DesignTokens, visual: ControlVisua
 }
 
 pub fn badgeStrokeWidth(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, tokens, 25, visual, 0);
     if (widget.style.stroke_width) |width| return nonNegative(width);
     if (visual.stroke_width) |width| return nonNegative(width);
     // Only the outline variant wears a border; the filled and quiet
@@ -708,6 +747,7 @@ pub fn badgeStrokeWidth(widget: Widget, tokens: DesignTokens, visual: ControlVis
 }
 
 pub fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, tokens, 26, appearance.visual(widget, tokens, .button), 0);
     if (widget.style.stroke_width) |width| return nonNegative(width);
     const visual = buttonControlVisualTokens(widget, tokens);
     if (visual.stroke_width) |width| return nonNegative(width);
@@ -722,6 +762,11 @@ pub fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetState) Color {
+    if (widget.appearance_policy != null) {
+        var target = widget;
+        target.state = state;
+        return appearance.color(target, tokens, 8, appearance.visual(widget, tokens, .list), .{});
+    }
     const visual = listItemControlVisualTokens(widget, tokens);
     // The quiet-surface knob reads through the widget, not the caller's
     // state copy, so every row/cell path honors it identically.
@@ -741,6 +786,7 @@ pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetStat
 /// hover fill remains authoritative, and a locally authored background is
 /// the surface's explicit all-state override.
 pub fn surfaceStateBackground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 9, visual, .{});
     const active = widget.state.pressed or widget.state.selected;
     const hovered = washHovered(widget);
     // A local background is an explicit all-state override. The theme
@@ -760,4 +806,44 @@ pub fn transparentColor() Color {
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+/// Callback-aware state ladder; drawing callers retain their explicit state facts.
+pub fn buttonStateBackgroundForWidget(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, active: bool, hovered: bool, fallback: Color) Color {
+    if (widget.appearance_policy == null) return buttonStateBackground(visual, active, hovered, fallback);
+    var target = widget;
+    target.state = .{ .selected = active, .hovered = hovered };
+    target.style.quiet_hover = false;
+    return appearance.color(target, tokens, 32, visual, fallback);
+}
+pub fn controlStateBackgroundForWidget(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, pressed: bool, active: bool, hovered: bool, fallback: Color) Color {
+    if (widget.appearance_policy == null) return controlStateBackground(visual, pressed, active, hovered, fallback);
+    var target = widget;
+    target.state = .{ .pressed = pressed, .selected = active, .hovered = hovered };
+    target.style.quiet_hover = false;
+    return appearance.color(target, tokens, 33, visual, fallback);
+}
+pub fn selectionDisabledColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, rest: Color, channel: u8) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 34 + channel, visual, rest);
+    if (!widget.state.disabled) return rest;
+    if (channel == 0) {
+        if (visual.disabled_background) |color| return color;
+    }
+    if (channel == 1) {
+        if (visual.disabled_foreground) |color| return color;
+    }
+    return disabledWash(rest, visual.disabled_background == null and visual.disabled_foreground == null, tokens.states.disabled_alpha);
+}
+pub fn alertBackgroundColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 37, visual, .{});
+    if (widget.variant != .destructive) return surfaceStateBackground(widget, visual, tokens);
+    if (widget.style.background) |color| return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
+    const hue = widget.style.accent orelse tokens.colors.destructive;
+    const wash = colorWithAlpha(hue, if (widget.state.pressed) tokens.states.destructive_wash_pressed_alpha else if (washHovered(widget)) tokens.states.destructive_wash_hover_alpha else tokens.states.destructive_wash_alpha);
+    return disabledWash(wash, widget.state.disabled, tokens.states.disabled_alpha);
+}
+pub fn alertBorderColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 38, visual, tokens.colors.border);
+    const border = widget.style.border orelse if (widget.variant == .destructive) colorWithAlpha(widget.style.accent orelse tokens.colors.destructive, 0.5) else visual.border orelse tokens.colors.border;
+    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
 }

@@ -904,6 +904,8 @@ pub const WidgetGroupSegment = enum {
 };
 
 pub const Widget = struct {
+    /// Portable appearance resolver installed by compiled views.
+    appearance_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Optional portable retained component policy, installed by compiled views.
     interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
     id: ObjectId = 0,

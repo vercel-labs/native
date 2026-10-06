@@ -91,11 +91,6 @@ pub const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 pub const selectControlVisualTokens = widget_render_style.selectControlVisualTokens;
 pub const textInputControlVisualTokens = widget_render_style.textInputControlVisualTokens;
-const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
-const cardControlVisualTokens = widget_render_style.cardControlVisualTokens;
-const dialogControlVisualTokens = widget_render_style.dialogControlVisualTokens;
-const drawerControlVisualTokens = widget_render_style.drawerControlVisualTokens;
-const sheetControlVisualTokens = widget_render_style.sheetControlVisualTokens;
 pub const listItemControlVisualTokens = widget_render_style.listItemControlVisualTokens;
 pub const selectionControlVisualTokens = widget_render_style.selectionControlVisualTokens;
 pub const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualTokens;
@@ -1126,13 +1121,13 @@ fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
         // Keep a surface's child clip exactly in step with its chrome.
         // In particular, an explicit `radius="none"` must not round a
         // full-bleed child after the surface itself has become square.
-        .alert => controlRadius(widget, alertControlVisualTokens(tokens), tokens.radius.lg),
-        .card => controlRadius(widget, cardControlVisualTokens(tokens), tokens.radius.lg),
+        .alert => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .card => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .resizable, .panel, .menu_surface, .dropdown_menu => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .accordion => .{},
-        .dialog => controlRadius(widget, dialogControlVisualTokens(tokens), tokens.radius.xl),
-        .drawer => controlRadius(widget, drawerControlVisualTokens(tokens), tokens.radius.xl),
-        .sheet => controlRadius(widget, sheetControlVisualTokens(tokens), tokens.radius.lg),
+        .dialog => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .drawer => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .sheet => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
         .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => .{},

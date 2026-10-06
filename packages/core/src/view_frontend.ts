@@ -63,7 +63,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscAppearanceColor", "NscAppearanceVisual", "NscAppearanceContext", "NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -802,4 +802,5 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
 const viewPrelude = "\n// Portable Native components compiled beside the committed model.\n" +
   readFileSync(new URL("./view_components.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./runtime_policy.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./control_appearance.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

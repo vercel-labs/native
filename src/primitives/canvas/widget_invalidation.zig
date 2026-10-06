@@ -55,7 +55,7 @@ const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
 const surfaceControlVisualTokens = widget_render.surfaceControlVisualTokens;
 const buttonStrokeWidth = widget_render.buttonStrokeWidth;
-const selectControlVisualTokens = widget_render.selectControlVisualTokens;
+const selectControlVisualTokens = @import("widget_render_style.zig").selectControlVisualTokensForWidget;
 const textInputControlVisualTokens = widget_render.textInputControlVisualTokens;
 const selectionControlVisualTokens = widget_render.selectionControlVisualTokens;
 const listItemControlVisualTokens = widget_render.listItemControlVisualTokens;
@@ -734,7 +734,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .toggle_button, .toggle, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
-        .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
+        .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .input, .text_field, .search_field, .combobox, .textarea, .input_group => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),

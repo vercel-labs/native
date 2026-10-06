@@ -449,6 +449,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     result.widget.video_control = value.videoControl;
     if (value.zeroIntrinsic) |flag| result.widget.layout.zero_intrinsic = flag;
     if (value.clipContent) |flag| result.widget.layout.clip_content = flag;
+    if (comptime @hasDecl(core, "nativeWindowPolicy")) result.widget.appearance_policy = core.nativeWindowPolicy;
     if (comptime @hasDecl(core, "nativeTextPolicy")) {
         // Every primitive can carry composed semantics. Specialized callbacks
         // below also accept shared keyboard, semantic-control and action tags.

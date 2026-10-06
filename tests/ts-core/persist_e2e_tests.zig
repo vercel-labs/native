@@ -853,3 +853,146 @@ test "compiled reach hysteresis preserves complete f32 axis and latch decisions"
         try std.testing.expectEqual(expected, actual);
     };
 }
+
+const appearance_canvas = native_sdk.canvas;
+const appearance_style = appearance_canvas.WidgetAppearance;
+fn expectAppearanceEqual(expected: anytype, actual: @TypeOf(expected)) !void {
+    const T = @TypeOf(expected);
+    switch (@typeInfo(T)) {
+        .float => try std.testing.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(actual))),
+        .optional => {
+            try std.testing.expectEqual(expected != null, actual != null);
+            if (expected) |value| try expectAppearanceEqual(value, actual.?);
+        },
+        .@"struct" => inline for (@typeInfo(T).@"struct".fields) |field| try expectAppearanceEqual(@field(expected, field.name), @field(actual, field.name)),
+        .@"union" => {
+            const tag = std.meta.activeTag(expected);
+            try std.testing.expectEqual(tag, std.meta.activeTag(actual));
+            inline for (@typeInfo(T).@"union".fields) |field| if (std.mem.eql(u8, field.name, @tagName(tag))) try expectAppearanceEqual(@field(expected, field.name), @field(actual, field.name));
+        },
+        else => try std.testing.expectEqual(expected, actual),
+    }
+}
+fn compareAppearance(widget: appearance_canvas.Widget, tokens: appearance_canvas.DesignTokens) !void {
+    var compiled = widget;
+    compiled.appearance_policy = core.nativeWindowPolicy;
+    const fallback = appearance_canvas.Color.rgba(0.17, 0.31, 0.73, 0.61);
+    inline for (.{ "buttonControlVisualTokens", "textInputControlVisualTokens", "selectionControlVisualTokens", "surfaceControlVisualTokens", "componentControlVisualTokens", "listItemControlVisualTokens" }) |name| {
+        try expectAppearanceEqual(@field(appearance_style, name)(widget, tokens), @field(appearance_style, name)(compiled, tokens));
+    }
+    try expectAppearanceEqual(appearance_style.selectControlVisualTokens(tokens), appearance_style.selectControlVisualTokensForWidget(compiled, tokens));
+    inline for (.{ "buttonFillColor", "buttonTextColorForWidget", "buttonBorderFill", "buttonStrokeWidth", "buttonInDetachedGroup", "textEditingInkColor", "textSelectionFillColor", "textSelectionTextColor", "staticTextSelectionFillColor", "widgetFocusRingFill" }) |name| {
+        try expectAppearanceEqual(@field(appearance_style, name)(widget, tokens), @field(appearance_style, name)(compiled, tokens));
+    }
+    inline for (.{ "widgetBackgroundColor", "widgetAccentColor", "widgetBorderColor" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, fallback), @field(appearance_style, name)(compiled, fallback));
+    inline for (.{ "widgetForegroundColor", "widgetAccentForegroundColor" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, tokens, fallback), @field(appearance_style, name)(compiled, tokens, fallback));
+    const visual = appearance_style.componentControlVisualTokens(widget, tokens);
+    inline for (.{ "badgeBackgroundColor", "badgeBorderColor", "badgeTextColor", "badgeStrokeWidth" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, tokens, visual), @field(appearance_style, name)(compiled, tokens, visual));
+    try expectAppearanceEqual(appearance_style.surfaceStateBackground(widget, visual, tokens), appearance_style.surfaceStateBackground(compiled, visual, tokens));
+    try expectAppearanceEqual(appearance_style.textInputFill(widget, tokens, visual), appearance_style.textInputFill(compiled, tokens, visual));
+    try expectAppearanceEqual(appearance_style.textInputBorderFill(widget, visual, fallback), appearance_style.textInputBorderFill(compiled, visual, fallback));
+    try expectAppearanceEqual(appearance_style.listItemFillColor(widget, tokens, widget.state), appearance_style.listItemFillColor(compiled, tokens, widget.state));
+    inline for (.{ "widgetRadius", "widgetSizedRadiusValue", "widgetStrokeWidth" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, 7), @field(appearance_style, name)(compiled, 7));
+    inline for (.{ "controlRadius", "componentPillRadius", "controlStrokeWidth" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, visual, 7), @field(appearance_style, name)(compiled, visual, 7));
+    try expectAppearanceEqual(appearance_style.buttonControlRadius(widget, visual, tokens), appearance_style.buttonControlRadius(compiled, visual, tokens));
+    inline for (.{ "alertBackgroundColor", "alertBorderColor" }) |name| try expectAppearanceEqual(@field(appearance_style, name)(widget, visual, tokens), @field(appearance_style, name)(compiled, visual, tokens));
+    for (0..3) |channel| try expectAppearanceEqual(appearance_style.selectionDisabledColor(widget, tokens, visual, fallback, @intCast(channel)), appearance_style.selectionDisabledColor(compiled, tokens, visual, fallback, @intCast(channel)));
+    for (0..8) |flags| {
+        try expectAppearanceEqual(appearance_style.buttonStateBackground(visual, flags & 1 != 0, flags & 2 != 0, fallback), appearance_style.buttonStateBackgroundForWidget(compiled, tokens, visual, flags & 1 != 0, flags & 2 != 0, fallback));
+        try expectAppearanceEqual(appearance_style.controlStateBackground(visual, flags & 4 != 0, flags & 1 != 0, flags & 2 != 0, fallback), appearance_style.controlStateBackgroundForWidget(compiled, tokens, visual, flags & 4 != 0, flags & 1 != 0, flags & 2 != 0, fallback));
+    }
+    core.rt.frameReset();
+}
+test "compiled control appearance preserves complete native theme and state decisions" {
+    inline for (.{ .house, .geist }) |pack| inline for (.{ .light, .dark }) |scheme| {
+        const tokens = appearance_canvas.DesignTokens.theme(.{ .pack = pack, .color_scheme = scheme });
+        for (std.enums.values(appearance_canvas.WidgetKind)) |kind| for (std.enums.values(appearance_canvas.WidgetVariant)) |variant| for (0..16) |flags| {
+            const widget = appearance_canvas.Widget{ .kind = kind, .variant = variant, .size = @enumFromInt(flags % 6), .style = .{ .quiet_hover = flags % 3 == 0 }, .state = .{ .disabled = flags & 1 != 0, .pressed = flags & 2 != 0, .selected = flags & 4 != 0, .hovered = flags & 8 != 0 } };
+            try compareAppearance(widget, tokens);
+        };
+    };
+}
+
+test "compiled appearance preserves authored optional values and borrowed ABI ownership" {
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    const bits = [_]u32{ 0, 0x80000000, 0x7fc00037, 0x7f800000, 0xff800000, 0x3eaaaaab };
+    for (bits) |word| {
+        const value: f32 = @bitCast(word);
+        var widget = appearance_canvas.Widget{ .kind = .button, .style = .{ .radius = value, .stroke_width = value, .background = .{ .r = value, .g = value, .b = value, .a = value } } };
+        var compiled = widget;
+        compiled.appearance_policy = core.nativeWindowPolicy;
+        try expectAppearanceEqual(appearance_style.widgetRadius(widget, 7), appearance_style.widgetRadius(compiled, 7));
+        try expectAppearanceEqual(appearance_style.widgetStrokeWidth(widget, 7), appearance_style.widgetStrokeWidth(compiled, 7));
+        try expectAppearanceEqual(appearance_style.widgetBackgroundColor(widget, .{}), appearance_style.widgetBackgroundColor(compiled, .{}));
+        widget.style.radius = null;
+        compiled.style.radius = null;
+        try expectAppearanceEqual(appearance_style.widgetSizedRadiusValue(widget, value), appearance_style.widgetSizedRadiusValue(compiled, value));
+    }
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    core.rt.frameReset();
+}
+
+test "compiled appearance preserves sparse and complete custom visual registers" {
+    const color_names = .{ "background", "hover_background", "active_background", "pressed_background", "disabled_background", "disabled_foreground", "foreground", "active_foreground", "border" };
+    for (0..12) |mask_case| {
+        var tokens = appearance_canvas.DesignTokens{};
+        inline for (@typeInfo(@TypeOf(tokens.controls)).@"struct".fields, 0..) |field, table_index| {
+            if (field.type == appearance_canvas.ControlVisualTokens) {
+                var visual: appearance_canvas.ControlVisualTokens = .{};
+                inline for (color_names, 0..) |name, i| {
+                    if (mask_case == 11 or mask_case == i) @field(visual, name) = appearance_canvas.Color.rgba(@as(f32, @floatFromInt(table_index + 1)) / 64, @as(f32, @floatFromInt(i + 1)) / 16, 0.37, if (i % 3 == 0) 0 else 0.71);
+                }
+                if (mask_case == 9 or mask_case == 11) visual.radius = 0;
+                if (mask_case == 10 or mask_case == 11) visual.stroke_width = 0;
+                @field(tokens.controls, field.name) = visual;
+            }
+        }
+        tokens.controls.button_group_style = .detached;
+        for (std.enums.values(appearance_canvas.WidgetKind)) |kind| for (std.enums.values(appearance_canvas.WidgetVariant)) |variant| for (0..16) |flags| {
+            const widget = appearance_canvas.Widget{ .kind = kind, .variant = variant, .group_segment = if (flags % 2 == 0) .none else .middle, .size = @enumFromInt(flags % 6), .state = .{ .disabled = flags & 1 != 0, .pressed = flags & 2 != 0, .selected = flags & 4 != 0, .hovered = flags & 8 != 0 }, .style = .{ .background = if (flags % 5 == 0) .{ .a = 0 } else null, .foreground = if (flags % 3 == 0) .{ .r = 0.23, .g = 0.37, .b = 0.51, .a = 0.73 } else null } };
+            try compareAppearance(widget, tokens);
+        };
+    }
+}
+
+test "compiled appearance drives complete native draw commands" {
+    const canvas = appearance_canvas;
+    const geometry = native_sdk.geometry;
+    inline for (.{ .house, .geist }) |pack| inline for (.{ .light, .dark }) |scheme| {
+        const tokens = canvas.DesignTokens.theme(.{ .pack = pack, .color_scheme = scheme });
+        for (std.enums.values(canvas.WidgetKind)) |kind| for (std.enums.values(canvas.WidgetVariant)) |variant| for (0..16) |flags| {
+            const widget = canvas.Widget{ .id = 42, .kind = kind, .variant = variant, .frame = geometry.RectF.init(0, 0, 240, 80), .text = "Control", .value = 0.5, .state = .{ .disabled = flags & 1 != 0, .pressed = flags & 2 != 0, .selected = flags & 4 != 0, .hovered = flags & 8 != 0, .focused = flags % 3 == 0 } };
+            var compiled = widget;
+            compiled.appearance_policy = core.nativeWindowPolicy;
+            var native_commands: [256]canvas.CanvasCommand = undefined;
+            var compiled_commands: [256]canvas.CanvasCommand = undefined;
+            var reference = canvas.Builder.init(&native_commands);
+            var actual = canvas.Builder.init(&compiled_commands);
+            try canvas.emitWidgetTree(&reference, widget, tokens);
+            try canvas.emitWidgetTree(&actual, compiled, tokens);
+            try std.testing.expectEqualDeep(reference.displayList().commands, actual.displayList().commands);
+            var changes: [256]canvas.DiffChange = undefined;
+            try std.testing.expectEqual(@as(usize, 0), (try canvas.DisplayList.diff(reference.displayList(), actual.displayList(), &changes)).len);
+            core.rt.frameReset();
+        };
+    };
+}
+
+test "compiled alpha arithmetic matches native exceptional and signed zero inputs" {
+    const bits = [_]u32{ 0, 0x80000000, 0x7fc00037, 0x7f800000, 0xff800000, 0x3eaaaaab, 0x3f800001, 0xbeaaaaab };
+    for (bits) |word| for (bits) |alpha_word| {
+        const alpha: f32 = @bitCast(alpha_word);
+        var tokens = appearance_canvas.DesignTokens{};
+        tokens.states.disabled_alpha = alpha;
+        tokens.states.selection_wash_alpha = alpha;
+        const widget = appearance_canvas.Widget{ .kind = .button, .state = .{ .disabled = true }, .style = .{ .foreground = .{ .r = 0.17, .g = 0.31, .b = 0.73, .a = @bitCast(word) }, .accent = .{ .r = 0.17, .g = 0.31, .b = 0.73, .a = @bitCast(word) } } };
+        var compiled = widget;
+        compiled.appearance_policy = core.nativeWindowPolicy;
+        try expectAppearanceEqual(appearance_style.widgetForegroundColor(widget, tokens, .{}), appearance_style.widgetForegroundColor(compiled, tokens, .{}));
+        try expectAppearanceEqual(appearance_style.staticTextSelectionFillColor(widget, tokens), appearance_style.staticTextSelectionFillColor(compiled, tokens));
+        core.rt.frameReset();
+    };
+}

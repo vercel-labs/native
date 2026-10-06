@@ -85,8 +85,8 @@ const buttonFill = widget_render_style.buttonFill;
 const buttonTextColorForWidget = widget_render_style.buttonTextColorForWidget;
 const buttonBorderFill = widget_render_style.buttonBorderFill;
 const buttonControlVisualTokens = widget_render_style.buttonControlVisualTokens;
-const selectControlVisualTokens = widget_render_style.selectControlVisualTokens;
-const buttonStateBackground = widget_render_style.buttonStateBackground;
+const selectControlVisualTokens = widget_render_style.selectControlVisualTokensForWidget;
+const buttonStateBackground = widget_render_style.buttonStateBackgroundForWidget;
 const textInputControlVisualTokens = widget_render_style.textInputControlVisualTokens;
 const textInputFill = widget_render_style.textInputFill;
 const textInputBorderFill = widget_render_style.textInputBorderFill;
@@ -393,7 +393,7 @@ fn iconPaintColor(paint: svg_icon_model.Paint, current: Color) ?Color {
 }
 
 pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const visual = selectControlVisualTokens(tokens);
+    const visual = selectControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
@@ -416,7 +416,7 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         .id = widgetPartId(widget.id, 1),
         .rect = widget.frame,
         .radius = radius,
-        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, widget.state.pressed, washHovered(widget), tokens.colors.surface))),
+        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed, washHovered(widget), tokens.colors.surface))),
     });
     try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
         .id = widgetPartId(widget.id, 2),
@@ -715,7 +715,7 @@ pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
         .id = widgetPartId(widget.id, 2),
         .rect = widget.frame,
         .radius = radius,
-        .fill = widgetAccentFill(widget, buttonStateBackground(visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.accent)),
+        .fill = widgetAccentFill(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.accent)),
     });
     if (widget.text.len > 0) {
         const text_size = widgetLabelTextSize(widget, tokens);
@@ -818,8 +818,8 @@ pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 /// pointer half of the attention wash — the keyboard's active row still
 /// washes, because inside a menu that wash IS the keyboard affordance.
 fn menuItemWashColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
-    if (widget.state.pressed) return widget_render_style.controlStateBackground(visual, true, true, false, tokens.colors.surface_pressed);
-    if (widget.state.focused or washHovered(widget)) return buttonStateBackground(visual, false, true, tokens.colors.surface_subtle);
+    if (widget.state.pressed) return widget_render_style.controlStateBackgroundForWidget(widget, tokens, visual, true, true, false, tokens.colors.surface_pressed);
+    if (widget.state.focused or washHovered(widget)) return buttonStateBackground(widget, tokens, visual, false, true, tokens.colors.surface_subtle);
     return widget_render_style.transparentColor();
 }
 
@@ -1003,7 +1003,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
                     .id = widgetPartId(widget.id, 1),
                     .rect = widget.frame,
                     .radius = radius,
-                    .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), background))),
+                    .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), background))),
                 });
             }
             if (selected) {
@@ -1028,7 +1028,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
                     .id = widgetPartId(widget.id, 1),
                     .rect = widget.frame,
                     .radius = radius,
-                    .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), background))),
+                    .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), background))),
                 });
             }
             if (selected) {
@@ -1112,7 +1112,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
     const box_rest = if (selected)
         widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
     else
-        widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface));
+        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = box,
@@ -1184,7 +1184,7 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     // widget/theme radii still shape the control through the ordinary
     // precedence ladder.
     const radius = selectionShapeRadius(widget, visual, circle.height * 0.5);
-    const circle_rest = widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface));
+    const circle_rest = widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = circle,
@@ -1251,7 +1251,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const track_rest = if (selected)
         widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
     else
-        widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface_pressed));
+        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface_pressed));
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
         .rect = track,
@@ -1309,20 +1309,13 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 /// while unstated channels stay at full strength. Marks and thumbs are
 /// foreground channels; boxes and tracks are backgrounds.
 fn selectionDisabledBackground(widget: Widget, visual: ControlVisualTokens, rest: Color, tokens: DesignTokens) Color {
-    if (!widget.state.disabled) return rest;
-    if (visual.disabled_background) |color| return color;
-    return selectionDisabledNeutral(widget, visual, rest, tokens);
+    return widget_render_style.selectionDisabledColor(widget, tokens, visual, rest, 0);
 }
-
 fn selectionDisabledForeground(widget: Widget, visual: ControlVisualTokens, rest: Color, tokens: DesignTokens) Color {
-    if (!widget.state.disabled) return rest;
-    if (visual.disabled_foreground) |color| return color;
-    return selectionDisabledNeutral(widget, visual, rest, tokens);
+    return widget_render_style.selectionDisabledColor(widget, tokens, visual, rest, 1);
 }
-
 fn selectionDisabledNeutral(widget: Widget, visual: ControlVisualTokens, rest: Color, tokens: DesignTokens) Color {
-    const swap = visual.disabled_background != null or visual.disabled_foreground != null;
-    return disabledWash(rest, widget.state.disabled and !swap, tokens.states.disabled_alpha);
+    return widget_render_style.selectionDisabledColor(widget, tokens, visual, rest, 2);
 }
 
 fn selectionShapeRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
