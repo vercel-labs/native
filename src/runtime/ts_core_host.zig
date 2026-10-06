@@ -817,6 +817,7 @@ pub fn TsCoreHost(comptime core: type) type {
             effects_table = @splat(.{});
             delays = @splat(.{});
             streams = @splat(.{});
+            file_streams = @splat(.{});
             audio_entry = .{};
             video_entry = .{};
             images = @splat(.{});

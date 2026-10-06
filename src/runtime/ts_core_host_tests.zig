@@ -5000,3 +5000,23 @@ test "file host consumes read replacement complete bytes and numeric terminal ro
     try std.testing.expectEqual(@as(usize, 3), file_policy_probe_core.calls[1]);
     try std.testing.expectEqual(@as(usize, 3), file_policy_probe_core.calls[5]);
 }
+
+test "file host consumes fresh bridge ownership after effects teardown and reinitialization" {
+    const Probe = ts_core_host.TsCoreHost(file_policy_probe_core);
+    file_policy_probe_core.retain = false;
+    file_policy_probe_core.clear_busy = true;
+    for (0..2) |_| {
+        const fx = freshChannel();
+        Probe.init(fx);
+        Probe.dispatch(fx, .open_save_sink);
+        try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base + 3);
+        fx.deinit(); // The next host installation must own an empty bridge table.
+    }
+    for (0..2) |_| {
+        const fx = freshChannel();
+        Host.init(fx);
+        Host.dispatch(fx, .open_save_sink);
+        try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base);
+        fx.deinit();
+    }
+}
