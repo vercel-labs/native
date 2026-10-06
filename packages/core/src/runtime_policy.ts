@@ -114,10 +114,6 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 5) return nscvContainerLayout(request);
   if (request[0] === 6) return nscvIntrinsicLayout(request);
   if (request[0] === 7) return nscvWrappedLayout(request);
-  if (request[0] === 11) return requestCoordinationPolicy(request);
-  if (request[0] === 12) return cancellationPolicy(request);
-  if (request[0] === 13) return credentialRecordPolicy(request);
-  if (request[0] === 14) return dbCommandPolicy(request);
   if (request[0] === 8) return nscvVirtualFlow(request);
   if (request[0] === 9) return nscvSemanticTree(request);
   if (request[0] === 10) return nscvExtentPolicy(request);
