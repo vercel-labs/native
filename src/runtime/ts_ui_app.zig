@@ -452,6 +452,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.container_layout_policy = core.nativeWindowPolicy;
                 if (options.intrinsic_layout_policy != null) @panic("TsUiApp owns intrinsic_layout_policy - remove custom intrinsic layout wiring");
                 stamped.intrinsic_layout_policy = core.nativeWindowPolicy;
+                if (options.widget_motion_policy != null) @panic("TsUiApp owns widget_motion_policy - remove custom motion wiring");
+                stamped.widget_motion_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");

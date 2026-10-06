@@ -521,6 +521,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             grid_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             container_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             intrinsic_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+            widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
             /// Which built-in theme pack the stock tokens resolve when
             /// the app claims neither `tokens` nor `tokens_fn`: the
             /// pack composes with the live system appearance (scheme,
@@ -2010,6 +2011,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.grid_layout_policy = self.options.grid_layout_policy;
                 tokens.container_layout_policy = self.options.container_layout_policy;
                 tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
+                tokens.widget_motion_policy = self.options.widget_motion_policy;
                 return tokens;
             }
             const state = self.currentThemeState();
@@ -2059,6 +2061,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.grid_layout_policy = self.options.grid_layout_policy;
             tokens.container_layout_policy = self.options.container_layout_policy;
             tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
+            tokens.widget_motion_policy = self.options.widget_motion_policy;
             return tokens;
         }
 

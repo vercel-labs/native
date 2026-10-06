@@ -1,4 +1,5 @@
 const std = @import("std");
+const motion_policy = @import("widget_motion_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
@@ -374,6 +375,27 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// is showing the animation is removed so the view goes idle.
         fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) void {
             const view = &self.views[view_index];
+            if (view.widget_tokens.widget_motion_policy) |policy| {
+                const id = view.canvas_widget_focused_id;
+                const index = view.canvasWidgetNodeIndexById(id);
+                const selection = if (index) |i| canvas.widgetTextSelectionRange(view.widget_layout_nodes[i].widget) else null;
+                const flags = @as(u8, @intFromBool(view.focused)) | (@as(u8, @intFromBool(id != 0)) << 1) |
+                    (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 2) |
+                    (@as(u8, @intFromBool(view.canEditCanvasWidgetText(id))) << 3) |
+                    (@as(u8, @intFromBool(index != null)) << 4) |
+                    (@as(u8, @intFromBool(if (selection) |range| range.isCollapsed(view.widget_layout_nodes[index.?].widget.text.len) else false)) << 5);
+                const command_id = if (index) |i| canvas.textCaretCommandId(view.widget_layout_nodes[i].widget.kind, id) else 0;
+                const plan = motion_policy.caret(policy, flags, view.canvas_widget_caret_blink_id, command_id, canvasRenderAnimationStartNsForView(view));
+                if (plan.remove) {
+                    view.removeCanvasRenderAnimation(view.canvas_widget_caret_blink_id);
+                    view.canvas_widget_caret_blink_id = 0;
+                }
+                if (!plan.arm) return;
+                view.replaceCanvasRenderAnimation(.{ .id = plan.id, .start_ns = plan.start, .duration_ms = caret_blink_sweep_ms, .easing = .standard, .from_opacity = 1, .to_opacity = 0, .loop = .ping_pong }) catch return;
+                view.replaceCanvasRenderAnimationDirtyBounds(plan.id, view.widget_layout_nodes[index.?].frame) catch {};
+                view.canvas_widget_caret_blink_id = plan.id;
+                return;
+            }
             const desired = canvasWidgetCaretBlinkTarget(view);
             const previous = view.canvas_widget_caret_blink_id;
             const desired_id: canvas.ObjectId = if (desired) |target| target.command_id else 0;
@@ -419,6 +441,10 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// static poses (the segmented emitter bakes its trail then).
         fn reconcileCanvasWidgetLoopAnimations(self: *Runtime, view_index: usize) void {
             const view = &self.views[view_index];
+            if (view.widget_tokens.widget_motion_policy) |policy| {
+                reconcileCompiledWidgetLoops(view, policy);
+                return;
+            }
             var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
             var desired_count: usize = 0;
 
@@ -530,6 +556,52 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 }
                 if (!still_desired) view.removeCanvasRenderAnimation(previous_id);
             }
+            @memcpy(view.canvas_widget_loop_animation_ids[0..desired_count], desired_ids[0..desired_count]);
+            view.canvas_widget_loop_animation_count = desired_count;
+        }
+
+        fn reconcileCompiledWidgetLoops(view: anytype, policy: motion_policy.Policy) void {
+            var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
+            var desired_count: usize = 0;
+            const layout = view.widgetLayoutTree();
+            nodes: for (layout.nodes, 0..) |node, node_index| {
+                if (node.widget.kind != .spinner and node.widget.kind != .skeleton) continue;
+                const mode: u8 = if (node.widget.kind == .skeleton) 2 else if (view.widget_tokens.metrics.spinner_style == .segmented) 1 else 0;
+                const count = if (mode == 1) canvas.spinnerWidgetSegmentCount(view.widget_tokens) else 1;
+                const first_id = if (mode == 2) canvas.skeletonWidgetFillCommandId(node.widget.id) else if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, 0) else canvas.spinnerWidgetArcCommandId(node.widget.id);
+                const existing = existingCanvasRenderAnimationStartNs(view, first_id);
+                const capacity = desired_ids.len - desired_count;
+                const flags = @as(u8, @intFromBool(node.widget.id != 0)) | (@as(u8, @intFromBool(view.widget_tokens.motion.durationMs(.slow) != 0)) << 1) |
+                    (@as(u8, @intFromBool(!canvas.isWidgetHiddenInAncestors(layout, node_index))) << 2) |
+                    (@as(u8, @intFromBool(!(node.widget.opacity <= 0))) << 3) |
+                    (@as(u8, @intFromBool(!node.frame.normalized().isEmpty())) << 4) |
+                    (@as(u8, @intFromBool(existing != null)) << 5);
+                for (0..count) |segment| {
+                    const plan = motion_policy.loop(policy, mode, flags, view.widget_tokens.metrics.spinner_period_ms, count, segment, capacity, view.widget_tokens.metrics.spinner_tail_opacity, existing orelse 0, canvasRenderAnimationStartNsForView(view), view.widget_tokens.motion.easing);
+                    if (!plan.arm) {
+                        if (flags & 31 == 31 and count > capacity) break :nodes;
+                        break;
+                    }
+                    const command_id = if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, segment) else first_id;
+                    var animation: canvas.CanvasRenderAnimation = .{ .id = command_id, .start_ns = plan.start, .duration_ms = plan.duration, .easing = plan.easing, .loop = plan.loop };
+                    if (mode == 0) {
+                        var laid_out = node.widget;
+                        laid_out.frame = node.frame;
+                        animation.from_rotation = plan.from;
+                        animation.to_rotation = plan.to;
+                        animation.rotation_center = canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens);
+                    } else {
+                        animation.from_opacity = plan.from;
+                        animation.to_opacity = plan.to;
+                    }
+                    view.replaceCanvasRenderAnimation(animation) catch break :nodes;
+                    view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
+                    desired_ids[desired_count] = command_id;
+                    desired_count += 1;
+                }
+            }
+            var removed: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
+            for (motion_policy.retireLoops(policy, view.canvas_widget_loop_animation_ids[0..view.canvas_widget_loop_animation_count], desired_ids[0..desired_count], &removed)) |id| view.removeCanvasRenderAnimation(id);
             @memcpy(view.canvas_widget_loop_animation_ids[0..desired_count], desired_ids[0..desired_count]);
             view.canvas_widget_loop_animation_count = desired_count;
         }

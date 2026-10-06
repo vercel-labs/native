@@ -143,7 +143,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);

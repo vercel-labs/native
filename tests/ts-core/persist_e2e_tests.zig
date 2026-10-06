@@ -8,6 +8,7 @@ const core = @import("ts_persist_core");
 
 test {
     _ = @import("component_construction_e2e_tests.zig");
+    _ = @import("widget_motion_e2e_tests.zig");
 }
 
 const Adapter = native_sdk.TsUiApp(core);

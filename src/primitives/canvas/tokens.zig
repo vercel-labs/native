@@ -1910,6 +1910,8 @@ pub const DesignTokens = struct {
     grid_layout_policy: ?@import("grid_layout_policy.zig").Policy = null,
     container_layout_policy: ?@import("container_layout_policy.zig").Policy = null,
     intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
+    /// Widget motion plans supplied by the compiled app, outside theme overrides.
+    widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and
