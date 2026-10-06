@@ -3626,9 +3626,10 @@ const effect_policy_probe_core = struct {
     pub const subscriptions = mini_core.subscriptions;
     pub const commitModelRoot = mini_core.commitModelRoot;
     var lookup_enabled: bool = true;
-    var calls = [_]usize{0} ** 3;
+    var calls = [_]usize{0} ** 15;
 
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
         if (request[0] >= 8) {
             const size = referenceCoordinationPolicy(request, output);
             if (request[0] == 12 and !lookup_enabled and output[0] == 1) {
@@ -3637,7 +3638,6 @@ const effect_policy_probe_core = struct {
             }
             return size;
         }
-        calls[request[0]] += 1;
         if (request[0] == 2) {
             const at = 5 + @as(usize, request[1]) * 4;
             output[0] = request[1];
@@ -3674,7 +3674,7 @@ const effect_policy_probe_core = struct {
     }
 };
 
-test "named effect host applies policy admission slots lookup routes and dropped terminal retirement" {
+test "named effect host applies policy admission slots cancellation routes and dropped terminal retirement" {
     const Probe = ts_core_host.TsCoreHost(effect_policy_probe_core);
     const fx = freshChannel();
     defer fx.deinit();
@@ -3684,7 +3684,7 @@ test "named effect host applies policy admission slots lookup routes and dropped
     Probe.dispatch(fx, .load_file);
     const first = ts_core_host.effect_key_base + 5;
     try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
-    Probe.dispatch(fx, .drop_load); // Compiled lookup deliberately suppresses it.
+    Probe.dispatch(fx, .drop_load); // Compiled cancellation deliberately suppresses it.
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
     effect_policy_probe_core.lookup_enabled = true;
     Probe.dispatch(fx, .drop_load);
@@ -3707,7 +3707,8 @@ test "named effect host applies policy admission slots lookup routes and dropped
     Probe.dispatch(fx, .load_file);
     try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
     try std.testing.expect(effect_policy_probe_core.calls[0] >= 5);
-    try std.testing.expect(effect_policy_probe_core.calls[1] >= 2);
+    try std.testing.expectEqual(@as(usize, 1), effect_policy_probe_core.calls[1]);
+    try std.testing.expectEqual(@as(usize, 2), effect_policy_probe_core.calls[12]);
     try std.testing.expectEqual(@as(usize, 4), effect_policy_probe_core.calls[2]);
 }
 

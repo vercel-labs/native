@@ -2402,6 +2402,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     addTestStep(b, "test-ts-capability-records", "Verify complete TypeScript capability records and ownership", filteredTestArtifact(b, desktop_mod, "ts-capability-record-tests", &.{
+        "named effect host applies policy admission slots cancellation routes and dropped terminal retirement",
         "runtime.ts_core_host.test.PTY name bindings",
         "runtime.ts_ui_app.test.web pane exact decimal",
         "runtime.ts_core_host_tests.test.complete subprocess records",
