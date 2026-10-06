@@ -34,6 +34,8 @@ const core = @import("core.zig");
 const journal = @import("session_journal.zig");
 const platform = @import("../platform/root.zig");
 const runtime_effects = @import("effects.zig");
+const replay_policy = @import("replay_policy.zig");
+const replay_reference = @import("replay_policy_reference.zig");
 const session_blobs = @import("session_blobs.zig");
 
 pub const ReplayError = error{
@@ -164,14 +166,15 @@ pub fn replaySession(
             .header => |header| {
                 runtime.replay_window_chrome_source = header.window_chrome_source;
                 report.protocol_fingerprint = header.protocol_fingerprint;
-                if (header.protocol_fingerprint != automation_protocol.fingerprint) {
+                const header_action = replay_policy.coordinate(app.replay_policy, .header, @intFromBool(header.protocol_fingerprint == automation_protocol.fingerprint), options.require_same_platform, std.mem.eql(u8, header.platform_name, currentPlatformName()));
+                if (header_action == .protocol_refusal) {
                     std.debug.print(
                         "replay refused: the journal was recorded by a build whose automation protocol differs from this build's (journal 0x{x:0>16}, this build 0x{x:0>16}) - re-record with this build\n",
                         .{ header.protocol_fingerprint, automation_protocol.fingerprint },
                     );
                     return error.ReplayProtocolMismatch;
                 }
-                if (options.require_same_platform and !std.mem.eql(u8, header.platform_name, currentPlatformName())) {
+                if (header_action == .platform_refusal) {
                     std.debug.print(
                         "replay refused: the journal was recorded on \"{s}\" but this host is \"{s}\" - v1 replay is same-platform only (font metrics and scale behavior differ across platforms)\n",
                         .{ header.platform_name, currentPlatformName() },
@@ -180,13 +183,12 @@ pub fn replaySession(
                 }
             },
             .window_chrome => |fact| {
-                if (runtime.replay_window_chrome_source == .unavailable) return error.ReplayDamagedRecord;
-                if (runtime.replay_window_chrome_count == journal.max_session_window_chrome_queries) return error.ReplayDamagedRecord;
+                if (replay_policy.coordinate(app.replay_policy, .chrome_admission, @intFromBool(runtime.replay_window_chrome_source == .unavailable), runtime.replay_window_chrome_count == journal.max_session_window_chrome_queries, false) == .damage) return error.ReplayDamagedRecord;
                 runtime.replay_window_chrome[runtime.replay_window_chrome_count] = fact;
                 runtime.replay_window_chrome_count += 1;
             },
             .event => |event| {
-                if (!armed) {
+                if (replay_policy.coordinate(app.replay_policy, .arm, @intFromBool(armed), false, false) == .arm) {
                     armed = true;
                     app.replayControl(.arm) catch {
                         // Apps without the hook still replay when the
@@ -213,14 +215,15 @@ pub fn replaySession(
                     }
                 }
                 try runtime.dispatchPlatformEvent(app, event);
-                if (runtime.replay_window_chrome_failed or runtime.replay_window_chrome_index != runtime.replay_window_chrome_count) return error.ReplayChromeDivergence;
+                if (replay_policy.coordinate(app.replay_policy, .chrome_consumed, @intFromBool(runtime.replay_window_chrome_failed), runtime.replay_window_chrome_index != runtime.replay_window_chrome_count, false) == .chrome_divergence) return error.ReplayChromeDivergence;
                 runtime.replay_window_chrome_count = 0;
                 runtime.replay_window_chrome_index = 0;
                 report.events_replayed += 1;
             },
             .effect => |effect_record| {
                 var effect = effect_record;
-                if (effect.kind == .file and fileRecordDamaged(effect)) {
+                const admission = replay_policy.plan(app.replay_policy, effect);
+                if (admission.damaged(0)) {
                     std.debug.print(
                         "replay refused after event {d}: file record for key {d} has an invalid stream/stat payload shape\n",
                         .{ report.events_replayed, effect.key },
@@ -238,7 +241,7 @@ pub fn replaySession(
                 // damaged record sail past the blob-integrity gate and
                 // deliver a pixel-less "loaded" the recording never
                 // produced.
-                if (effect.kind == .image and effect.image_outcome == .loaded and effect.image_blob_len == 0) {
+                if (admission.damaged(1)) {
                     std.debug.print(
                         "replay refused after event {d}: image record for id {d} claims .loaded with a zero-length blob - a recorded .loaded always carries its source bytes, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key },
@@ -269,7 +272,7 @@ pub fn replaySession(
                 // bytes would flow verbatim into the app's Msg (and
                 // into a fixed-size feed buffer) before anything could
                 // disprove them — refuse HERE, before the feed.
-                if (effect.kind == .channel and channelRecordDamaged(effect)) {
+                if (admission.damaged(2)) {
                     std.debug.print(
                         "replay refused after event {d}: channel record for key {d} claims .{s} with {d} payload bytes - a recorded post is bounded at {d} bytes and only .data events carry bytes, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.channel_kind), effect.payload.len, runtime_effects.max_effect_channel_bytes },
@@ -283,21 +286,21 @@ pub fn replaySession(
                 // stream (see `channelRecordProvenanceDamaged` for the
                 // recorder-truth analysis of exactly which pairs a
                 // recording can produce).
-                if (effect.kind == .channel and channelRecordProvenanceDamaged(effect)) {
+                if (admission.damaged(3)) {
                     std.debug.print(
                         "replay refused after event {d}: channel record for key {d} claims a .{s} event stamped with .{s} provenance - the recorder stamps .rejected only on regenerating .rejected admission refusals and every other channel record keeps .exited, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.channel_kind), @tagName(effect.exit_reason) },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .image and imageDimsDamaged(effect)) {
+                if (admission.damaged(4)) {
                     std.debug.print(
                         "replay refused after event {d}: image record for id {d} claims .{s} with dimensions {d}x{d} - a recorded .loaded always carries nonzero decoded dimensions within the SDK's registered-image ceiling and every other outcome records 0x0, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.image_outcome), effect.image_width, effect.image_height },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .video and videoScalarsDamaged(effect)) {
+                if (admission.damaged(5)) {
                     std.debug.print(
                         "replay refused after event {d}: video record for key {d} carries a millisecond or dimension value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key },
@@ -309,7 +312,7 @@ pub fn replaySession(
                 // window before anything journals), so an out-of-window
                 // value is journal damage — refuse it rather than
                 // silently reshaping the recorded stream at the feed.
-                if (effect.kind == .audio and audioScalarsDamaged(effect)) {
+                if (admission.damaged(6)) {
                     std.debug.print(
                         "replay refused after event {d}: audio record for key {d} carries a millisecond value at or past 2^53 - recorded playback scalars ride the exact-integer window every delivery tier can carry, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key },
@@ -320,21 +323,21 @@ pub fn replaySession(
                 // skip below: a `.rejected` stamped onto a delivered
                 // record (nonzero token) would be skipped there and its
                 // handler Msg silently omitted from the stream.
-                if (effect.kind == .video and videoRecordProvenanceDamaged(effect)) {
+                if (admission.damaged(7)) {
                     std.debug.print(
                         "replay refused after event {d}: video record for key {d} claims .{s} with load token {d} - the recorder stamps token 0 exactly on loop-side rejections and a minted token on every delivery, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.video_kind), effect.video_token },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .video and videoRecordShapeDamaged(effect)) {
+                if (admission.damaged(8)) {
                     std.debug.print(
                         "replay refused after event {d}: video record for key {d} claims .{s} with motion or geometry the recorder never writes on that kind - terminals deliver with playing and buffering false and no dimensions, and a completion pins position to the duration, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .video_load and videoLoadOutcomeDamaged(effect)) {
+                if (admission.damaged(9)) {
                     std.debug.print(
                         "replay refused after event {d}: video load record for key {d} claims outcome .{s} - the recorder stamps .loaded on a resolved cascade and .failed on a refusal, nothing else, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.video_kind) },
@@ -347,7 +350,7 @@ pub fn replaySession(
                 // bounded by the chunk size), and exits carry neither
                 // payload nor blob. Refuse contradictions before the
                 // feed, like the channel gate above.
-                if (effect.kind == .pty and ptyRecordDamaged(effect)) {
+                if (admission.damaged(10)) {
                     std.debug.print(
                         "replay refused after event {d}: pty record for key {d} claims .{s} with {d} payload bytes and a {d}-byte blob - a recorded output batch rides the blob store bounded at {d} bytes and an exit carries neither, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.pty_kind), effect.payload.len, effect.pty_blob_len, runtime_effects.max_effect_pty_chunk_bytes },
@@ -359,35 +362,35 @@ pub fn replaySession(
                 // only on regenerating admission refusals, which are
                 // always `.exit` events; an output record wearing exit
                 // provenance would be silently omitted below.
-                if (effect.kind == .pty and ptyRecordProvenanceDamaged(effect)) {
+                if (admission.damaged(11)) {
                     std.debug.print(
                         "replay refused after event {d}: pty record for key {d} claims a .{s} event stamped with .{s} provenance - only .exit records carry a non-.exited reason, so the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key, @tagName(effect.pty_kind), @tagName(effect.exit_reason) },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .persist and persistRecordDamaged(effect)) {
+                if (admission.damaged(12)) {
                     std.debug.print(
                         "replay refused after event {d}: model-restore record claims .{s} with {d} inline bytes and a {d}-byte blob - only .ok may carry canonical snapshot bytes, always out of line and bounded at {d}; re-record the session\n",
                         .{ report.events_replayed, @tagName(effect.persist_outcome), effect.payload.len, effect.persist_blob_len, runtime_effects.max_effect_persist_snapshot_bytes },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .db and dbRecordDamaged(effect)) {
+                if (admission.damaged(13)) {
                     std.debug.print(
                         "replay refused after event {d}: relational record for key {d} has a kind, outcome, payload, blob, or provenance shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effect.kind == .credentials and credentialsRecordDamaged(effect)) {
+                if (admission.damaged(14)) {
                     std.debug.print(
                         "replay refused after event {d}: credential record for key {d} has a payload or redaction shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
                         .{ report.events_replayed, effect.key },
                     );
                     return error.ReplayDamagedRecord;
                 }
-                if (effectRegeneratesUnderReplay(effect)) {
+                if (admission.regenerates) {
                     report.effects_skipped += 1;
                     continue;
                 }
@@ -400,7 +403,7 @@ pub fn replaySession(
                 // executor's slot buffer).
                 var blob_scratch: ?[]u8 = null;
                 defer if (blob_scratch) |scratch| std.heap.page_allocator.free(scratch);
-                if (effect.kind == .pty and effect.pty_blob_len > 0) {
+                if (admission.blob == .pty) {
                     const bytes = resolveBlob(effect.pty_blob_hash, effect.pty_blob_len, runtime_effects.max_effect_pty_chunk_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: pty record for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
@@ -410,7 +413,7 @@ pub fn replaySession(
                     };
                     effect.payload = bytes;
                 }
-                if (effect.kind == .file and effect.file_blob_len > 0) {
+                if (admission.blob == .file) {
                     const bytes = resolveBlob(effect.file_blob_hash, effect.file_blob_len, runtime_effects.effect_file_stream_chunk_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: file stream for key {d} references blob {s} ({d} bytes) that could not be resolved ({s})\n",
@@ -420,7 +423,7 @@ pub fn replaySession(
                     };
                     effect.payload = bytes;
                 }
-                if (effect.kind == .image and effect.image_blob_len > 0) {
+                if (admission.blob == .image) {
                     const bytes = resolveBlob(effect.image_blob_hash, effect.image_blob_len, runtime_effects.max_effect_image_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: image record for id {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
@@ -430,7 +433,7 @@ pub fn replaySession(
                     };
                     effect.payload = bytes;
                 }
-                if (effect.kind == .persist and effect.persist_blob_len > 0) {
+                if (admission.blob == .persist) {
                     const bytes = resolveBlob(effect.persist_blob_hash, effect.persist_blob_len, runtime_effects.max_effect_persist_snapshot_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: model restore references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
@@ -440,7 +443,7 @@ pub fn replaySession(
                     };
                     effect.payload = bytes;
                 }
-                if (effect.kind == .db and effect.db_blob_len > 0) {
+                if (admission.blob == .db) {
                     const bytes = resolveBlob(effect.db_blob_hash, effect.db_blob_len, runtime_effects.max_effect_db_page_bytes, options.blobs, &blob_scratch) catch |err| {
                         std.debug.print(
                             "replay refused after event {d}: relational page for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
@@ -463,35 +466,40 @@ pub fn replaySession(
                 // real fault and propagates.
                 var drained_for_room = false;
                 feed: while (true) {
-                    app.replayControl(.{ .feed = effect }) catch |err| switch (err) {
-                        error.EffectQueueFull => {
-                            if (drained_for_room) return err;
+                    app.replayControl(.{ .feed = effect }) catch |err| switch (replay_policy.coordinate(app.replay_policy, .feed_error, switch (err) {
+                        error.EffectQueueFull => 0,
+                        error.EffectNotFound => 1,
+                        error.ReplayUnsupported => 2,
+                        else => return err,
+                    }, drained_for_room, false)) {
+                        .propagate => return err,
+                        .drain => {
                             drained_for_room = true;
                             try runtime.dispatchPlatformEvent(app, .wake);
                             continue :feed;
                         },
-                        error.EffectNotFound => {
+                        .effect_divergence => {
                             std.debug.print(
                                 "replay diverged after event {d}: journaled {s} result for effect key {d} has no matching pending request - the replayed updates issued different effects than the recording (nondeterminism outside the effect boundary?)\n",
                                 .{ report.events_replayed, @tagName(effect.kind), effect.key },
                             );
                             return error.ReplayEffectDivergence;
                         },
-                        error.ReplayUnsupported => {
+                        .unsupported => {
                             std.debug.print(
                                 "replay refused: the journal carries effect results but this app registered no replay hook (App.replay_fn - UiApp wires it automatically)\n",
                                 .{},
                             );
                             return error.ReplayUnsupportedApp;
                         },
-                        else => return err,
+                        else => @panic("invalid replay feed action"),
                     };
                     break :feed;
                 }
                 report.effects_fed += 1;
             },
             .checkpoint => |checkpoint| {
-                if (!options.verify) continue;
+                if (replay_policy.coordinate(app.replay_policy, .verify, @intFromBool(options.verify), false, false) != .verify) continue;
                 const actual = runtime.sessionStateFingerprint();
                 report.checkpoints_verified += 1;
                 if (actual != checkpoint.fingerprint) {
@@ -505,7 +513,7 @@ pub fn replaySession(
                 }
             },
             .screenshot => |mark| {
-                if (!options.verify) continue;
+                if (replay_policy.coordinate(app.replay_policy, .verify, @intFromBool(options.verify), false, false) != .verify) continue;
                 report.screenshots_verified += 1;
                 const actual = renderScreenshotHash(runtime, mark.view_label, mark.scale) catch 0;
                 if (actual != mark.png_hash) {
@@ -518,7 +526,7 @@ pub fn replaySession(
                 }
             },
             .end => {
-                if (runtime.replay_window_chrome_count != 0) return error.ReplayChromeDivergence;
+                if (replay_policy.coordinate(app.replay_policy, .end, @intFromBool(runtime.replay_window_chrome_count != 0), false, false) == .chrome_divergence) return error.ReplayChromeDivergence;
             },
         }
     }
@@ -566,361 +574,54 @@ fn resolveBlob(
     return bytes;
 }
 
-/// Whether an image record's journaled dimensions contradict what the
-/// recorder can produce (see the gate in `replaySession`): `.loaded`
-/// carries nonzero width and height whose RGBA8 byte size — computed
-/// overflow-checked, a hand-edited product that wraps u64 is damage,
-/// not a small image — fits `registerCanvasImage`'s per-image slot
-/// bound; every other outcome carries 0x0.
-/// Whether a channel record's journaled shape contradicts what the
-/// recorder can produce (see the gate in `replaySession`): `.data`
-/// payloads stay within the post bound; `.closed` and `.rejected`
-/// carry no bytes.
-/// Whether a pty record's journaled shape contradicts what the
-/// recorder can produce: output batches journal with an EMPTY payload
-/// (the bytes moved into the blob store, bounded by the chunk size);
-/// exits carry neither payload nor blob.
-fn ptyRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.payload.len > 0) return true;
-    if (record.pty_blob_len > runtime_effects.max_effect_pty_chunk_bytes) return true;
-    switch (record.pty_kind) {
-        // The recorder journals output ONLY for a non-empty batch, so
-        // its blob is always non-empty — a zero-length output blob is
-        // damage that would otherwise replay a synthetic empty output
-        // event and diverge the fingerprint. The scalar fields are
-        // canonical (-1 code sentinel, no signal, no drops): replay
-        // delivers those exact defaults regardless, so a record claiming
-        // anything else would be silently rewritten — refuse it instead.
-        .output => {
-            if (record.pty_blob_len == 0) return true;
-            if (record.code != runtime_effects.effect_error_exit_code) return true;
-            if (record.pty_signal != 0 or record.pty_dropped_writes != 0) return true;
-        },
-        // Exits carry neither payload nor blob, and their code/signal
-        // must obey the delivered contract (`signal != 0` iff the reason
-        // is `.signaled`; `code == -1` for every reason but `.exited`).
-        // A hand-edited `.cancelled` with code 0 or signal 9 would
-        // otherwise dispatch an event violating that contract. The
-        // values are also RANGE-gated to what the transport can produce:
-        // `waitpid`'s status word yields exit codes 0..255 (plus the
-        // documented -1 for a child reaped outside the toolkit) and
-        // signals 1..127 — anything else is hand-editing, refused
-        // rather than replayed into an event no live run can emit.
-        .exit => {
-            if (record.pty_blob_len > 0) return true;
-            const signaled = record.exit_reason == .signaled;
-            if (signaled != (record.pty_signal != 0)) return true;
-            if (record.exit_reason != .exited and record.code != runtime_effects.effect_error_exit_code) return true;
-            if (record.exit_reason == .exited and
-                record.code != runtime_effects.effect_error_exit_code and
-                (record.code < 0 or record.code > 255)) return true;
-            if (signaled and (record.pty_signal < 1 or record.pty_signal > 127)) return true;
-        },
-        // A write-admission verdict carries only the accepted bit in
-        // `code` (1/0) — no blob, no signal, no drop count.
-        .write => {
-            if (record.pty_blob_len > 0) return true;
-            if (record.code != 0 and record.code != 1) return true;
-            if (record.pty_signal != 0 or record.pty_dropped_writes != 0) return true;
-        },
-    }
-    return false;
-}
-
-fn persistRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.payload.len > 0) return true;
-    if (record.persist_blob_len > runtime_effects.max_effect_persist_snapshot_bytes) return true;
-    return record.persist_outcome != .ok and record.persist_blob_len > 0;
-}
-
-fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
-    const kind = runtime_effects.dbKindFromJournalCode(record.code) orelse return true;
-    const outcome = runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return true;
-    if (record.code != runtime_effects.dbJournalCode(kind, outcome)) return true;
-    // `.rejected` provenance identifies an admission refusal that replay
-    // regenerates. An executor may also return the closed `.rejected`
-    // outcome (for example when a result crosses its total bound); that
-    // terminal is external truth and correctly keeps `.exited` provenance.
-    if (record.exit_reason != .exited and record.exit_reason != .rejected) return true;
-    if (record.exit_reason == .rejected and outcome != .rejected) return true;
-    if (record.db_blob_len > runtime_effects.max_effect_db_page_bytes) return true;
-    return switch (kind) {
-        .page => outcome != .ok or
-            (record.payload.len == 0) == (record.db_blob_len == 0) or
-            record.payload.len > runtime_effects.max_effect_db_page_bytes,
-        .done, .exec => record.payload.len > 0 or record.db_blob_len > 0,
-    };
-}
-
-fn fileRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.file_rejected_admission) switch (record.file_outcome) {
-        .rejected => {},
-        .sink_missing, .out_of_order => if (record.file_op != .write_stream_chunk and record.file_op != .write_stream_close) return true,
-        else => return true,
-    };
-    if (record.file_blob_len > runtime_effects.effect_file_stream_chunk_bytes) return true;
-    if (record.file_event == .chunk) {
-        return record.file_op != .read_stream or record.file_outcome != .ok or
-            record.payload.len != 0 or record.file_blob_len == 0;
-    }
-    if (record.file_blob_len != 0) return true;
-    if (record.file_event == .done) {
-        return record.file_op != .read_stream or record.file_outcome != .ok or record.payload.len != 0;
-    }
-    if (record.file_op == .stat and record.file_outcome == .ok) return record.payload.len != 0;
-    return record.file_total != 0 or record.file_mtime_ms != 0 or record.file_exists;
-}
-
-fn credentialsRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.payload.len != 0 or record.exit_reason != .exited) return true;
-    const redacted_get = record.credentials_operation == .get and record.credentials_outcome == .ok;
-    if (redacted_get) return record.credentials_secret_len > runtime_effects.max_effect_credentials_secret_bytes or
-        std.mem.allEqual(u8, &record.credentials_salt, 0) or
-        std.mem.allEqual(u8, &record.credentials_digest, 0);
-    if (record.credentials_secret_len != 0) return true;
-    return !std.mem.allEqual(u8, &record.credentials_salt, 0) or
-        !std.mem.allEqual(u8, &record.credentials_digest, 0);
-}
-
-/// Recorder truth for pty provenance: output records always carry
-/// `.exited` (the live drain never touches the exit reason on an
-/// output); every reason is legal on an `.exit` record (`.rejected` =
-/// regenerating admission refusal, `.spawn_failed` = executor-truth
-/// start failure, the rest = real endings).
-fn ptyRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
-    // Output and write-verdict records always carry `.exited` (neither
-    // journal site ever touches the reason).
-    if (record.pty_kind != .exit and record.exit_reason != .exited) return true;
-    // The regenerating-provenance bit only ever rides an admission
-    // refusal — an `.exit` record whose reason is `.rejected`.
-    if (record.truncated and (record.pty_kind != .exit or record.exit_reason != .rejected)) return true;
-    return false;
-}
-
-fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.payload.len > runtime_effects.max_effect_channel_bytes) return true;
-    return record.channel_kind != .data and record.payload.len > 0;
-}
-
-/// Whether a channel record's provenance stamp contradicts its event
-/// kind — RECORDER TRUTH: channel records journal from exactly two
-/// sites. The live drain (staged posts and the close marker) journals
-/// `.data` and `.closed` events and never touches `exit_reason`, so
-/// they always carry `.exited`; the pending-terminal ring journals only
-/// `.rejected` events, stamped `.rejected` when the refusal is
-/// regenerating loop-side admission validation and left `.exited` when
-/// it is executor truth (an open that could not stage its channel). The
-/// legal pairs are therefore exactly (.data, .exited),
-/// (.closed, .exited), (.rejected, .exited), (.rejected, .rejected).
-/// The forward mismatch is the dangerous one: a `.data` or `.closed`
-/// record stamped `.rejected` sails into the regeneration skip and is
-/// silently OMITTED — with verification disabled, replay succeeds with
-/// a different Msg stream. The reverse direction needs no twin gate
-/// beyond the range check: `.rejected` with `.exited` is exactly the
-/// executor-truth rejection and must feed; and no recorder site can
-/// write any other exit reason on a channel record, so a decoded
-/// `.signaled`/`.cancelled`/`.spawn_failed` (valid members for SPAWN
-/// records) is hand-editing.
-fn channelRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
-    if (record.exit_reason == .rejected) return record.channel_kind != .rejected;
-    return record.exit_reason != .exited;
-}
-
-/// A structurally valid u64 in a video record is not automatically an
-/// HONEST one: the engine clamps every video scalar into the
-/// exact-integer delivery window at the delivery boundary
-/// (`Effects.takeVideoMsg`, `max_effect_video_scalar_exclusive`), so no
-/// recorder can write a position, duration, or dimension at or past
-/// 2^53 whatever a host or embedder reports — and the TS delivery tier
-/// carries these scalars through the subset's exact-integer number
-/// window, where feeding a larger value would trap in the bridge's
-/// numeric widening instead of refusing the hostile file at the gate.
-fn videoScalarsDamaged(record: journal.EffectResultRecord) bool {
-    const max_exact: u64 = runtime_effects.max_effect_video_scalar_exclusive;
-    return record.video_position_ms >= max_exact or
-        record.video_duration_ms >= max_exact or
-        record.video_width >= max_exact or
-        record.video_height >= max_exact;
-}
-
-/// The audio twin: positions and durations clamp into the exact-integer
-/// window at every delivery entry before they journal, so a recorded
-/// value at or past 2^53 can only be a damaged or hand-edited journal.
-fn audioScalarsDamaged(record: journal.EffectResultRecord) bool {
-    const max_exact: u64 = runtime_effects.max_effect_video_scalar_exclusive;
-    return record.audio_position_ms >= max_exact or
-        record.audio_duration_ms >= max_exact;
-}
-
-/// A `.video_load` record's `video_kind` is the load's OUTCOME, and the
-/// recorder writes exactly two values: `.loaded` on a resolved cascade
-/// and `.failed` on a synchronous refusal. Any other kind steers
-/// nothing honestly (a `.position` would leave the replayed fake load
-/// active where nothing is known), so it refuses at the gate.
-/// A `.video` record's kind and token are recorder-coupled: loop-side
-/// rejections never minted a token (they stamp 0) and every DELIVERY —
-/// position ticks, terminals, acknowledgments — carries the minted
-/// token of the load that produced it. A `.rejected` with a nonzero
-/// token would silently skip a real delivery through the regeneration
-/// gate; a delivery with token 0 could never have routed. Both are
-/// damage.
-fn videoRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
-    if (record.video_kind == .rejected) return record.video_token != 0;
-    return record.video_token == 0;
-}
-
-/// Recorder truth for a `.video` record's payload SHAPE, per kind:
-/// `.failed` and `.rejected` deliver with playing and buffering false
-/// (the terminal resolution forces the flags) and no dimensions (no
-/// failure path ever measured a frame); `.completed` pins position to
-/// the duration with the flags false. A record violating these can
-/// only be hand-edited — and a synchronously failed load's record has
-/// no platform event behind it to cross-check at the pairing, so the
-/// gate is where the impossible payload refuses.
-fn videoRecordShapeDamaged(record: journal.EffectResultRecord) bool {
-    return switch (record.video_kind) {
-        .failed, .rejected => record.video_playing or record.video_buffering or
-            record.video_width != 0 or record.video_height != 0,
-        .completed => record.video_playing or record.video_buffering or
-            record.video_position_ms != record.video_duration_ms,
-        .loaded, .position => false,
-    };
-}
-
-fn videoLoadOutcomeDamaged(record: journal.EffectResultRecord) bool {
-    return record.video_kind != .loaded and record.video_kind != .failed;
-}
-
-fn imageDimsDamaged(record: journal.EffectResultRecord) bool {
-    if (record.image_outcome != .loaded) {
-        return record.image_width != 0 or record.image_height != 0;
-    }
-    if (record.image_width == 0 or record.image_height == 0) return true;
-    if (record.image_width > platform.max_decoded_image_dimension or record.image_height > platform.max_decoded_image_dimension) return true;
-    const pixels = std.math.mul(u64, record.image_width, record.image_height) catch return true;
-    const pixel_bytes = std.math.mul(u64, pixels, 4) catch return true;
-    // The journal does not carry the recording's manifest budget. Validate
-    // against the SDK-wide ceiling: a result above the replay runtime's
-    // current (possibly lowered) budget is still valid recorder truth. Its
-    // Msg feeds verbatim; best-effort pixel re-registration may fit smaller.
-    return pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling;
-}
-
-/// Journaled results that regenerate deterministically from the
-/// replayed updates themselves — feeding them would double-deliver:
-/// rejections (the same over-capacity/duplicate-key validation refuses
-/// again, loop-side) and fx-timer Msgs (real fires replay through the
-/// journaled platform `.timer` events; rejections regenerate).
-fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
-    return switch (record.kind) {
-        .timer => true,
-        .exit => record.exit_reason == .rejected,
-        // Only DETERMINISTIC admission/protocol results regenerate — marked
-        // by each effect family's provenance bit. Executor-truth terminals —
-        // start failures, platform refusals, output, and real exits — are
-        // external inputs and must be fed, even when their reason is rejected.
-        .pty => record.pty_kind == .exit and record.truncated,
-        .response => record.fetch_outcome == .rejected,
-        .file => record.file_rejected_admission,
-        .clipboard => record.clipboard_outcome == .rejected,
-        // Audio rejections are loop-side validation (path bounds) that
-        // refuses again; everything else — loaded acknowledgments,
-        // position ticks, completions, platform failures — is an
-        // external input and must be fed.
-        .audio => record.audio_kind == .rejected,
-        // Video rejections are the same loop-side validation (source
-        // bounds, scheme, surface-id shape) and regenerate; failures —
-        // including a claim or platform load the recording host
-        // refused — are executor truth the replayed fake never
-        // reproduces, so they feed like every other kind.
-        .video => record.video_kind == .rejected,
-        // The cascade resolution is the recording host's filesystem
-        // truth — the replayed fake load cannot re-run the local
-        // probe, so the record must feed.
-        .video_load => false,
-        // Host-request rejections mark themselves with the exit reason
-        // (the `.host` record encoding); host answers must be fed.
-        .host => record.exit_reason == .rejected,
-        .db => record.exit_reason == .rejected,
-        .credentials => false,
-        // Image `.rejected` terminals journal from BOTH sides of the
-        // executor seam, so the outcome alone is not provenance: only
-        // loop-side validation refusals — which the replayed
-        // `loadImage` regenerates — mark themselves with the exit
-        // reason (the `.host` records' convention, above). Worker-side
-        // rejections (a URL that passes the loop's scheme check but
-        // cannot become a request, an executor that could not start a
-        // cancelable load) keep `.exited`: the fake executor parks
-        // those requests, so the journaled record is the ONLY terminal
-        // and must be fed like every other worker truth.
-        .image => record.exit_reason == .rejected,
-        // Channel `.rejected` terminals follow the image convention
-        // exactly: admission refusals (occupied key, full channel
-        // table) mark themselves with the exit reason and regenerate —
-        // the replayed `openChannel` re-runs the same deterministic
-        // gates against re-derived occupancy windows and stages its
-        // own. An executor-truth rejection (the open that could not
-        // stage its channel) keeps `.exited` and FEEDS, retiring the
-        // slot the replayed open parked. `.data` and `.closed` are
-        // executor truth by definition — the source thread never
-        // re-runs at replay, so the journaled events are the ONLY
-        // delivery.
-        .channel => record.exit_reason == .rejected,
-        // Launch-env deliveries are exactly what must NOT regenerate:
-        // the recorded values feed the replayed envMsgs dispatch so the
-        // replay launch's environment is never consulted.
-        .line, .clock, .env, .persist => false,
-    };
-}
-
 test "only admission-tagged file results regenerate" {
-    try std.testing.expect(effectRegeneratesUnderReplay(.{
+    try std.testing.expect(replay_reference.effectRegeneratesUnderReplay(.{
         .kind = .file,
         .key = 1,
         .file_outcome = .rejected,
         .file_rejected_admission = true,
     }));
-    try std.testing.expect(!fileRecordDamaged(.{
+    try std.testing.expect(!replay_reference.fileRecordDamaged(.{
         .kind = .file,
         .key = 2,
         .file_op = .write_stream_chunk,
         .file_outcome = .sink_missing,
         .file_rejected_admission = true,
     }));
-    try std.testing.expect(fileRecordDamaged(.{
+    try std.testing.expect(replay_reference.fileRecordDamaged(.{
         .kind = .file,
         .key = 2,
         .file_op = .write_stream_chunk,
         .file_outcome = .ok,
         .file_rejected_admission = true,
     }));
-    try std.testing.expect(!effectRegeneratesUnderReplay(.{
+    try std.testing.expect(!replay_reference.effectRegeneratesUnderReplay(.{
         .kind = .file,
         .key = 1,
         .file_op = .read_stream,
         .file_outcome = .rejected,
     }));
-    try std.testing.expect(effectRegeneratesUnderReplay(.{
+    try std.testing.expect(replay_reference.effectRegeneratesUnderReplay(.{
         .kind = .file,
         .key = 2,
         .file_op = .write_stream_chunk,
         .file_outcome = .sink_missing,
         .file_rejected_admission = true,
     }));
-    try std.testing.expect(effectRegeneratesUnderReplay(.{
+    try std.testing.expect(replay_reference.effectRegeneratesUnderReplay(.{
         .kind = .file,
         .key = 3,
         .file_op = .write_stream_close,
         .file_outcome = .out_of_order,
         .file_rejected_admission = true,
     }));
-    try std.testing.expect(!fileRecordDamaged(.{
+    try std.testing.expect(!replay_reference.fileRecordDamaged(.{
         .kind = .file,
         .key = 4,
         .file_op = .write_stream_chunk,
         .file_outcome = .ok,
     }));
-    try std.testing.expect(fileRecordDamaged(.{
+    try std.testing.expect(replay_reference.fileRecordDamaged(.{
         .kind = .file,
         .key = 4,
         .file_op = .write_stream_chunk,
@@ -968,17 +669,17 @@ test "exit records outside the transport's producible ranges are damaged" {
         .exit_reason = .exited,
         .code = 0,
     };
-    try std.testing.expect(!ptyRecordDamaged(record));
+    try std.testing.expect(!replay_reference.ptyRecordDamaged(record));
     record.code = 255;
-    try std.testing.expect(!ptyRecordDamaged(record));
+    try std.testing.expect(!replay_reference.ptyRecordDamaged(record));
     record.code = runtime_effects.effect_error_exit_code;
-    try std.testing.expect(!ptyRecordDamaged(record));
+    try std.testing.expect(!replay_reference.ptyRecordDamaged(record));
 
     // Hand-edited codes no status word can carry are refused.
     record.code = 256;
-    try std.testing.expect(ptyRecordDamaged(record));
+    try std.testing.expect(replay_reference.ptyRecordDamaged(record));
     record.code = -2;
-    try std.testing.expect(ptyRecordDamaged(record));
+    try std.testing.expect(replay_reference.ptyRecordDamaged(record));
 
     // Signals: waitpid's status word carries 1..127.
     record = .{
@@ -989,13 +690,13 @@ test "exit records outside the transport's producible ranges are damaged" {
         .code = runtime_effects.effect_error_exit_code,
         .pty_signal = 9,
     };
-    try std.testing.expect(!ptyRecordDamaged(record));
+    try std.testing.expect(!replay_reference.ptyRecordDamaged(record));
     record.pty_signal = 127;
-    try std.testing.expect(!ptyRecordDamaged(record));
+    try std.testing.expect(!replay_reference.ptyRecordDamaged(record));
     record.pty_signal = 128;
-    try std.testing.expect(ptyRecordDamaged(record));
+    try std.testing.expect(replay_reference.ptyRecordDamaged(record));
     record.pty_signal = -9;
-    try std.testing.expect(ptyRecordDamaged(record));
+    try std.testing.expect(replay_reference.ptyRecordDamaged(record));
 }
 
 test "audio records outside the exact-integer scalar window are damaged" {
@@ -1009,14 +710,14 @@ test "audio records outside the exact-integer scalar window are damaged" {
         .audio_position_ms = 0,
         .audio_duration_ms = 183_000,
     };
-    try std.testing.expect(!audioScalarsDamaged(record));
+    try std.testing.expect(!replay_reference.audioScalarsDamaged(record));
     record.audio_position_ms = runtime_effects.max_effect_video_scalar_exclusive - 1;
-    try std.testing.expect(!audioScalarsDamaged(record));
+    try std.testing.expect(!replay_reference.audioScalarsDamaged(record));
     record.audio_position_ms = runtime_effects.max_effect_video_scalar_exclusive;
-    try std.testing.expect(audioScalarsDamaged(record));
+    try std.testing.expect(replay_reference.audioScalarsDamaged(record));
     record.audio_position_ms = 0;
     record.audio_duration_ms = std.math.maxInt(u64);
-    try std.testing.expect(audioScalarsDamaged(record));
+    try std.testing.expect(replay_reference.audioScalarsDamaged(record));
 }
 
 test "relational rejection provenance distinguishes admission from executor truth" {
@@ -1028,20 +729,20 @@ test "relational rejection provenance distinguishes admission from executor trut
     };
 
     // A bounded executor result is a real terminal which replay must feed.
-    try std.testing.expect(!dbRecordDamaged(record));
+    try std.testing.expect(!replay_reference.dbRecordDamaged(record));
 
     // A deterministic admission refusal regenerates instead and uses the
     // same outcome with explicit rejected provenance.
     record.exit_reason = .rejected;
-    try std.testing.expect(!dbRecordDamaged(record));
+    try std.testing.expect(!replay_reference.dbRecordDamaged(record));
 
     // Rejected provenance cannot decorate a successful result, and DB
     // records never carry process-only exit reasons.
     record.code = runtime_effects.dbJournalCode(.done, .ok);
-    try std.testing.expect(dbRecordDamaged(record));
+    try std.testing.expect(replay_reference.dbRecordDamaged(record));
     record.code = runtime_effects.dbJournalCode(.done, .rejected);
     record.exit_reason = .cancelled;
-    try std.testing.expect(dbRecordDamaged(record));
+    try std.testing.expect(replay_reference.dbRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

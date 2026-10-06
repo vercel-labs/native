@@ -964,3 +964,41 @@ test("dispatch rejects malformed packets and preserves input, output and indepen
   assert.throws(() => dispatch(9, 3, 0));
   assert.throws(() => dispatch(8, 0, 2));
 });
+
+function replayRequest(kind: number): Uint8Array {
+  const bytes = new Uint8Array(256); bytes.set([20, kind]); bytes[245] = 1; bytes[246] = 1; bytes[248] = 8;
+  const view = new DataView(bytes.buffer);
+  for (const [field, value] of [[19,262144],[20,4096],[21,8192],[22,8388608],[23,65536],[24,16777216],[25,262144],[26,2560]]) view.setUint32(24 + field! * 8, value!, true);
+  return bytes;
+}
+test("replay admission refuses every truncated packet and invalid flags", () => {
+  const bytes = replayRequest(1);
+  for (let n = 0; n < bytes.length; n++) assert.throws(() => native_effect_policy(bytes.subarray(0,n)));
+  for (let at = 240; at < 247; at++) { bytes[at] = 2; assert.throws(() => native_effect_policy(bytes)); bytes[at] = at >= 245 ? 1 : 0; }
+  for (let at = 247; at < 256; at++) if (at !== 248) { bytes[at] = 1; assert.throws(() => native_effect_policy(bytes)); bytes[at] = 0; }
+});
+test("replay decisions retain external truth and reject hostile scalar words", () => {
+  for (let kind = 1; kind <= 18; kind++) {
+    const request = replayRequest(kind), frozen = request.slice();
+    const result = native_effect_policy(request); assert.equal(result.length,8); assert.deepEqual(request,frozen);
+    assert.equal(result[2],kind === 6 ? 1 : 0);
+  }
+  const bytes = replayRequest(13), view = new DataView(bytes.buffer); bytes[8] = 4;
+  assert.equal(native_effect_policy(bytes)[2],1);
+  view.setUint32(24 + 7 * 8 + 4,2097152,true);
+  assert.equal(new DataView(native_effect_policy(bytes).buffer).getUint16(0,true) & 32,32);
+  view.setUint32(24 + 11 * 8 + 4,1,true);
+  assert.equal(new DataView(native_effect_policy(bytes).buffer).getUint16(0,true) & 128,128);
+  const file = replayRequest(4); file[5] = 4;
+  assert.equal(native_effect_policy(file)[2],0);file[240] = 1;assert.equal(native_effect_policy(file)[2],1);
+});
+
+test("replay sequencing preserves refusal precedence and one-drain back-pressure", () => {
+  const plan = (stage: number,a: number,b=0,c=0) => native_effect_policy(new Uint8Array([21,stage,a,b,c,0,0,0]))[0];
+  assert.equal(plan(0,0,1,0),1);assert.equal(plan(0,1,1,0),2);assert.equal(plan(0,1,0,0),0);
+  assert.equal(plan(1,1),3);assert.equal(plan(1,0,1),3);assert.equal(plan(1,0),0);
+  assert.equal(plan(2,0),4);assert.equal(plan(2,1),0);
+  assert.equal(plan(4,0),7);assert.equal(plan(4,0,1),6);assert.equal(plan(4,1),8);assert.equal(plan(4,2),9);
+  assert.equal(plan(5,0),0);assert.equal(plan(5,1),10);assert.equal(plan(6,1),5);
+  assert.throws(() => plan(0,2)); assert.throws(() => plan(7,0));
+});

@@ -454,6 +454,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");
                 stamped.app_dispatch_policy = core.nativeEffectPolicy;
+                if (options.replay_policy != null) @panic("TsUiApp owns replay_policy - remove custom replay wiring");
+                stamped.replay_policy = core.nativeEffectPolicy;
             }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;

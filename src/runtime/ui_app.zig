@@ -488,6 +488,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             scene: app_manifest.ShellConfig,
             /// Portable dispatch/drain scheduling. Native owns messages,
             /// queue boundaries, errors and capability execution; plans copy.
+            replay_policy: ?*const fn ([]const u8, []u8) usize = null,
             app_dispatch_policy: dispatch_policy.Policy = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -1529,6 +1530,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .event_fn = eventFn,
                 .stop_fn = stopFn,
                 .replay_fn = replayFn,
+                .replay_policy = self.options.replay_policy,
             };
         }
 

@@ -1328,6 +1328,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        b.step("test-ts-replay-policy", "Compare compiled replay admission with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);

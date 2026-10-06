@@ -472,7 +472,9 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 19) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 21) throw new Error("invalid effect policy request");
+  if (request[0] === 21) return replayCoordinationPolicy(request);
+  if (request[0] === 20) return sessionReplayPolicy(request);
   if (request[0] === 19) return appDispatchPolicy(request);
   if (request[0] === 18) return appLifecyclePolicy(request);
   if (request[0] === 17) return bufferedCompletionPolicy(request);
@@ -2783,4 +2785,101 @@ function appDispatchPolicy(request: Uint8Array): Uint8Array {
   else if (stage === 9) { if (a === 0 || (a === 2 && b === 1)) plan[0] = 13; }
   else if (a === 0 && b === 1) plan[0] = 14;
   return plan;
+}
+
+/** Operation 20: complete journal effect admission. Exact u64 facts stay as
+ * word pairs. No record bytes, identities, blob storage, or frame reset cross
+ * this boundary. All damage predicates precede regeneration in the consumer.
+ */
+function sessionReplayPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 256 || request[1]! < 1 || request[1]! > 18 || request[2]! > 4 ||
+      request[3]! > 8 || request[4]! > 2 || request[5]! > 9 || request[6]! > 14 ||
+      request[7]! > 2 || request[8]! > 4 || request[9]! > 5 || request[10]! > 2 ||
+      request[11]! > 6 || request[12]! > 2 || request[13]! > 6 || request[14]! > 6 || request[15]! > 3)
+    throw new Error("invalid replay admission request");
+  for (let at = 240; at < 247; at++) if (request[at]! > 1) throw new Error("invalid replay admission flag");
+  if (request[247] !== 0 || request[248] === 0) throw new Error("invalid replay schema facts");
+  for (let at = 249; at < 256; at++) if (request[at] !== 0) throw new Error("invalid replay reserved byte");
+  const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const kind = request[1]!, reason = request[2]!, fileOp = request[3]!, fileEvent = request[4]!, fileOutcome = request[5]!;
+  const image = request[6]!, channel = request[7]!, video = request[8]!, pty = request[10]!;
+  const code = view.getInt32(16, true), signal = view.getInt32(20, true);
+  const nonzero = (field: number): boolean => view.getUint32(24 + field * 8, true) !== 0 || view.getUint32(28 + field * 8, true) !== 0;
+  const exceeds = (a: number, b: number): boolean => {
+    const ah = view.getUint32(28 + a * 8, true), bh = view.getUint32(28 + b * 8, true);
+    return ah > bh || (ah === bh && view.getUint32(24 + a * 8, true) > view.getUint32(24 + b * 8, true));
+  };
+  const equal = (a: number, b: number): boolean => view.getUint32(24 + a * 8, true) === view.getUint32(24 + b * 8, true) && view.getUint32(28 + a * 8, true) === view.getUint32(28 + b * 8, true);
+  const scalarDamaged = (field: number): boolean => view.getUint32(28 + field * 8, true) >= 2097152;
+  const payload = nonzero(0), fileBlob = nonzero(1), imageBlob = nonzero(4), ptyBlob = nonzero(14), persistBlob = nonzero(16), dbBlob = nonzero(17);
+  const fileRejected = request[240] === 1, playing = request[242] === 1, buffering = request[243] === 1;
+  let damage = 0;
+  let badFile = fileRejected && (fileOutcome !== 4 && ((fileOutcome !== 6 && fileOutcome !== 7) || (fileOp !== 6 && fileOp !== 7)));
+  badFile = badFile || exceeds(1, 19);
+  if (fileEvent === 1) badFile = badFile || fileOp !== 4 || fileOutcome !== 0 || payload || !fileBlob;
+  else {
+    badFile = badFile || fileBlob;
+    if (fileEvent === 2) badFile = badFile || fileOp !== 4 || fileOutcome !== 0 || payload;
+    else if (fileOp === 3 && fileOutcome === 0) badFile = badFile || payload;
+    else badFile = badFile || nonzero(2) || nonzero(3) || request[241] === 1;
+  }
+  if (kind === 4 && badFile) damage |= 1;
+  if (kind === 11 && image === 0 && !imageBlob) damage |= 2;
+  if (kind === 12 && (exceeds(0, 20) || (channel !== 0 && payload))) damage |= 4;
+  if (kind === 12 && (reason === 3 ? channel !== 2 : reason !== 0)) damage |= 8;
+  let badImage = image !== 0 ? nonzero(5) || nonzero(6) : !nonzero(5) || !nonzero(6) || exceeds(5, 21) || exceeds(6, 21);
+  if (image === 0 && !badImage) {
+    // The schema dimension ceiling fits u32. Divide the byte ceiling before
+    // multiplication so an oversized product never wraps or loses precision.
+    const width = view.getUint32(64, true), height = view.getUint32(72, true);
+    const ceiling = view.getUint32(200, true) + view.getUint32(204, true) * 4294967296;
+    badImage = width > Math.floor(ceiling / 4 / height);
+  }
+  if (kind === 11 && badImage) damage |= 16;
+  if (kind === 13 && (scalarDamaged(7) || scalarDamaged(8) || scalarDamaged(9) || scalarDamaged(10))) damage |= 32;
+  if (kind === 8 && (scalarDamaged(12) || scalarDamaged(13))) damage |= 64;
+  if (kind === 13 && (video === 4 ? nonzero(11) : !nonzero(11))) damage |= 128;
+  if (kind === 13 && ((video === 3 || video === 4) ? playing || buffering || nonzero(9) || nonzero(10) : video === 2 && (playing || buffering || !equal(7, 8)))) damage |= 256;
+  if (kind === 14 && video !== 0 && video !== 3) damage |= 512;
+  let badPty = payload || exceeds(14, 23);
+  if (pty === 0) badPty = badPty || !ptyBlob || code !== -1 || signal !== 0 || nonzero(15);
+  else if (pty === 1) badPty = badPty || ptyBlob || (reason === 1) !== (signal !== 0) ||
+    (reason !== 0 && code !== -1) || (reason === 0 && code !== -1 && (code < 0 || code > 255)) || (reason === 1 && (signal < 1 || signal > 127));
+  else badPty = badPty || ptyBlob || (code !== 0 && code !== 1) || signal !== 0 || nonzero(15);
+  if (kind === 15 && badPty) damage |= 1024;
+  if (kind === 15 && ((pty !== 1 && reason !== 0) || (request[244] === 1 && (pty !== 1 || reason !== 3)))) damage |= 2048;
+  if (kind === 16 && (payload || exceeds(16, 24) || (request[11] !== 0 && persistBlob))) damage |= 4096;
+  const dbKind = code & 255, dbOutcome = (code >> 8) & 255;
+  const badDb = dbKind > 2 || dbOutcome >= request[248]! || code !== (dbKind | (dbOutcome << 8)) ||
+    (reason !== 0 && reason !== 3) || (reason === 3 && dbOutcome !== 6) || exceeds(17, 25) ||
+    (dbKind === 0 ? dbOutcome !== 0 || payload === dbBlob || exceeds(0, 25) : payload || dbBlob);
+  if (kind === 17 && badDb) damage |= 8192;
+  const redacted = request[12] === 1 && request[13] === 0;
+  if (kind === 18 && (payload || reason !== 0 || (redacted ? exceeds(18, 26) || request[245] === 1 || request[246] === 1 : nonzero(18) || request[245] === 0 || request[246] === 0))) damage |= 16384;
+  const regenerate = kind === 6 || ((kind === 2 || kind === 9 || kind === 11 || kind === 12 || kind === 17) && reason === 3) ||
+    (kind === 15 && pty === 1 && request[244] === 1) || (kind === 3 && request[14] === 1) ||
+    (kind === 4 && fileRejected) || (kind === 5 && request[15] === 2) || (kind === 8 && request[9] === 4) || (kind === 13 && video === 4);
+  const blob = kind === 15 && ptyBlob ? 1 : kind === 4 && fileBlob ? 2 : kind === 11 && imageBlob ? 3 : kind === 16 && persistBlob ? 4 : kind === 17 && dbBlob ? 5 : 0;
+  const result = new Uint8Array(8);
+  new DataView(result.buffer).setUint16(0, damage, true); result[2] = regenerate ? 1 : 0; result[3] = blob;
+  return result;
+}
+
+/** Operation 21: replay sequencing and refusal precedence. Native samples
+ * OS/query/queue facts and executes the copied action after planning.
+ */
+function replayCoordinationPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 8 || request[1]! > 6 || request[2]! > 2 || request[3]! > 1 || request[4]! > 1 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid replay coordination request");
+  const stage = request[1]!, a = request[2]!, b = request[3]!, c = request[4]!;
+  if (stage !== 4 && a > 1) throw new Error("invalid replay coordination fact");
+  const result = new Uint8Array(4);
+  if (stage === 0) result[0] = a === 0 ? 1 : b === 1 && c === 0 ? 2 : 0;
+  else if (stage === 1) result[0] = a === 1 || b === 1 ? 3 : 0;
+  else if (stage === 2) result[0] = a === 0 ? 4 : 0;
+  else if (stage === 3) result[0] = a === 1 || b === 1 ? 5 : 0;
+  else if (stage === 4) result[0] = a === 0 ? b === 1 ? 6 : 7 : a === 1 ? 8 : 9;
+  else if (stage === 5) result[0] = a === 1 ? 10 : 0;
+  else result[0] = a === 1 ? 5 : 0;
+  return result;
 }

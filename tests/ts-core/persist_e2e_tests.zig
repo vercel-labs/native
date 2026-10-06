@@ -491,3 +491,318 @@ test "compiled dispatch coordination preserves complete plans and frame ownershi
     core.rt.frameReset();
     try std.testing.expectEqualSlices(u8, &owned, &copied);
 }
+
+fn compareReplay(record: native_sdk.runtime.EffectResultRecord) !void {
+    const policy = native_sdk.runtime.replay_policy;
+    const input = policy.request(record);
+    const frozen = input;
+    const expected = policy.plan(null, record);
+    const actual = policy.plan(core.nativeEffectPolicy, record);
+    try std.testing.expectEqual(expected.damage, actual.damage);
+    try std.testing.expectEqual(expected.regenerates, actual.regenerates);
+    try std.testing.expectEqual(expected.blob, actual.blob);
+    try std.testing.expectEqualSlices(u8, &frozen, &input);
+}
+
+test "compiled replay admission preserves every damage predicate, provenance and exact word boundary" {
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    const Record = native_sdk.runtime.EffectResultRecord;
+    const words = [_]u64{ 0, 1, 255, 256, 4096, 4097, 65536, 65537, 262144, 262145, 8388608, 8388609, 16777216, 16777217, 0xffffffff, 0x100000000, 9007199254740991, 9007199254740992, 9007199254740993, std.math.maxInt(u64) };
+    for (1..19) |kind| {
+        var record: Record = .{ .kind = @enumFromInt(kind), .key = std.math.maxInt(u64) };
+        try compareReplay(record);
+        inline for (@typeInfo(@FieldType(Record, "exit_reason")).@"enum".fields) |entry| {
+            record.exit_reason = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.exit_reason = (Record{ .kind = @enumFromInt(kind), .key = 0 }).exit_reason;
+        inline for (@typeInfo(@FieldType(Record, "file_op")).@"enum".fields) |entry| {
+            record.file_op = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.file_op = (Record{ .kind = @enumFromInt(kind), .key = 0 }).file_op;
+        inline for (@typeInfo(@FieldType(Record, "file_event")).@"enum".fields) |entry| {
+            record.file_event = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.file_event = (Record{ .kind = @enumFromInt(kind), .key = 0 }).file_event;
+        inline for (@typeInfo(@FieldType(Record, "file_outcome")).@"enum".fields) |entry| {
+            record.file_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.file_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).file_outcome;
+        inline for (@typeInfo(@FieldType(Record, "image_outcome")).@"enum".fields) |entry| {
+            record.image_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.image_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).image_outcome;
+        inline for (@typeInfo(@FieldType(Record, "channel_kind")).@"enum".fields) |entry| {
+            record.channel_kind = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.channel_kind = (Record{ .kind = @enumFromInt(kind), .key = 0 }).channel_kind;
+        inline for (@typeInfo(@FieldType(Record, "video_kind")).@"enum".fields) |entry| {
+            record.video_kind = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.video_kind = (Record{ .kind = @enumFromInt(kind), .key = 0 }).video_kind;
+        inline for (@typeInfo(@FieldType(Record, "audio_kind")).@"enum".fields) |entry| {
+            record.audio_kind = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.audio_kind = (Record{ .kind = @enumFromInt(kind), .key = 0 }).audio_kind;
+        inline for (@typeInfo(@FieldType(Record, "pty_kind")).@"enum".fields) |entry| {
+            record.pty_kind = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.pty_kind = (Record{ .kind = @enumFromInt(kind), .key = 0 }).pty_kind;
+        inline for (@typeInfo(@FieldType(Record, "persist_outcome")).@"enum".fields) |entry| {
+            record.persist_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.persist_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).persist_outcome;
+        inline for (@typeInfo(@FieldType(Record, "credentials_operation")).@"enum".fields) |entry| {
+            record.credentials_operation = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.credentials_operation = (Record{ .kind = @enumFromInt(kind), .key = 0 }).credentials_operation;
+        inline for (@typeInfo(@FieldType(Record, "credentials_outcome")).@"enum".fields) |entry| {
+            record.credentials_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.credentials_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).credentials_outcome;
+        inline for (@typeInfo(@FieldType(Record, "fetch_outcome")).@"enum".fields) |entry| {
+            record.fetch_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.fetch_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).fetch_outcome;
+        inline for (@typeInfo(@FieldType(Record, "clipboard_outcome")).@"enum".fields) |entry| {
+            record.clipboard_outcome = @enumFromInt(entry.value);
+            try compareReplay(record);
+        }
+        record.clipboard_outcome = (Record{ .kind = @enumFromInt(kind), .key = 0 }).clipboard_outcome;
+        for (words) |value| {
+            record.file_blob_len = value;
+            try compareReplay(record);
+        }
+        record.file_blob_len = 0;
+        for (words) |value| {
+            record.file_total = value;
+            try compareReplay(record);
+        }
+        record.file_total = 0;
+        for (words) |value| {
+            record.file_mtime_ms = @bitCast(value);
+            try compareReplay(record);
+        }
+        record.file_mtime_ms = 0;
+        for (words) |value| {
+            record.image_blob_len = value;
+            try compareReplay(record);
+        }
+        record.image_blob_len = 0;
+        for (words) |value| {
+            record.image_width = value;
+            try compareReplay(record);
+        }
+        record.image_width = 0;
+        for (words) |value| {
+            record.image_height = value;
+            try compareReplay(record);
+        }
+        record.image_height = 0;
+        for (words) |value| {
+            record.video_position_ms = value;
+            try compareReplay(record);
+        }
+        record.video_position_ms = 0;
+        for (words) |value| {
+            record.video_duration_ms = value;
+            try compareReplay(record);
+        }
+        record.video_duration_ms = 0;
+        for (words) |value| {
+            record.video_width = value;
+            try compareReplay(record);
+        }
+        record.video_width = 0;
+        for (words) |value| {
+            record.video_height = value;
+            try compareReplay(record);
+        }
+        record.video_height = 0;
+        for (words) |value| {
+            record.video_token = value;
+            try compareReplay(record);
+        }
+        record.video_token = 0;
+        for (words) |value| {
+            record.audio_position_ms = value;
+            try compareReplay(record);
+        }
+        record.audio_position_ms = 0;
+        for (words) |value| {
+            record.audio_duration_ms = value;
+            try compareReplay(record);
+        }
+        record.audio_duration_ms = 0;
+        for (words) |value| {
+            record.pty_blob_len = value;
+            try compareReplay(record);
+        }
+        record.pty_blob_len = 0;
+        for (words) |value| {
+            record.persist_blob_len = value;
+            try compareReplay(record);
+        }
+        record.persist_blob_len = 0;
+        for (words) |value| {
+            record.db_blob_len = value;
+            try compareReplay(record);
+        }
+        record.db_blob_len = 0;
+        for (words) |value| {
+            record.credentials_secret_len = value;
+            try compareReplay(record);
+        }
+        record.credentials_secret_len = 0;
+        for ([_]i32{ std.math.minInt(i32), -257, -1, 0, 1, 255, 256, 257, 1536, 1792, 65536, std.math.maxInt(i32) }) |code| {
+            record.code = code;
+            try compareReplay(record);
+        }
+        record.code = 0;
+        for ([_]i32{ std.math.minInt(i32), -1, 0, 1, 127, 128, std.math.maxInt(i32) }) |signal| {
+            record.pty_signal = signal;
+            try compareReplay(record);
+        }
+    }
+    var seed: u64 = 0x92a1337;
+    for (0..6000) |_| {
+        seed = seed *% 6364136223846793005 +% 1442695040888963407;
+        var record: Record = .{ .kind = @enumFromInt(1 + seed % 18), .key = seed };
+        record.exit_reason = @enumFromInt((seed >> 0) % @typeInfo(@FieldType(Record, "exit_reason")).@"enum".fields.len);
+        record.file_op = @enumFromInt((seed >> 3) % @typeInfo(@FieldType(Record, "file_op")).@"enum".fields.len);
+        record.file_event = @enumFromInt((seed >> 6) % @typeInfo(@FieldType(Record, "file_event")).@"enum".fields.len);
+        record.file_outcome = @enumFromInt((seed >> 9) % @typeInfo(@FieldType(Record, "file_outcome")).@"enum".fields.len);
+        record.image_outcome = @enumFromInt((seed >> 12) % @typeInfo(@FieldType(Record, "image_outcome")).@"enum".fields.len);
+        record.channel_kind = @enumFromInt((seed >> 15) % @typeInfo(@FieldType(Record, "channel_kind")).@"enum".fields.len);
+        record.video_kind = @enumFromInt((seed >> 18) % @typeInfo(@FieldType(Record, "video_kind")).@"enum".fields.len);
+        record.audio_kind = @enumFromInt((seed >> 21) % @typeInfo(@FieldType(Record, "audio_kind")).@"enum".fields.len);
+        record.pty_kind = @enumFromInt((seed >> 24) % @typeInfo(@FieldType(Record, "pty_kind")).@"enum".fields.len);
+        record.persist_outcome = @enumFromInt((seed >> 27) % @typeInfo(@FieldType(Record, "persist_outcome")).@"enum".fields.len);
+        record.credentials_operation = @enumFromInt((seed >> 30) % @typeInfo(@FieldType(Record, "credentials_operation")).@"enum".fields.len);
+        record.credentials_outcome = @enumFromInt((seed >> 33) % @typeInfo(@FieldType(Record, "credentials_outcome")).@"enum".fields.len);
+        record.fetch_outcome = @enumFromInt((seed >> 36) % @typeInfo(@FieldType(Record, "fetch_outcome")).@"enum".fields.len);
+        record.clipboard_outcome = @enumFromInt((seed >> 39) % @typeInfo(@FieldType(Record, "clipboard_outcome")).@"enum".fields.len);
+        record.file_blob_len = words[@intCast((seed >> 0) % words.len)];
+        record.file_total = words[@intCast((seed >> 3) % words.len)];
+        record.file_mtime_ms = @bitCast(words[@intCast((seed >> 6) % words.len)]);
+        record.image_blob_len = words[@intCast((seed >> 9) % words.len)];
+        record.image_width = words[@intCast((seed >> 12) % words.len)];
+        record.image_height = words[@intCast((seed >> 15) % words.len)];
+        record.video_position_ms = words[@intCast((seed >> 18) % words.len)];
+        record.video_duration_ms = words[@intCast((seed >> 21) % words.len)];
+        record.video_width = words[@intCast((seed >> 24) % words.len)];
+        record.video_height = words[@intCast((seed >> 27) % words.len)];
+        record.video_token = words[@intCast((seed >> 30) % words.len)];
+        record.audio_position_ms = words[@intCast((seed >> 33) % words.len)];
+        record.audio_duration_ms = words[@intCast((seed >> 36) % words.len)];
+        record.pty_blob_len = words[@intCast((seed >> 39) % words.len)];
+        record.persist_blob_len = words[@intCast((seed >> 42) % words.len)];
+        record.db_blob_len = words[@intCast((seed >> 45) % words.len)];
+        record.credentials_secret_len = words[@intCast((seed >> 0) % words.len)];
+        record.code = @bitCast(@as(u32, @truncate(seed)));
+        record.pty_signal = @bitCast(@as(u32, @truncate(seed >> 32)));
+        record.pty_dropped_writes = @truncate(seed);
+        record.file_rejected_admission = seed & 1 != 0;
+        record.file_exists = seed & 2 != 0;
+        record.video_playing = seed & 4 != 0;
+        record.video_buffering = seed & 8 != 0;
+        record.truncated = seed & 16 != 0;
+        record.credentials_salt[0] = @truncate(seed >> 5);
+        record.credentials_digest[31] = @truncate(seed >> 13);
+        const payload: [4097]u8 = @splat(0);
+        record.payload = payload[0..@intCast(seed % 4098)];
+        try compareReplay(record);
+    }
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    const input = native_sdk.runtime.replay_policy.request(.{ .kind = .timer, .key = 0 });
+    var owned: [8]u8 = undefined;
+    try std.testing.expectEqual(owned.len, core.nativeEffectPolicy(&input, &owned));
+    const frozen = owned;
+    var other: [8]u8 = undefined;
+    const next = native_sdk.runtime.replay_policy.request(.{ .kind = .file, .key = 0 });
+    _ = core.nativeEffectPolicy(&next, &other);
+    try std.testing.expectEqualSlices(u8, &frozen, &owned);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &frozen, &owned);
+}
+
+const ReplayJournalBuffer = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    fn write(context: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *ReplayJournalBuffer = @ptrCast(@alignCast(context));
+        try self.bytes.appendSlice(std.testing.allocator, bytes);
+    }
+};
+fn replayProbe(record: native_sdk.runtime.EffectResultRecord, expected: ?anyerror, feeds: usize) !void {
+    const Probe = struct {
+        var calls: usize = 0;
+        fn control(_: *anyopaque, value: native_sdk.runtime.ReplayControl) anyerror!void {
+            if (value == .feed) calls += 1;
+        }
+    };
+    Probe.calls = 0;
+    var buffer: ReplayJournalBuffer = .{};
+    defer buffer.bytes.deinit(std.testing.allocator);
+    const recorder = try std.heap.page_allocator.create(native_sdk.runtime.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = native_sdk.runtime.SessionRecorder.init(.{ .context = &buffer, .write_fn = ReplayJournalBuffer.write });
+    recorder.begin(.{ .platform_name = "test", .app_name = "replay-admission", .window_chrome_source = .unavailable });
+    recorder.recordEffect(record);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var context: u8 = 0;
+    const app: native_sdk.App = .{ .context = &context, .name = "probe", .replay_fn = Probe.control, .replay_policy = core.nativeEffectPolicy };
+    const result = native_sdk.runtime.replaySession(&harness.runtime, app, buffer.bytes.items, .{ .verify = false, .require_same_platform = false });
+    if (expected) |err| try std.testing.expectError(err, result) else {
+        const report = try result;
+        try std.testing.expectEqual(feeds, report.effects_fed);
+    }
+    try std.testing.expectEqual(feeds, Probe.calls);
+}
+test "compiled replay consumer gates damage before regeneration and preserves feed and blob ownership" {
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    try replayProbe(.{ .kind = .file, .key = 1, .file_rejected_admission = true }, error.ReplayDamagedRecord, 0);
+    try replayProbe(.{ .kind = .video, .key = 1, .video_kind = .rejected, .video_token = 1 }, error.ReplayDamagedRecord, 0);
+    try replayProbe(.{ .kind = .channel, .key = 1, .channel_kind = .data, .exit_reason = .rejected }, error.ReplayDamagedRecord, 0);
+    try replayProbe(.{ .kind = .pty, .key = 1, .pty_kind = .write, .truncated = true }, error.ReplayDamagedRecord, 0);
+    try replayProbe(.{ .kind = .timer, .key = 1 }, null, 0);
+    try replayProbe(.{ .kind = .file, .key = 1, .file_outcome = .rejected, .file_rejected_admission = true }, null, 0);
+    try replayProbe(.{ .kind = .file, .key = 1, .file_outcome = .rejected }, null, 1);
+    try replayProbe(.{ .kind = .channel, .key = 1, .channel_kind = .rejected }, null, 1);
+    try replayProbe(.{ .kind = .image, .key = 1, .image_outcome = .loaded, .image_width = 1, .image_height = 1, .image_blob_len = 1 }, error.ReplayMissingBlob, 0);
+    try replayProbe(.{ .kind = .persist, .key = 1, .persist_outcome = .ok, .persist_blob_len = 1 }, error.ReplayMissingBlob, 0);
+}
+
+test "compiled replay sequencing preserves complete header queue and verification plans" {
+    const policy = native_sdk.runtime.replay_policy;
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    inline for (@typeInfo(policy.Stage).@"enum".fields) |entry| {
+        const stage: policy.Stage = @enumFromInt(entry.value);
+        const count: usize = if (stage == .feed_error) 3 else 2;
+        for (0..count) |a| for (0..2) |b| for (0..2) |c| {
+            const expected = policy.coordinate(null, stage, @intCast(a), b != 0, c != 0);
+            const actual = policy.coordinate(core.nativeEffectPolicy, stage, @intCast(a), b != 0, c != 0);
+            try std.testing.expectEqual(expected, actual);
+        };
+    }
+}
