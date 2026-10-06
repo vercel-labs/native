@@ -2162,7 +2162,11 @@ pub fn TsCoreHost(comptime core: type) type {
             if (key.len == 0) return false;
             if (findFileStream(key) != null or findClipboardWrite(key) != null) return true;
             if (family != .effect) if (findEffect(key)) |index| if (effects_table[index].full_result) return true;
-            if (family != .delay) if (findDelay(key)) |index| if (delays[index].full_result) return true;
+            // Capability ownership is the recorded wire key, independent of
+            // the compiled policy's cancellation lookup and routing decisions.
+            if (family != .delay) for (&delays) |*entry| {
+                if (entry.used and entry.full_result and std.mem.eql(u8, entry.wireKey(), key)) return true;
+            };
             return false;
         }
 

@@ -2395,6 +2395,9 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host_tests.test.playback snapshot captures",
         "runtime.ts_core_host_tests.test.complete storage",
         "runtime.ts_core_host_tests.test.complete timers",
+        "runtime.ts_core_host_tests.test.timer host applies policy",
+        "runtime.ts_core_host_tests.test.delay host consumes compiled",
+        "runtime.ts_core_host_tests.test.delay admission supplies",
     }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",

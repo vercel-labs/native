@@ -304,6 +304,10 @@ fn notesReplay(comptime compiled_view: bool) !void {
         harness.runtime.options.session_recorder = recorder;
         try harness.start(state.app());
         try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{ .label = reference.canvas_label, .size = .init(1180, 760), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+        const folder = parity.find(&state.tree.?.root, "Inbox folder") orelse return error.WidgetNotFound;
+        var click: [128]u8 = undefined;
+        try harness.runtime.dispatchAutomationCommand(state.app(), try std.fmt.bufPrint(&click, "widget-click {s} {d}", .{ reference.canvas_label, folder.id }));
+        try testing.expectEqual(@as(i64, 1), state.model.selected_folder);
         try harness.runtime.dispatchPlatformEvent(state.app(), .{ .menu_command = .{ .window_id = 1, .name = "notes.new-note" } });
         try harness.runtime.dispatchPlatformEvent(state.app(), .{ .menu_command = .{ .window_id = 1, .name = "notes.new-folder" } });
         try parity.action(&harness.runtime, state.app(), &state.tree.?.root, reference.canvas_label, "Cancel", "press");
@@ -314,6 +318,9 @@ fn notesReplay(comptime compiled_view: bool) !void {
             try harness.runtime.dispatchPlatformEvent(state.app(), .wake);
         }
         try harness.runtime.dispatchPlatformEvent(state.app(), .{ .menu_command = .{ .window_id = 1, .name = "notes.delete-note" } });
+        const trash = parity.find(&state.tree.?.root, "Recently Deleted folder") orelse return error.WidgetNotFound;
+        try harness.runtime.dispatchAutomationCommand(state.app(), try std.fmt.bufPrint(&click, "widget-click {s} {d}", .{ reference.canvas_label, trash.id }));
+        try testing.expectEqual(@as(i64, std.math.maxInt(u32)), state.model.selected_folder);
         try harness.runtime.dispatchPlatformEvent(state.app(), .{ .menu_command = .{ .window_id = 1, .name = "notes.dismiss" } });
         try harness.runtime.dispatchPlatformEvent(state.app(), .frame_requested);
         fingerprint = harness.runtime.sessionStateFingerprint();

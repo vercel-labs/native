@@ -363,7 +363,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         if (value.kind == .tree or value.role == .tree or value.role == .treeitem) result.widget.interaction_policy = core.nativeTreePolicy;
     }
     if (comptime @hasDecl(core, "nativeListPolicy")) {
-        if (value.kind == .list or value.kind == .list_item) result.widget.interaction_policy = core.nativeListPolicy;
+        if ((value.kind == .list or value.kind == .list_item) and value.role != .tree and value.role != .treeitem) result.widget.interaction_policy = core.nativeListPolicy;
     }
     if (comptime @hasDecl(core, "nativeMenuPolicy")) {
         if (value.kind == .dropdown_menu or value.kind == .menu_item) result.widget.interaction_policy = core.nativeMenuPolicy;
@@ -672,7 +672,7 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"submit\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"panel\",\"text\":\"\",\"wrap\":true}]}",
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"list_item\",\"text\":\"Mixed\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"role\":\"treeitem\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"role\":\"treeitem\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list\",\"text\":\"\",\"role\":\"tree\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"toggle\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_group\",\"text\":\"\",\"toggle\":[1,0]}]}",
