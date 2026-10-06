@@ -1039,7 +1039,7 @@ fn tsCoreStage(
         }
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
-        for ([_][]const u8{ "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts" }) |source| {
+        for ([_][]const u8{ "bytes.ts", "bytes.d.ts", "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts" }) |source| {
             sqlite_check.addFileInput(dep.path(b.fmt("packages/core/sdk/{s}", .{source})));
         }
         addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
@@ -1480,7 +1480,7 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
 /// contract remains byte-identical. Public for the repository fixture graph,
 /// which exercises the same compiler boundary as app builds.
 pub fn addStagedCoreSdkInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
-    for ([_][]const u8{ "text.ts", "events.ts", "theme.ts" }) |source| {
+    for ([_][]const u8{ "bytes.ts", "text.ts", "events.ts", "theme.ts" }) |source| {
         stage.addFileInput(sdk_builder.path(b.fmt("packages/core/sdk/{s}", .{source})));
     }
 }

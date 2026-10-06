@@ -39,6 +39,7 @@ export const sdkModuleDir = path.join(path.dirname(fileURLToPath(import.meta.url
 /// This module is INTRINSIC: the transpiler lowers references to it onto
 /// the rt kernel and never emits its code.
 export const sdkCoreModulePath = path.join(sdkModuleDir, "core.ts");
+export const sdkBytesModulePath = path.join(sdkModuleDir, "bytes.ts");
 
 /// The SDK LIBRARY modules an app core may import by published name. Unlike
 /// sdk/core.ts these are ordinary subset TypeScript, transpiled into the
@@ -93,6 +94,7 @@ export function subsetCompilerOptions(
     // (tmp dirs, workspaces) resolve the same modules.
     paths: {
       "@native-sdk/core": [coreModulePath.replace(/\.ts$/, "")],
+      "@native-sdk/core/bytes": [sdkBytesModulePath.replace(/\.ts$/, "")],
       ...(generatedServicesPath
         ? { "@native-sdk/services": [generatedServicesPath.replace(/\.ts$/, "")] }
         : {}),

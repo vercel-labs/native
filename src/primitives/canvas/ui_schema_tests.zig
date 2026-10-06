@@ -21,15 +21,17 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 71), schema.elements.len);
-    try testing.expectEqual(@as(usize, 103), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 73), schema.elements.len);
+    try testing.expectEqual(@as(usize, 104), schema.attrs.len);
     try testing.expectEqual(@as(usize, 15), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
     // runtime-image leaf (67), the video playback composite (68), and
-    // the terminal leaf (69), and the reusable code composite (70).
+    // the terminal leaf (69), reusable code composite (70), standalone
+    // segmented control (71), and the retained virtual-window (72) and
+    // virtual-list (73) authoring composites.
     try testing.expectEqual(
-        @as(u64, 0xbb9008f3d35ecc25),
+        @as(u64, 0xaba0356a7c7c8c4d),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -50,9 +52,10 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // textarea Enter policy submit-on-enter (97), and the responsive
     // layout ceiling max-width (98), and the registered-image source
     // rectangle source-x (99), source-y (100), source-width (101), and
-    // source-height (102), and the retained command name (103).
+    // source-height (102), retained command name (103), and explicit
+    // keyboard eligibility focusable (104).
     try testing.expectEqual(
-        @as(u64, 0x452f8823a0170802),
+        @as(u64, 0x7f85ce729f69e5b5),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     // The event table runs through the pointer-hover containment pair

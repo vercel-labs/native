@@ -102,6 +102,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 item: struct { type_index: usize, ptr: *const anyopaque },
                 slice: struct { type_index: usize, ptr: *const anyopaque, len: usize },
                 value: Value,
+                virtual: struct { options: Ui.VirtualListOptions, range: canvas.VirtualListRange, consumed: *bool },
                 slot: SlotCapture,
             };
         };
@@ -222,6 +223,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         }
 
         fn buildElementInner(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, forwarded_press: ?MsgT) BuildError!Ui.Node {
+            if (std.mem.eql(u8, node.name, "virtual-window")) return self.buildVirtualWindow(ui, scope, node);
+            if (std.mem.eql(u8, node.name, "virtual-list")) return self.buildVirtualList(ui, scope, node);
             if (std.mem.eql(u8, node.name, "markdown")) {
                 return self.buildMarkdown(ui, scope, node);
             }
@@ -664,6 +667,132 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         /// elements, `use` expansions, and nested `for`/`if`/`else`
         /// structure) is appended to `out`. Returns the item count so the
         /// caller can render a trailing `<else>` for the empty case.
+        fn virtualCountAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, name: []const u8, fallback: usize) BuildError!usize {
+            const attribute = node.attrEntry(name) orelse return fallback;
+            const value = try self.evalUnclassifiedExpression(scope, node, attribute);
+            return switch (value) {
+                .integer => |count| if (count >= 0 and count <= 9007199254740991) @intCast(count) else self.failValue(node, "virtual window count requires a nonnegative safe integer"),
+                else => self.failValue(node, "virtual window count requires an integer"),
+            };
+        }
+
+        fn virtualExtentAttr(self: *Self, scope: *Scope, node: markup.MarkupNode, name: []const u8) BuildError!f32 {
+            const attribute = node.attrEntry(name) orelse return 0;
+            const value = try self.floatAttr(scope, node, attribute);
+            if (!std.math.isFinite(value) or value < 0) return self.failValue(node, "virtual window extent requires a nonnegative finite f32");
+            return value;
+        }
+
+        fn buildVirtualWindow(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            @setEvalBranchQuota(scan_quota);
+            for (scope.entries[scope.floor..scope.len]) |entry| if (entry.payload == .virtual) return self.failNode(node, "virtual-window declarations cannot nest");
+            if (scope.len >= max_scope_depth or node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) return self.failNode(node, "virtual-window requires one root child");
+            const identity = node.attr("id") orelse return self.failNode(node, "virtual-window requires id");
+            const name = node.attr("as") orelse return self.failNode(node, "virtual-window requires as");
+            const id = canvas.globalWidgetId(.scroll_view, .{ .str = identity });
+            if (ui.virtualWindows().len >= canvas.max_virtual_windows) return self.failNode(node, "too many virtual windows");
+            for (ui.virtualWindows()) |prior| if (prior.id == id) return self.failNode(node, "duplicate virtual window identity");
+            var options = Ui.VirtualListOptions{
+                .id = identity,
+                .item_count = try self.virtualCountAttr(scope, node, "item-count", 0),
+                .item_extent = try self.virtualExtentAttr(scope, node, "item-extent"),
+                .gap = try self.virtualExtentAttr(scope, node, "gap"),
+                .overscan = try self.virtualCountAttr(scope, node, "overscan", 4),
+                .viewport_fallback = try self.virtualExtentAttr(scope, node, "viewport-fallback"),
+                .index_base = try self.virtualCountAttr(scope, node, "index-base", 0),
+                .anchor = if (std.mem.eql(u8, node.attr("anchor") orelse "leading", "trailing")) .trailing else .leading,
+            };
+            if (options.index_base > 9007199254740991 - options.item_count) return self.failNode(node, "virtual window logical range exceeds safe integers");
+            if (node.attr("extent-estimate")) |estimate| {
+                if (comptime @hasDecl(ModelT, "virtualExtentHelper") and @hasDecl(ModelT, "virtualExtentEstimate")) {
+                    const helper = ModelT.virtualExtentHelper(estimate) orelse return self.failNode(node, "extent-estimate requires a numeric index helper");
+                    options.extent_estimate = ModelT.virtualExtentEstimate;
+                    options.extent_context = @ptrFromInt(@as(usize, helper) + 1);
+                } else return self.failNode(node, "extent-estimate requires a stable compiled helper capability");
+            }
+            if (options.extent_estimate == null and options.item_extent == 0) return self.failNode(node, "virtual-window requires an extent or estimate");
+            const consumed = try ui.arena.create(bool);
+            consumed.* = false;
+            scope.entries[scope.len] = .{ .name = name, .payload = .{ .virtual = .{ .options = options, .range = ui.virtualWindow(options), .consumed = consumed } } };
+            scope.len += 1;
+            defer scope.len -= 1;
+            const result = try self.buildNode(ui, scope, node.children[0]);
+            if (!consumed.*) return self.failNode(node, "virtual window requires exactly one list");
+            return result;
+        }
+
+        fn buildVirtualList(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode) BuildError!Ui.Node {
+            @setEvalBranchQuota(scan_quota);
+            const window = scope.lookup(node.attr("window") orelse return self.failNode(node, "virtual-list requires window")) orelse return self.failNode(node, "virtual-list requires an enclosing window");
+            if (window.payload != .virtual) return self.failNode(node, "virtual-list requires an enclosing window");
+            const resolved = window.payload.virtual;
+            if (resolved.consumed.*) return self.failNode(node, "virtual window has more than one list");
+            resolved.consumed.* = true;
+            const each = node.attr("each") orelse return self.failNode(node, "virtual-list requires each");
+            const name = node.attr("as") orelse return self.failNode(node, "virtual-list requires as");
+            if (scope.len >= max_scope_depth or node.children.len != 1) return self.failNode(node, "virtual-list requires one keyed root per row");
+            inline for (@typeInfo(ModelT).@"struct".decls) |decl| {
+                const Decl = @TypeOf(@field(ModelT, decl.name));
+                if (comptime reflect.isVirtualItemFn(ModelT, Decl)) {
+                    if (std.mem.eql(u8, decl.name, each)) {
+                        const info = @typeInfo(Decl).@"fn";
+                        const Parameter = info.params[1].type.?;
+                        const Range = reflect.Pointee(Parameter);
+                        var range: Range = undefined;
+                        inline for (@typeInfo(Range).@"struct".fields) |field| {
+                            const source = @field(resolved.range, field.name);
+                            @field(range, field.name) = switch (@typeInfo(field.type)) {
+                                .int => @intCast(source),
+                                .float => if (@typeInfo(@TypeOf(source)) == .int) @floatFromInt(source) else @floatCast(source),
+                                else => unreachable,
+                            };
+                        }
+                        const argument = if (Parameter == Range) range else &range;
+                        const items = if (comptime info.params.len == 3) @field(ModelT, decl.name)(scope.model, argument, ui.arena) else @field(ModelT, decl.name)(scope.model, argument);
+                        if (items.len != resolved.range.itemCount()) return self.failNode(node, "virtual-list query returned a different item count");
+                        const Item = reflect.sliceElement(info.return_type.?).?;
+                        const type_index = comptime blk: {
+                            for (item_types, 0..) |candidate, index| if (candidate == Item) break :blk index;
+                            unreachable;
+                        };
+                        var rows: std.ArrayListUnmanaged(Ui.Node) = .empty;
+                        for (items) |*item| {
+                            scope.entries[scope.len] = .{ .name = name, .payload = .{ .item = .{ .type_index = type_index, .ptr = @ptrCast(item) } } };
+                            scope.len += 1;
+                            const built = self.buildNode(ui, scope, node.children[0]);
+                            scope.len -= 1;
+                            const row = try built;
+                            if (row.key == null and row.global_key == null) return self.failNode(node, "virtual-list requires one keyed root per row");
+                            try rows.append(ui.arena, row);
+                        }
+                        var attributes: std.ArrayListUnmanaged(markup.MarkupAttr) = .empty;
+                        for (node.attrs) |attribute| if (!std.mem.eql(u8, attribute.name, "window") and !std.mem.eql(u8, attribute.name, "each") and !std.mem.eql(u8, attribute.name, "as")) {
+                            try attributes.append(ui.arena, attribute);
+                        };
+                        var proxy = node;
+                        proxy.name = "scroll";
+                        proxy.attrs = attributes.items;
+                        var element: Ui.ElementOptions = .{};
+                        try self.applyAttrs(scope, proxy, &element);
+                        var options = resolved.options;
+                        options.width = element.width;
+                        options.height = element.height;
+                        options.min_width = element.min_width;
+                        options.grow = element.grow;
+                        options.padding = element.padding orelse 0;
+                        options.style_tokens = element.style_tokens;
+                        options.semantics = element.semantics;
+                        options.overscroll = element.overscroll;
+                        options.on_scroll = element.on_scroll;
+                        options.on_reach_end = element.on_reach_end;
+                        options.on_reach_start = element.on_reach_start;
+                        return ui.virtualList(options, resolved.range, .{rows.items});
+                    }
+                }
+            }
+            return self.failNode(node, "virtual-list each requires a Model-first complete range query");
+        }
+
         fn buildFor(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, out: *std.ArrayListUnmanaged(Ui.Node)) BuildError!usize {
             @setEvalBranchQuota(scan_quota);
             const each = node.attr("each") orelse return self.failVoid(node, "for requires an each attribute");
@@ -1719,8 +1848,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (typed == .binding) {
                 const path = typed.binding;
                 if (scope.lookup(pathHead(path))) |entry| {
-                    if (entry.payload == .slice and pathTail(path) == null) {
-                        // Re-pass a slice arg to a nested use.
+                    if ((entry.payload == .slice or entry.payload == .virtual) and pathTail(path) == null) {
+                        // Re-pass an iterable or retained window to a nested use.
                         return entry.payload;
                     }
                 } else {
@@ -1783,6 +1912,13 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (std.mem.eql(u8, attribute.name, "global-key")) {
                     options.global_key = try self.attrKey(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "focusable")) {
+                    options.semantics.focusable = switch (try self.evalAttrExpression(scope, node, attribute)) {
+                        .boolean => |flag| flag,
+                        else => return self.failVoid(node, "focusable expects a boolean"),
+                    };
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "role")) {
@@ -2241,6 +2377,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 options.on_hover_enter = msg;
             } else if (std.mem.eql(u8, event, "hover-leave")) {
                 options.on_hover_leave = msg;
+            } else if (std.mem.eql(u8, event, "reach-start") and std.mem.eql(u8, node.name, "scroll")) {
+                options.on_reach_start = msg;
             } else if (std.mem.eql(u8, event, "reach-end")) {
                 // The approach-end signal (infinite-scroll fetch) is
                 // emitted for scroll containers only.
@@ -2540,6 +2678,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                         return value;
                     },
                     .slice => return self.failValue(node, "slice-valued template args are only usable with for each"),
+                    .virtual => |window| {
+                        const tail = pathTail(path) orelse return self.failValue(node, "virtual window requires a range field");
+                        return resolveOn(canvas.VirtualListRange, &window.range, tail, null) orelse self.failValue(node, "unknown virtual range field");
+                    },
                     // Slot captures carry an empty name, which no binding
                     // head can equal.
                     .slot => unreachable,

@@ -106,7 +106,7 @@ class MirrorEmitter extends CodeWriter {
     for (let i = 0; i < this.s.model_helpers.length; i++) {
       const h = this.s.model_helpers[i];
       const returns = this.spellRef(h.returns, "helpers", h.name, "helpers." + h.name + ".return");
-      if (h.arena) {
+      if (h.arena && h.params.length === 0) {
         this.print("\n    pub fn {f}(self: *const {f}, arena: std.mem.Allocator) {s} {{\n        _ = self;\n        return callHelper({s}, {d}, &.{{}}, arena);\n    }}",
           [zigIdent(h.name), zigIdent(model.name), returns, returns, String(i)]);
       } else if (h.params.length === 0) {
@@ -120,11 +120,25 @@ class MirrorEmitter extends CodeWriter {
           if (j > 0) tuple += ", ";
           tuple += "p" + j;
         }
-        this.print("\n    pub fn {f}(self: *const {f}{s}) {s} {{\n        _ = self;\n        const args_tuple = .{{ {s} }};\n        const args = shim_rt.encodeAlloc(@TypeOf(args_tuple), args_tuple, shim_rt.frameAllocator());\n        return callHelper({s}, {d}, args, shim_rt.frameAllocator());\n    }}",
-          [zigIdent(h.name), zigIdent(model.name), params, returns, tuple, returns, String(i)]);
+        if (h.arena) params += ", arena: std.mem.Allocator";
+        this.print("\n    pub fn {f}(self: *const {f}{s}) {s} {{\n        _ = self;\n        const args_tuple = .{{ {s} }};\n        const args = shim_rt.encodeAlloc(@TypeOf(args_tuple), args_tuple, shim_rt.frameAllocator());\n        return callHelper({s}, {d}, args, {s});\n    }}",
+          [zigIdent(h.name), zigIdent(model.name), params, returns, tuple, returns, String(i), h.arena ? "arena" : "shim_rt.frameAllocator()"]);
       }
     }
+    if (this.s.abi.exports.includes("native_virtual_requests")) this.virtualEstimates();
     this.unboundDecl(this.s.model_unbound); this.raw("\n};\n");
+  }
+  virtualEstimates(): void {
+    this.raw('\n    /// Stable compiled helper identities; retained tables hold no model or arena pointer.\n    pub fn virtualExtentHelper(name: []const u8) ?u32 {\n');
+    const helpers = this.s.model_helpers.map((helper, index) => ({ helper, index })).filter(({ helper }) => helper.params.length === 1 && ["i64", "f64"].includes(helper.params[0].kind) && ["i64", "f64"].includes(helper.returns.kind));
+    for (const { helper, index } of helpers) this.print('        if (std.mem.eql(u8, name, "{f}")) return {d};\n', [zigString(helper.name), String(index)]);
+    this.raw('        return null;\n    }\n\n    pub fn virtualExtentEstimate(context: ?*const anyopaque, index: u64) f32 {\n        if (index > 9007199254740991) @panic("virtual extent index exceeds safe integers");\n        const helper: u32 = @intCast(@intFromPtr(context orelse @panic("missing virtual extent identity")) - 1);\n        var args: [8]u8 = undefined;\n        defer abi.frame_reset();\n        const value: f64 = switch (helper) {\n');
+    for (const { helper, index } of helpers) {
+      const parameter = this.spellRef(helper.params[0], "helpers", helper.name, "helpers." + helper.name + ".params[0]");
+      const encoded = helper.params[0].kind === "i64" ? "@as(" + parameter + ", @intCast(index))" : "@as(f64, @floatFromInt(index))";
+      this.print('            {d} => blk: {{\n                std.mem.writeInt(u64, &args, @bitCast({s}), .little);\n                break :blk {s}callHelper({s}, {d}, &args, shim_rt.frameAllocator()){s};\n            }},\n', [String(index), encoded, helper.returns.kind === "i64" ? "@floatFromInt(" : "", this.spellRef(helper.returns, "helpers", helper.name, "helpers." + helper.name + ".return"), String(index), helper.returns.kind === "i64" ? ")" : ""]);
+    }
+    this.raw('            else => @panic("invalid virtual extent helper"),\n        };\n        if (!std.math.isFinite(value) or value < 0 or value > std.math.floatMax(f32)) @panic("invalid virtual extent result");\n        return @floatCast(value);\n    }\n');
   }
   unboundDecl(names: string[]): void {
     if (names.length === 0) return;
@@ -222,6 +236,7 @@ class MirrorEmitter extends CodeWriter {
       this.print("pub fn nativeViewEvent(envelope: []const u8, arena: std.mem.Allocator) ?{f} {{\n    return decodeMsgEnvelope(envelope, arena);\n}}\n", [msg]);
     }
     const extensions = [
+      { name: "native_virtual_requests", code: text.nativeVirtualRequests }, { name: "native_virtual_view", code: text.nativeVirtualView },
       { name: "native_media_view", code: text.nativeMediaView }, { name: "native_media_window_view", code: text.nativeMediaWindowView },
       { name: "native_window_view", code: text.nativeWindowView }, { name: "native_radio_policy", code: text.nativeRadioPolicy },
       { name: "native_tabs_policy", code: text.nativeTabsPolicy }, { name: "native_tree_policy", code: text.nativeTreePolicy },

@@ -191,7 +191,19 @@ class FacadeEmitter extends CodeWriter {
     this.raw(text.helperPrelude);
     for (const h of this.s.model_helpers) {
       const returns = this.spellRef(h.returns), optionalInt = h.returns.kind === "optional" && h.returns.inner!.kind === "i64";
-      if (h.returns.kind === "i64" || optionalInt) {
+      if (h.params.length > 0) {
+        const params = h.params.map((p, index) => `p${index}: ${this.spellRef(p)}`);
+        const args = h.params.map((_p, index) => `p${index}`);
+        this.print("\nexport function {s}(model: {s}, {s}): {s} {{\n", [h.name, this.s.model, params.join(", "), returns]);
+        this.print("  const nscfValue = nscfH_{s}(model, {s});\n", [h.name, args.join(", ")]);
+        if (h.returns.kind === "i64" || optionalInt) {
+          if (optionalInt) this.raw("  if (nscfValue === null) return null;\n");
+          this.print("  if (nscfValue >= {s} && nscfValue <= {s}) return Math.trunc(nscfValue);\n", [lowerBound(this.nestedSlotClass("helpers", h.name, "return")), maxSafe]);
+          this.raw('  nscfTrap("a helper return is outside its attested integer range");\n');
+          this.use("trap");
+        } else this.print("  return nscfValue as {s};\n", [returns]);
+        this.raw("}\n");
+      } else if (h.returns.kind === "i64" || optionalInt) {
         const lower = lowerBound(this.nestedSlotClass("helpers", h.name, "return"));
         this.print(optionalInt ? text.helperOptionalInteger : text.helperInteger, optionalInt
           ? [h.name, this.s.model, returns, h.name, lower, maxSafe] : [h.name, this.s.model, h.name, lower, maxSafe]);
@@ -412,12 +424,26 @@ class FacadeEmitter extends CodeWriter {
   helperCall(): void {
     this.use("trap"); this.use("assert_consumed");
     if (this.s.model_helpers.length === 0) { this.raw(text.helperEmpty); return; }
-    this.use("sink"); this.raw(text.helperCallPrelude);
+    const parameterized = this.s.model_helpers.some(h => h.params.length > 0);
+    this.use("sink"); this.raw(parameterized ? text.helperCallPrelude.replace("  nscfAssertConsumed(args, 0);\n", "") : text.helperCallPrelude);
     for (let i = 0; i < this.s.model_helpers.length; i++) {
       const h = this.s.model_helpers[i];
-      this.print("  if (helper === {d}) {{\n    const sink = nscfNewSink();\n    const nscfValue = {s}(nscfCommitted);\n", [String(i), h.name]);
+      this.print("  if (helper === {d}) {{\n", [String(i)]);
+      let argumentsText = "";
+      let guards: string[] = [];
+      if (h.params.length > 0) {
+        const decode = new RecordDecode(this, "args", 2, "0", false);
+        for (let index = 0; index < h.params.length; index++) decode.fieldLocal(`p${index}`, h.params[index], "helpers", `${h.name}.params[${index}]`);
+        this.print("    nscfAssertConsumed(args, {s});\n", [decode.offsetText()]);
+        argumentsText = ", " + decode.exprs.map(p => p.text).join(", ");
+        guards = decode.guards;
+      } else if (parameterized) this.raw("    nscfAssertConsumed(args, 0);\n");
+      if (guards.length) this.print("    if ({s}) {{\n", [guards.join(" && ")]);
+      this.print("    const sink = nscfNewSink();\n    const nscfValue = {s}(nscfCommitted{s});\n", [h.name, argumentsText]);
       this.fieldWriteStatements(h.returns, "nscfValue", "helpers", h.name + ".return", 2);
-      this.raw("    return nscfFinish(sink);\n  }\n");
+      this.raw("    return nscfFinish(sink);\n");
+      if (guards.length) this.raw('    }\n    nscfTrap("a helper argument is outside its attested integer range");\n');
+      this.raw("  }\n");
     }
     this.raw('  nscfTrap("helper index " + helper + " does not name an exported model helper of this core — the host and this core disagree about the contract");\n}\n');
   }

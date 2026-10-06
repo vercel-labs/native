@@ -475,5 +475,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    _ = @import("tests.zig");
+    _ = @import("feed_reference_tests.zig");
 }

@@ -241,3 +241,18 @@ export interface AudioCaptureEvent {
     readonly droppedPending: number;
     readonly droppedTotal: number;
 }
+/** Retained viewport facts supplied to a windowed-list row query. */
+export interface VirtualListRange {
+    readonly start_index: number;
+    readonly end_index: number;
+    readonly first_visible_index: number;
+    readonly last_visible_index: number;
+    readonly item_extent: number;
+    readonly item_gap: number;
+    readonly scroll_offset: number;
+    readonly layout_offset: number;
+    readonly content_extent: number;
+    readonly before_extent: number;
+    readonly after_extent: number;
+    readonly anchor_extent: number;
+}

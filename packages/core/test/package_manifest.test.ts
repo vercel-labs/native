@@ -53,14 +53,14 @@ test("the artifact contains the core, compile surface, and native testing API", 
   // The external-compile stage's one static SDK surface.
   assert.ok(fs.existsSync(path.join(pkg, "compile-surface", "core.ts")));
   // The generated declaration twins ship beside the sources.
-  for (const name of ["core.d.ts", "text.d.ts", "events.d.ts"]) {
+  for (const name of ["core.d.ts", "bytes.d.ts", "text.d.ts", "events.d.ts", "theme.d.ts"]) {
     assert.ok(fs.existsSync(path.join(pkg, "sdk", name)), `sdk/${name} does not exist`);
   }
 });
 
 test("exports resolve core and testing modules to shipped sources, types included", () => {
   const entries = Object.entries(manifest.exports);
-  assert.deepEqual(entries.map(([key]) => key), [".", "./text", "./events", "./testing"]);
+  assert.deepEqual(entries.map(([key]) => key), [".", "./bytes", "./text", "./events", "./theme", "./testing"]);
   for (const [, target] of entries) {
     assert.equal(typeof target.types, "string");
     assert.equal(target.types, target.default);

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { coreCases } from "./core_cases.ts";
+import { baseContract, coreCases } from "./core_cases.ts";
 
 assert.ok(process.argv[2], "run with the compiled corewire path (zig build test-corewire-policy)");
 const corewire = path.resolve(process.argv[2]);
@@ -37,5 +37,32 @@ for (const item of coreCases()) test(item.name, () => {
     assert.ifError(checked.error); assert.equal(checked.signal, null, checked.stderr);
     assert.equal(checked.status, golden.check_status, checked.stderr); assert.equal(checked.stderr, golden.check_diagnostics);
     for (const file of files) assert.equal(createHash("sha256").update(fs.readFileSync(path.join(dir, file))).digest("hex"), golden.hashes[file], "check wrote an output");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("parameterized arena helpers and retained integer estimators keep the attested codecs", () => {
+  const contract = baseContract();
+  contract.types.structs.push({ name: "Range", origin: "src/events.ts", exported: true, fields: [
+    { name: "first", type: { kind: "i64" } }, { name: "geometry", type: { kind: "f64" } },
+  ] });
+  contract.model_helpers.push(
+    { name: "rows", params: [{ kind: "value", name: "Range" }, { kind: "optional", inner: { kind: "bytes" } }], returns: { kind: "slice", elem: { kind: "value", name: "Range" } }, arena: true },
+    { name: "estimate", params: [{ kind: "i64" }], returns: { kind: "f64" }, arena: false },
+  );
+  contract.integer_slots.push({ slot: "Range.first", class: "i64" }, { slot: "helpers.estimate.params[0]", class: "u64" });
+  contract.abi.exports.push("native_virtual_requests", "native_virtual_view");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-helper-codecs-"));
+  try {
+    fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(contract, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
+    const result = spawnSync(corewire, ["--sidecar", "input.json", "--out", "mirror", "--facade", "facade"], { cwd: dir, encoding: "utf8" });
+    assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+    const mirror = fs.readFileSync(path.join(dir, "mirror"), "utf8"), facade = fs.readFileSync(path.join(dir, "facade"), "utf8");
+    assert.match(mirror, /pub fn rows\(self: \*const Model, p0: Range, p1: \?\[\]const u8, arena: std.mem.Allocator\)/);
+    assert.match(mirror, /const args_tuple = \.\{ p0, p1 \}/);
+    assert.match(mirror, /callHelper\(\[\]const Range, 0, args, arena\)/);
+    assert.match(mirror, /@bitCast\(@as\(u64, @intCast\(index\)\)\)/);
+    assert.match(facade, /rows\(nscfCommitted,/);
+    assert.match(facade, /estimate\(nscfCommitted,/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

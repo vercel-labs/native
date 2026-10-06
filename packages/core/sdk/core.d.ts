@@ -1,5 +1,4 @@
-export declare function asciiBytes(s: string): Uint8Array;
-export declare function utf8Bytes(s: string): Uint8Array;
+export { asciiBytes, utf8Bytes } from "./bytes.js";
 export type Msgish = {
     readonly kind: string;
 };
@@ -787,4 +786,3 @@ export declare const Sub: {
     timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M>;
     batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M>;
 };
-export {};

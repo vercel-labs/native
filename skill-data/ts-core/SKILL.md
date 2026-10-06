@@ -325,6 +325,29 @@ One caveat for node-side pokes: the build resolves the `@native-sdk/core*` speci
 
 The reference splits are `examples/soundboard` (core.ts + library.ts + player.ts + the SDK text engine), `examples/system-monitor` (core.ts + parsers.ts + table.ts + the SDK text engine), and `examples/chatbot` (core.ts + api.ts — the JSON-over-bytes wire-format reference: request encoding and a targeted parse walk that returns `null` on anything malformed) in the SDK repo.
 
+## Windowed lists
+
+Use `VirtualListRange` from `@native-sdk/core/events` for a Model-first row query. Export `rows(model: Model, range: VirtualListRange): readonly Row[]`; return exactly the rows from `start_index` through the exclusive `end_index`. Every row needs one keyed root. The range also includes first/last visible indices, item extent/gap, scroll/layout offsets, total content extent, before/after extents, and anchor extent. Geometry remains fractional.
+
+```html
+<virtual-window id="items" as="window" item-count="{count}"
+  item-extent="40" overscan="4" viewport-fallback="600">
+  <column>
+    <virtual-list window="window" each="rows" as="row" grow="1"
+      label="Items" on-reach-end="load_more">
+      <list-item key="{row.id}">{row.title}</list-item>
+    </virtual-list>
+    <status-bar>{window.first_visible_index}–{window.last_visible_index}</status-bar>
+  </column>
+</virtual-window>
+```
+
+For variable row heights, replace `item-extent` with `extent-estimate="estimate"`, where `estimate(model: Model, index: number): number` returns a nonnegative finite estimate. The native capability owns measurement, scrolling, retained corrections, and viewport resolution; compiled TypeScript owns row selection and markup composition. Estimates retain only a stable helper identity. They never hold a model pointer or result-arena memory. Supply cheap estimates without constructing rows.
+
+Each window requires exactly one list, declarations cannot nest, and a view supports eight windows. A template may receive a complete window binding and forward it to another template. Counts and logical indices are nonnegative safe integers; extent values must fit finite f32 points. Return no rows for an empty range. See `examples/feed` for variable-height authoring and persistent row interaction state.
+
+Exported Model-first helpers may take additional explicitly typed, fixed-arity parameters. Their complete parameter tuples cross the canonical helper ABI, including nested records, optionals, slices, integer obligations, and fractional fields. Ordinary `{helper}` bindings continue to use helpers with only the Model parameter; windowed row queries receive their range through `<virtual-list>`. Shell conventions such as `windows`, `statusItem`, and `webPanes` retain their documented single-Model signature.
+
 ## Text is bytes
 
 `string` in a core is for literals, string-literal-union tags, and `===` comparisons — content equality, on tags and plain `string` values alike (`name === "app.add"` in a command mapper works and behaves identically under node and native). Dynamic, user-visible text lives in the Model as `Uint8Array` — indexing yields byte values, `.length` is byte length, `subarray` is a view and `slice` is a copy, and both resolve their bounds the JS way (negatives count from the end, out-of-range clamps, a crossed range is empty), identical under node and native. Observing a `string`'s code units (`.length`, `s[i]`, `.charCodeAt`) is banned (NS1004) because UTF-16 and UTF-8 would disagree, and `+` concatenation is banned (NS1018) because runtime string building needs a JS string heap the binary does not carry — build text with template literals into bytes instead.
@@ -473,7 +496,7 @@ Every diagnostic carries one of these IDs plus the fix and the why, and every ru
 - **NS1070 relational SQLite and capability disagree (warning).** Raw `Cmd.db.*`, generated `Cmd.q<Name>`, and generated `Sub.q<Name>` require `"sqlite"`; declaring the capability without using any of them produces the inverse warning.
 - **NS14xx SQL diagnostics come from the real schema.** Fix the migration or named statement at the reported `.sql` line. Migration versions are append-only and contiguous; ordinary generated-query tables are `STRICT`; raw query literals receive the non-fatal NS1420 escape-hatch nudge; identifier-like INTEGER fields receive NS1422's exact-number warning.
 - **NS1029 effect op arguments have a fixed shape.** Paths/URLs/bodies are bytes, `Cmd.fetch`'s spec is an inline object with a closed verb literal, a number-literal timeout, and an inline flat record of headers whose NAMES are compile-time ASCII and whose VALUES are string literals or runtime bytes (`Uint8Array`). The record's shape encodes at build time; a runtime header value rides its length-prefixed wire field at dispatch time exactly like `url`/`body` — but a smuggled string (a ternary of literals, a template) has no encoding: make it bytes.
-- **NS1031 exported model helpers join the model's binding surface.** An exported single-Model-parameter helper becomes a Model declaration markup binds (`doneCount` → `{doneCount}`); two members with one binding name would be ambiguous — rename one.
+- **NS1031 exported model helpers join the model's binding surface.** An exported Model-first helper becomes a Model declaration; only a single-Model-parameter helper is a scalar markup binding (`doneCount` → `{doneCount}`); two members with one binding name would be ambiguous — rename one.
 - **NS1032 viewUnbound names update-only model state.** `export const viewUnbound = [...] as const` entries must be string literals naming Model fields, exported model helpers, or Msg kinds — by their TypeScript spellings (`"nextId"`); anything else would silence nothing and hide a typo.
 - **NS1030 effect arguments respect the engine's limits.** A compile-time-knowable value outside an engine bound (a path literal over 1024 bytes, a URL literal over 2 KiB, more than 8 headers, a header block over 1 KiB, a delay literal outside 1ms..one year) stops the build instead of shipping a guaranteed runtime rejection. Dynamic values stay the engine's to validate — they surface through the `err` arm.
 - **NS1033 wiring channel exports match their host event shapes.** `frameMsg`/`keyMsg`/`pinchMsg`/`dropMsg` take their exact event records and return `Msg | null`; `appearanceMsg`/`chromeMsg` are string literals naming arms with those channels' record shapes; `envMsgs` entries carry `env` and a one-`Uint8Array`-field `msg` arm; `themeState`, `themePack`, `statusItem`, `statusItems`, `windows`, and `webPanes` return their exact model-derived shell shapes. The generated wiring builds these host values structurally from your declarations, so a wrong shape is taught here instead of surfacing as a Zig error inside generated code.

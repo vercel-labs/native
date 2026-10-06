@@ -108,6 +108,7 @@ function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
   if (s.model !== "Model") reserved.push("Model");
   if (s.msg.name !== "Msg") reserved.push("Msg");
   if (s.abi.exports.includes("native_view")) reserved.push("nativeView", "nativeViewEvent", "ptr", "len", "arena");
+  if (s.abi.exports.includes("native_virtual_requests")) reserved.push("nativeVirtualRequests", "nativeVirtualView", "virtualExtentHelper", "virtualExtentEstimate");
   if (s.abi.exports.includes("native_media_view")) reserved.push("nativeMediaView");
   if (s.abi.exports.includes("native_media_window_view")) reserved.push("nativeMediaWindowView");
   if (s.abi.exports.includes("native_window_view")) reserved.push("nativeWindowView", "label", "ptr", "len", "arena");
@@ -319,7 +320,6 @@ function facadeNames(s: CoreContract, plan: ProjectionPlan, out: Diagnostic[]): 
     if (reservedNamespace(h.name)) flag(out, "model_helpers", `helper "${h.name}" takes the facade's reserved nsc name space; rename it in the core source`);
     for (const name of fixedExports) if (h.name === name) flag(out, "model_helpers", `helper "${h.name}" collides with a declaration the generated facade itself must export; rename it in the core source`);
     for (const name of ambientValues) if (h.name === name) flag(out, "model_helpers", `helper "${h.name}" shadows an ambient value the generated facade calls; rename it in the core source`);
-    if (h.params.length > 0) flag(out, "model_helpers", `helper "${h.name}" declares extra parameters — the generated dispatch surface carries model-only helpers (no producer emits parameters today); drop them in the core source`);
   }
   const declarations = tableNames(s); declarations.push(s.msg.name);
   for (const name of declarations) {

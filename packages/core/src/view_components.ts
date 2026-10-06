@@ -10,7 +10,7 @@ type NscContextMenuItem = { label: string; labelBytes?: readonly number[]; press
 type NscViewNode = {
   end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
-  columns?: number; virtualized?: boolean; virtualItemExtent?: number;
+  columns?: number; virtualized?: boolean; virtualItemExtent?: number; virtualWindow?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; valueX?: number; axis?: string; overscroll?: string;
@@ -30,18 +30,62 @@ type NscViewNode = {
   contextMenu?: readonly NscContextMenuItem[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
-  hoverEnter?: number[]; hoverLeave?: number[];
+  hoverEnter?: number[]; hoverLeave?: number[]; reachEnd?: number[]; reachStart?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;
 };
 
-function nscvTextBytes(parts: readonly Uint8Array[]): number[] | undefined {
+type NscVirtualRequest = { id: string; itemCount: number; itemExtent: number; gap: number; overscan: number; viewportFallback: number; indexBase: number; trailing: boolean; estimateHelper: number };
+type NscVirtualRange = { start_index: number; end_index: number; first_visible_index: number; last_visible_index: number; item_extent: number; item_gap: number; scroll_offset: number; layout_offset: number; content_extent: number; before_extent: number; after_extent: number; anchor_extent: number };
+type NscVirtualBuild = { requestsOnly: boolean; requests: NscVirtualRequest[]; ranges: NscVirtualRange[]; consumed: number[] };
+
+function nscvVirtualContext(request: Uint8Array): NscVirtualBuild {
+  if (request.length < 8) throw new Error("invalid virtual window context");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const count = wire.getUint32(4, true);
+  if (wire.getUint32(0, true) !== 1 || count > 8 || request.length !== 8 + count * 96) throw new Error("invalid virtual window context");
+  const ranges: NscVirtualRange[] = [];
+  for (let i = 0; i < count; i++) {
+    const at = 8 + i * 96;
+    const start = wire.getFloat64(at, true), end = wire.getFloat64(at + 8, true);
+    const first = wire.getFloat64(at + 16, true), last = wire.getFloat64(at + 24, true);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || !Number.isSafeInteger(first) || !Number.isSafeInteger(last) || start < 0 || end < start || first < start || first > end || last < first || last > end) throw new Error("invalid virtual window range");
+    for (let offset = 32; offset < 96; offset += 8) if (!Number.isFinite(wire.getFloat64(at + offset, true))) throw new Error("invalid virtual window geometry");
+    ranges.push({ start_index: start >= 0 && start <= 9007199254740991 ? Math.trunc(start) : 0, end_index: end >= 0 && end <= 9007199254740991 ? Math.trunc(end) : 0, first_visible_index: first >= 0 && first <= 9007199254740991 ? Math.trunc(first) : 0, last_visible_index: last >= 0 && last <= 9007199254740991 ? Math.trunc(last) : 0, item_extent: wire.getFloat64(at + 32, true), item_gap: wire.getFloat64(at + 40, true), scroll_offset: wire.getFloat64(at + 48, true), layout_offset: wire.getFloat64(at + 56, true), content_extent: wire.getFloat64(at + 64, true), before_extent: wire.getFloat64(at + 72, true), after_extent: wire.getFloat64(at + 80, true), anchor_extent: wire.getFloat64(at + 88, true) });
+  }
+  return { requestsOnly: false, requests: [], ranges, consumed: [] };
+}
+
+function nscvVirtualConsume(build: NscVirtualBuild, index: number): void {
+  if (build.consumed.includes(index)) throw new Error("virtual window has more than one list");
+  build.consumed.push(index);
+}
+
+function nscvVirtualRequest(requests: NscVirtualRequest[], value: NscVirtualRequest): number {
+  if (requests.length >= 8 || requests.some(request => request.id === value.id)) throw new Error("duplicate or excessive virtual windows");
+  for (const count of [value.itemCount, value.overscan, value.indexBase]) if (!Number.isSafeInteger(count) || count < 0) throw new Error("virtual window count requires a nonnegative safe integer");
+  if (value.indexBase + value.itemCount > 9007199254740991) throw new Error("virtual window logical range exceeds safe integers");
+  for (const extent of [value.itemExtent, value.gap, value.viewportFallback]) if (!Number.isFinite(extent) || extent < 0 || extent > 3.4028234663852886e38) throw new Error("virtual window extent requires a nonnegative finite f32");
+  if (value.estimateHelper < 0 && value.itemExtent === 0) throw new Error("virtual window requires an extent or estimate");
+  const index = requests.length;
+  requests.push(value);
+  return index;
+}
+
+function nscvVirtualRow(nodes: NscViewNode[], first: number): void {
+  const row = nodes[first];
+  if (!row || row.end !== nodes.length || row.key === undefined && row.keyInt === undefined && row.globalKey === undefined && row.globalKeyInt === undefined) throw new Error("virtual-list query requires one keyed root per row");
+}
+
+function nscvVirtualList(nodes: NscViewNode[], first: number, range: NscVirtualRange): void {
+  let count = 0;
+  for (let at = first + 1; at < nodes.length; at = nodes[at]!.end) count++;
+  if (count !== range.end_index - range.start_index) throw new Error("virtual-list query returned a different item count");
+}
+
+function nscvTextBytes(parts: readonly Uint8Array[]): number[] {
   const out: number[] = [];
   for (const part of parts) for (const byte of part) out.push(byte);
-  const bytes = new Uint8Array(out);
-  const roundtrip = new TextEncoder().encode(new TextDecoder().decode(bytes));
-  if (roundtrip.length !== bytes.length) return out;
-  for (let i = 0; i < bytes.length; i += 1) if (roundtrip[i] !== bytes[i]) return out;
-  return undefined;
+  return out;
 }
 
 function nscvSpanScale(value: number): number {
@@ -1205,8 +1249,10 @@ function nscvCodeIndentation(request: Uint8Array): Uint8Array {
  */
 function nscvCodeEditor(node: NscViewNode, numbered: boolean, addedSpec: Uint8Array, removedSpec: Uint8Array): void {
   let lines = 1;
-  for (let i = 0; i < node.text.length; i += 1) if (node.text.charCodeAt(i) === 10) lines += 1;
-  const terminal = node.text.length > 0 && node.text.charCodeAt(node.text.length - 1) === 10;
+  const bytes = node.textBytes;
+  const length = bytes === undefined ? node.text.length : bytes.length;
+  for (let i = 0; i < length; i += 1) if ((bytes === undefined ? node.text.charCodeAt(i) : bytes[i]) === 10) lines += 1;
+  const terminal = length > 0 && (bytes === undefined ? node.text.charCodeAt(length - 1) : bytes[length - 1]) === 10;
   let digits = 0;
   if (numbered && lines - (terminal ? 1 : 0) <= 10000) {
     digits = 1;

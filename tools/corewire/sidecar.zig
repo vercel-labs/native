@@ -337,6 +337,8 @@ pub const conditional_exports = [_][]const u8{
     "native_window_policy",
     "native_theme_policy",
     "native_status_policy",
+    "native_virtual_requests",
+    "native_virtual_view",
 };
 
 // ------------------------------------------------------------ reading

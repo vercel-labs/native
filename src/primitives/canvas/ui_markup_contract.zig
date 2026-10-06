@@ -61,7 +61,9 @@ pub const ValueKind = expr.ValueKind;
 /// preview insertion/reordering on change and restore on cancellation.
 /// Version 6: live drag geometry requires floating-point fields so captured
 /// out-of-view coordinates cannot trap an integer conversion at dispatch.
-pub const format_version: u32 = 6;
+/// Version 7: windowed queries and stable extent helpers have explicit
+/// authoring contracts; older artifacts cannot validate that surface.
+pub const format_version: u32 = 7;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).
@@ -138,6 +140,7 @@ pub const Iterable = struct {
     item_scalar: bool = false,
     item: Group = .{},
     fn_backed: bool = false,
+    virtual_window: bool = false,
 };
 
 /// Payload classes a markup dispatch can (or cannot) construct. The
@@ -165,6 +168,7 @@ pub const Contract = struct {
     msg_type: []const u8 = "",
     model: Group = .{},
     iterables: []const Iterable = &.{},
+    virtual_estimators: []const []const u8 = &.{},
     msgs: []const MsgTag = &.{},
     /// Names opted out of the dead-state lint via `pub const view_unbound`.
     model_unbound: []const []const u8 = &.{},
@@ -200,6 +204,7 @@ pub fn describe(comptime Model: type, comptime Msg: type, comptime specials: Spe
             .msg_type = @typeName(Msg),
             .model = describeGroup(Model),
             .iterables = describeIterables(Model),
+            .virtual_estimators = describeVirtualEstimators(Model),
             .msgs = describeMsgs(Msg, specials),
             .model_unbound = optOutNames(Model),
             .msg_unbound = optOutNames(Msg),
@@ -308,14 +313,28 @@ fn describeIterables(comptime Model: type) []const Iterable {
             if (@typeInfo(DeclType) != .@"fn") continue;
             const Return = @typeInfo(DeclType).@"fn".return_type orelse continue;
             const Item = reflect.sliceElement(Return) orelse continue;
-            if (reflect.isItemFn(DeclType, Item, false) or reflect.isItemFn(DeclType, Item, true)) {
+            const virtual = reflect.isVirtualItemFn(Model, DeclType);
+            if (reflect.isItemFn(DeclType, Item, false) or reflect.isItemFn(DeclType, Item, true) or virtual) {
                 var entry = describeItem(Item);
                 entry.name = decl.name;
                 entry.fn_backed = true;
+                entry.virtual_window = virtual;
                 iterables = iterables ++ &[_]Iterable{entry};
             }
         }
         return iterables;
+    }
+}
+
+fn describeVirtualEstimators(comptime Model: type) []const []const u8 {
+    comptime {
+        var names: []const []const u8 = &.{};
+        if (@hasDecl(Model, "virtualExtentHelper") and @hasDecl(Model, "virtualExtentEstimate")) {
+            for (@typeInfo(Model).@"struct".decls) |decl| {
+                if (Model.virtualExtentHelper(decl.name) != null) names = names ++ &[_][]const u8{decl.name};
+            }
+        }
+        return names;
     }
 }
 
@@ -648,6 +667,7 @@ const Binder = union(enum) {
     slice: ItemRef,
     value: ?ValueKind,
     slot: SlotCapture,
+    virtual: void,
 };
 
 const ScopeEntry = struct {
@@ -743,6 +763,14 @@ const Checker = struct {
                     return .{ .kind = kind };
                 },
                 .slice => return self.fail(node, slice_arg_value_message),
+                .virtual => {
+                    const tail = pathTail(path) orelse return self.fail(node, "virtual window requires a range field");
+                    const integers = [_][]const u8{ "start_index", "end_index", "first_visible_index", "last_visible_index" };
+                    const geometry = [_][]const u8{ "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent" };
+                    if (nameListed(&integers, tail)) return .{ .kind = .integer };
+                    if (nameListed(&geometry, tail)) return .{ .kind = .float };
+                    return self.fail(node, "unknown virtual range field");
+                },
                 // Slot captures carry an empty name, which no binding
                 // head can equal.
                 .slot => unreachable,
@@ -1119,7 +1147,7 @@ const Checker = struct {
         if (expression == .binding) {
             const path = expression.binding;
             if (self.lookup(pathHead(path))) |entry| {
-                if (entry.binder == .slice and pathTail(path) == null) {
+                if ((entry.binder == .slice or entry.binder == .virtual) and pathTail(path) == null) {
                     return entry.binder;
                 }
             } else {
@@ -1219,7 +1247,59 @@ const Checker = struct {
         }
     }
 
+    fn checkVirtualWindow(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        for (self.entries[self.floor..self.len]) |entry| if (entry.binder == .virtual) return self.fail(node, "virtual-window declarations cannot nest");
+        for (node.attrs) |attribute| {
+            if (nameListed(&.{ "item-count", "index-base", "overscan" }, attribute.name)) {
+                const kind = try self.unclassifiedKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.integer}, "virtual window count requires an integer");
+            } else if (nameListed(&.{ "item-extent", "gap", "viewport-fallback" }, attribute.name)) {
+                try self.checkClassAttr(node, attribute, .number);
+            } else if (std.mem.eql(u8, attribute.name, "extent-estimate")) {
+                if (!nameListed(self.contract.virtual_estimators, attribute.value)) return self.failAttr(node, attribute, "extent-estimate requires a stable compiled numeric index helper");
+                self.markModel(attribute.value);
+            }
+        }
+        if (self.len >= max_scope_depth) return self.fail(node, "virtual window nesting is too deep");
+        self.entries[self.len] = .{ .name = node.attr("as").?, .binder = .virtual };
+        self.len += 1;
+        defer self.len -= 1;
+        return self.checkChildList(node.children);
+    }
+
+    fn checkVirtualList(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        const window = self.lookup(node.attr("window").?) orelse return self.fail(node, "virtual-list requires an enclosing window");
+        if (window.binder != .virtual) return self.fail(node, "virtual-list requires an enclosing window");
+        const each = node.attr("each").?;
+        var found: ?*const Iterable = null;
+        for (self.contract.iterables) |*iterable| if (std.mem.eql(u8, iterable.name, each) and iterable.virtual_window) {
+            found = iterable;
+            break;
+        };
+        const query = found orelse return self.fail(node, "virtual-list each requires a Model-first complete range query");
+        self.markModel(each);
+        var proxy = node;
+        proxy.name = "scroll";
+        proxy.children = &.{};
+        var attributes: [markup.virtual_list_attrs.len]markup.MarkupAttr = undefined;
+        var count: usize = 0;
+        for (node.attrs) |attribute| {
+            if (nameListed(&.{ "window", "each", "as" }, attribute.name)) continue;
+            attributes[count] = attribute;
+            count += 1;
+        }
+        proxy.attrs = attributes[0..count];
+        try self.checkElement(proxy);
+        if (self.len >= max_scope_depth) return self.fail(node, "virtual list nesting is too deep");
+        self.entries[self.len] = .{ .name = node.attr("as").?, .binder = .{ .item = itemRefOf(query) } };
+        self.len += 1;
+        defer self.len -= 1;
+        return self.checkChildList(node.children);
+    }
+
     fn checkElement(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (std.mem.eql(u8, node.name, "virtual-window")) return self.checkVirtualWindow(node);
+        if (std.mem.eql(u8, node.name, "virtual-list")) return self.checkVirtualList(node);
         if (std.mem.eql(u8, node.name, "span")) return self.checkSpan(node);
         if (std.mem.eql(u8, node.name, "markdown")) return self.checkMarkdown(node);
         if (std.mem.eql(u8, node.name, "code")) return self.checkCode(node);

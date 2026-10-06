@@ -15,6 +15,22 @@ const runInNewContext = (code: string, context: Record<string, unknown>) => runV
   },
 });
 
+// Semantic assertions apply the native consumer's raw-byte precedence.
+// Wire assertions below inspect the unmodified JSON separately.
+function decodedView(bytes: Uint8Array): any {
+  const value = JSON.parse(new TextDecoder().decode(bytes));
+  const visit = (item: any): void => {
+    if (!item || typeof item !== "object") return;
+    if (Array.isArray(item)) { item.forEach(visit); return; }
+    for (const field of ["text", "label", "placeholder"]) if (item[field + "Bytes"] !== undefined) {
+      item[field] = new TextDecoder().decode(new Uint8Array(item[field + "Bytes"]));
+      delete item[field + "Bytes"];
+    }
+    Object.values(item).forEach(visit);
+  };
+  visit(value); return value;
+}
+
 const contract: ViewContract = {
   model: "Model", types: { structs: [{ name: "Model", fields: [
     { name: "count", type: { kind: "i64" } }, { name: "tickCount", type: { kind: "i64" } },
@@ -32,8 +48,49 @@ const evaluate = (markup: string) => {
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, total: (m: typeof model) => m.count + m.tickCount,
     nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, contract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
-  return { model, view: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
+  return { model, view: () => decodedView(exports.native_view!()), wire: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
+
+test("windowed row queries consume complete viewport facts without materializing other rows", () => {
+  const rangeNames = ["start_index", "end_index", "first_visible_index", "last_visible_index", "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent"];
+  const input: ViewContract = { ...contract, types: { structs: [...contract.types.structs,
+    { name: "VirtualListRange", fields: rangeNames.map((name, index) => ({ name, type: { kind: index < 4 ? "i64" : "f64" } })) },
+    { name: "Post", fields: [{ name: "id", type: { kind: "i64" } }] },
+  ] }, model_helpers: [
+    { name: "estimate", params: [{ kind: "i64" }], returns: { kind: "f64" } },
+    { name: "rows", params: [{ kind: "value", name: "VirtualListRange" }], returns: { kind: "slice", elem: { kind: "value", name: "Post" } } },
+  ] };
+  const markup = '<virtual-window id="posts" as="window" item-count="{count}" extent-estimate="estimate" overscan="2"><column><virtual-list window="window" each="rows" as="post" grow="1" on-reach-end="load"><list-item key="{post.id}">{post.id}</list-item></virtual-list><status-bar>{window.first_visible_index}–{window.last_visible_index} at {window.scroll_offset}</status-bar></column></virtual-window>';
+  const exports: Record<string, (...args: Uint8Array[]) => Uint8Array> = {};
+  const calls: Record<string, number>[] = [];
+  let rowsResult = [{ id: 7 }, { id: 8 }];
+  runInNewContext(ts.transpile(compileView(markup, input), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: { count: 100000 },
+    rows: (_model: unknown, range: Record<string, number>) => { calls.push(range); return rowsResult; },
+    nscfPackMsg: () => Uint8Array.of(1, 0),
+  });
+  const video = new Uint8Array(20); video[0] = 1;
+  const label = new Uint8Array(0);
+  const requests = decodedView(exports.native_virtual_requests!(label, video));
+  assert.equal(calls.length, 0);
+  assert.deepEqual(requests, { format: 1, requests: [{ id: "posts", itemCount: 100000, itemExtent: 0, gap: 0, overscan: 2, viewportFallback: 0, indexBase: 0, trailing: false, estimateHelper: 0 }] });
+  const numbers = [7, 9, 7, 8, 0, 1.25, 190.5, 191.75, 800000.25, 150.125, 799610.5, 180.75];
+  const context = new Uint8Array(104), wire = new DataView(context.buffer);
+  wire.setUint32(0, 1, true); wire.setUint32(4, 1, true);
+  numbers.forEach((number, index) => wire.setFloat64(8 + index * 8, number, true));
+  const tree = decodedView(exports.native_virtual_view!(label, context, video));
+  assert.deepEqual(Object.fromEntries(rangeNames.map((name, index) => [name, calls[0]![name]])), Object.fromEntries(rangeNames.map((name, index) => [name, numbers[index]])));
+  assert.equal(tree.nodes.filter((node: { kind: string }) => node.kind === "list_item").length, 2);
+  assert.equal(tree.nodes[1].virtualWindow, 0);
+  assert.deepEqual(tree.nodes[1].reachEnd, [1, 0]);
+  assert.equal(tree.nodes.at(-1).text, "7–8 at 190.5");
+  assert.throws(() => exports.native_virtual_view!(label, context.subarray(0, 103), video), /invalid virtual window context/);
+  wire.setFloat64(8, 7.5, true);
+  assert.throws(() => exports.native_virtual_view!(label, context, video), /invalid virtual window range/);
+  wire.setFloat64(8, 7, true); rowsResult = [{ id: 7 }];
+  assert.throws(() => exports.native_virtual_view!(label, context, video), /different item count/);
+  assert.throws(() => compileView(markup.replace('key="{post.id}"', ""), input), /keyed root/);
+});
 
 test("hold envelopes preserve borrowed text and coexist with ordinary press handlers", () => {
   const input: ViewContract = { ...contract, msg: { arms: [
@@ -47,11 +104,11 @@ test("hold envelopes preserve borrowed text and coexist with ordinary press hand
     exports, TextEncoder, TextDecoder, nscfCommitted: model,
     nscfPackMsg: (msg: { kind: string; text?: Uint8Array }) => new Uint8Array([1, msg.kind === "held" ? 0 : 1, ...msg.text ?? []]),
   });
-  const view = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  const view = decodedView(exports.native_view!()).nodes[0];
   assert.deepEqual(view.hold, [1, 0, ...model.status]);
   assert.deepEqual(view.press, [1, 1]);
   model.status = new TextEncoder().encode("changed");
-  assert.deepEqual(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0].hold, [1, 0, ...model.status]);
+  assert.deepEqual(decodedView(exports.native_view!()).nodes[0].hold, [1, 0, ...model.status]);
   assert.throws(() => compileView('<button on-hold="held">Card</button>', input), /matching scalar/);
   assert.throws(() => compileView('<button on-hold="unknown">Card</button>', input), /event/);
 });
@@ -216,7 +273,7 @@ test("mixer sliders route applied float values separately from static change mes
     tracks: () => [{ id: 1, title: new TextEncoder().encode("Acoustic café"), value: 0.25, disabled: false }],
     nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, mixerContract.msg.arms.findIndex(arm => arm.name === msg.kind)),
   });
-  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const nodes = decodedView(exports.native_view!()).nodes;
   const sliders = nodes.filter((node: { kind: string }) => node.kind === "slider");
   assert.equal(sliders.length, 3);
   assert.equal(sliders[0].valueChange, mixerContract.msg.arms.findIndex(arm => arm.name === "master_changed"));
@@ -242,7 +299,7 @@ test("split panes preserve float resize channels, minimum widths and structural 
     runInNewContext(ts.transpile(compileView(markup, floatContract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
       exports, TextEncoder, TextDecoder, nscfCommitted: { count: 2, ticking: true }, nscfPackMsg: () => Uint8Array.of(1, 5),
     });
-    return JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+    return decodedView(exports.native_view!()).nodes;
   };
   const nodes = render('<split value="0.35" on-resize="resized" gap="12" resize-duration="180" resize-easing="linear" resize-origin="0.2"><column min-width="150"><text>First</text></column><if test="{ticking}"><column min-width="220"/></if><else><column/></else></split>');
   assert.equal(nodes[0].resize, floatContract.msg.arms.findIndex(arm => arm.name === "resized"));
@@ -272,7 +329,7 @@ test("scroll views preserve two-axis grants, offsets, overscroll and closed enum
   runInNewContext(ts.transpile(compileView('<scroll axis="{axes}" overscroll="{edges}" value="25.5" value-x="45.25"><column/></scroll>', scrollContract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
     exports, TextEncoder, TextDecoder, nscfCommitted: { axes: "both", edges: "rubber_band" },
   });
-  const root = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  const root = decodedView(exports.native_view!()).nodes[0];
   assert.equal(root.axis, "both"); assert.equal(root.overscroll, "rubber_band");
   assert.equal(root.value, 25.5); assert.equal(root.valueX, 45.25);
   for (const markup of ['<column axis="both"/>', '<column overscroll="none"/>', '<column value-x="3"/>',
@@ -351,7 +408,7 @@ test("the shipping Kanban view expands templates, record lists, bytes, enums and
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model,
     todoCards: () => [card], doingCards: () => [], doneCards: () => [],
     nscfPackMsg: (msg: unknown) => { messages.push(msg); return Uint8Array.of(1, 1); } });
-  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!()));
+  const view = () => decodedView(exports.native_view!());
   const nodes = view().nodes;
   assert.equal(nodes.filter((n: any) => n.label === "Todo").length, 1);
   assert.equal(nodes.find((n: any) => n.kind === "scroll").value, 23);
@@ -372,7 +429,7 @@ test("keyed iteration stamps every emitted sibling and respects explicit identit
   const model = { cards: [{ id: 3, title: new TextEncoder().encode("three") }, { id: 1, title: new Uint8Array() }] };
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model });
-  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const nodes = decodedView(exports.native_view!()).nodes;
   assert.deepEqual(nodes.slice(1).map((n: any) => [n.keyInt ?? n.key, n.keySlot ?? 0]), [[3, 0], [3, 1], ["own", 0], [1, 0], [1, 1], ["own", 0]]);
 });
 
@@ -423,7 +480,7 @@ test("the complete feed view uses native input constructors and committed servic
   const model = { url: bytes("https://example.com/café"), items: [{ title: bytes("日本語"), link: bytes("https://example.com/1") }], feedTitle: bytes("Feed"), reason: bytes("failure"), phase: "ready" };
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model, loading: () => model.phase === "loading", ready: () => model.phase === "ready", failed: () => model.phase === "failed", itemSummary: () => bytes("1 of 1 items"), nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, feedContract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
-  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const view = () => decodedView(exports.native_view!()).nodes;
   const input = view().find((node: any) => node.kind === "input");
   assert.equal(input.text, "https://example.com/café");
   assert.equal(input.input, feedContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
@@ -458,13 +515,13 @@ test("window bundle shares helpers, routes exact labels, and preserves independe
   const model = { count: 7 };
   runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }),
     { exports, TextEncoder, nscfCommitted: model, nscfPackMsg: () => Uint8Array.of(1, 3) });
-  const view = (label: string) => JSON.parse(new TextDecoder().decode(exports.native_window_view!(new TextEncoder().encode(label))));
+  const view = (label: string) => decodedView(exports.native_window_view!(new TextEncoder().encode(label)));
   const first = view("café");
   assert.equal(first.nodes[1].text, "7");
   assert.deepEqual(first.nodes[2].press, [1, 3]);
   model.count = 8;
   assert.equal(view("other").nodes[1].text, "8");
-  assert.equal(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0].text, "8");
+  assert.equal(decodedView(exports.native_view!()).nodes[0].text, "8");
   assert.equal(first.nodes[1].text, "7");
   for (const label of ["", "missing", "café\0", "caf"]) assert.throws(() => view(label), /unknown compiled window/);
   assert.throws(() => exports.native_window_view!(Uint8Array.of(0xff)), /unknown compiled window/);
@@ -502,7 +559,7 @@ test("portable stepper owns state, primitive composition and accessible position
   const model = { active: 1 };
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, nscfCommitted: model });
-  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes as any[];
+  const view = () => decodedView(exports.native_view!()).nodes as any[];
   const nodes = view();
   assert.equal(nodes.length, 12);
   assert.equal(nodes[0].role, "list");
@@ -1687,7 +1744,7 @@ test("compiled hover handlers preserve typed byte envelopes on nested keyed list
   runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
     exports, TextEncoder, TextDecoder, nscfCommitted: model, nscfPackMsg: (msg: { kind: string; text?: Uint8Array }) => new Uint8Array([1, msg.kind === "enter" ? 0 : 1, ...msg.text ?? []]),
   });
-  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const view = () => decodedView(exports.native_view!()).nodes;
   assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]); assert.deepEqual(view()[0].hoverEnter, [1, 0]); assert.deepEqual(view()[1].hoverEnter, [1, 0]);
   model.status = new TextEncoder().encode("Rebound"); assert.deepEqual(view()[0].hoverLeave, [1, 1, ...model.status]);
   assert.throws(() => compileView('<panel on-hover-leave="leave"/>', input), /matching scalar/);
@@ -1757,12 +1814,12 @@ test("unkeyed enum filters preserve structural identities and dispatch typed enu
   const exports: { native_view?: () => Uint8Array } = {};
   runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model,
     nscfPackMsg: (msg: unknown) => { messages.push(msg); return Uint8Array.of(1, 1); } });
-  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const nodes = decodedView(exports.native_view!()).nodes;
   assert.deepEqual(nodes.slice(1).map((n: any) => [n.text, n.checked]), [["all", false], ["active", true], ["all", false]]);
   assert.ok(nodes.slice(1).every((n: any) => n.key === undefined && n.keyInt === undefined && n.keySlot === undefined));
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ kind: "set_filter", filter: "all" }, { kind: "set_filter", filter: "active" }, { kind: "set_filter", filter: "all" }]);
   model.filters = [];
-  assert.equal(JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes.length, 1);
+  assert.equal(decodedView(exports.native_view!()).nodes.length, 1);
   assert.throws(() => compileView(markup.replace("f == filter", "f == other"), c), /invalid operands/);
   assert.throws(() => compileView(markup.replace("set_filter:{f}", "set_filter:{other}"), c), /matching scalar/);
   assert.throws(() => compileView(markup.replace('as="f"', 'as="f" key=""'), c), /for requires/);
@@ -1854,7 +1911,7 @@ test("playback context builds owned house chrome independently for primary and s
     const result = new Uint8Array(20); result[0] = 1; result[1] = flags;
     const data = new DataView(result.buffer); data.setFloat64(4, position, true); data.setFloat64(12, duration, true); return result;
   };
-  const read = (bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(bytes)).nodes;
+  const read = (bytes: Uint8Array) => decodedView(bytes).nodes;
   const live = context(7, 3_723_000, 7_325_000);
   const primary = read(exports.native_media_view!(live));
   assert.deepEqual(read(exports.native_media_window_view!(new TextEncoder().encode("player"), live)), primary);
@@ -1878,7 +1935,7 @@ test("bare media surfaces and closed dynamic icons preserve their binding types"
   const exports: { native_view?: () => Uint8Array } = {};
   const model = { surface: 0x7601, icon: "pause" };
   runInNewContext(ts.transpile(code, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
-  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  const nodes = decodedView(exports.native_view!()).nodes;
   assert.equal(nodes[1].kind, "media_surface"); assert.equal(nodes[1].image, 0x7601); assert.equal(nodes[2].icon, "pause");
   assert.throws(() => compileView('<button surface="{surface}"/>', input), /requires media-surface/);
   assert.throws(() => compileView('<button icon="{count}"/>', contract), /closed union/);
@@ -1890,7 +1947,7 @@ test("compiled empty-list branches preserve keyed rows and outer scope across tr
   const exports: { native_view?: () => Uint8Array } = {};
   const markup = '<column><for each="rows" key="id" as="row"><list-item>{row.title}</list-item></for><else><text>{status}</text></else></column>';
   runInNewContext(ts.transpile(compileView(markup, c), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
-  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!()));
+  const view = () => decodedView(exports.native_view!());
   assert.equal(view().nodes[1].text, "No notes");
   model.rows.push({ id: 7, title: new TextEncoder().encode("Café") });
   const occupied = view(); assert.equal(occupied.nodes.length, 2); assert.equal(occupied.nodes[1].text, "Café"); assert.equal(occupied.nodes[1].keyInt, 7);
@@ -1915,9 +1972,9 @@ test("compiled Notes conditions and context menus retain native text truthiness 
 
 test("compiled byte text retains malformed UTF-8 NUL labels placeholders menus and span bytes", () => {
   const markup = '<column><text>{status}</text><text><span>{status}</span></text><text-field text="{status}" label="{status}" placeholder="{status}"/><list-item label="{status}"><text>{status}</text><context-menu><menu-item on-press="reset">{status}</menu-item></context-menu></list-item></column>';
-  const { model, view } = evaluate(markup);
+  const { model, wire } = evaluate(markup);
   const input = new Uint8Array([0xff, 0xc3, 0x00, 0x78]); model.status = input;
-  const nodes = view().nodes;
+  const nodes = wire().nodes;
   assert.deepEqual(nodes[1].textBytes, [...input]);
   assert.deepEqual(nodes[2].spans[0].textBytes, [...input]);
   assert.deepEqual(nodes[3].textBytes, [...input]);
@@ -1925,7 +1982,7 @@ test("compiled byte text retains malformed UTF-8 NUL labels placeholders menus a
   assert.deepEqual(nodes[3].placeholderBytes, [...input]);
   assert.deepEqual(nodes[4].labelBytes, [...input]);
   assert.deepEqual(nodes[4].contextMenu[0].labelBytes, [...input]);
-  input.fill(0); view();
+  input.fill(0); wire();
   assert.deepEqual(nodes[1].textBytes, [0xff, 0xc3, 0x00, 0x78]);
 });
 
@@ -1940,7 +1997,7 @@ test("terminal records preserve byte-named PTY ownership and full state dispatch
   runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
     exports, TextEncoder, TextDecoder, nscfCommitted: { status: key, count: 4294967295 },
   });
-  const node = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  const node = decodedView(exports.native_view!()).nodes[0];
   assert.deepEqual(node.ptyBytes, [...key]);
   assert.equal(node.scrollback, 4294967295);
   assert.equal(node.terminal, 0);
@@ -1950,4 +2007,49 @@ test("terminal records preserve byte-named PTY ownership and full state dispatch
     '<terminal pty="{ticking}"/>', '<text scrollback="2">Wrong</text>',
     '<text on-terminal="terminal_changed">Wrong</text>', '<terminal on-terminal="load"/>',
   ]) assert.throws(() => compileView(markup, input));
+});
+
+test("windowed templates secondary windows and malformed contexts preserve declaration ownership", () => {
+  const names = ["start_index", "end_index", "first_visible_index", "last_visible_index", "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent"];
+  const input: ViewContract = { ...contract, types: { structs: [...contract.types.structs,
+    { name: "Range", fields: names.map((name, i) => ({ name, type: { kind: i < 4 ? "i64" : "f64" } })) },
+    { name: "Row", fields: [{ name: "id", type: { kind: "i64" } }] },
+  ] }, model_helpers: [{ name: "rows", params: [{ kind: "value", name: "Range" }], returns: { kind: "slice", elem: { kind: "value", name: "Row" } } }] };
+  const list = '<virtual-list window="range" each="rows" as="row"><list-item key="{row.id}">{row.id}</list-item></virtual-list>';
+  const template = `<template name="rows-view" args="range"><column>${list}<status-bar>{range.content_extent}</status-bar></column></template>`;
+  const markup = `${template}<virtual-window id="one" as="window" item-count="2" item-extent="20"><use template="rows-view" range="{window}"/></virtual-window>`;
+  const exports: Record<string, (...args: Uint8Array[]) => Uint8Array> = {};
+  runInNewContext(ts.transpile(compileViewBundle(markup, input, {}, [{ label: "second", source: markup.replace('id="one"', 'id="two"') }]), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: {}, rows: (_: unknown, range: Record<string, number>) => Array.from({ length: range.end_index - range.start_index }, (_, i) => ({ id: i + range.start_index })), nscfPackMsg: () => Uint8Array.of(1, 0),
+  });
+  const video = new Uint8Array(20); video[0] = 1;
+  const label = new TextEncoder().encode("second"), context = new Uint8Array(104), wire = new DataView(context.buffer);
+  wire.setUint32(0, 1, true); wire.setUint32(4, 1, true);
+  [0, 2, 0, 1, 20, 0, 0, 0, 40, 0, 0, 20].forEach((n, i) => wire.setFloat64(8 + 8 * i, n, true));
+  assert.equal(decodedView(exports.native_virtual_requests!(label, video)).requests[0].id, "two");
+  assert.equal(decodedView(exports.native_virtual_view!(label, context, video)).nodes[4].text, "40");
+  for (const [offset, value] of [[8, NaN], [16, Infinity], [24, .5], [32, -1], [40, NaN], [96, Infinity]]) {
+    const invalid = context.slice(); new DataView(invalid.buffer).setFloat64(offset!, value!, true);
+    assert.throws(() => exports.native_virtual_view!(label, invalid, video), /invalid virtual window/);
+  }
+  for (const count of [0, 2, 9]) {
+    const invalid = context.slice(); new DataView(invalid.buffer).setUint32(4, count, true);
+    assert.throws(() => exports.native_virtual_view!(label, invalid, video), /invalid virtual window context/);
+  }
+  for (const body of ['<text>missing</text>', `<column>${list}${list}</column>`]) {
+    const code = compileView(`<virtual-window id="one" as="range" item-count="2" item-extent="20">${body}</virtual-window>`, input);
+    const bad: Record<string, (...args: Uint8Array[]) => Uint8Array> = {};
+    runInNewContext(ts.transpile(code, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports: bad, TextEncoder, TextDecoder, nscfCommitted: {}, rows: () => [{ id: 0 }, { id: 1 }] });
+    assert.throws(() => bad.native_virtual_view!(new Uint8Array(), context, video), /virtual window/);
+  }
+  for (const attr of ['overscroll="wrong"', 'background="wrong"', 'radius="wrong"']) assert.throws(() => compileView(markup.replace('<virtual-list ', `<virtual-list ${attr} `), input));
+});
+
+
+test("explicit focusable state remains a typed boolean in compiled widget data", () => {
+  const { model, view } = evaluate('<list-item focusable="{ticking}" role="listitem" label="Row">Row</list-item>');
+  assert.equal(view().nodes[0].focusable, true);
+  model.ticking = false;
+  assert.equal(view().nodes[0].focusable, false);
+  assert.throws(() => compileView('<list-item focusable="{count}">Row</list-item>', contract), /boolean/);
 });

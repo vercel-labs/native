@@ -4,7 +4,7 @@
 // checker adds the subset rules on the typed AST; the emitter re-derives every
 // rule during emission and turns any gap into a loud internal error.
 
-import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, type ExportListBinding } from "./typed_ast.ts";
+import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, sdkBytesModulePath, type ExportListBinding } from "./typed_ast.ts";
 import path from "node:path";
 import { makeDiagnostic, type SubsetDiagnostic, type RuleId } from "./diagnostics.ts";
 import type { TypeTable } from "./types.ts";
@@ -627,7 +627,7 @@ export class SubsetChecker {
       if (!ts.isStringLiteral(spec)) continue;
       if (stmt.importClause?.isTypeOnly) continue;
       const bindings = stmt.importClause?.namedBindings;
-      if (spec.text !== "@native-sdk/core") {
+      if (spec.text !== "@native-sdk/core" && spec.text !== "@native-sdk/core/bytes") {
         // NS1039 (half 1): `import * as ns` over an in-graph module is the
         // supported dot-syntax alias; record the local name for the
         // bare-value check in walk().
@@ -822,7 +822,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "themePack" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`themePack` is not a single-Model-parameter helper with an explicit return type.",
@@ -860,7 +860,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "themeState" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`themeState` is not a single-Model-parameter helper with an explicit return type.",
@@ -898,7 +898,7 @@ export class SubsetChecker {
   private checkTokenOverridesHelper(): void {
     const decl = this.entryExportedFunction("tokenOverrides");
     if (decl === null) return;
-    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "tokenOverrides" && candidate.decl === decl);
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "tokenOverrides" && candidate.decl === decl && decl.parameters.length === 1);
     const returns = decl.type ? this.table.resolveTypeNode(decl.type) : undefined;
     // The canonical declaration is complete: importing it gives every
     // consumer one optional field for every register member, even when an
@@ -982,7 +982,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "statusItem" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`statusItem` is not a single-Model-parameter helper with an explicit return type.",
@@ -1390,7 +1390,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "statusItems" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`statusItems` must be a single-Model-parameter helper with an explicit return type.",
@@ -1528,7 +1528,7 @@ export class SubsetChecker {
   private checkWebPanesHelper(): void {
     const decl = this.entryExportedFunction("webPanes");
     if (decl === null) return;
-    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "webPanes" && candidate.decl === decl);
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "webPanes" && candidate.decl === decl && decl.parameters.length === 1);
     const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
     const descriptor = returns?.k === "slice" && returns.elem.k === "struct" ? this.table.structs.get(returns.elem.name) : undefined;
     const fields = descriptor?.fields ?? [];
@@ -1569,7 +1569,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "windows" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`windows` must be a single-Model-parameter helper with an explicit `readonly WindowDescriptor[]` return type.",
@@ -2559,7 +2559,9 @@ export class SubsetChecker {
     if (!ts.isIdentifier(expr)) return null;
     const decl = this.tast.declarationOf(expr);
     if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return null;
-    if (path.resolve(decl.getSourceFile().fileName) !== path.resolve(this.sdkCorePath)) return null;
+    const source = path.resolve(decl.getSourceFile().fileName);
+    if (source !== path.resolve(this.sdkCorePath) &&
+        !(source === path.resolve(sdkBytesModulePath) && ["asciiBytes", "utf8Bytes"].includes(decl.name.text))) return null;
     return decl.name.text;
   }
 

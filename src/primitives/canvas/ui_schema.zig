@@ -365,6 +365,8 @@ pub const elements = [_]ElementInfo{
     // Standalone exclusive-choice trigger. Its item collection is ordinary
     // markup structure around these text-bearing leaves.
     .{ .code = 71, .name = "segmented-control", .widget_kind = "segmented_control", .takes_text = true, .icon_attr = true, .a11y_name = .control },
+    .{ .code = 72, .name = "virtual-window", .rule_hook = "virtual-window" },
+    .{ .code = 73, .name = "virtual-list", .rule_hook = "virtual-list" },
 };
 
 // ------------------------------------------------------------- attributes
@@ -605,6 +607,7 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 102, .name = "source-height", .class = .number, .group = .element },
     // A command name is data, retained with the widget until activation.
     .{ .code = 103, .name = "command", .class = .text, .group = .option, .field = "command" },
+    .{ .code = 104, .name = "focusable", .class = .flag, .group = .option },
 };
 
 // ----------------------------------------------------------------- events

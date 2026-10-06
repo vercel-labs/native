@@ -74,6 +74,7 @@ function resolveSpecifiers(text, rel) {
     return spelled.startsWith(".") ? spelled : `./${spelled}`;
   };
   return text
+    .replaceAll('"@native-sdk/core/bytes"', `"${toSdk("bytes.ts")}"`)
     .replaceAll('"@native-sdk/core/text"', `"${toSdk("text.ts")}"`)
     .replaceAll('"@native-sdk/core/theme"', `"${toSdk("theme.ts")}"`)
     .replaceAll('"@native-sdk/core/events"', `"${toSdk("events.ts")}"`)
@@ -136,7 +137,7 @@ for (const rel of authorFiles) {
 
 // Transform 5: the staged SDK library modules spell their exported
 // records as object-literal aliases (value storage).
-for (const sdkFile of ["text.ts", "events.ts", "theme.ts"]) {
+for (const sdkFile of ["bytes.ts", "text.ts", "events.ts", "theme.ts"]) {
   const staged = fs
     .readFileSync(path.join(args.sdk, sdkFile), "utf8")
     .replace(/^export interface ([A-Za-z0-9_]+) \{/gm, "export type $1 = {");
@@ -195,6 +196,10 @@ if (args["view-markup"]) {
   profile.exports.push({ export: "native_window_policy", symbol: `${profile.abi.prefix}native_window_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_theme_policy", symbol: `${profile.abi.prefix}native_theme_policy`, params: ["bytes"], returns: "bytes" });
   profile.exports.push({ export: "native_status_policy", symbol: `${profile.abi.prefix}native_status_policy`, params: ["bytes"], returns: "bytes" });
+  if (view.includes("export function native_virtual_requests(")) {
+    profile.exports.push({ export: "native_virtual_requests", symbol: `${profile.abi.prefix}native_virtual_requests`, params: ["bytes", "bytes"], returns: "bytes" });
+    profile.exports.push({ export: "native_virtual_view", symbol: `${profile.abi.prefix}native_virtual_view`, params: ["bytes", "bytes", "bytes"], returns: "bytes" });
+  }
   fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
 }
 if (args["services-client"]) {

@@ -23,6 +23,10 @@
       "types": "./sdk/core.ts",
       "default": "./sdk/core.ts"
     },
+    "./bytes": {
+      "types": "./sdk/bytes.ts",
+      "default": "./sdk/bytes.ts"
+    },
     "./text": {
       "types": "./sdk/text.ts",
       "default": "./sdk/text.ts"

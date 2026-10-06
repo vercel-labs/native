@@ -74,6 +74,7 @@ const Record = struct {
     columns: usize = 0,
     virtualized: bool = false,
     virtualItemExtent: f32 = 0,
+    virtualWindow: ?usize = null,
     gap: f32 = 0,
     padding: ?f32 = null,
     grow: f32 = 0,
@@ -130,6 +131,8 @@ const Record = struct {
     hold: ?[]const u8 = null,
     hoverEnter: ?[]const u8 = null,
     hoverLeave: ?[]const u8 = null,
+    reachEnd: ?[]const u8 = null,
+    reachStart: ?[]const u8 = null,
     toggle: ?[]const u8 = null,
     change: ?[]const u8 = null,
     drag: ?[]const u8 = null,
@@ -153,9 +156,61 @@ const ContextMenuRecord = struct {
 };
 const Tree = struct { format: u32, nodes: []const Record };
 
+const VirtualRequest = struct {
+    id: []const u8,
+    itemCount: usize,
+    itemExtent: f32,
+    gap: f32,
+    overscan: usize,
+    viewportFallback: f32,
+    indexBase: u64,
+    trailing: bool,
+    estimateHelper: i64,
+};
+const VirtualRequests = struct { format: u32, requests: []const VirtualRequest };
+const ResolvedVirtual = struct { options: Ui.VirtualListOptions, range: sdk.canvas.VirtualListRange };
+
+fn virtualView(ui: *Ui, label: []const u8, video: []const u8) !Ui.Node {
+    const bytes = core.nativeVirtualRequests(label, video, ui.arena);
+    const requests = try std.json.parseFromSliceLeaky(VirtualRequests, ui.arena, bytes, .{ .allocate = .alloc_always });
+    if (requests.format != 1 or requests.requests.len > sdk.canvas.max_virtual_windows) return error.InvalidView;
+    const resolved = try ui.arena.alloc(ResolvedVirtual, requests.requests.len);
+    const context = try ui.arena.alloc(u8, 8 + resolved.len * 96);
+    std.mem.writeInt(u32, context[0..4], 1, .little);
+    std.mem.writeInt(u32, context[4..8], @intCast(resolved.len), .little);
+    for (requests.requests, resolved, 0..) |request, *target, index| {
+        if (request.id.len == 0 or request.id.len > 256 or request.itemCount > 9007199254740991 or request.overscan > 9007199254740991 or request.indexBase > 9007199254740991 - request.itemCount) return error.InvalidView;
+        for (requests.requests[0..index]) |prior| if (std.mem.eql(u8, prior.id, request.id)) return error.InvalidView;
+        for ([_]f32{ request.itemExtent, request.gap, request.viewportFallback }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+        if (request.estimateHelper < -1 or request.estimateHelper > std.math.maxInt(u32)) return error.InvalidView;
+        if (request.estimateHelper == -1 and request.itemExtent == 0) return error.InvalidView;
+        target.options = .{
+            .id = request.id,
+            .item_count = request.itemCount,
+            .item_extent = request.itemExtent,
+            .gap = request.gap,
+            .overscan = request.overscan,
+            .viewport_fallback = request.viewportFallback,
+            .index_base = request.indexBase,
+            .anchor = if (request.trailing) .trailing else .leading,
+            .extent_estimate = if (request.estimateHelper >= 0) core.Model.virtualExtentEstimate else null,
+            .extent_context = if (request.estimateHelper >= 0) @ptrFromInt(@as(usize, @intCast(request.estimateHelper)) + 1) else null,
+        };
+        target.range = ui.virtualWindow(target.options);
+        const at = 8 + index * 96;
+        inline for (@typeInfo(sdk.canvas.VirtualListRange).@"struct".fields, 0..) |field, offset| {
+            const value = @field(target.range, field.name);
+            const number: f64 = if (@typeInfo(field.type) == .int) @floatFromInt(value) else value;
+            std.mem.writeInt(u64, context[at + offset * 8 ..][0..8], @bitCast(number), .little);
+        }
+    }
+    return decodeVirtual(ui, core.nativeVirtualView(label, context, video, ui.arena), resolved);
+}
+
 pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
     _ = model;
     var context: [20]u8 = undefined;
+    if (comptime @hasDecl(core, "nativeVirtualRequests")) return virtualView(ui, "", videoContext(ui, &context)) catch @panic("invalid compiled virtual view data");
     const bytes = if (comptime @hasDecl(core, "nativeMediaView")) core.nativeMediaView(videoContext(ui, &context), ui.arena) else core.nativeView(ui.arena);
     return decode(ui, bytes) catch @panic("invalid compiled TypeScript view data");
 }
@@ -163,6 +218,7 @@ pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
 pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node {
     _ = model;
     var context: [20]u8 = undefined;
+    if (comptime @hasDecl(core, "nativeVirtualRequests")) return virtualView(ui, label, videoContext(ui, &context)) catch @panic("invalid compiled virtual window view data");
     const bytes = if (comptime @hasDecl(core, "nativeMediaWindowView")) core.nativeMediaWindowView(label, videoContext(ui, &context), ui.arena) else core.nativeWindowView(label, ui.arena);
     return decode(ui, bytes) catch @panic("invalid compiled TypeScript window view data");
 }
@@ -178,6 +234,10 @@ fn videoContext(ui: *Ui, buffer: *[20]u8) []const u8 {
 }
 
 fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
+    return decodeVirtual(ui, bytes, &.{});
+}
+
+fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) !Ui.Node {
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -185,10 +245,16 @@ fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
     };
     if (tree.format != 2 or tree.nodes.len == 0 or tree.nodes.len > 1024) return error.InvalidView;
     if (tree.nodes[0].end != tree.nodes.len) return error.InvalidView;
-    return node(ui, tree.nodes, 0, tree.nodes.len, 0);
+    var seen: [sdk.canvas.max_virtual_windows]bool = @splat(false);
+    for (tree.nodes) |record| if (record.virtualWindow) |window| {
+        if (window >= virtuals.len or seen[window]) return error.InvalidView;
+        seen[window] = true;
+    };
+    for (seen[0..virtuals.len]) |present| if (!present) return error.InvalidView;
+    return node(ui, tree.nodes, 0, tree.nodes.len, 0, virtuals);
 }
 
-fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize) !Ui.Node {
+fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual) !Ui.Node {
     if (depth > 64) return error.ViewTooDeep;
     var value = records[index];
     value.text = byteText(value.textBytes, value.text);
@@ -207,6 +273,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if ((value.columns != 0 or value.virtualized or value.virtualItemExtent != 0) and value.kind != .grid) return error.InvalidView;
     if (value.columns > 9007199254740991) return error.InvalidView;
     if (!std.math.isFinite(value.value)) return error.InvalidView;
+    if (value.virtualWindow) |window| if (value.kind != .scroll or window >= virtuals.len) return error.InvalidView;
+    if ((value.reachEnd != null or value.reachStart != null) and value.kind != .scroll) return error.InvalidView;
     if ((value.valueX != null or value.axis != null or value.overscroll != null) and value.kind != .scroll) return error.InvalidView;
     if (value.valueX) |offset| if (!std.math.isFinite(offset)) return error.InvalidView;
     if (value.key != null and value.keyInt != null or value.globalKey != null and value.globalKeyInt != null) return error.InvalidView;
@@ -266,7 +334,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     var children: std.ArrayList(Ui.Node) = .empty;
     var child_index = index + 1;
     while (child_index < value.end) {
-        try children.append(ui.arena, try node(ui, records, child_index, value.end, depth + 1));
+        try children.append(ui.arena, try node(ui, records, child_index, value.end, depth + 1, virtuals));
         child_index = records[child_index].end;
     }
     if (value.kind == .split and children.items.len != 2) return error.InvalidView;
@@ -340,6 +408,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .on_hold = if (value.hold) |bytes| try event(ui, bytes) else null,
         .on_hover_enter = if (value.hoverEnter) |bytes| try event(ui, bytes) else null,
         .on_hover_leave = if (value.hoverLeave) |bytes| try event(ui, bytes) else null,
+        .on_reach_end = if (value.reachEnd) |bytes| try event(ui, bytes) else null,
+        .on_reach_start = if (value.reachStart) |bytes| try event(ui, bytes) else null,
         .on_change = if (value.change) |bytes| try event(ui, bytes) else null,
         .on_toggle = if (value.toggle) |bytes| try event(ui, bytes) else null,
         .on_drag = if (value.drag) |bytes| try dragEvent(ui, bytes) else null,
@@ -354,6 +424,25 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .anchor_offset = value.anchorOffset,
         .tooltip_delay = value.tooltipDelay orelse -1,
     }, children.items);
+    if (value.kind == .avatar) result.widget.image_fit = .cover;
+    if (value.virtualWindow) |window| {
+        const resolved = virtuals[window];
+        if (children.items.len != resolved.range.itemCount()) return error.InvalidView;
+        for (children.items) |child| if (child.key == null and child.global_key == null) return error.InvalidView;
+        var options = resolved.options;
+        options.width = value.width;
+        options.height = value.height;
+        options.min_width = value.minWidth;
+        options.grow = value.grow;
+        options.padding = value.padding orelse 0;
+        options.style_tokens = result.style_tokens;
+        options.semantics = result.widget.semantics;
+        options.overscroll = value.overscroll orelse .default;
+        options.on_scroll = result.on_scroll;
+        options.on_reach_end = result.on_reach_end;
+        options.on_reach_start = result.on_reach_start;
+        result = ui.virtualList(options, resolved.range, .{children.items});
+    }
     if (value.videoSrc) |src| {
         if (src.len > 0) ui.video_declaration = .{ .src = src, .controls = value.videoControls, .autoplay = value.videoAutoplay, .loop = value.videoLoop, .muted = value.videoMuted };
     }

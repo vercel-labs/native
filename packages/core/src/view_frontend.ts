@@ -12,7 +12,7 @@ export interface ViewContract {
   msg: { name?: string; arms: Arm[] };
 }
 interface Element { name: string; attrs: Map<string, string>; children: Element[]; content: (Element | { text: string; at: number; end: number })[]; text: string; at: number; end: number; file: string }
-interface Expr { code: string; type: Ref }
+interface Expr { code: string; type: Ref; virtualIndex?: string }
 type Scope = ReadonlyMap<string, Expr>;
 interface Slot { children: Element[]; scope: Scope; slot?: Slot }
 export interface ViewSources { entry?: string; sources?: ReadonlyMap<string, string> }
@@ -20,9 +20,7 @@ export interface ViewSources { entry?: string; sources?: ReadonlyMap<string, str
 export interface WindowViewSource extends ViewSources { label: string; source: string }
 
 export function compileView(source: string, contract: ViewContract, options: ViewSources = {}): string {
-  return viewPrelude + compileViewFunction(source, contract, options, "nscvMainView", false) +
-    "export function native_view(): Uint8Array { return nscvMainView(nscvEmptyVideo()); }\n" +
-    "export function native_media_view(request: Uint8Array): Uint8Array { return nscvMainView(nscvVideoState(request)); }\n";
+  return compileViewBundle(source, contract, options, []);
 }
 
 /** One shared prelude, primary view, and a closed label-addressed window set.
@@ -30,8 +28,9 @@ export function compileView(source: string, contract: ViewContract, options: Vie
  */
 export function compileViewBundle(source: string, contract: ViewContract, options: ViewSources,
   windows: readonly WindowViewSource[]): string {
-  let generated = compileView(source, contract, options);
-  if (windows.length === 0) return generated;
+  let generated = viewPrelude + compileViewFunction(source, contract, options, "nscvMainView", false) +
+    "export function native_view(): Uint8Array { return nscvMainView(nscvEmptyVideo()); }\n" +
+    "export function native_media_view(request: Uint8Array): Uint8Array { return nscvMainView(nscvVideoState(request)); }\n";
   const labels = new Set<string>();
   const branches: string[] = [];
   for (const [index, window] of windows.entries()) {
@@ -43,10 +42,17 @@ export function compileViewBundle(source: string, contract: ViewContract, option
     generated += compileViewFunction(window.source, contract, window, `nscvWindow${index}`, false);
     branches.push(`if (nscvWindowLabel(label, ${JSON.stringify(window.label)})) return nscvWindow${index}(nscvVideo);`);
   }
-  return generated + `function nscvWindowLabel(label: Uint8Array, expected: string): boolean { const bytes = new TextEncoder().encode(expected); if (label.length !== bytes.length) return false; for (let i = 0; i < bytes.length; i++) if (label[i] !== bytes[i]) return false; return true; }\n` +
+  const virtual = [source, ...options.sources?.values() ?? [], ...windows.flatMap(window => [window.source, ...window.sources?.values() ?? []])].some(value => /<virtual-window\b/.test(value));
+  if (windows.length === 0 && !virtual) return generated;
+  generated += `function nscvWindowLabel(label: Uint8Array, expected: string): boolean { const bytes = new TextEncoder().encode(expected); if (label.length !== bytes.length) return false; for (let i = 0; i < bytes.length; i++) if (label[i] !== bytes[i]) return false; return true; }\n`;
+  if (windows.length) generated +=
     `function nscvWindowView(label: Uint8Array, nscvVideo: NscVideoPlaybackState): Uint8Array {\n${branches.join("\n")}\nthrow new Error("unknown compiled window view label");\n}\n` +
     `export function native_window_view(label: Uint8Array): Uint8Array { return nscvWindowView(label, nscvEmptyVideo()); }\n` +
     `export function native_media_window_view(label: Uint8Array, request: Uint8Array): Uint8Array { return nscvWindowView(label, nscvVideoState(request)); }\n`;
+  if (virtual) generated += `function nscvVirtualView(label: Uint8Array, nscvVideo: NscVideoPlaybackState, nscvVirtual: NscVirtualBuild): Uint8Array {\nif (label.length === 0) return nscvMainView(nscvVideo, nscvVirtual);\n${windows.map((window, index) => `if (nscvWindowLabel(label, ${JSON.stringify(window.label)})) return nscvWindow${index}(nscvVideo, nscvVirtual);`).join("\n")}\nthrow new Error("unknown compiled virtual window label");\n}\n` +
+    `export function native_virtual_requests(label: Uint8Array, video: Uint8Array): Uint8Array { return nscvVirtualView(label, nscvVideoState(video), { requestsOnly: true, requests: [], ranges: [], consumed: [] }); }\n` +
+    `export function native_virtual_view(label: Uint8Array, context: Uint8Array, video: Uint8Array): Uint8Array { return nscvVirtualView(label, nscvVideoState(video), nscvVirtualContext(context)); }\n`;
+  return generated;
 }
 
 function compileViewFunction(source: string, contract: ViewContract, options: ViewSources, functionName: string, exported: boolean): string {
@@ -57,7 +63,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -155,6 +161,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
   if (roots.length !== 1) fail(origin, "expected exactly one root element");
   const fields = contract.types.structs.find(item => item.name === contract.model)?.fields;
   if (!fields) fail(origin, "contract has no model fields");
+  const rangeFields = ["start_index", "end_index", "first_visible_index", "last_visible_index", "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent"];
+  const rangeType = (ref: Ref): boolean => {
+    const record = ["node", "value"].includes(ref.kind) ? contract.types.structs.find(item => item.name === ref.name) : undefined;
+    return !!record && record.fields.length === 12 && record.fields.every((field, i) => field.name === rangeFields[i] && (i < 4 ? ["i64", "f64"].includes(field.type.kind) : field.type.kind === "f64"));
+  };
   const category = (ref: Ref): string => ["i64", "f64"].includes(ref.kind) ? "number" : ref.kind === "bool" ? "boolean" : ref.kind;
   const path = (raw: string, node: Element, scope: Scope): Expr => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(raw)) fail(node, `unsupported binding path ${raw}`);
@@ -358,6 +369,53 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
   };
   const emit = (node: Element, scope: Scope, slot: Slot | undefined, stack: string[], depth: number): void => {
     if (depth > 64 || next > 4096) fail(node, "expanded view exceeds 64 levels or 4096 elements");
+    if (node.name === "virtual-window") {
+      if ([...scope.values()].some(value => value.virtualIndex !== undefined)) fail(node, "virtual-window declarations cannot nest");
+      const allowed = ["id", "as", "item-count", "item-extent", "gap", "overscan", "viewport-fallback", "extent-estimate", "index-base", "anchor"];
+      const name = node.attrs.get("as"), identity = node.attrs.get("id");
+      if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || !identity || identity.includes("{") || new TextEncoder().encode(identity).length > 256 || node.children.length !== 1 || node.text.trim()) fail(node, "virtual-window requires a literal id, as and one root child");
+      if ([...node.attrs.keys()].some(attr => !allowed.includes(attr)) || !node.attrs.has("item-count")) fail(node, "unsupported virtual-window attributes");
+      const estimateName = node.attrs.get("extent-estimate");
+      const estimator = contract.model_helpers.find(helper => helper.name === estimateName && helper.params.length === 1 && ["i64", "f64"].includes(helper.params[0]!.kind) && ["i64", "f64"].includes(helper.returns.kind));
+      if (estimateName !== undefined && !estimator) fail(node, "extent-estimate requires a Model-first numeric index helper returning a number");
+      const range = contract.model_helpers.flatMap(helper => helper.params).find(rangeType);
+      if (!range) fail(node, "virtual-window requires a row helper taking the complete VirtualListRange");
+      const numeric = (attr: string, fallback: string, integer = false): string => {
+        const raw = node.attrs.get(attr);
+        if (raw === undefined) return fallback;
+        const value = raw.startsWith("{") ? binding(raw, node, scope) : expression(raw, node, scope);
+        if (!["i64", "f64"].includes(value.type.kind) || integer && value.type.kind !== "i64") fail(node, `${attr} requires ${integer ? "an integer" : "a number"}`);
+        return value.code;
+      };
+      const anchor = node.attrs.get("anchor") ?? "leading";
+      if (anchor !== "leading" && anchor !== "trailing") fail(node, "virtual-window anchor requires leading or trailing");
+      const id = next++, variable = `nscvRange${id}`, index = `nscvWindowIndex${id}`;
+      output.push('if (nscvVirtual === undefined) throw new Error("virtual view requires retained window context");',
+        `const ${index} = nscvVirtualRequest(nscvVirtual.requests, { id: ${JSON.stringify(identity)}, itemCount: ${numeric("item-count", "0", true)}, itemExtent: ${numeric("item-extent", "0")}, gap: ${numeric("gap", "0")}, overscan: ${numeric("overscan", "4", true)}, viewportFallback: ${numeric("viewport-fallback", "0")}, indexBase: ${numeric("index-base", "0", true)}, trailing: ${anchor === "trailing"}, estimateHelper: ${estimator ? contract.model_helpers.indexOf(estimator) : -1} });`,
+        'if (!nscvVirtual.requestsOnly) {', `const ${variable} = nscvVirtual.ranges[${index}];`, `if (${variable} === undefined) throw new Error("missing virtual window range");`);
+      const inner = new Map(scope); inner.set(name, { code: variable, type: range, virtualIndex: index });
+      emitChildren(node.children, inner, slot, stack, depth + 1);
+      output.push("}"); return;
+    }
+    if (node.name === "virtual-list") {
+      const windowName = node.attrs.get("window"), window = windowName ? scope.get(windowName) : undefined;
+      const helper = contract.model_helpers.find(helper => helper.name === node.attrs.get("each"));
+      const name = node.attrs.get("as");
+      if (!window?.virtualIndex || !helper || helper.params.length !== 1 || !rangeType(helper.params[0]!) || helper.returns.kind !== "slice" || !helper.returns.elem || !name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || node.children.length !== 1 || node.text.trim()) fail(node, "virtual-list requires an enclosing window, a Model-first range query, as and one keyed root per row");
+      if (!node.children[0]!.attrs.has("key") && !node.children[0]!.attrs.has("global-key")) fail(node, "virtual-list requires one keyed root per row");
+      const allowed = ["window", "each", "as", "grow", "width", "height", "min-width", "padding", "label", "background", "foreground", "border-color", "focus-ring", "radius", "overscroll", "on-scroll", "on-reach-end", "on-reach-start"];
+      if ([...node.attrs.keys()].some(attr => !allowed.includes(attr))) fail(node, "unsupported virtual-list attribute");
+      const attrs = new Map(node.attrs); for (const attr of ["window", "each", "as", "on-reach-end", "on-reach-start"]) attrs.delete(attr);
+      const id = next++, start = `nscvListStart${id}`, item = `nscvVirtualItem${id}`;
+      output.push(`nscvVirtualConsume(nscvVirtual!, ${window.virtualIndex});`, `const ${start} = nscvNodes.length;`);
+      emit({ ...node, name: "scroll", attrs, children: [], content: [] }, scope, slot, stack, depth + 1);
+      for (const [attr, property] of [["on-reach-end", "reachEnd"], ["on-reach-start", "reachStart"]]) if (node.attrs.has(attr!)) output.push(`nscvNodes[${start}]!.${property} = ${event(node.attrs.get(attr!)!, attr!.slice(3), node, scope)};`);
+      output.push(`nscvNodes[${start}]!.virtualWindow = ${window.virtualIndex};`, `for (const ${item} of ${helper.name}(nscfCommitted, ${window.code})) {`, `const nscvRowStart${id} = nscvNodes.length;`);
+      const inner = new Map(scope); inner.set(name, { code: item, type: helper.returns.elem });
+      emitChildren(node.children, inner, slot, stack, depth + 1);
+      output.push(`nscvVirtualRow(nscvNodes, nscvRowStart${id});`, "}", `nscvNodes[${start}]!.end = nscvNodes.length;`, `nscvVirtualList(nscvNodes, ${start}, ${window.code});`);
+      return;
+    }
     if (node.name === "use") {
       const name = node.attrs.get("template"), template = name ? templates.get(name) : null;
       if (!template) fail(node, `unknown template ${name}`);
@@ -470,8 +528,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
     const paragraph = node.name === "text" && contentChildren.length > 0;
     if (!paragraph && (["list-item", "card", "alert"].includes(node.name) ? node.text.trim() !== "" && contentChildren.length !== 0 : container ? node.text.trim() !== "" : contentChildren.length !== 0)) fail(node, "mixed content is unsupported");
-    const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${node.name === "icon" ? JSON.stringify(node.attrs.get("name")) : text(node.text.trim(), node, scope)}`];
     const rawText = byteText(node.text.trim(), node, scope);
+    const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${node.name === "icon" ? JSON.stringify(node.attrs.get("name")) : rawText === null ? text(node.text.trim(), node, scope) : '""'}`];
     if (rawText !== null) props.push(`textBytes: ${rawText}`);
     if (menus.length) {
       const menu = menus[0]!;
@@ -509,7 +567,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
             const press = item.attrs.get("on-press"), disabled = item.attrs.get("disabled");
             if (press === undefined) fail(item, "context-menu menu-item requires on-press");
             const rawLabel = byteText(item.text.trim(), item, menuScope);
-            value = `{ label: ${text(item.text.trim(), item, menuScope)}, ${rawLabel === null ? "" : `labelBytes: ${rawLabel}, `}enabled: ${disabled === undefined ? "true" : `!(${bound(disabled, "boolean", item, menuScope)})`}, separator: false, press: ${event(press, "press", item, menuScope)} }`;
+            value = `{ label: ${rawLabel === null ? text(item.text.trim(), item, menuScope) : '""'}, ${rawLabel === null ? "" : `labelBytes: ${rawLabel}, `}enabled: ${disabled === undefined ? "true" : `!(${bound(disabled, "boolean", item, menuScope)})`}, separator: false, press: ${event(press, "press", item, menuScope)} }`;
             items++;
           }
           output.push(`${menuName}.push(${value});`);
@@ -532,8 +590,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!isSpan && /^[ \t\r\n]/.test(raw)) separator = true;
         if (!visible) { if (/[ \t\r\n]/.test(raw)) separator = true; continue; }
         if (runs.length && separator) runs.push('{ text: " " }');
-        const fields = [`text: ${text(visible, node, scope)}`];
         const rawSpan = byteText(visible, node, scope);
+        const fields = [`text: ${rawSpan === null ? text(visible, node, scope) : '""'}`];
         if (rawSpan !== null) fields.push(`textBytes: ${rawSpan}`);
         if (isSpan) for (const [name, value] of part.attrs) {
           if (["mono", "italic", "underline"].includes(name)) fields.push(`${name === "mono" ? "monospace" : name}: ${bound(value, "boolean", part, scope)}`);
@@ -567,7 +625,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       if (!node.attrs.has("source") || node.text.trim()) fail(node, "code requires a source binding and no element text");
       const expr = binding(node.attrs.get("source")!, node, scope);
       if (expr.type.kind !== "bytes") fail(node, "code source requires UTF-8 bytes");
-      props[1] = `text: ${textValue(expr, node)}`;
+      props[1] = 'text: ""';
+      props.push(`textBytes: nscvTextBytes([${expr.code}])`);
       const language = (node.attrs.get("language") ?? "plain").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").toLowerCase();
       const aliases: Record<string, string> = { text: "plain", js: "javascript", mjs: "javascript", ts: "typescript", jsonc: "json", yml: "yaml", sh: "shell", bash: "shell", zsh: "shell", py: "python", rs: "rust", c: "c_like", h: "c_like", cc: "c_like", cpp: "c_like", "c++": "c_like", cs: "c_like", csharp: "c_like", java: "c_like", kotlin: "c_like", swift: "c_like", golang: "go", xml: "html", svg: "html", scss: "css", less: "css", md: "markdown" };
       const canonical = aliases[language] ?? language;
@@ -637,7 +696,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (node.name !== "terminal") fail(node, "scrollback requires terminal");
         props.push(`scrollback: nscvScrollback(${bound(value, "number", node, scope)})`);
       }
-      else if (["checked", "disabled", "selected", "window-drag", "wrap", "expanded", "submit-on-enter", "autofocus"].includes(name)) {
+      else if (["checked", "disabled", "selected", "window-drag", "wrap", "expanded", "submit-on-enter", "autofocus", "focusable"].includes(name)) {
         if (name === "autofocus" && !["input", "text-field", "search-field", "textarea", "terminal"].includes(node.name)) fail(node, "autofocus requires a text-entry widget");
         if (name === "checked" && !["checkbox", "switch", "toggle", "radio"].includes(node.name)) fail(node, "checked requires checkbox, switch, toggle or radio");
         if (name === "submit-on-enter" && node.name !== "textarea") fail(node, "submit-on-enter requires textarea");
@@ -656,9 +715,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (name === "text" && node.text.trim()) fail(node, "text attribute cannot be combined with element text");
         const expr = value.startsWith("{") ? binding(value, node, scope) : { code: JSON.stringify(value), type: { kind: "string" } };
         if (!["bytes", "string", "enum"].includes(expr.type.kind)) fail(node, `${name} requires text`);
-        if (name === "text") props[1] = `text: ${textValue(expr, node)}`;
-        else props.push(`${name}: ${textValue(expr, node)}`);
-        const rawBytes = byteText(value, node, scope);
+        const rawBytes = name === "command" ? null : byteText(value, node, scope);
+        const display = rawBytes === null ? textValue(expr, node) : '""';
+        if (name === "text") props[1] = `text: ${display}`;
+        else props.push(`${name}: ${display}`);
         if (rawBytes !== null) props.push(`${name}Bytes: ${rawBytes}`);
       }
       else if (name === "name" && node.name === "icon") {
@@ -736,7 +796,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (node.name === "split") output.push(`nscvSplit(nscvNodes, nscvStart${id});`);
   };
   emit(roots[0]!, new Map(), undefined, [], 0);
-  return `${exported ? "export " : ""}function ${functionName}(nscvVideo: NscVideoPlaybackState): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;
+  return `${exported ? "export " : ""}function ${functionName}(nscvVideo: NscVideoPlaybackState, nscvVirtual?: NscVirtualBuild): Uint8Array {\nconst nscvNodes: NscViewNode[] = [];\n${output.join("\n")}\nif (nscvVirtual?.requestsOnly) return new TextEncoder().encode(JSON.stringify({ format: 1, requests: nscvVirtual.requests }));\nif (nscvVirtual !== undefined && (nscvVirtual.requests.length !== nscvVirtual.ranges.length || nscvVirtual.consumed.length !== nscvVirtual.requests.length)) throw new Error("virtual window context count mismatch");\nif (nscvNodes.length === 0 || nscvNodes[0]!.end !== nscvNodes.length) throw new Error("compiled view requires one rendered root");\nreturn new TextEncoder().encode(JSON.stringify({ format: 2, nodes: nscvNodes }));\n}\n`;
 }
 
 const viewPrelude = "\n// Portable Native components compiled beside the committed model.\n" +

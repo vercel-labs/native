@@ -529,7 +529,9 @@ class ContractEmitter {
     const helperReturns = helperDecls.map((h) => {
       const ret = this.table.resolveTypeNode(h.decl.type!);
       this.collect(ret, h.decl, "helpers", h.name);
-      return { name: h.name, decl: h.decl, ret };
+      const params = h.decl.parameters.slice(1).map(p => ({ decl: p, type: this.table.resolveTypeNode(p.type!) }));
+      for (const p of params) this.collect(p.type, p.decl, "helpers", h.name);
+      return { name: h.name, decl: h.decl, ret, params };
     });
 
     // Phase 2: sections.
@@ -589,7 +591,12 @@ class ContractEmitter {
       if (helperCount > 0) helpers += ",\n    ";
       const reflected = this.reflect(h.ret, h.decl, true);
       if (this.spellsI64(reflected)) this.appendSlot(`helpers.${h.name}.return`);
-      helpers += `{"name": ${js(h.name)}, "params": [], "returns": ${this.typeRefJson(reflected)}, "arena": false}`;
+      const params = h.params.map((p, index) => {
+        const ref = this.reflect(p.type, p.decl, true);
+        if (this.spellsI64(ref)) this.appendSlot(`helpers.${h.name}.params[${index}]`);
+        return this.typeRefJson(ref);
+      });
+      helpers += `{"name": ${js(h.name)}, "params": [${params.join(", ")}], "returns": ${this.typeRefJson(reflected)}, "arena": false}`;
       helperCount += 1;
     }
 

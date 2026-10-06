@@ -1334,6 +1334,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-workbench-e2e", "Compare compiled Workbench with complete native behavior").dependOn(&workbench_run.step);
         ts_core_e2e_step.dependOn(&workbench_run.step);
         test_step.dependOn(&workbench_run.step);
+        const feed_run = b.addRunArtifact(ts_core_artifacts.feed);
+        b.step("test-ts-feed-e2e", "Compare compiled Feed with complete native model, viewport, and replay behavior").dependOn(&feed_run.step);
+        ts_core_e2e_step.dependOn(&feed_run.step);
+        test_step.dependOn(&feed_run.step);
         const notes_run = b.addRunArtifact(ts_core_artifacts.notes);
         b.step("test-ts-notes-e2e", "Compare compiled Notes with the complete native reference").dependOn(&notes_run.step);
         ts_core_e2e_step.dependOn(&notes_run.step);
@@ -4080,6 +4084,7 @@ const TsCoreE2eArtifacts = struct {
     inbox: *std.Build.Step.Compile,
     effects_probe: *std.Build.Step.Compile,
     notes: *std.Build.Step.Compile,
+    feed: *std.Build.Step.Compile,
     workbench: *std.Build.Step.Compile,
     video_player: *std.Build.Step.Compile,
     canvas_preview: *std.Build.Step.Compile,
@@ -4293,6 +4298,25 @@ fn tsCoreE2eArtifact(
     workbench_decoder.addImport("native_sdk", desktop_mod);
     workbench_decoder.addImport("core.zig", workbench_fixture.module);
     workbench_mod.addImport("workbench_decoder", workbench_decoder);
+
+    const feed_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/feed/src/core.ts",
+        .src_dir = b.path("examples/feed/src"),
+        .name = "feed_core",
+        .typescript_view = true,
+    });
+    const feed_stage = b.addWriteFiles();
+    const feed_root = feed_stage.addCopyFile(b.path("tests/ts-core/feed_e2e_tests.zig"), "feed_e2e_tests.zig");
+    inline for (.{ "feed_reference.zig", "feed_reference_tests.zig", "effects_media_parity.zig" }) |file|
+        _ = feed_stage.addCopyFile(b.path("tests/ts-core/" ++ file), file);
+    _ = feed_stage.addCopyFile(b.path("examples/feed/src/app.native"), "app.native");
+    const feed_mod = b.createModule(.{ .root_source_file = feed_root, .target = target, .optimize = optimize });
+    feed_mod.addImport("native_sdk", desktop_mod);
+    feed_mod.addImport("feed_core", feed_fixture.module);
+    const feed_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    feed_decoder.addImport("native_sdk", desktop_mod);
+    feed_decoder.addImport("core.zig", feed_fixture.module);
+    feed_mod.addImport("feed_decoder", feed_decoder);
 
     const notes_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/notes/src/core.ts",
@@ -4773,6 +4797,7 @@ fn tsCoreE2eArtifact(
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
+        .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
         .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
         .video_player = filteredTestArtifact(b, video_player_mod, "ts-video-player-e2e-tests", &.{}),

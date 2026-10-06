@@ -2978,7 +2978,47 @@ fn validateVideo(node: MarkupNode) ?MarkupErrorInfo {
 /// The rule hooks the composite registry entries name. A registry entry
 /// whose hook this table does not implement is a compile error (below),
 /// so attachment and implementation can never drift.
-const rule_hook_names = [_][]const u8{ "markdown", "code", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video" };
+pub const virtual_window_attrs = [_][]const u8{ "id", "as", "item-count", "item-extent", "gap", "overscan", "viewport-fallback", "extent-estimate", "index-base", "anchor" };
+pub const virtual_list_attrs = [_][]const u8{ "window", "each", "as", "grow", "width", "height", "min-width", "padding", "label", "background", "foreground", "border-color", "focus-ring", "radius", "overscroll", "on-scroll", "on-reach-end", "on-reach-start" };
+
+fn validateVirtual(document: MarkupDocument, node: MarkupNode, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    const window = std.mem.eql(u8, node.name, "virtual-window");
+    const required: []const []const u8 = if (window) &.{ "id", "as", "item-count" } else &.{ "window", "each", "as" };
+    for (required) |name| if (node.attr(name) == null) return errorAt(node, "virtual markup is missing a required attribute");
+    if (node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) return errorAt(node, "virtual markup requires one root child");
+    if (!window and node.children[0].attr("key") == null and node.children[0].attr("global-key") == null) return errorAt(node.children[0], "virtual-list requires one keyed root per row");
+    const allowed: []const []const u8 = if (window) &virtual_window_attrs else &virtual_list_attrs;
+    for (node.attrs) |attribute| {
+        if (!nameInList(attribute.name, allowed)) return attrError(node, attribute, "unsupported virtual markup attribute");
+        if (nameInList(attribute.name, &.{ "as", "window", "each", "extent-estimate" })) {
+            if ((!isBindingPath(attribute.value) or std.mem.indexOfScalar(u8, attribute.value, '.') != null)) return attrError(node, attribute, "virtual markup requires an identifier");
+        } else if (std.mem.eql(u8, attribute.name, "id")) {
+            if (attribute.value.len == 0 or attribute.value.len > 256 or std.mem.indexOfScalar(u8, attribute.value, '{') != null) return attrError(node, attribute, "virtual-window requires a literal id");
+        } else if (window and std.mem.eql(u8, attribute.name, "anchor")) {
+            if (!nameInList(attribute.value, &.{ "leading", "trailing" })) return attrError(node, attribute, "virtual-window anchor requires leading or trailing");
+        } else if (std.mem.startsWith(u8, attribute.name, "on-")) {
+            if (parseMessageExpression(attribute.value) == null) return attrError(node, attribute, "invalid virtual-list message");
+        } else if (attrExpressionError(attribute.value, invalid_expression_message)) |message| return attrError(node, attribute, message);
+    }
+    if (!window) {
+        // Virtual lists use ordinary scroll styles and enum validation.
+        var proxy = node;
+        proxy.name = "scroll";
+        proxy.children = &.{};
+        var attributes: [virtual_list_attrs.len]MarkupAttr = undefined;
+        var count: usize = 0;
+        for (node.attrs) |attribute| {
+            if (nameInList(attribute.name, &.{ "window", "each", "as" })) continue;
+            attributes[count] = attribute;
+            count += 1;
+        }
+        proxy.attrs = attributes[0..count];
+        if (validateNode(document, proxy, null, template_limit, slot_rule)) |info| return info;
+    }
+    return validateNode(document, node.children[0], node.name, template_limit, slot_rule);
+}
+
+const rule_hook_names = [_][]const u8{ "markdown", "code", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video", "virtual-window", "virtual-list" };
 
 comptime {
     for (schema.elements) |entry| {
@@ -2997,6 +3037,7 @@ comptime {
 /// timeline's parent scoping) into declarative registry data would breed
 /// a worse inner language than plain Zig.
 fn validateRuleHook(hook: []const u8, document: MarkupDocument, node: MarkupNode, parent_element: ?[]const u8, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    if (std.mem.eql(u8, hook, "virtual-window") or std.mem.eql(u8, hook, "virtual-list")) return validateVirtual(document, node, template_limit, slot_rule);
     if (std.mem.eql(u8, hook, "markdown")) return validateMarkdown(node);
     if (std.mem.eql(u8, hook, "code")) return validateCode(node);
     if (std.mem.eql(u8, hook, "stepper")) return validateStepper(node, slot_rule);

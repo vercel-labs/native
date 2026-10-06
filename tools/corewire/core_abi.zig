@@ -114,6 +114,8 @@ pub fn Bindings(comptime prefix: []const u8) type {
         pub const native_view = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_view");
         pub const native_media_view = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_media_view");
         pub const native_media_window_view = Symbol(fn (label: [*]const u8, label_len: usize, request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_media_window_view");
+        pub const native_virtual_requests = Symbol(fn (label: [*]const u8, label_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_requests");
+        pub const native_virtual_view = Symbol(fn (label: [*]const u8, label_len: usize, context: [*]const u8, context_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_view");
         pub const native_window_view = Symbol(fn (label: [*]const u8, label_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_view");
 
         /// Pure retained radio policy over native tree/eligibility bytes.
