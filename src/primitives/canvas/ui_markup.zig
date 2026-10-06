@@ -2981,15 +2981,27 @@ fn validateVideo(node: MarkupNode) ?MarkupErrorInfo {
 pub const virtual_window_attrs = [_][]const u8{ "id", "as", "item-count", "item-extent", "gap", "overscan", "viewport-fallback", "extent-estimate", "index-base", "anchor" };
 pub const virtual_list_attrs = [_][]const u8{ "window", "each", "as", "grow", "width", "height", "min-width", "padding", "label", "background", "foreground", "border-color", "focus-ring", "radius", "overscroll", "on-scroll", "on-reach-end", "on-reach-start" };
 
+/// Validate the closed virtual attribute vocabulary before projecting it
+/// into a fixed-capacity scroll proxy. Also used by direct contract checks.
+pub fn virtualAttributeError(node: MarkupNode) ?MarkupErrorInfo {
+    const allowed: []const []const u8 = if (std.mem.eql(u8, node.name, "virtual-window")) &virtual_window_attrs else &virtual_list_attrs;
+    for (node.attrs, 0..) |attribute, index| {
+        if (!nameInList(attribute.name, allowed)) return attrError(node, attribute, "unsupported virtual markup attribute");
+        for (node.attrs[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.name, attribute.name)) return attrError(node, attribute, "duplicate virtual markup attribute");
+        }
+    }
+    return null;
+}
+
 fn validateVirtual(document: MarkupDocument, node: MarkupNode, template_limit: usize, slot_rule: SlotRule) ?MarkupErrorInfo {
+    if (virtualAttributeError(node)) |info| return info;
     const window = std.mem.eql(u8, node.name, "virtual-window");
     const required: []const []const u8 = if (window) &.{ "id", "as", "item-count" } else &.{ "window", "each", "as" };
     for (required) |name| if (node.attr(name) == null) return errorAt(node, "virtual markup is missing a required attribute");
     if (node.children.len != 1 or (node.children[0].kind != .element and node.children[0].kind != .use_block)) return errorAt(node, "virtual markup requires one root child");
     if (!window and node.children[0].attr("key") == null and node.children[0].attr("global-key") == null) return errorAt(node.children[0], "virtual-list requires one keyed root per row");
-    const allowed: []const []const u8 = if (window) &virtual_window_attrs else &virtual_list_attrs;
     for (node.attrs) |attribute| {
-        if (!nameInList(attribute.name, allowed)) return attrError(node, attribute, "unsupported virtual markup attribute");
         if (nameInList(attribute.name, &.{ "as", "window", "each", "extent-estimate" })) {
             if ((!isBindingPath(attribute.value) or std.mem.indexOfScalar(u8, attribute.value, '.') != null)) return attrError(node, attribute, "virtual markup requires an identifier");
         } else if (std.mem.eql(u8, attribute.name, "id")) {
@@ -3009,6 +3021,7 @@ fn validateVirtual(document: MarkupDocument, node: MarkupNode, template_limit: u
         var count: usize = 0;
         for (node.attrs) |attribute| {
             if (nameInList(attribute.name, &.{ "window", "each", "as" })) continue;
+            if (count >= attributes.len) return attrError(node, attribute, "too many virtual-list attributes");
             attributes[count] = attribute;
             count += 1;
         }

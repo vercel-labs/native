@@ -1248,6 +1248,10 @@ const Checker = struct {
     }
 
     fn checkVirtualWindow(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (markup.virtualAttributeError(node)) |info| {
+            self.failure = info;
+            return error.ContractCheck;
+        }
         for (self.entries[self.floor..self.len]) |entry| if (entry.binder == .virtual) return self.fail(node, "virtual-window declarations cannot nest");
         for (node.attrs) |attribute| {
             if (nameListed(&.{ "item-count", "index-base", "overscan" }, attribute.name)) {
@@ -1268,6 +1272,10 @@ const Checker = struct {
     }
 
     fn checkVirtualList(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (markup.virtualAttributeError(node)) |info| {
+            self.failure = info;
+            return error.ContractCheck;
+        }
         const window = self.lookup(node.attr("window").?) orelse return self.fail(node, "virtual-list requires an enclosing window");
         if (window.binder != .virtual) return self.fail(node, "virtual-list requires an enclosing window");
         const each = node.attr("each").?;
@@ -1285,6 +1293,7 @@ const Checker = struct {
         var count: usize = 0;
         for (node.attrs) |attribute| {
             if (nameListed(&.{ "window", "each", "as" }, attribute.name)) continue;
+            if (count >= attributes.len) return self.failAttr(node, attribute, "too many virtual-list attributes");
             attributes[count] = attribute;
             count += 1;
         }

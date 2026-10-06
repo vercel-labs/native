@@ -1900,3 +1900,24 @@ test "whitespace between a span paragraph's runs collapses to one spliced space"
     const commented = try comment_parser.parse();
     try testing.expectEqual(@as(usize, 2), commented.root.?.children[0].children.len);
 }
+
+test "virtual markup rejects repeated attributes at their second source position" {
+    for ([_][]const u8{ "virtual-window", "virtual-list" }) |name| {
+        const allowed: []const []const u8 = if (std.mem.eql(u8, name, "virtual-window")) &markup.virtual_window_attrs else &markup.virtual_list_attrs;
+        for (allowed) |attribute| {
+            const attrs = [_]markup.MarkupAttr{
+                .{ .name = attribute, .value = "1", .line = 2, .column = 3 },
+                .{ .name = attribute, .value = "2", .line = 4, .column = 5 },
+            };
+            const node = markup.MarkupNode{ .kind = .element, .name = name, .attrs = &attrs, .src_path = "view.native" };
+            const info = markup.validate(.{ .root = node }).?;
+            try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+            try testing.expectEqual(@as(usize, 4), info.line);
+            try testing.expectEqual(@as(usize, 5), info.column);
+            try testing.expectEqualStrings("view.native", info.path);
+        }
+        var attrs: [markup.virtual_list_attrs.len]markup.MarkupAttr = undefined;
+        for (allowed, 0..) |attribute, i| attrs[i] = .{ .name = attribute, .value = "1", .line = 1, .column = 1 };
+        try testing.expect(markup.virtualAttributeError(.{ .kind = .element, .name = name, .attrs = attrs[0..allowed.len] }) == null);
+    }
+}

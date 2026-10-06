@@ -997,3 +997,16 @@ test "virtual range attributes have contextual hover documentation" {
     try testing.expect(std.mem.indexOf(u8, query.doc, "complete virtual range") != null);
     try testing.expect(attributeDocForElement("virtual-window", "foreground") == null);
 }
+
+test "virtual attribute diagnostics report the repeated attribute" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "<virtual-window id=\"rows\" id=\"other\" />",
+        "<virtual-list grow=\"1\" grow=\"2\" />",
+    }) |source| {
+        const info = analyze(arena.allocator(), source).?;
+        try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+        try testing.expect(info.column > 20);
+    }
+}

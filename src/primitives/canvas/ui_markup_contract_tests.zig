@@ -1373,3 +1373,22 @@ test "a declared mirror union classifies as a text_input payload" {
     }
     try testing.expect(saw_edit);
 }
+
+test "direct virtual contract checks reject repeated attributes before scope lookup" {
+    const empty_contract = contract.Contract{};
+    for ([_][]const u8{ "virtual-window", "virtual-list" }) |name| {
+        const allowed: []const []const u8 = if (std.mem.eql(u8, name, "virtual-window")) &markup.virtual_window_attrs else &markup.virtual_list_attrs;
+        for (allowed) |attribute| {
+            const attrs = [_]markup.MarkupAttr{
+                .{ .name = attribute, .value = "1", .line = 2, .column = 3 },
+                .{ .name = attribute, .value = "2", .line = 4, .column = 5 },
+            };
+            const document = markup.MarkupDocument{ .root = .{ .kind = .element, .name = name, .attrs = &attrs, .src_path = "view.native" } };
+            const info = (try contract.checkDocument(testing.allocator, document, &empty_contract, null)).?;
+            try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+            try testing.expectEqual(@as(usize, 4), info.line);
+            try testing.expectEqual(@as(usize, 5), info.column);
+            try testing.expectEqualStrings("view.native", info.path);
+        }
+    }
+}

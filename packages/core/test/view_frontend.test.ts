@@ -51,6 +51,13 @@ const evaluate = (markup: string) => {
   return { model, view: () => decodedView(exports.native_view!()), wire: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
 
+test("compiled views reject repeated virtual attributes before binding checks", () => {
+  for (const markup of [
+    '<virtual-window id="rows" id="again" />',
+    '<virtual-list grow="1" grow="2" />',
+  ]) assert.throws(() => compileView(markup, contract), /duplicate attribute/);
+});
+
 test("windowed row queries consume complete viewport facts without materializing other rows", () => {
   const rangeNames = ["start_index", "end_index", "first_visible_index", "last_visible_index", "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent"];
   const input: ViewContract = { ...contract, types: { structs: [...contract.types.structs,
