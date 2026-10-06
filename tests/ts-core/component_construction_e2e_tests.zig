@@ -5,7 +5,7 @@ const core = @import("ts_persist_core");
 const canvas = sdk.canvas;
 const Ui = canvas.Ui(core.Msg);
 
-fn exact(expected: anytype, actual: @TypeOf(expected)) anyerror!void {
+pub fn exact(expected: anytype, actual: @TypeOf(expected)) anyerror!void {
     const T = @TypeOf(expected);
     switch (@typeInfo(T)) {
         .float => {

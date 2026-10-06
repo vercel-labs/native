@@ -1,3 +1,4 @@
+pub const ComponentCompositionPolicy = @import("component_composition_policy.zig");
 pub const ComponentConstructionPolicy = @import("component_construction_policy.zig");
 pub const ControlAppearancePolicy = @import("control_appearance_policy.zig");
 pub const WidgetAppearance = @import("widget_render_style.zig");

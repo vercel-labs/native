@@ -211,6 +211,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 16) return nscvControlAppearance(request);
   if (request[0] === 17) return nscvConstructionPolicy(request);
   if (request[0] === 18) return nscvWidgetMotion(request);
+  if (request[0] === 19) return nscvCompositionPolicy(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

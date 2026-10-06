@@ -58,7 +58,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -238,7 +238,10 @@ fn decode(ui: *Ui, bytes: []const u8) !Ui.Node {
 }
 
 fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) !Ui.Node {
-    if (comptime @hasDecl(core, "nativeWindowPolicy")) ui.construction_policy = core.nativeWindowPolicy;
+    if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+        ui.construction_policy = core.nativeWindowPolicy;
+        ui.composition_policy = core.nativeWindowPolicy;
+    }
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -252,10 +255,10 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
         seen[window] = true;
     };
     for (seen[0..virtuals.len]) |present| if (!present) return error.InvalidView;
-    return node(ui, tree.nodes, 0, tree.nodes.len, 0, virtuals);
+    return node(ui, tree.nodes, 0, tree.nodes.len, 0, virtuals, null);
 }
 
-fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual) !Ui.Node {
+fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual, parent_kind: ?@FieldType(Record, "kind")) !Ui.Node {
     if (depth > 64) return error.ViewTooDeep;
     var value = records[index];
     value.text = byteText(value.textBytes, value.text);
@@ -283,7 +286,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
-    const container = modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
+    const container = value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel or value.kind == .list_item) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
@@ -335,11 +338,33 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     var children: std.ArrayList(Ui.Node) = .empty;
     var child_index = index + 1;
     while (child_index < value.end) {
-        try children.append(ui.arena, try node(ui, records, child_index, value.end, depth + 1, virtuals));
+        try children.append(ui.arena, try node(ui, records, child_index, value.end, depth + 1, virtuals, value.kind));
         child_index = records[child_index].end;
     }
     if (value.kind == .split and children.items.len != 2) return error.InvalidView;
+    if (value.kind == .input_group_actions) {
+        if (parent_kind != .input_group) return error.InvalidView;
+        return stampCompound(ui.inputGroupActions(.{
+            .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
+            .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
+            .gap = value.gap,
+        }, children.items));
+    }
+    if (value.kind == .input_group) {
+        if (children.items.len < 1 or children.items.len > 2 or children.items[0].widget.kind != .textarea) return error.InvalidView;
+        if (children.items.len == 2 and records[records[index + 1].end].kind != .input_group_actions) return error.InvalidView;
+        return stampCompound(ui.inputGroup(.{
+            .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
+            .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
+            .width = value.width,
+            .height = value.height,
+            .min_width = value.minWidth,
+            .grow = value.grow,
+            .semantics = .{ .role = value.role, .label = value.label },
+        }, children.items[0], if (children.items.len == 2) children.items[1] else null));
+    }
     const kind: sdk.canvas.WidgetKind = switch (value.kind) {
+        .input_group_actions => return error.InvalidView,
         .spacer => .stack,
         .scroll => .scroll_view,
         inline else => |tag| @field(sdk.canvas.WidgetKind, @tagName(tag)),
@@ -525,6 +550,15 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         result.widget.text_no_wrap = true;
         result.widget.layout.clip_content = true;
     }
+    return result;
+}
+
+// Compound records create their root after decoding the child primitives.
+// Attach both owners exactly as the ordinary primitive decoder does.
+fn stampCompound(node_value: Ui.Node) Ui.Node {
+    var result = node_value;
+    if (comptime @hasDecl(core, "nativeWindowPolicy")) result.widget.appearance_policy = core.nativeWindowPolicy;
+    if (comptime @hasDecl(core, "nativeTextPolicy")) result.widget.interaction_policy = core.nativeTextPolicy;
     return result;
 }
 
@@ -1146,4 +1180,50 @@ pub fn testTerminalRecords() !void {
 
 test "compiled terminal records reject misplaced malformed and incompatible ownership channels" {
     try testTerminalRecords();
+}
+
+test "compiled grouped input records preserve complete owned primitive trees" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const bytes = try ui.arena.dupe(u8,
+            \\{"format":2,"nodes":[{"end":4,"kind":"input_group","text":"","label":"Compose","width":360,"height":160},{"end":2,"kind":"textarea","text":"","textBytes":[67,0,255],"label":"Draft","borderColor":"accent"},{"end":4,"kind":"input_group_actions","text":"","gap":6},{"end":4,"kind":"button","text":"Send"}]}
+        );
+        const actual_node = try decode(&ui, bytes);
+        @memset(bytes, 0);
+        core.rt.frameReset();
+        var reference = Ui.init(arena.allocator());
+        const entry = reference.el(.textarea, .{ .text = "C\x00\xff", .semantics = .{ .label = "Draft" }, .style_tokens = .{ .border_color = .accent } }, .{});
+        const expected_node = reference.inputGroup(.{ .width = 360, .height = 160, .semantics = .{ .label = "Compose" } }, entry, reference.inputGroupActions(.{}, .{reference.button(.{}, "Send")}));
+        const expected_tree = try reference.finalize(compoundOwners(expected_node));
+        const actual_tree = try ui.finalize(actual_node);
+        try std.testing.expectEqualDeep(expected_tree.root, actual_tree.root);
+        try std.testing.expectEqualDeep(expected_tree.handlers, actual_tree.handlers);
+    } else return error.SkipZigTest;
+}
+fn compoundOwners(node_value: Ui.Node) Ui.Node {
+    const result = stampCompound(node_value);
+    for (@constCast(result.nodes)) |*child| child.* = compoundOwners(child.*);
+    return result;
+}
+
+test "compiled grouped input refuses orphan actions invalid order and excess children" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            \\{"format":2,"nodes":[{"end":1,"kind":"input_group_actions","text":""}]}
+            ,
+            \\{"format":2,"nodes":[{"end":1,"kind":"input_group","text":""}]}
+            ,
+            \\{"format":2,"nodes":[{"end":2,"kind":"input_group","text":""},{"end":2,"kind":"button","text":""}]}
+            ,
+            \\{"format":2,"nodes":[{"end":3,"kind":"input_group","text":""},{"end":2,"kind":"textarea","text":""},{"end":3,"kind":"button","text":""}]}
+            ,
+            \\{"format":2,"nodes":[{"end":4,"kind":"input_group","text":""},{"end":2,"kind":"textarea","text":""},{"end":3,"kind":"textarea","text":""},{"end":4,"kind":"input_group_actions","text":""}]}
+            ,
+        }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+    } else return error.SkipZigTest;
 }

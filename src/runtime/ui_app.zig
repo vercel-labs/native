@@ -495,6 +495,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             component_policy: component_policy.Policy = null,
             /// Portable construction is owned by the compiled app; the
             /// builder copies descriptors into its existing generation arena.
+            composition_policy: ?canvas.ComponentCompositionPolicy.Policy = null,
             construction_policy: ?canvas.ComponentConstructionPolicy.Policy = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2448,6 +2449,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != null or pin.arena_index != next_index else true);
                 _ = self.arenas[next_index].reset(.retain_capacity);
                 var ui = Ui.init(self.arenas[next_index].allocator());
+                ui.composition_policy = self.options.composition_policy;
                 ui.construction_policy = self.options.construction_policy;
                 // The house video chrome renders the channel's honest
                 // snapshot, stamped before the view fn runs — the model
@@ -3365,6 +3367,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             std.debug.assert(if (self.context_menu_pin) |pin| pin.window_id != slot.window_id or pin.arena_index != next_index else true);
             _ = slot.arenas[next_index].reset(.retain_capacity);
             var ui = Ui.init(slot.arenas[next_index].allocator());
+            ui.composition_policy = self.options.composition_policy;
             ui.construction_policy = self.options.construction_policy;
             // Window views render the same honest video chrome state,
             // and their `<video src>` declarations reconcile the channel

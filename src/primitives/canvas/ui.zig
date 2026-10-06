@@ -24,6 +24,8 @@ const code_model = @import("code.zig");
 const font_coverage = @import("font_coverage.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const composition_recipes = @import("component_composition_policy.zig");
+const composer = @import("component_composition.zig");
 const construction = @import("component_construction_policy.zig");
 const reflect = @import("ui_markup_reflect.zig");
 const ui_provenance = @import("ui_provenance.zig");
@@ -431,8 +433,9 @@ pub fn Ui(comptime Msg: type) type {
 
         arena: std.mem.Allocator,
         failed: bool = false,
-        /// Compiled apps own portable construction; native builders retain
-        /// the reference implementation when this explicit owner is absent.
+        /// Compiled apps own portable recipes and construction. Native
+        /// extensions retain the reference when the corresponding owner is absent.
+        composition_policy: ?composition_recipes.Policy = null,
         construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
@@ -3000,6 +3003,7 @@ pub fn Ui(comptime Msg: type) type {
         /// FIRST (document order is focus order); build the accessory
         /// row with `inputGroupActions`.
         pub fn inputGroup(self: *Self, options: InputGroupOptions, entry: Node, actions: ?Node) Node {
+            if (self.composition_policy != null) return composer.Composer(Self).inputGroup(self, options, entry, actions);
             var semantics = options.semantics;
             if (semantics.role == .none) semantics.role = .group;
             var entry_node = entry;
@@ -3031,6 +3035,7 @@ pub fn Ui(comptime Msg: type) type {
         /// keep ghost/icon buttons optically inside the field's own text
         /// inset without double-padding the seam.
         pub fn inputGroupActions(self: *Self, options: InputGroupActionsOptions, children: anytype) Node {
+            if (self.composition_policy != null) return composer.Composer(Self).inputActions(self, options, children);
             var node = self.el(.row, .{
                 .key = options.key,
                 .global_key = options.global_key,
@@ -3094,6 +3099,7 @@ pub fn Ui(comptime Msg: type) type {
         /// number otherwise — and hairline separators connect the steps.
         /// Display-only: driving `active` belongs to the app model.
         pub fn stepper(self: *Self, options: StepperOptions, steps: []const StepperStep) Node {
+            if (self.composition_policy != null) return composer.Composer(Self).stepper(self, options, steps);
             var semantics = options.semantics;
             if (semantics.role == .none) semantics.role = .list;
             const node_count = if (steps.len == 0) 0 else steps.len * 2 - 1;
@@ -3163,11 +3169,12 @@ pub fn Ui(comptime Msg: type) type {
         /// `timelineItem` nodes.
         pub fn timeline(self: *Self, options: TimelineOptions, items: anytype) Node {
             var semantics = options.semantics;
-            if (semantics.role == .none) semantics.role = .list;
+            const compiled = if (self.composition_policy) |owner| composition_recipes.plan(owner, .timeline, 0, semantics.role, 0, 0, 0, 0, options.gap) else null;
+            if (compiled) |p| semantics.role = p.role() else if (semantics.role == .none) semantics.role = .list;
             return self.el(.column, .{
                 .key = options.key,
                 .global_key = options.global_key,
-                .gap = options.gap,
+                .gap = if (compiled) |p| p.float(0) else options.gap,
                 .grow = options.grow,
                 .semantics = semantics,
             }, items);
@@ -3210,6 +3217,7 @@ pub fn Ui(comptime Msg: type) type {
         /// pressable — a trailing chevron with `on_press` bound to the
         /// item's root (presses on the content fall through to it).
         pub fn timelineItem(self: *Self, options: TimelineItemOptions) Node {
+            if (self.composition_policy != null) return composer.Composer(Self).timelineItem(self, options);
             const dot = options.indicator.len == 0 and options.icon.len == 0;
             const indicator = self.el(.badge, .{
                 .variant = options.variant,
@@ -3312,6 +3320,7 @@ pub fn Ui(comptime Msg: type) type {
             var semantics = options.semantics;
             if (semantics.role == .none) semantics.role = .group;
             const page_nodes = self.childNodes(pages);
+            if (self.composition_policy != null) return composer.Composer(Self).nav(self, options, page_nodes);
             if (page_nodes.len == 0) {
                 return self.el(.stack, .{
                     .key = options.key,

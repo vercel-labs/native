@@ -143,7 +143,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);
@@ -592,6 +592,32 @@ test("portable stepper owns state, primitive composition and accessible position
   assert.equal(view()[1].label, "Plan (active)");
   model.active = 0.5;
   assert.throws(view, /exact integer/);
+});
+
+test("composed labels and timeline fields preserve malformed UTF-8 and NUL bytes", () => {
+  const markup = '<column><input-group label="{status}"><textarea>{status}</textarea></input-group>' +
+    '<stepper active="{count}" label="{status}"><step>Start {status}</step></stepper>' +
+    '<timeline label="{status}"><timeline-item title="{status}" description="{status}" meta="{status}" indicator="{status}"/></timeline></column>';
+  const exports: { native_view?: () => Uint8Array } = {};
+  const model = { count: 0, status: Uint8Array.of(65, 0, 255, 192, 66) };
+  runInNewContext(ts.transpile(compileView(markup, contract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }),
+    { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  const wire = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes as any[];
+  const nodes = wire();
+  const raw = [...model.status];
+  assert.deepEqual(nodes[1].labelBytes, raw);
+  assert.deepEqual(nodes[3].labelBytes, raw);
+  assert.deepEqual(nodes[4].labelBytes, [...new TextEncoder().encode("Start "), ...raw, ...new TextEncoder().encode(" (active)")]);
+  assert.deepEqual(nodes[6].textBytes, [...new TextEncoder().encode("Start "), ...raw]);
+  assert.deepEqual(nodes[7].labelBytes, raw);
+  assert.deepEqual(nodes[8].labelBytes, raw);
+  assert.deepEqual(nodes.filter(n => n.textBytes !== undefined && n.kind === "text").slice(-3).map(n => n.textBytes), [raw, raw, raw]);
+  assert.deepEqual(nodes.find(n => n.kind === "badge" && n.textBytes !== undefined).textBytes, raw);
+  model.status = new Uint8Array(0);
+  const empty = wire();
+  assert.equal(empty.filter(n => n.wrap || n.spanScale !== undefined).length, 0);
+  assert.equal(empty.find(n => n.kind === "badge" && n.textBytes !== undefined).width, 10);
+  assert.deepEqual(nodes[8].labelBytes, raw);
 });
 
 test("portable component expansion enforces the shared native node budget", () => {
@@ -2069,4 +2095,28 @@ test("explicit focusable state remains a typed boolean in compiled widget data",
   model.ticking = false;
   assert.equal(view().nodes[0].focusable, false);
   assert.throws(() => compileView('<list-item focusable="{count}">Row</list-item>', contract), /boolean/);
+});
+
+
+test("grouped input compiles owned entry and action records with stable keys and event envelopes", () => {
+  const { view, wire } = evaluate('<input-group key="composer" label="Compose" width="360" height="160" grow="1"><textarea text="{status}" label="Draft" border-color="accent" on-submit="reset"/><input-group-actions key="actions"><button on-press="increment">Attach</button><spacer grow="1"/><if test="{ticking}"><button on-press="reset">Stop</button></if><else><button on-press="increment">Send</button></else></input-group-actions></input-group>');
+  const nodes = view().nodes;
+  assert.equal(nodes[0].kind, "input_group"); assert.equal(nodes[0].key, "composer"); assert.equal(nodes[0].width, 360);
+  assert.equal(nodes[1].kind, "textarea"); assert.equal(nodes[1].borderColor, "accent"); assert.equal(nodes[1].text, "Café\nnotes");
+  assert.deepEqual(nodes[1].submit, [1, 5]); assert.equal(nodes[2].kind, "input_group_actions"); assert.equal(nodes[2].gap, 6);
+  assert.equal(nodes[2].key, "actions"); assert.equal(nodes.at(-1).text, "Stop"); assert.deepEqual(nodes.at(-1).press, [1, 5]);
+  assert.deepEqual(wire().nodes[1].textBytes, [...new TextEncoder().encode("Café\nnotes")]);
+  assert.equal(evaluate('<input-group><textarea/><input-group-actions gap="0"/></input-group>').view().nodes[2].gap, 0);
+});
+
+test("grouped input rejects invalid structure and preserves the native compound attribute surface", () => {
+  for (const markup of [
+    '<input-group/>', '<input-group><button/></input-group>',
+    '<input-group><textarea/><textarea/></input-group>',
+    '<input-group><input-group-actions/><textarea/></input-group>',
+    '<input-group><textarea/><input-group-actions/><button/></input-group>',
+  ]) assert.throws(() => compileView(markup, contract), /requires a textarea/);
+  assert.throws(() => compileView('<input-group-actions><button/></input-group-actions>', contract), /requires an input-group parent/);
+  assert.throws(() => compileView('<input-group padding="1"><textarea/></input-group>', contract), /unsupported input-group attribute/);
+  assert.throws(() => compileView('<input-group><textarea/><input-group-actions label="bad"/></input-group>', contract), /unsupported input-group-actions attribute/);
 });

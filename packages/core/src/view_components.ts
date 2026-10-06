@@ -1621,22 +1621,30 @@ function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number
   }
 }
 
-function nscvStepper(nodes: NscViewNode[], root: NscViewNode, active: number, labels: string[]): void {
+type NscComponentText = { text: string; bytes?: readonly number[] };
+
+function nscvStepper(nodes: NscViewNode[], root: NscViewNode, active: number, labels: NscComponentText[]): void {
   if (!Number.isSafeInteger(active)) throw new Error("stepper active is not an exact integer");
   active = Math.max(0, active);
-  root.kind = "row"; root.gap = 8; root.cross = "center"; root.role = "list";
+  const recipe = nscvCompositionRequest(3, 0, 0, active, 0, labels.length);
+  root.kind = "row"; root.gap = new DataView(recipe.buffer).getFloat32(32, true); root.cross = "center"; root.role = "list";
   nscvPush(nodes, root);
   for (let index = 0; index < labels.length; index++) {
-    const state = index < active ? "completed" : index === active ? "active" : "pending";
+    const plan = nscvCompositionRequest(4, 0, 0, active, index, labels.length);
+    const state = nscvCompositionStateName(plan[2]!);
+    const label = labels[index]!;
     const item: NscViewNode = { end: 0, kind: "row", text: "", keyInt: index,
-      gap: 6, cross: "center", selected: state === "active", role: "listitem",
-      label: labels[index]! + " (" + state + ")", listItemIndex: index, listItemCount: labels.length };
+      gap: new DataView(plan.buffer).getFloat32(32, true), cross: "center", selected: (plan[1]! & 2) !== 0, role: "listitem",
+      label: label.bytes === undefined ? label.text + " (" + state + ")" : "",
+      listItemIndex: index, listItemCount: labels.length };
+    if (label.bytes !== undefined) item.labelBytes = nscvTextBytes([new Uint8Array(label.bytes), new TextEncoder().encode(" (" + state + ")")]);
     nscvPush(nodes, item);
-    nscvPush(nodes, { end: 0, kind: "badge", text: state === "completed" ? "" : String(index + 1),
-      icon: state === "completed" ? "check" : "", variant: state === "pending" ? "outline" : "primary" });
-    const title: NscViewNode = { end: 0, kind: "text", text: labels[index]! };
-    if (state === "active") title.spanWeight = "bold";
-    if (state === "pending") title.foreground = "text_muted";
+    nscvPush(nodes, { end: 0, kind: "badge", text: (plan[1]! & 1) !== 0 ? "" : String(index + 1),
+      icon: (plan[1]! & 1) !== 0 ? "check" : "", variant: (plan[1]! & 4) !== 0 ? "outline" : "primary" });
+    const title: NscViewNode = { end: 0, kind: "text", text: label.text };
+    if (label.bytes !== undefined) title.textBytes = label.bytes;
+    if ((plan[1]! & 2) !== 0) title.spanWeight = "bold";
+    if ((plan[1]! & 4) !== 0) title.foreground = "text_muted";
     nscvPush(nodes, title);
     item.end = nodes.length;
     if (index + 1 < labels.length) nscvPush(nodes, { end: 0, kind: "separator", text: "", grow: 1 });
@@ -1645,34 +1653,46 @@ function nscvStepper(nodes: NscViewNode[], root: NscViewNode, active: number, la
 }
 
 type NscTimelineItem = {
-  root: NscViewNode; title: string; description: string; meta: string;
-  indicator: string; icon: string; variant: string; connector: boolean;
+  root: NscViewNode; title: NscComponentText; description: NscComponentText; meta: NscComponentText;
+  indicator: NscComponentText; icon: string; variant: string; connector: boolean;
 };
 
 function nscvTimelineItem(nodes: NscViewNode[], options: NscTimelineItem): void {
+  const length = (value: NscComponentText): number => value.bytes === undefined ? value.text.length : value.bytes.length;
+  const textNode = (kind: string, value: NscComponentText): NscViewNode => {
+    const result: NscViewNode = { end: 0, kind, text: value.text };
+    if (value.bytes !== undefined) result.textBytes = value.bytes;
+    return result;
+  };
+  const facts = (options.connector ? 1 : 0) | (length(options.description) > 0 ? 2 : 0) |
+    (length(options.meta) > 0 ? 4 : 0) | (options.root.press !== undefined ? 8 : 0) |
+    (length(options.indicator) === 0 && options.icon.length === 0 ? 16 : 0);
+  const recipe = nscvCompositionRequest(5, facts, 0, 0, 0, 0);
+  const wire = new DataView(recipe.buffer);
+  const float = (slot: number): number => wire.getFloat32(32 + slot * 4, true);
   const root = options.root;
-  root.kind = "stack"; root.role = "listitem"; root.label = options.title;
-  root.focusable = root.press !== undefined;
+  root.kind = "stack"; root.role = "listitem"; root.label = options.title.text;
+  if (options.title.bytes !== undefined) root.labelBytes = options.title.bytes;
+  root.focusable = (recipe[1]! & 8) !== 0;
   nscvPush(nodes, root);
-  const row: NscViewNode = { end: 0, kind: "row", text: "", gap: 10, padding: 8 };
+  const row: NscViewNode = { end: 0, kind: "row", text: "", gap: float(14), padding: float(15) };
   nscvPush(nodes, row);
   const lead: NscViewNode = { end: 0, kind: "column", text: "", cross: "center" };
-  if (options.connector) lead.gap = 4;
+  lead.gap = float(9);
   nscvPush(nodes, lead);
-  const dot = options.indicator.length === 0 && options.icon.length === 0;
-  nscvPush(nodes, { end: 0, kind: "badge", text: options.indicator, icon: options.icon,
-    variant: options.variant, width: dot ? 10 : 0, height: dot ? 10 : 0 });
-  if (options.connector) nscvPush(nodes, { end: 0, kind: "separator", text: "", grow: 1, width: 1 });
+  nscvPush(nodes, { ...textNode("badge", options.indicator), icon: options.icon,
+    variant: options.variant, width: float(7), height: float(8) });
+  if ((recipe[1]! & 1) !== 0) nscvPush(nodes, { end: 0, kind: "separator", text: "", grow: float(10), width: float(11) });
   lead.end = nodes.length;
-  const content: NscViewNode = { end: 0, kind: "column", text: "", grow: 1, gap: 2 };
+  const content: NscViewNode = { end: 0, kind: "column", text: "", grow: float(12), gap: float(13) };
   nscvPush(nodes, content);
-  nscvPush(nodes, { end: 0, kind: "text", text: options.title, spanWeight: "bold" });
-  if (options.description.length > 0) nscvPush(nodes, { end: 0, kind: "text", text: options.description,
+  nscvPush(nodes, { ...textNode("text", options.title), spanWeight: "bold" });
+  if ((recipe[1]! & 2) !== 0) nscvPush(nodes, { ...textNode("text", options.description),
     wrap: true, foreground: "text_muted" });
-  if (options.meta.length > 0) nscvPush(nodes, { end: 0, kind: "text", text: options.meta,
-    spanColor: "text_muted", spanScale: 0.9 });
+  if ((recipe[1]! & 4) !== 0) nscvPush(nodes, { ...textNode("text", options.meta),
+    spanColor: "text_muted", spanScale: float(16) });
   content.end = nodes.length;
-  if (root.press !== undefined) nscvPush(nodes, { end: 0, kind: "text", text: "›", foreground: "text_muted" });
+  if ((recipe[1]! & 8) !== 0) nscvPush(nodes, { end: 0, kind: "text", text: "›", foreground: "text_muted" });
   row.end = nodes.length;
   root.end = nodes.length;
 }

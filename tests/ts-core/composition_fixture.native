@@ -1,0 +1,11 @@
+<column gap="8">
+  <input-group label="{label}" width="360" height="120" min-width="100">
+    <textarea label="Draft" on-input="edit" text="{label}"/>
+    <input-group-actions gap="5"><button on-press="next">Next</button></input-group-actions>
+  </input-group>
+  <stepper active="{active}" label="{label}"><step>{label}</step><step>Review</step><step>Ship</step></stepper>
+  <timeline gap="7" label="{label}">
+    <timeline-item title="{label}" description="{description}" meta="{meta}" indicator="{indicator}" selected="{selected}" on-press="next"/>
+    <timeline-item title="Empty" connector="false"/>
+  </timeline>
+</column>

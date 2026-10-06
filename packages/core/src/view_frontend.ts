@@ -63,7 +63,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     throw new Error(`${node.file}:${before.length}:${before.at(-1)!.length + 1}: compiled TypeScript view: ${message}`);
   };
   const origin = { file: entry, at: 0 };
-  const reserved = ["NscAppearanceColor", "NscAppearanceVisual", "NscAppearanceContext", "NscViewSpan", "NscViewNode", "NscTimelineItem", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
+  const reserved = ["NscAppearanceColor", "NscAppearanceVisual", "NscAppearanceContext", "NscViewSpan", "NscViewNode", "NscTimelineItem", "NscComponentText", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
   if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
@@ -367,7 +367,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     }
     return `Array.from(nscfPackMsg({ ${props} }))`;
   };
-  const emit = (node: Element, scope: Scope, slot: Slot | undefined, stack: string[], depth: number): void => {
+  const emit = (node: Element, scope: Scope, slot: Slot | undefined, stack: string[], depth: number, inputActionsAllowed = false): void => {
     if (depth > 64 || next > 4096) fail(node, "expanded view exceeds 64 levels or 4096 elements");
     if (node.name === "virtual-window") {
       if ([...scope.values()].some(value => value.virtualIndex !== undefined)) fail(node, "virtual-window declarations cannot nest");
@@ -466,9 +466,36 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`${name === "key" ? "key" : "globalKey"}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
         }
       }
-      if (node.attrs.has("label")) props.push(`label: ${stringAttr("label")}`);
+      if (node.attrs.has("label")) {
+        const bytes = byteText(node.attrs.get("label")!, node, scope);
+        props.push(bytes === null ? `label: ${stringAttr("label")}` : `label: "", labelBytes: ${bytes}`);
+      }
       return props;
     };
+    if (node.name === "input-group" || node.name === "input-group-actions") {
+      const actions = node.name === "input-group-actions";
+      if (actions && !inputActionsAllowed) fail(node, "input-group-actions requires an input-group parent");
+      const props = componentRoot(actions ? ["gap", "key", "global-key"] : ["label", "width", "height", "min-width", "grow", "key", "global-key"]);
+      props[1] = `kind: "${actions ? "input_group_actions" : "input_group"}"`;
+      for (const name of actions ? ["gap"] : ["width", "height", "min-width", "grow"]) {
+        const raw = node.attrs.get(name);
+        if (raw !== undefined) props.push(`${name === "min-width" ? "minWidth" : name}: ${bound(raw, "number", node, scope)}`);
+      }
+      const id = next++;
+      output.push(`const nscvGroup${id}: NscViewNode = { ${props.join(", ")} };`, `nscvPush(nscvNodes, nscvGroup${id});`);
+      if (actions) {
+        if (!node.attrs.has("gap")) output.push(`nscvGroup${id}.gap = 6;`);
+        if (node.children.some(child => child.name === "#text")) fail(node, "input-group-actions requires element children");
+        emitChildren(node.children, scope, slot, stack, depth + 1);
+      } else {
+        if (node.children.length < 1 || node.children.length > 2 || node.children[0]!.name !== "textarea" ||
+            node.children.length === 2 && node.children[1]!.name !== "input-group-actions") fail(node, "input-group requires a textarea then optional input-group-actions");
+        emit(node.children[0]!, scope, slot, stack, depth + 1);
+        if (node.children[1]) emit(node.children[1], scope, slot, stack, depth + 1, true);
+      }
+      output.push(`nscvGroup${id}.end = nscvNodes.length;`);
+      return;
+    }
     if (node.name === "stepper") {
       const props = componentRoot(["active", "key", "global-key", "label"]);
       const raw = node.attrs.get("active");
@@ -482,7 +509,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       }
       const labels = steps.map(step => {
         if (step.name !== "step" || step.attrs.size || step.children.length) fail(step, "stepper takes only step text leaves");
-        return text(step.text.trim(), step, stepScope);
+        const raw = step.text.trim(), bytes = byteText(raw, step, stepScope);
+        return bytes === null ? `{ text: ${text(raw, step, stepScope)} }` : `{ text: "", bytes: ${bytes} }`;
       });
       output.push(`nscvStepper(nscvNodes, { ${props.join(", ")} }, ${active.code}, [${labels.join(", ")}]);`);
       return;
@@ -492,7 +520,9 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       props[1] = 'kind: "column"'; props.push('role: "list"');
       for (const name of ["gap", "grow"]) if (node.attrs.has(name)) props.push(`${name}: ${bound(node.attrs.get(name)!, "number", node, scope)}`);
       const id = next++;
-      output.push(`const nscvNode${id}: NscViewNode = { ${props.join(", ")} };`, `nscvPush(nscvNodes, nscvNode${id});`);
+      output.push(`const nscvNode${id}: NscViewNode = { ${props.join(", ")} };`,
+        `const nscvRecipe${id} = nscvCompositionRequest(7, 0, 0, 0, 0, 0, 0, nscvNode${id}.gap ?? 0);`,
+        `nscvNode${id}.gap = new DataView(nscvRecipe${id}.buffer).getFloat32(32, true);`, `nscvPush(nscvNodes, nscvNode${id});`);
       emitChildren(node.children, scope, slot, stack, depth + 1);
       output.push(`nscvNode${id}.end = nscvNodes.length;`);
       return;
@@ -504,7 +534,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       if (node.attrs.has("selected")) props.push(`selected: ${bound(node.attrs.get("selected")!, "boolean", node, scope)}`);
       const variant = stringAttr("variant", "outline");
       const connector = node.attrs.has("connector") ? bound(node.attrs.get("connector")!, "boolean", node, scope) : "true";
-      output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${stringAttr("title")}, description: ${stringAttr("description")}, meta: ${stringAttr("meta")}, indicator: ${stringAttr("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
+      const itemText = (name: string): string => {
+        const raw = node.attrs.get(name), bytes = raw === undefined ? null : byteText(raw, node, scope);
+        return bytes === null ? `{ text: ${stringAttr(name)} }` : `{ text: "", bytes: ${bytes} }`;
+      };
+      output.push(`nscvTimelineItem(nscvNodes, { root: { ${props.join(", ")} }, title: ${itemText("title")}, description: ${itemText("description")}, meta: ${itemText("meta")}, indicator: ${itemText("indicator")}, icon: ${stringAttr("icon")}, variant: nscvVariant(${variant}), connector: ${connector} });`);
       return;
     }
     if (node.name === "video") {
@@ -805,4 +839,5 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./control_appearance.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./component_construction.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_motion.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./component_composition.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");
