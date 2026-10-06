@@ -143,7 +143,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "chart_content.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);
@@ -2134,4 +2134,43 @@ test("grouped input rejects invalid structure and preserves the native compound 
   assert.throws(() => compileView('<input-group-actions><button/></input-group-actions>', contract), /requires an input-group parent/);
   assert.throws(() => compileView('<input-group padding="1"><textarea/></input-group>', contract), /unsupported input-group attribute/);
   assert.throws(() => compileView('<input-group><textarea/><input-group-actions label="bad"/></input-group>', contract), /unsupported input-group-actions attribute/);
+});
+
+const chartContract: ViewContract = { ...contract, types: { structs: [{ name: "Model", fields: [
+  { name: "samples", type: { kind: "slice", elem: { kind: "f64" } } },
+  { name: "labels", type: { kind: "slice", elem: { kind: "bytes" } } },
+  { name: "caption", type: { kind: "bytes" } },
+] }] } };
+const evaluateChart = (markup: string, model: unknown) => {
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView(markup, chartContract), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  return JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+};
+test("compiled charts retain raw labels signed zero and nonfinite words while lowering area and axes", () => {
+  const model = { samples: [1.005, -0, NaN, Infinity, -Infinity], labels: [new Uint8Array([0, 255]), new Uint8Array([65])], caption: new Uint8Array([67, 0, 255]) };
+  const nodes = evaluateChart('<chart height="120" grid-lines="3" baseline="true" y-labels="true" hover-details="true" x-labels="{labels}" y-min="-3" stroke-width="2.5"><series kind="area" values="{samples}" label="{caption}" color="info"/></chart>', model);
+  assert.equal(nodes.length, 1);
+  const node = nodes[0]; assert.equal(node.kind, "chart"); assert.equal(node.chartGridLines, 3);
+  assert.equal(node.chartBaseline, true); assert.equal(node.chartYLabels, true); assert.equal(node.chartHoverDetails, true);
+  assert.equal(node.chartYMin, 0xc0400000); assert.equal(node.chartStrokeWidth, 0x40200000);
+  assert.deepEqual(node.chartXLabels, [[0, 255], [65]]);
+  assert.deepEqual(node.chartSeries, [{ kind: "line", fill: true, color: "info", label: [67, 0, 255], values: [0x3f80a3d7, 0x80000000, 0x7fc00000, 0x7f800000, 0xff800000] }]);
+  assert.deepEqual(node.labelBytes, [99,104,97,114,116,58,32,67,0,255,...new TextEncoder().encode(" 5 pts last -inf")]);
+});
+test("compiled charts downsample long arrays retain authored summaries and discard rebucketed x labels", () => {
+  const model = { samples: Array.from({ length: 10000 }, (_, i) => i), labels: [new Uint8Array([65])], caption: new Uint8Array([0, 255]) };
+  const node = evaluateChart('<chart label="{caption}" x-labels="{labels}"><series values="{samples}"/></chart>', model)[0];
+  assert.equal(node.chartSeries[0].values.length, 256); assert.deepEqual(node.chartXLabels, []); assert.deepEqual(node.labelBytes, [0, 255]);
+  const summary = evaluateChart('<chart><series values="{samples}"/></chart>', model)[0];
+  assert.equal(new TextDecoder().decode(new Uint8Array(summary.labelBytes)), "chart: line 10000 pts last 9999.00");
+});
+test("compiled charts reject incorrect channels child placement and untyped arrays", () => {
+  for (const markup of [
+    '<chart/>', '<series values="{samples}"/>', '<chart><text>data</text></chart>',
+    '<chart on-press="load"><series values="{samples}"/></chart>',
+    '<chart><series kind="band" values="{samples}"/></chart>',
+    '<chart><series values="{caption}"/></chart>', '<chart x-labels="{samples}"><series values="{samples}"/></chart>',
+    '<chart><series values="{samples}" color="oops"/></chart>', '<chart><series values="{samples}" low="{samples}"/></chart>',
+  ]) assert.throws(() => compileView(markup, chartContract));
+  for (const grid of ["-1", "256", "0.5"]) assert.throws(() => evaluateChart(`<chart grid-lines="${grid}"><series values="{samples}"/></chart>`, { samples: [], labels: [], caption: new Uint8Array(0) }));
 });

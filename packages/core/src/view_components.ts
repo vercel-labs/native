@@ -7,6 +7,8 @@ import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffs
 type NscViewSpan = { text: string; textBytes?: readonly number[]; weight?: string; color?: string; scale?: number; monospace?: boolean; italic?: boolean; underline?: boolean };
 type NscContextMenuItem = { label: string; labelBytes?: readonly number[]; press?: number[]; enabled: boolean; separator: boolean };
 
+type NscChartSeries = { kind: string; values: readonly number[]; color: string; fill: boolean; label: readonly number[] };
+
 type NscViewNode = {
   end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
@@ -27,6 +29,9 @@ type NscViewNode = {
   spanWeight?: string; spanColor?: string; spanScale?: number;
   codeLanguage?: string; codeLineDigits?: number; codeEditable?: boolean; codeNumbered?: boolean;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
+  chartSeries?: readonly NscChartSeries[]; chartXLabels?: readonly (readonly number[])[];
+  chartYMin?: number; chartYMax?: number; chartGridLines?: number; chartBaseline?: boolean;
+  chartYLabels?: boolean; chartHoverDetails?: boolean; chartStrokeWidth?: number;
   contextMenu?: readonly NscContextMenuItem[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
@@ -2343,4 +2348,33 @@ function nscvPtyKey(value: number): number {
 function nscvScrollback(value: number): number {
   if (!Number.isInteger(value) || value < 0 || value > 4294967295) throw new Error("invalid terminal scrollback");
   return value;
+}
+
+function nscvChartWord(value: number): number {
+  const bytes = new Uint8Array(4), wire = new DataView(bytes.buffer);
+  wire.setFloat32(0, value, true); return wire.getUint32(0, true);
+}
+function nscvChartWords(values: readonly number[]): number[] {
+  const words: number[] = [], bytes = new Uint8Array(4), wire = new DataView(bytes.buffer);
+  for (const value of values) { wire.setFloat32(0, value, true); words.push(wire.getUint32(0, true)); }
+  return words;
+}
+function nscvChartGrid(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 255) throw new Error("chart grid-lines requires a u8 integer");
+  return value;
+}
+function nscvChart(nodes: NscViewNode[], root: NscViewNode, source: readonly NscChartSeries[], labels: readonly (readonly number[])[]): void {
+  const plan = nscChartPrepare(source.map(entry => ({ kind: entry.kind === "bar" ? 1 : 0, values: entry.values, low: [], label: entry.label })));
+  const series: NscChartSeries[] = [];
+  for (let i = 0; i < source.length; i++) {
+    const entry = source[i]!, values: number[] = [];
+    for (const index of plan.series[i]!.values) values.push(entry.values[index]!);
+    series.push({ kind: entry.kind, values, color: entry.color, fill: entry.fill, label: entry.label });
+  }
+  root.kind = "chart"; root.chartSeries = series;
+  root.chartXLabels = plan.downsampled ? [] : labels;
+  if (root.labelBytes === undefined && (root.label === undefined || root.label.length === 0) || root.labelBytes !== undefined && root.labelBytes.length === 0) {
+    root.label = ""; root.labelBytes = plan.summary;
+  }
+  nscvPush(nodes, root);
 }

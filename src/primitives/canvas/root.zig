@@ -527,6 +527,7 @@ pub const max_terminal_cells = terminal_grid.max_cells;
 // Chart plot data for the `.chart` widget kind (series, downsampling,
 // domain) lives in `chart.zig`.
 pub const chart = @import("chart.zig");
+pub const ChartContentPolicy = @import("chart_content_policy.zig");
 pub const ChartSeries = chart.ChartSeries;
 pub const ChartSeriesKind = chart.ChartSeriesKind;
 pub const ChartSeriesColor = chart.ChartSeriesColor;

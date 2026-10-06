@@ -1172,7 +1172,7 @@ Three composites for pipeline/run UIs — pure compositions of existing widgets 
 
 ## Charts
 
-`<chart>` is the data-visualization composite: `<series>` children bind model `[]const f32` iterables and draw through the vector path pipeline with token colors — charts retheme with the palette, repaint exactly when their data changes (value equality, not identity), and report series semantics to automation. Both engines lower it through `ui.chart`, so markup charts and Zig charts are pixel- and semantics-identical.
+`<chart>` is the data-visualization composite: `<series>` children bind model `[]const f32` iterables and draw through the vector path pipeline with token colors — charts retheme with the palette, repaint exactly when their data changes (value equality, not identity), and report series semantics to automation. The interpreted, native-compiled and scriptc-compiled markup paths preserve the same chart data, pixels and semantics as `ui.chart`.
 
 ```html
 <!-- Star-history: cumulative stars per repo. 10k-point series are fine —

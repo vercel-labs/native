@@ -1,0 +1,12 @@
+<column gap="8">
+  <chart width="480" height="120" x-labels="{labels}" y-labels="true" hover-details="true" grid-lines="3" baseline="true" stroke-width="2.5" key="samples">
+    <series kind="area" values="{samples}" label="trace" color="info"/>
+    <series kind="bar" values="{samples}" label="bars" color="warning"/>
+  </chart>
+  <chart width="480" height="120" x-labels="{labels}" y-min="-100" y-max="100" y-labels="true" hover-details="true" grid-lines="3" baseline="true" key="dense">
+    <series values="{dense}"/>
+  </chart>
+  <chart width="480" height="80" label="Authored summary" key="named">
+    <series values="{samples}" label="trace"/>
+  </chart>
+</column>

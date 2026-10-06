@@ -437,6 +437,7 @@ pub fn Ui(comptime Msg: type) type {
         /// extensions retain the reference when the corresponding owner is absent.
         composition_policy: ?composition_recipes.Policy = null,
         code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
+        chart_content_policy: ?canvas.ChartContentPolicy.Policy = null,
         construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
@@ -2989,6 +2990,24 @@ pub fn Ui(comptime Msg: type) type {
                 .style = .{ .stroke_width = options.stroke_width },
                 .semantics = options.semantics,
             }, .{});
+            if (self.chart_content_policy) |policy| {
+                const prepared = canvas.ChartContentPolicy.prepare(self.arena, policy, series) catch {
+                    self.failed = true;
+                    return node;
+                };
+                node.widget.chart = .{
+                    .series = prepared.series,
+                    .y_min = options.y_min,
+                    .y_max = options.y_max,
+                    .grid_lines = options.grid_lines,
+                    .baseline = options.baseline,
+                    .x_labels = if (prepared.downsampled) &.{} else options.x_labels,
+                    .y_labels = options.y_labels,
+                    .hover_details = options.hover_details,
+                };
+                if (node.widget.semantics.label.len == 0) node.widget.semantics.label = prepared.summary;
+                return node;
+            }
             const stored = self.arena.alloc(canvas.ChartSeries, series.len) catch {
                 self.failed = true;
                 return node;

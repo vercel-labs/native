@@ -47,7 +47,24 @@ const SpanRecord = struct {
     underline: bool = false,
 };
 
+const ChartSeriesRecord = struct {
+    kind: enum { line, bar },
+    values: []const u32,
+    color: sdk.canvas.ChartSeriesColor,
+    fill: bool,
+    label: ByteText,
+};
+
 const Record = struct {
+    chartSeries: ?[]const ChartSeriesRecord = null,
+    chartXLabels: ?[]const ByteText = null,
+    chartYMin: ?u32 = null,
+    chartYMax: ?u32 = null,
+    chartGridLines: ?u8 = null,
+    chartBaseline: ?bool = null,
+    chartYLabels: ?bool = null,
+    chartHoverDetails: ?bool = null,
+    chartStrokeWidth: ?u32 = null,
     videoSrc: ?[]const u8 = null,
     videoControls: bool = false,
     videoAutoplay: bool = true,
@@ -58,7 +75,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -244,6 +261,7 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
         ui.construction_policy = core.nativeWindowPolicy;
         ui.composition_policy = core.nativeWindowPolicy;
         ui.code_content_policy = core.nativeWindowPolicy;
+        ui.chart_content_policy = core.nativeWindowPolicy;
     }
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
@@ -288,6 +306,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
+    const chart_metadata = value.chartSeries != null or value.chartXLabels != null or value.chartYMin != null or value.chartYMax != null or value.chartGridLines != null or value.chartBaseline != null or value.chartYLabels != null or value.chartHoverDetails != null or value.chartStrokeWidth != null;
+    if (chart_metadata and value.kind != .chart) return error.InvalidView;
+    if (value.kind == .chart and (value.chartSeries == null or value.chartXLabels == null or value.chartSeries.?.len == 0 or value.chartSeries.?.len > 64 or value.text.len != 0 or value.textBytes != null or value.role != .none or value.focusable or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or value.contextMenu.len != 0)) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
     const container = value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel or value.kind == .list_item) and value.role == .treeitem;
@@ -422,6 +443,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         slot.* = .{ .label = item.label, .msg = if (item.press) |bytes| try event(ui, bytes) else null, .enabled = item.enabled, .separator = item.separator };
     }
     var result = ui.el(kind, .{
+        .style = .{ .stroke_width = if (value.chartStrokeWidth) |bits| @as(f32, @bitCast(bits)) else null },
         .context_menu = context_menu,
         .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
@@ -554,6 +576,28 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
             result.widget.runtime_flags.compiled_scroll_policy = true;
             result.widget.interaction_policy = if (value.role == .tree) scrollTreePolicy else core.nativeScrollPolicy;
         }
+    }
+    if (value.kind == .chart) {
+        const raw_series = value.chartSeries.?;
+        const series = try ui.arena.alloc(sdk.canvas.ChartSeries, raw_series.len);
+        for (raw_series, series) |raw, *entry| {
+            if (raw.values.len > sdk.canvas.max_chart_points_per_series or raw.fill and raw.kind != .line) return error.InvalidView;
+            const values = try ui.arena.alloc(f32, raw.values.len);
+            for (raw.values, values) |bits, *sample| sample.* = @bitCast(bits);
+            entry.* = .{ .kind = if (raw.kind == .bar) .bar else .line, .values = values, .color = raw.color, .fill = raw.fill, .label = raw.label.bytes };
+        }
+        const labels = try ui.arena.alloc([]const u8, value.chartXLabels.?.len);
+        for (value.chartXLabels.?, labels) |raw, *label| label.* = raw.bytes;
+        result.widget.chart = .{
+            .series = series,
+            .x_labels = labels,
+            .y_min = if (value.chartYMin) |bits| @as(f32, @bitCast(bits)) else null,
+            .y_max = if (value.chartYMax) |bits| @as(f32, @bitCast(bits)) else null,
+            .grid_lines = value.chartGridLines orelse 0,
+            .baseline = value.chartBaseline orelse false,
+            .y_labels = value.chartYLabels orelse false,
+            .hover_details = value.chartHoverDetails orelse false,
+        };
     }
     if (value.spans) |runs| {
         // Rebase every run into one native-owned paragraph buffer. No pointer
@@ -1287,4 +1331,35 @@ test "compiled grouped input refuses orphan actions invalid order and excess chi
             ,
         }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
     } else return error.SkipZigTest;
+}
+
+test "compiled app chart rejects misplaced metadata unbounded samples and invalid series records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "\"chartSeries\":[]",     "\"chartXLabels\":[]",     "\"chartYMin\":0",        "\"chartYMax\":0",
+        "\"chartGridLines\":0",   "\"chartBaseline\":false", "\"chartYLabels\":false", "\"chartHoverDetails\":false",
+        "\"chartStrokeWidth\":0",
+    }) |fields| {
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"column\",\"text\":\"\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    for ([_][]const u8{
+        "\"chartSeries\":[],\"chartXLabels\":[]",
+        "\"chartSeries\":[{\"kind\":\"band\",\"values\":[],\"color\":\"accent\",\"fill\":false,\"label\":[]}],\"chartXLabels\":[]",
+        "\"chartSeries\":[{\"kind\":\"bar\",\"values\":[null],\"color\":\"accent\",\"fill\":false,\"label\":[]}],\"chartXLabels\":[]",
+        "\"chartSeries\":[{\"kind\":\"bar\",\"values\":[4294967296],\"color\":\"accent\",\"fill\":false,\"label\":[]}],\"chartXLabels\":[]",
+        "\"chartSeries\":[{\"kind\":\"bar\",\"values\":[],\"color\":\"accent\",\"fill\":true,\"label\":[]}],\"chartXLabels\":[]",
+        "\"chartSeries\":[{\"kind\":\"line\",\"values\":[],\"color\":\"accent\",\"fill\":false,\"label\":[256]}],\"chartXLabels\":[]",
+    }) |fields| {
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"chart\",\"text\":\"\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    const values = try arena.allocator().alloc(u8, 2 * 257 - 1);
+    for (values, 0..) |*byte, i| byte.* = if (i % 2 == 0) '0' else ',';
+    var ui = Ui.init(arena.allocator());
+    const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"chart\",\"text\":\"\",\"chartSeries\":[{{\"kind\":\"line\",\"values\":[{s}],\"color\":\"accent\",\"fill\":false,\"label\":[]}}],\"chartXLabels\":[]}}]}}", .{values});
+    try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
 }

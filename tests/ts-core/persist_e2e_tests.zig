@@ -10,6 +10,7 @@ test {
     _ = @import("component_construction_e2e_tests.zig");
     _ = @import("component_composition_e2e_tests.zig");
     _ = @import("code_content_e2e_tests.zig");
+    _ = @import("chart_content_e2e_tests.zig");
     _ = @import("widget_motion_e2e_tests.zig");
 }
 

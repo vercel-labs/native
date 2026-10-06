@@ -1392,7 +1392,17 @@ pub fn build(b: *std.Build) void {
         // no build inputs/outputs to hash, so always run it.
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        b.step("test-ts-chart-content", "Compare complete compiled chart preparation with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-chart-content-tests", &.{"compiled chart content"})).step);
         b.step("test-ts-code-content", "Compare complete compiled code spans and carried state with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-code-content-tests", &.{"compiled code content"})).step);
+        const chart_app_run = b.addRunArtifact(ts_core_artifacts.chart_app);
+        const chart_view_run = b.addRunArtifact(ts_core_artifacts.chart_view);
+        const chart_step = b.step("test-ts-chart-app", "Verify generated chart views and copied data ownership");
+        chart_step.dependOn(&chart_app_run.step);
+        chart_step.dependOn(&chart_view_run.step);
+        ts_core_e2e_step.dependOn(&chart_app_run.step);
+        test_step.dependOn(&chart_app_run.step);
+        ts_core_e2e_step.dependOn(&chart_view_run.step);
+        test_step.dependOn(&chart_view_run.step);
         const code_app_run = b.addRunArtifact(ts_core_artifacts.code_app);
         const code_view_run = b.addRunArtifact(ts_core_artifacts.code_view);
         const code_app_step = b.step("test-ts-code-app", "Verify complete generated code views and owned typed input");
@@ -4161,6 +4171,8 @@ const TsCoreE2eArtifacts = struct {
     composition_app: *std.Build.Step.Compile,
     code_app: *std.Build.Step.Compile,
     code_view: *std.Build.Step.Compile,
+    chart_app: *std.Build.Step.Compile,
+    chart_view: *std.Build.Step.Compile,
     /// The markup battery is its own binary: the compiled-core symbol
     /// set is a fixed-prefix C ABI, so one process carries ONE archive
     /// — every fixture battery links exactly its own core.
@@ -4350,6 +4362,23 @@ fn tsCoreE2eArtifact(
     code_decoder.addImport("native_sdk", desktop_mod);
     code_decoder.addImport("core.zig", code_fixture.module);
     code_app_mod.addImport("code_decoder", code_decoder);
+    const chart_src = b.addWriteFiles();
+    _ = chart_src.addCopyFile(b.path("tests/ts-core/chart_fixture.ts"), "chart_fixture.ts");
+    const chart_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/chart_fixture.ts",
+        .src_dir = chart_src.getDirectory(),
+        .name = "chart_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/chart_fixture.native",
+    });
+    const chart_app_mod = module(b, target, optimize, "tests/ts-core/chart_app_e2e_tests.zig");
+    chart_app_mod.addImport("native_sdk", desktop_mod);
+    chart_app_mod.addImport("chart_core", chart_fixture.module);
+    const chart_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    chart_decoder.addImport("native_sdk", desktop_mod);
+    chart_decoder.addImport("core.zig", chart_fixture.module);
+    chart_app_mod.addImport("chart_decoder", chart_decoder);
     const lifecycle_reference_files = b.addWriteFiles();
     persist_mod.addImport("lifecycle_policy_reference", b.createModule(.{
         .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/lifecycle_policy_test_reference.zig"), "lifecycle_policy_reference.zig"),
@@ -4934,6 +4963,8 @@ fn tsCoreE2eArtifact(
         .construction = filteredTestArtifact(b, persist_mod, "ts-construction-e2e-tests", &.{"compiled construction"}),
         .composition_view = filteredTestArtifact(b, composition_decoder_mod, "ts-composition-view-tests", &.{"compiled grouped input"}),
         .composition_app = filteredTestArtifact(b, composition_app_mod, "ts-composition-app-tests", &.{"compiled app composition"}),
+        .chart_app = filteredTestArtifact(b, chart_app_mod, "ts-chart-app-tests", &.{"compiled app chart"}),
+        .chart_view = filteredTestArtifact(b, chart_decoder, "ts-chart-view-tests", &.{"compiled app chart"}),
         .code_app = filteredTestArtifact(b, code_app_mod, "ts-code-app-tests", &.{"compiled app code"}),
         .code_view = filteredTestArtifact(b, code_decoder, "ts-code-view-tests", &.{"compiled app code"}),
         .composition = filteredTestArtifact(b, persist_mod, "ts-composition-e2e-tests", &.{"compiled composition"}),
