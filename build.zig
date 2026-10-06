@@ -1328,6 +1328,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        b.step("test-ts-component-policy", "Compare compiled component coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-replay-policy", "Compare compiled replay admission with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
@@ -2420,6 +2421,20 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
+    addTestStep(b, "test-component-consumers", "Verify menu pins recovery fallback and virtual-scroll consumers", filteredTestArtifact(b, desktop_mod, "component-consumer-tests", &.{
+        "runtime.ui_app_tests.test.a declared context menu presents",
+        "runtime.ui_app_tests.test.ui app dispatches native context menu",
+        "runtime.ui_app_tests.test.a rebuild while the native menu",
+        "runtime.ui_app_tests.test.context menu selection dispatches",
+        "runtime.ui_app_tests.test.any superseding presentation",
+        "runtime.ui_app_tests.test.rebuilds under an open menu",
+        "runtime.ui_app_tests.test.a failing rebuild routed",
+        "runtime.ui_app_tests.test.dismissing the menu after",
+        "runtime.ui_app_tests.test.a selection whose update",
+        "runtime.ui_app_tests.test.a menu presented while",
+        "runtime.ui_app_tests.test.windowed virtual list scrolls",
+        "runtime.ui_app_tests.test.component coordination",
+    }));
     addTestStep(b, "test-ts-capability-records", "Verify complete TypeScript capability records and ownership", filteredTestArtifact(b, desktop_mod, "ts-capability-record-tests", &.{
         "named effect host applies policy admission slots cancellation routes and dropped terminal retirement",
         "runtime.ts_core_host.test.PTY name bindings",

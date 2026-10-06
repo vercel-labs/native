@@ -222,6 +222,7 @@ pub const SessionHeader = runtime_session_journal.Header;
 pub const sessionHeaderNow = runtime_session_record.headerNow;
 pub const sessionPlatformName = runtime_session_replay.currentPlatformName;
 pub const replay_policy = @import("replay_policy.zig");
+pub const component_policy = @import("component_policy.zig");
 pub const replaySession = runtime_session_replay.replaySession;
 pub const ReplayOptions = runtime_session_replay.ReplayOptions;
 pub const ReplayReport = runtime_session_replay.ReplayReport;

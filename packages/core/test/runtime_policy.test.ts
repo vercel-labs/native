@@ -1002,3 +1002,45 @@ test("replay sequencing preserves refusal precedence and one-drain back-pressure
   assert.equal(plan(5,0),0);assert.equal(plan(5,1),10);assert.equal(plan(6,1),5);
   assert.throws(() => plan(0,2)); assert.throws(() => plan(7,0));
 });
+
+function componentPacket(stage: number, a = false, b = false, c = false, x = 0n, y = 0n): Uint8Array {
+  const bytes = new Uint8Array(32); bytes.set([22, stage, +a, +b, +c]);
+  const view = new DataView(bytes.buffer); view.setBigUint64(8, x, true); view.setBigUint64(16, y, true); return bytes;
+}
+test("component menu plans preserve exact counts, pinned arenas, recovery and source precedence", () => {
+  const words = [0n, 1n, 0xffffffffn, 0x100000000n, 9007199254740993n, 0xffffffffffffffffn];
+  for (const x of words) for (const y of words) {
+    const result = native_effect_policy(componentPacket(0, false, false, false, x, y));
+    assert.equal(new DataView(result.buffer).getBigUint64(8, true), x < y ? x : y);
+    assert.deepEqual([...result.subarray(0, 8)], Array(8).fill(0));
+  }
+  for (let bits = 0; bits < 8; bits++) {
+    const a = (bits & 1) !== 0, b = (bits & 2) !== 0, c = (bits & 4) !== 0;
+    const expected = [0, a ? 1 : b ? 2 : 0, +(a && b && c), +(a && b && c), +(a && b), +(a && (b || c)), +a | (+(b && c) << 1), a && b ? 1 : 2, +a, +(a && b), +(a && b && c), +(a && b && c), a ? 1 : 2, +(a && !b), +a, +(!a && b && c)];
+    for (let stage = 1; stage < 16; stage++) assert.deepEqual([...native_effect_policy(componentPacket(stage, a, b, c, 1n))], [expected[stage], ...Array(15).fill(0)]);
+  }
+});
+function reachPacket(start: boolean, present: boolean, values: number[], vFired = false, hFired = false): Uint8Array {
+  const bytes = new Uint8Array(32); bytes.set([23, +start, +present, +vFired, +hFired]);
+  const view = new DataView(bytes.buffer); for (let i = 0; i < 6; i++) view.setFloat32(8 + i * 4, values[i]!, true); return bytes;
+}
+test("scroll reach plans retain vertical priority, horizontal fallback and exact f32 bands", () => {
+  for (const start of [false, true]) {
+    const axis = (distance: number): number[] => [start ? distance : Math.fround(400 - 100 - distance), 100, 400, 0, 100, 400];
+    for (const [distance, expected] of [[100, 2], [100.00003051757812, 0], [150, 0], [150.00001525878906, 1], [0, 2]]) {
+      assert.deepEqual([...native_effect_policy(reachPacket(start, true, axis(distance)))], [0, expected, 0, 0, 0, 0, 0, 0]);
+      assert.equal(native_effect_policy(reachPacket(start, true, axis(distance), true))[1], expected === 2 ? 0 : expected);
+    }
+    assert.deepEqual([...native_effect_policy(reachPacket(start, true, [0, 0, 0, start ? 0 : 300, 100, 400]))], [1, 2, 0, 0, 0, 0, 0, 0]);
+    assert.equal(native_effect_policy(reachPacket(start, false, [0, 100, 400, 0, 100, 400]))[1], 0);
+  }
+});
+test("component packets reject malformed headers and preserve borrowed and copied ABI buffers", () => {
+  for (const operation of [22, 23]) {
+    const input = operation === 22 ? componentPacket(6, true, true, true) : reachPacket(true, true, [0, 100, 400, 0, 0, 0]);
+    const frozen = input.slice(), result = native_effect_policy(input), owned = result.slice();
+    native_effect_policy(componentPacket(0)); assert.deepEqual(input, frozen); assert.deepEqual(result, owned);
+    for (let length = 0; length < 32; length++) assert.throws(() => native_effect_policy(input.subarray(0, length)));
+    for (const at of [2, 3, 4, 5, 6, 7]) { const invalid = input.slice(); invalid[at] = 2; assert.throws(() => native_effect_policy(invalid)); }
+  }
+});

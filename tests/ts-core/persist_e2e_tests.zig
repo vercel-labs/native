@@ -806,3 +806,50 @@ test "compiled replay sequencing preserves complete header queue and verificatio
         };
     }
 }
+
+fn compareComponent(request: []const u8, expected: []const u8) !void {
+    const frozen = try std.testing.allocator.dupe(u8, request);
+    defer std.testing.allocator.free(frozen);
+    var actual: [16]u8 = undefined;
+    try std.testing.expectEqual(expected.len, core.nativeEffectPolicy(request, &actual));
+    try std.testing.expectEqualSlices(u8, expected, actual[0..expected.len]);
+    try std.testing.expectEqualSlices(u8, frozen, request);
+    const copied = actual;
+    var other: [16]u8 = undefined;
+    _ = core.nativeEffectPolicy(&.{ 19, 0, 0, 0, 0, 0 }, &other);
+    try std.testing.expectEqualSlices(u8, copied[0..expected.len], actual[0..expected.len]);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, copied[0..expected.len], actual[0..expected.len]);
+}
+
+test "compiled component coordination preserves exact menu counts arenas recovery and scheduling" {
+    const policy = native_sdk.runtime.component_policy;
+    const words = [_]u64{ 0, 1, 0xffff_ffff, 0x1_0000_0000, 9_007_199_254_740_993, std.math.maxInt(u64) };
+    for (0..16) |stage| for (0..8) |bits| for (words) |x| for (words) |y| {
+        const a = bits & 1 != 0;
+        const b = bits & 2 != 0;
+        const c = bits & 4 != 0;
+        const input = policy.request(@enumFromInt(stage), a, b, c, x, y);
+        const expected = policy.reference(@enumFromInt(stage), a, b, c, x, y);
+        try compareComponent(&input, &expected);
+        const plan = policy.plan(core.nativeEffectPolicy, @enumFromInt(stage), a, b, c, x, y);
+        try std.testing.expectEqualSlices(u8, &expected, &plan);
+    };
+}
+
+test "compiled reach hysteresis preserves complete f32 axis and latch decisions" {
+    const policy = native_sdk.runtime.component_policy;
+    const canvas = native_sdk.canvas;
+    const values = [_]f32{ -std.math.inf(f32), -100, -0.0, 0, 1, 99.99999, 100, 100.00001, 149.99998, 150, 150.00002, 300, 400, std.math.floatMax(f32), std.math.inf(f32), std.math.nan(f32) };
+    for (0..2) |start| for (0..2) |present| for (0..4) |fired| for (0..3) |mode| for (values) |offset| for (values) |viewport| {
+        const scroll: canvas.ScrollState = .{ .offset_y = offset, .viewport_extent_y = viewport, .content_extent_y = if (mode == 0) 400 else 0, .offset_x = offset, .viewport_extent_x = if (mode == 2) viewport else 100, .content_extent_x = 400 };
+        const vf = fired & 1 != 0;
+        const hf = fired & 2 != 0;
+        const expected = policy.reachReference(start != 0, present != 0, scroll, vf, hf);
+        const input = policy.reachRequest(start != 0, present != 0, scroll, vf, hf);
+        const bytes = [_]u8{ @intFromBool(expected.horizontal), @intFromEnum(expected.action), 0, 0, 0, 0, 0, 0 };
+        try compareComponent(&input, &bytes);
+        const actual = policy.reach(core.nativeEffectPolicy, start != 0, present != 0, scroll, vf, hf);
+        try std.testing.expectEqual(expected, actual);
+    };
+}

@@ -42,6 +42,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_events = @import("canvas_widget_events.zig");
 const drag_policy = @import("canvas_drag_policy.zig");
 const dispatch_policy = @import("app_dispatch_policy.zig");
+const component_policy = @import("component_policy.zig");
 const hover_policy = @import("canvas_hover_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
@@ -490,6 +491,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// queue boundaries, errors and capability execution; plans copy.
             replay_policy: ?*const fn ([]const u8, []u8) usize = null,
             app_dispatch_policy: dispatch_policy.Policy = null,
+            /// Portable context-menu and scroll coordination; native owns pins and latches.
+            component_policy: component_policy.Policy = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2265,7 +2268,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // The fallback menu's target vanished from this build (the
             // model dropped the row, or its menu emptied): the open state
             // has nothing to present, so it closes.
-            if (self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0 and tree.context_menu_fallback == null) {
+            if (self.componentDecision(.fallback_vanished, self.contextMenuFallbackTargetForLabel(self.options.canvas_label) != 0, tree.context_menu_fallback != null, false) != 0) {
                 self.clearContextMenuFallback();
             }
             try self.scheduleAnimations(runtime, window_id);
@@ -2808,25 +2811,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             axis: canvas.ScrollAxis = .vertical,
         };
 
-        const ReachAxis = struct {
-            state: canvas.ScrollAxisState,
-            axis: canvas.ScrollAxis,
-        };
-
-        /// The axis reach-end/reach-start measure: the vertical axis
-        /// wherever it has scrollable range (every pre-axis region, so
-        /// existing apps see identical behavior), otherwise the
-        /// horizontal one — a horizontal timeline's `on-reach-end` is
-        /// its right edge. One rule for both signals so "the end" and
-        /// "the start" always name the same axis.
-        fn reachAxisState(scroll_state: canvas.ScrollState) ReachAxis {
-            const vertical = scroll_state.axis(.vertical);
-            if (vertical.maxOffset() > 0) return .{ .state = vertical, .axis = .vertical };
-            const horizontal = scroll_state.axis(.horizontal);
-            if (horizontal.maxOffset() > 0) return .{ .state = horizontal, .axis = .horizontal };
-            return .{ .state = vertical, .axis = .vertical };
-        }
-
         /// Approach-end hysteresis (`on_reach_end`): fire when a scroll
         /// lands within `reach_end_fire_ratio` viewports of the content
         /// end and the region is armed; re-arm once the offset sits more
@@ -2834,22 +2818,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// appending a batch causes on its own, since the extent grows
         /// under the unchanged offset. One Msg per approach, never a
         /// fetch storm from a user riding the end of the list.
-        fn reachEndShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            const reach = reachAxisState(scroll_state);
-            const axis_state = reach.state;
-            if (id == 0 or axis_state.viewport_extent <= 0) return false;
-            const remaining = axis_state.content_extent - axis_state.viewport_extent - axis_state.offset;
-            if (remaining > axis_state.viewport_extent * reach_end_rearm_ratio) {
-                self.clearReachEndFired(id, reach.axis);
-                return false;
+        fn applyReachPlan(self: *Self, start: bool, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
+            const vertical_fired = if (start) self.reachStartFired(id, .vertical) else self.reachEndFired(id, .vertical);
+            const horizontal_fired = if (start) self.reachStartFired(id, .horizontal) else self.reachEndFired(id, .horizontal);
+            const plan = component_policy.reach(self.options.component_policy, start, id != 0, scroll_state, vertical_fired, horizontal_fired);
+            const axis: canvas.ScrollAxis = if (plan.horizontal) .horizontal else .vertical;
+            switch (plan.action) {
+                .none => return false,
+                .clear => {
+                    if (start) self.clearReachStartFired(id, axis) else self.clearReachEndFired(id, axis);
+                    return false;
+                },
+                // Dispatch only after a native latch slot was actually stored.
+                .store => return if (start) self.markReachStartFired(id, axis) else self.markReachEndFired(id, axis),
             }
-            if (remaining > axis_state.viewport_extent * reach_end_fire_ratio) return false;
-            if (self.reachEndFired(id, reach.axis)) return false;
-            // Fire only when the latch STORES: an unstorable latch
-            // (table full — a degenerate tree) would otherwise fire on
-            // every observation, the exact storm the hysteresis exists
-            // to prevent. Silence is the safer failure.
-            return self.markReachEndFired(id, reach.axis);
+        }
+
+        fn reachEndShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
+            return self.applyReachPlan(false, id, scroll_state);
         }
 
         fn reachEndFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
@@ -2886,18 +2872,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// only moves on scroll OBSERVATIONS, so a programmatic jump out
         /// of the band re-arms on the next user scroll, not instantly.
         fn reachStartShouldFire(self: *Self, id: canvas.ObjectId, scroll_state: canvas.ScrollState) bool {
-            const reach = reachAxisState(scroll_state);
-            const axis_state = reach.state;
-            if (id == 0 or axis_state.viewport_extent <= 0) return false;
-            const remaining = axis_state.offset;
-            if (remaining > axis_state.viewport_extent * reach_start_rearm_ratio) {
-                self.clearReachStartFired(id, reach.axis);
-                return false;
-            }
-            if (remaining > axis_state.viewport_extent * reach_start_fire_ratio) return false;
-            if (self.reachStartFired(id, reach.axis)) return false;
-            // Fire only when the latch stores (the reach-end rule).
-            return self.markReachStartFired(id, reach.axis);
+            return self.applyReachPlan(true, id, scroll_state);
         }
 
         fn reachStartFired(self: *const Self, id: canvas.ObjectId, axis: canvas.ScrollAxis) bool {
@@ -3288,7 +3263,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 runtime.recordDispatchError("hover_leave_capture", refresh_err);
             }
             // Same close-on-vanish rule as the main canvas rebuild.
-            if (self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0 and tree.context_menu_fallback == null) {
+            if (self.componentDecision(.fallback_vanished, self.contextMenuFallbackTargetForLabel(slot.canvasLabel()) != 0, tree.context_menu_fallback != null, false) != 0) {
                 self.clearContextMenuFallback();
             }
             // Reconcile the video declaration THIS build recorded or
@@ -5995,14 +5970,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // on_dismiss (its open state lives here, not in the model):
             // close the state and rebuild, agreeing with the engine's
             // optimistic hide.
-            if (self.context_menu_fallback_target != 0) {
-                if (tree.context_menu_fallback) |fallback| {
-                    if (fallback.surface_id == dismiss_event.id) {
-                        self.clearContextMenuFallback();
-                        try self.rebuildAllViews(runtime);
-                        return;
-                    }
-                }
+            const fallback = tree.context_menu_fallback;
+            const matches = if (fallback) |value| value.surface_id == dismiss_event.id else false;
+            if (self.componentDecision(.fallback_dismiss, self.context_menu_fallback_target != 0, fallback != null, matches) != 0) {
+                self.clearContextMenuFallback();
+                try self.rebuildAllViews(runtime);
+                return;
             }
             if (tree.msgForDismiss(dismiss_event.id)) |msg| {
                 try self.dispatch(runtime, dismiss_event.window_id, msg);
@@ -6428,10 +6401,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     rebuilt = true;
                 }
             }
-            if (!rebuilt and self.installed and
-                std.mem.eql(u8, scroll_event.view_label, self.options.canvas_label) and
-                self.isVirtualWindowId(scroll_event.id))
-            {
+            const rebuild_plan = component_policy.plan(self.options.component_policy, .scroll_rebuild, rebuilt, self.installed, std.mem.eql(u8, scroll_event.view_label, self.options.canvas_label), @intFromBool(self.isVirtualWindowId(scroll_event.id)), 0);
+            if (rebuild_plan[0] != 0) {
                 try self.rebuild(runtime, scroll_event.window_id);
             }
         }
@@ -6452,20 +6423,26 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // the tree first — silently arming nothing would leave the
             // presented menu's selection to fall through a null tree
             // and dispatch no message.
-            if (self.treeForViewLabel(shown_event.view_label) == null) try self.restoreMissingTree(runtime);
+            if (self.componentDecision(.missing_tree, self.treeForViewLabel(shown_event.view_label) == null, false, false) != 0) try self.restoreMissingTree(runtime);
             const tree = self.treeForViewLabel(shown_event.view_label) orelse return;
-            const count = @min(shown_event.item_count, self.context_menu_shown_msgs.len);
+            const count_plan = component_policy.plan(self.options.component_policy, .shown_count, false, false, false, shown_event.item_count, self.context_menu_shown_msgs.len);
+            const count: usize = @intCast(std.mem.readInt(u64, count_plan[8..16], .little));
             for (0..count) |item_index| {
                 self.context_menu_shown_msgs[item_index] = tree.msgForContextMenu(shown_event.target_id, item_index);
             }
             self.context_menu_shown_token = shown_event.token;
             self.context_menu_shown_count = count;
-            self.context_menu_pin = if (std.mem.eql(u8, shown_event.view_label, self.options.canvas_label))
-                .{ .window_id = null, .arena_index = self.arena_index }
-            else if (self.windowSlotByCanvasLabel(shown_event.view_label)) |slot|
-                .{ .window_id = slot.window_id, .arena_index = slot.arena_index }
-            else
-                null;
+            const slot = self.windowSlotByCanvasLabel(shown_event.view_label);
+            const owner = self.componentDecision(.pin_owner, std.mem.eql(u8, shown_event.view_label, self.options.canvas_label), slot != null, false);
+            self.context_menu_pin = switch (owner) {
+                1 => .{ .window_id = null, .arena_index = self.arena_index },
+                2 => .{ .window_id = slot.?.window_id, .arena_index = slot.?.arena_index },
+                else => null,
+            };
+        }
+
+        fn componentDecision(self: *const Self, stage: component_policy.Stage, a: bool, b: bool, c: bool) u8 {
+            return component_policy.plan(self.options.component_policy, stage, a, b, c, 0, 0)[0];
         }
 
         /// The arena index this canvas's next rebuild must use:
@@ -6479,13 +6456,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// therefore bounded at two trees, however many rebuilds occur.
         fn contextMenuRebuildIndex(self: *const Self, window_id: ?platform.WindowId, current_index: usize) usize {
             const natural = current_index ^ 1;
-            const pin = self.context_menu_pin orelse return natural;
-            if (pin.arena_index != natural) return natural;
-            const matches = if (pin.window_id) |pin_window|
-                (window_id orelse return natural) == pin_window
-            else
-                window_id == null;
-            return if (matches) natural ^ 1 else natural;
+            const pin = self.context_menu_pin;
+            const matches = if (pin) |value| value.window_id == window_id else false;
+            const pinned = if (pin) |value| value.arena_index == natural else false;
+            return natural ^ self.componentDecision(.rebuild_arena, pin != null, pinned, matches);
         }
 
         /// Window teardown for the pin's owner: the slot's arenas are
@@ -6494,9 +6468,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// a stale pin would otherwise keep steering the reused slot's
         /// rebuild cadence around a generation that no longer exists.
         fn releaseContextMenuSnapshotForWindow(self: *Self, window_id: platform.WindowId) void {
-            const pin = self.context_menu_pin orelse return;
-            const pin_window = pin.window_id orelse return;
-            if (pin_window == window_id) self.releaseContextMenuSnapshot();
+            const pin = self.context_menu_pin;
+            const has_window = if (pin) |value| value.window_id != null else false;
+            const matches = if (pin) |value| value.window_id == window_id else false;
+            if (self.componentDecision(.release_window, pin != null, has_window, matches) != 0) self.releaseContextMenuSnapshot();
         }
 
         /// Disarm the presented-menu snapshot and release the pinned
@@ -6514,7 +6489,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// token's notice is ignored (a superseding presentation
         /// already replaced the snapshot and the pin).
         fn handleContextMenuDismissed(self: *Self, runtime: *Runtime, dismissed_event: core.CanvasWidgetContextMenuDismissedEvent) anyerror!void {
-            if (dismissed_event.token == 0 or dismissed_event.token != self.context_menu_shown_token) return;
+            if (self.componentDecision(.dismiss_token, dismissed_event.token != 0, dismissed_event.token == self.context_menu_shown_token, false) == 0) return;
             self.releaseContextMenuSnapshot();
             try self.restoreMissingTree(runtime);
         }
@@ -6528,12 +6503,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// no-ops until an unrelated resize, timer, or effect happens
         /// to rebuild.
         fn restoreMissingTree(self: *Self, runtime: *Runtime) anyerror!void {
-            if (!self.installed) return;
-            var missing = self.tree == null;
+            var secondary_missing = false;
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
-                if (slot.installed and slot.tree == null) missing = true;
+                if (slot.installed and slot.tree == null) secondary_missing = true;
             }
-            if (missing) try self.rebuildAllViews(runtime);
+            if (self.componentDecision(.restore_tree, self.installed, self.tree == null, secondary_missing) != 0) try self.rebuildAllViews(runtime);
         }
 
         /// A native context-menu selection: resolve the selected item's
@@ -6546,32 +6520,30 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // A selection on this menu closes it whatever the source: an
             // automation-invoked selection while the fallback surface is
             // open must not leave the surface mounted.
-            if (self.context_menu_fallback_target == menu_event.target_id) {
-                self.clearContextMenuFallback();
-            }
-            if (menu_event.token != 0 and menu_event.token == self.context_menu_shown_token) {
+            const begin = self.componentDecision(.selection_begin, self.context_menu_fallback_target == menu_event.target_id, menu_event.token != 0, menu_event.token == self.context_menu_shown_token);
+            if (begin & 1 != 0) self.clearContextMenuFallback();
+            if (begin & 2 != 0) {
                 const count = self.context_menu_shown_count;
                 // The request is consumed on every path out of this
                 // block — resolved, out-of-range, or a failed dispatch.
                 defer self.releaseContextMenuSnapshot();
-                if (menu_event.item_index < count) {
-                    if (self.context_menu_shown_msgs[menu_event.item_index]) |msg| {
-                        // The Msg is stored by value and its pinned-arena
-                        // payload slices are consumed by `update` itself;
-                        // the rebuild that follows reads only the model.
-                        // Release the pin BEFORE the dispatch: nothing
-                        // resets the pinned arena until the rebuild, and
-                        // the rebuild then routes into the partner arena
-                        // naturally — so a Msg whose update pushes the
-                        // model past a build budget fails the rebuild
-                        // WITHOUT resetting the live arena underneath it.
-                        // Input keeps working on the previous tree, and
-                        // the app's controls can recover the model —
-                        // production's degraded-error contract.
-                        self.releaseContextMenuSnapshot();
-                        try self.dispatch(runtime, menu_event.window_id, msg);
-                        return;
-                    }
+                const msg = if (menu_event.item_index < count) self.context_menu_shown_msgs[menu_event.item_index] else null;
+                if (self.componentDecision(.selection_item, menu_event.item_index < count, msg != null, false) == 1) {
+                    // The Msg is stored by value and its pinned-arena
+                    // payload slices are consumed by `update` itself;
+                    // the rebuild that follows reads only the model.
+                    // Release the pin BEFORE the dispatch: nothing
+                    // resets the pinned arena until the rebuild, and
+                    // the rebuild then routes into the partner arena
+                    // naturally — so a Msg whose update pushes the
+                    // model past a build budget fails the rebuild
+                    // WITHOUT resetting the live arena underneath it.
+                    // Input keeps working on the previous tree, and
+                    // the app's controls can recover the model —
+                    // production's degraded-error contract.
+                    self.releaseContextMenuSnapshot();
+                    try self.dispatch(runtime, menu_event.window_id, msg.?);
+                    return;
                 }
                 // Swallowed without a Msg (out of range, or an item the
                 // presented tree never mapped): no dispatch rebuilds, so
@@ -6584,7 +6556,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // failed while the model was unbuildable): the model may
             // have recovered since, so restore a dropped tree before
             // resolving rather than silently dispatching nothing.
-            if (self.treeForViewLabel(menu_event.view_label) == null) try self.restoreMissingTree(runtime);
+            if (self.componentDecision(.missing_tree, self.treeForViewLabel(menu_event.view_label) == null, false, false) != 0) try self.restoreMissingTree(runtime);
             const tree = self.treeForViewLabel(menu_event.view_label) orelse return;
             if (tree.msgForContextMenu(menu_event.target_id, menu_event.item_index)) |msg| {
                 try self.dispatch(runtime, menu_event.window_id, msg);
@@ -6614,9 +6586,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// being rebuilt, or 0 when the open fallback (if any) belongs to
         /// a different view.
         fn contextMenuFallbackTargetForLabel(self: *const Self, view_label: []const u8) canvas.ObjectId {
-            if (self.context_menu_fallback_target == 0) return 0;
-            if (!std.mem.eql(u8, view_label, self.contextMenuFallbackLabel())) return 0;
-            return self.context_menu_fallback_target;
+            return if (self.componentDecision(.fallback_label, self.context_menu_fallback_target != 0, std.mem.eql(u8, view_label, self.contextMenuFallbackLabel()), false) != 0) self.context_menu_fallback_target else 0;
         }
 
         fn clearContextMenuFallback(self: *Self) void {
@@ -6628,7 +6598,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// menu's open state lives here, not in the model, so opening and
         /// closing it re-derives the views directly.
         fn rebuildAllViews(self: *Self, runtime: *Runtime) anyerror!void {
-            if (!self.installed) return;
+            if (self.componentDecision(.rebuild_views, self.installed, false, false) == 0) return;
             try self.rebuild(runtime, self.canvas_window_id);
             try self.rebuildWindowSlots(runtime);
         }
@@ -6639,12 +6609,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// a native selection resolves. Returns true when the id was a
         /// fallback item (consumed either way).
         fn dispatchContextMenuFallbackItem(self: *Self, runtime: *Runtime, tree: *const Ui.Tree, window_id: platform.WindowId, id: canvas.ObjectId) anyerror!bool {
-            if (self.context_menu_fallback_target == 0) return false;
-            const fallback = tree.context_menu_fallback orelse return false;
-            const item_index = fallback.itemIndex(id) orelse return false;
+            const fallback = tree.context_menu_fallback;
+            const item_index = if (fallback) |value| value.itemIndex(id) else null;
+            if (self.componentDecision(.fallback_item, self.context_menu_fallback_target != 0, fallback != null, item_index != null) == 0) return false;
             self.clearContextMenuFallback();
-            if (tree.msgForContextMenu(fallback.target_id, item_index)) |msg| {
-                try self.dispatch(runtime, window_id, msg);
+            const msg = tree.msgForContextMenu(fallback.?.target_id, item_index.?);
+            if (self.componentDecision(.fallback_dispatch, msg != null, false, false) == 1) {
+                try self.dispatch(runtime, window_id, msg.?);
             } else {
                 try self.rebuildAllViews(runtime);
             }

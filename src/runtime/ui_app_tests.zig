@@ -780,6 +780,7 @@ test "a declared context menu presents as the anchored fallback surface on prese
     defer std.testing.allocator.destroy(app_state);
     app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -4665,6 +4666,7 @@ test "ui app dispatches native context menu selections as typed messages" {
         .view = taskView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -4775,6 +4777,7 @@ test "a rebuild while the native menu is open never redirects the visible select
         .view = reorderView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -4955,6 +4958,7 @@ test "context menu selection dispatches the original arena payload across rebuil
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -5142,6 +5146,7 @@ test "any superseding presentation or dispatch releases the app menu's snapshot 
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5235,6 +5240,7 @@ test "rebuilds under an open menu stay bounded at two trees" {
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5386,6 +5392,7 @@ test "a failing rebuild routed into the live arena under an open menu drops the 
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5471,6 +5478,7 @@ test "dismissing the menu after a failed pinned rebuild restores the dropped tre
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5545,6 +5553,7 @@ test "a selection whose update breaks the build budget keeps the live tree and i
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5641,6 +5650,7 @@ test "a menu presented while the tree is dropped still resolves once the model r
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -6287,6 +6297,7 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     defer std.testing.allocator.destroy(app_state);
     app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -8425,4 +8436,85 @@ test "dispatch coordination preserves main secondary failure ordering and indepe
         try std.testing.expect(try retainedTextExists(&harness.runtime, "Main 4"));
         try harness.stop(app);
     }
+}
+
+const component_reference = @import("component_policy.zig");
+const ComponentProbe = struct {
+    var calls: usize = 0;
+    var suppress_snapshot = false;
+    fn policy(packet: []const u8, output: []u8) usize {
+        calls += 1;
+        if (packet[0] == 22) {
+            const stage: component_reference.Stage = @enumFromInt(packet[1]);
+            var result = component_reference.reference(stage, packet[2] != 0, packet[3] != 0, packet[4] != 0, std.mem.readInt(u64, packet[8..16], .little), std.mem.readInt(u64, packet[16..24], .little));
+            if (suppress_snapshot and stage == .shown_count) @memset(result[8..], 0);
+            @memcpy(output[0..result.len], &result);
+            return result.len;
+        }
+        std.debug.assert(packet[0] == 23);
+        const scroll: canvas.ScrollState = .{
+            .offset_y = @bitCast(std.mem.readInt(u32, packet[8..12], .little)),
+            .viewport_extent_y = @bitCast(std.mem.readInt(u32, packet[12..16], .little)),
+            .content_extent_y = @bitCast(std.mem.readInt(u32, packet[16..20], .little)),
+            .offset_x = @bitCast(std.mem.readInt(u32, packet[20..24], .little)),
+            .viewport_extent_x = @bitCast(std.mem.readInt(u32, packet[24..28], .little)),
+            .content_extent_x = @bitCast(std.mem.readInt(u32, packet[28..32], .little)),
+        };
+        const result = component_reference.reachReference(packet[1] != 0, packet[2] != 0, scroll, packet[3] != 0, packet[4] != 0);
+        output[0..8].* = .{ @intFromBool(result.horizontal), @intFromEnum(result.action), 0, 0, 0, 0, 0, 0 };
+        return 8;
+    }
+};
+
+test "component coordination consumes callback counts before pinning and restores swallowed selection" {
+    ComponentProbe.calls = 0;
+    ComponentProbe.suppress_snapshot = true;
+    defer ComponentProbe.suppress_snapshot = false;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(TaskRowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
+    defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000, .nonblank = true } });
+    const id = findIn(app_state.tree.?.root, .list_item, "Task").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const frame = layout.findById(id).?.frame;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_down, .button = 1, .x = frame.x + 4, .y = frame.y + 4, .timestamp_ns = 2_000_000 } });
+    try std.testing.expectEqual(@as(usize, 0), app_state.context_menu_shown_count);
+    const token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{ .window_id = 1, .view_label = canvas_label, .token = token, .item_id = 1 } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
+    try std.testing.expect(app_state.context_menu_pin == null);
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(ComponentProbe.calls > 0);
+}
+
+test "component coordination preserves end latches and full-table silence" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(VirtualFeedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
+    defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000, .nonblank = true } });
+    const id = app_state.virtual_windows[0].id;
+    for (&app_state.reach_end_fired, 0..) |*slot, index| slot.* = .{ .id = @as(u64, @intCast(index)) + 5000, .axis = .vertical };
+    const before = app_state.model.fetches;
+    const scroll: canvas.ScrollState = .{ .offset_y = 300, .viewport_extent_y = 100, .content_extent_y = 400 };
+    for (0..3) |_| try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before, app_state.model.fetches);
+    app_state.reach_end_fired[0] = .{};
+    try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before + 1, app_state.model.fetches);
+    try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before + 1, app_state.model.fetches);
 }

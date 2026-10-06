@@ -472,7 +472,9 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 21) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 23) throw new Error("invalid effect policy request");
+  if (request[0] === 22) return componentCoordinationPolicy(request);
+  if (request[0] === 23) return scrollReachPolicy(request);
   if (request[0] === 21) return replayCoordinationPolicy(request);
   if (request[0] === 20) return sessionReplayPolicy(request);
   if (request[0] === 19) return appDispatchPolicy(request);
@@ -2881,5 +2883,53 @@ function replayCoordinationPolicy(request: Uint8Array): Uint8Array {
   else if (stage === 4) result[0] = a === 0 ? b === 1 ? 6 : 7 : a === 1 ? 8 : 9;
   else if (stage === 5) result[0] = a === 1 ? 10 : 0;
   else result[0] = a === 1 ? 5 : 0;
+  return result;
+}
+
+/** Operation 22: menu admission, arena selection, recovery and view scheduling.
+ * Identities are compared natively; counts cross as exact u64 word pairs.
+ */
+function componentCoordinationPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 32 || request[1]! > 15 || request[2]! > 1 || request[3]! > 1 || request[4]! > 1)
+    throw new Error("invalid component coordination request");
+  for (let i = 5; i < 8; i++) if (request[i] !== 0) throw new Error("invalid component reserved byte");
+  for (let i = 24; i < 32; i++) if (request[i] !== 0) throw new Error("invalid component reserved byte");
+  const stage = request[1]!, a = request[2] === 1, b = request[3] === 1, c = request[4] === 1;
+  const result = new Uint8Array(16), view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  if (stage === 0) {
+    const xl = view.getUint32(8, true), xh = view.getUint32(12, true), yl = view.getUint32(16, true), yh = view.getUint32(20, true);
+    const at = xh < yh || (xh === yh && xl < yl) ? 8 : 16;
+    result.set(request.subarray(at, at + 8), 8);
+  } else if (stage === 1) result[0] = a ? 1 : b ? 2 : 0;
+  else if (stage === 2 || stage === 3 || stage === 10 || stage === 11) result[0] = a && b && c ? 1 : 0;
+  else if (stage === 4 || stage === 9) result[0] = a && b ? 1 : 0;
+  else if (stage === 5) result[0] = a && (b || c) ? 1 : 0;
+  else if (stage === 6) result[0] = (a ? 1 : 0) | (b && c ? 2 : 0);
+  else if (stage === 7) result[0] = a && b ? 1 : 2;
+  else if (stage === 8 || stage === 14) result[0] = a ? 1 : 0;
+  else if (stage === 12) result[0] = a ? 1 : 2;
+  else if (stage === 13) result[0] = a && !b ? 1 : 0;
+  else result[0] = !a && b && c && (view.getUint32(8, true) !== 0 || view.getUint32(12, true) !== 0) ? 1 : 0;
+  return result;
+}
+
+/** Operation 23: axis selection and reach hysteresis with reference f32 order.
+ * Latch capacity, exact widget identity and storage remain native capabilities.
+ */
+function scrollReachPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 32 || request[1]! > 1 || request[2]! > 1 || request[3]! > 1 || request[4]! > 1 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid scroll reach request");
+  const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const nonnegative = (value: number): number => Number.isNaN(value) || value <= 0 ? 0 : value;
+  const vv = view.getFloat32(12, true), vc = view.getFloat32(16, true), hv = view.getFloat32(24, true), hc = view.getFloat32(28, true);
+  const verticalRange = Math.fround(nonnegative(vc) - nonnegative(vv));
+  const horizontalRange = Math.fround(nonnegative(hc) - nonnegative(hv));
+  const horizontal = !(verticalRange > 0) && horizontalRange > 0;
+  const result = new Uint8Array(8); result[0] = horizontal ? 1 : 0;
+  const viewport = horizontal ? hv : vv, content = horizontal ? hc : vc, offset = view.getFloat32(horizontal ? 20 : 8, true);
+  if (request[2] === 0 || viewport <= 0) return result;
+  const remaining = request[1] === 1 ? offset : Math.fround(Math.fround(content - viewport) - offset);
+  if (remaining > Math.fround(viewport * 1.5)) result[1] = 1;
+  else if (!(remaining > Math.fround(viewport * 1.0)) && request[horizontal ? 4 : 3] === 0) result[1] = 2;
   return result;
 }
