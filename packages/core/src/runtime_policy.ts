@@ -385,7 +385,9 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 2) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 7) throw new Error("invalid effect policy request");
+  if (request[0] === 6) return mediaTransportPolicy(request);
+  if (request[0]! >= 3) return mediaSlotPolicy(request);
   if (request[0] === 2) {
     if (request.length !== 69 || request[1]! >= 16 || request[2]! > 3 || request[3]! > 1 || request[4]! > 1)
       throw new Error("invalid effect completion request");
@@ -437,6 +439,100 @@ export function native_effect_policy(request: Uint8Array): Uint8Array {
   result[1] = blocked === 1 || free < 0 ? 255 : free;
   result[2] = blocked === 1 || length === 0 || matching < 0 ? 255 : matching;
   result[3] = ok; result[4] = err;
+  return result;
+}
+
+/** Media lifecycle operations share the effect ABI and borrow native-owned
+ * tables. 3 admits a numeric owner; 4 resolves a numeric control; 5 routes and
+ * retires a complete event; 7 performs an opaque u64 lookup. Header: operation,
+ * family (image/channel/capture), count, event, tag, source, channels, reserved,
+ * key (f64 for 3/4, opaque u64 otherwise), u32 rate, f64 expected bytes. Slots:
+ * used, opaque u64 key, tag, source, u32 rate, channels. Results are owned bytes;
+ * keys/tokens never pass through a lossy floating-point conversion.
+ */
+function mediaSlotPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 28 || ![3, 4, 5, 7].includes(request[0]!)) throw new Error("invalid media slot operation");
+  const operation = request[0]!, family = request[1]!, count = request[2]!;
+  if (family > 2 || count > (family === 0 ? 16 : 8) || request.length !== 28 + count * 16 || request[7] !== 0 || request[5]! > 1)
+    throw new Error("invalid media slot request");
+  if (operation === 5 && (family === 0 ? request[3] !== 0 : family === 1 ? request[3]! > 2 : request[3]! > 4))
+    throw new Error("invalid media event kind");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const result = new Uint8Array(28), out = new DataView(result.buffer);
+  result[1] = 255; result[2] = request[4]!; result[4] = request[5]!; result[5] = request[6]!;
+  out.setUint32(24, wire.getUint32(16, true), true);
+  const numberKey = operation === 3 || operation === 4;
+  const key = wire.getFloat64(8, true);
+  const valid = !numberKey || Number.isFinite(key) && key >= 1 && key < 9007199254740992 && Math.floor(key) === key;
+  result[0] = valid ? 1 : 0;
+  if (valid) for (let i = 0; i < 8; i++) result[8 + i] = request[8 + i]!;
+  // f64 wire keys become exact u64 words only after the representability gate.
+  if (numberKey && valid) {
+    out.setUint32(8, key % 4294967296, true); out.setUint32(12, Math.floor(key / 4294967296), true);
+  }
+  const expected = wire.getFloat64(20, true);
+  if (Number.isFinite(expected) && expected >= 1 && expected < 9007199254740992 && Math.floor(expected) === expected) {
+    out.setUint32(16, expected % 4294967296, true); out.setUint32(20, Math.floor(expected / 4294967296), true);
+  }
+  let matching = -1, free = -1;
+  for (let slot = 0; slot < count; slot++) {
+    const at = 28 + slot * 16;
+    if (request[at]! > 1 || request[at + 10]! > 1) throw new Error("invalid media slot fact");
+    let equal = valid && request[at] === 1;
+    for (let i = 0; i < 8; i++) if (request[at + 1 + i] !== result[8 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (request[at] === 0 && free < 0) free = slot;
+  }
+  if (operation === 3) {
+    const rate = wire.getUint32(16, true), channels = request[6]!;
+    const format = family !== 2 || (rate === 16000 || rate === 24000 || rate === 48000) && (channels === 1 || channels === 2);
+    if (valid && format && matching < 0 && free >= 0) result[1] = free;
+    return result;
+  }
+  if (matching < 0) {
+    if (operation === 5) throw new Error("media event has no tracked owner");
+    return result;
+  }
+  result[1] = matching;
+  const at = 28 + matching * 16;
+  result[2] = request[at + 9]!;
+  if (operation === 5) {
+    result[3] = family === 0 || family === 1 && request[3] !== 0 || family === 2 && request[3]! >= 3 ? 1 : 0;
+    if (family === 2) {
+      result[4] = request[at + 10]!;
+      if (request[6] === 0) result[5] = request[at + 15]!;
+      if (wire.getUint32(16, true) === 0) out.setUint32(24, wire.getUint32(at + 11, true), true);
+    }
+  }
+  return result;
+}
+
+/** Operation 6 plans playback controls from opaque key equality and native
+ * ownership facts (foreign/owned/idle). Native retains exact owner tokens,
+ * stops only the named token, and applies OS calls in command order. Result:
+ * action (255 = no-op), retirement, re-key, reserved, scalar f64.
+ */
+function mediaTransportPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 15 || request[1]! > 1 || request[2]! > 1 || request[3]! > 2 || request.length !== 15 + request[5]! + request[6]!)
+    throw new Error("invalid media transport request");
+  const result = new Uint8Array(12); result[0] = 255;
+  const video = request[1] === 1, verb = request[4]!;
+  let matches = request[2] === 1 && request[5] === request[6];
+  if (matches) for (let i = 0; i < request[5]!; i++) if (request[15 + i] !== request[15 + request[5]! + i]) matches = false;
+  if (!matches) return result;
+  // Stop cancels this stream's staged results even after a foreign replacement.
+  // Volume may update a remembered preference while the channel is idle.
+  if (video && verb !== 2 && request[3] !== 1 && !(verb === 4 && request[3] === 2)) return result;
+  if (verb > (video ? 7 : 4)) throw new Error("unknown media transport verb");
+  result[0] = verb; result[1] = verb === 2 ? 1 : 0; result[2] = video && verb === 7 ? 1 : 0;
+  for (let i = 0; i < 8; i++) result[4 + i] = request[7 + i]!;
+  const value = new DataView(request.buffer, request.byteOffset, request.byteLength).getFloat64(7, true);
+  const out = new DataView(result.buffer);
+  if (verb === 3) {
+    const seek = value >= 0 && value <= 9007199254740992 ? Math.trunc(value) : video && value > 9007199254740992 && Number.isFinite(value) ? 9007199254740991 : 0;
+    out.setFloat64(4, seek === 0 ? 0 : seek, true);
+  }
+  else if (video && (verb === 5 || verb === 6)) out.setFloat64(4, value !== 0 ? 1 : 0, true);
   return result;
 }
 

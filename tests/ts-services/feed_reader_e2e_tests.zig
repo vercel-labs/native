@@ -9369,3 +9369,171 @@ test "hover consumers obey compiled drain entry capture-refresh and leave-resolu
     try std.testing.expectEqualSlices(u16, &.{ 1, 2 }, state.model.log[0..state.model.len]);
     for (state.hover_msg_slot_used) |used| try std.testing.expect(!used);
 }
+
+fn referenceMediaPlan(request: []const u8) [28]u8 {
+    const op = request[0];
+    const family = request[1];
+    const number = op == 3 or op == 4;
+    const value: f64 = @bitCast(std.mem.readInt(u64, request[8..16], .little));
+    const valid = !number or (std.math.isFinite(value) and value >= 1 and value < 9007199254740992.0 and @floor(value) == value);
+    const key: u64 = if (!valid) 0 else if (number) @intFromFloat(value) else std.mem.readInt(u64, request[8..16], .little);
+    var result: [28]u8 = @splat(0);
+    result[0] = @intFromBool(valid);
+    result[1] = 255;
+    result[2] = request[4];
+    result[4] = request[5];
+    result[5] = request[6];
+    std.mem.writeInt(u64, result[8..16], key, .little);
+    const expected: f64 = @bitCast(std.mem.readInt(u64, request[20..28], .little));
+    std.mem.writeInt(u64, result[16..24], if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected) @intFromFloat(expected) else 0, .little);
+    const rate = std.mem.readInt(u32, request[16..20], .little);
+    std.mem.writeInt(u32, result[24..28], rate, .little);
+    var matching: ?usize = null;
+    var free: ?usize = null;
+    for (0..request[2]) |slot| {
+        const at = 28 + slot * 16;
+        if (request[at] == 1 and valid and std.mem.readInt(u64, request[at + 1 ..][0..8], .little) == key and matching == null) matching = slot;
+        if (request[at] == 0 and free == null) free = slot;
+    }
+    if (op == 3) {
+        const format = family != 2 or ((rate == 16000 or rate == 24000 or rate == 48000) and (request[6] == 1 or request[6] == 2));
+        if (valid and format and matching == null and free != null) result[1] = @intCast(free.?);
+    } else if (matching) |slot| {
+        const at = 28 + slot * 16;
+        result[1] = @intCast(slot);
+        result[2] = request[at + 9];
+        if (op == 5) {
+            result[3] = @intFromBool(family == 0 or family == 1 and request[3] != 0 or family == 2 and (request[3] == 3 or request[3] == 4));
+            if (family == 2) {
+                result[4] = request[at + 10];
+                if (request[6] == 0) result[5] = request[at + 15];
+                if (rate == 0) std.mem.writeInt(u32, result[24..28], std.mem.readInt(u32, request[at + 11 ..][0..4], .little), .little);
+            }
+        }
+    }
+    return result;
+}
+
+fn checkCompiledMediaPlan(request: []const u8) !void {
+    const expected = referenceMediaPlan(request);
+    var result: [28]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeEffectPolicy(request, &result));
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &expected, &result);
+}
+
+test "compiled media lifecycle preserves numeric boundaries native capacities complete routing and borrowed ownership" {
+    var request: [28 + 16 * 16]u8 = @splat(0);
+    const keys = [_]f64{ std.math.nan(f64), -std.math.inf(f64), std.math.inf(f64), -1, -0.0, 0, 0.5, 1, 1.5, 4294967295, 4294967296, 9007199254740991, 9007199254740992 };
+    const sizes = [_]f64{ std.math.nan(f64), std.math.inf(f64), -1, 0, 0.5, 1, 1.5, 4294967296, 9007199254740991, 9007199254740992 };
+    const formats = [_]struct { rate: u32, channels: u8 }{ .{ .rate = 0, .channels = 0 }, .{ .rate = 16000, .channels = 1 }, .{ .rate = 24000, .channels = 2 }, .{ .rate = 48000, .channels = 2 }, .{ .rate = 44100, .channels = 1 }, .{ .rate = 48000, .channels = 3 } };
+    defer core.rt.frameReset();
+    var comparisons: usize = 0;
+    for (0..3) |family| {
+        const count: usize = if (family == 0) 16 else 8;
+        request[0] = 3;
+        request[1] = @intCast(family);
+        request[2] = @intCast(count);
+        request[4] = 253;
+        request[5] = 1;
+        for (0..count + 1) |hole| {
+            for (0..count) |slot| {
+                const at = 28 + slot * 16;
+                request[at] = @intFromBool(slot != hole);
+                std.mem.writeInt(u64, request[at + 1 ..][0..8], if (slot % 3 == 0) 1 else slot + 100, .little);
+                request[at + 9] = @intCast(255 - slot);
+            }
+            for (keys) |key| for (sizes) |size| for (formats) |format| {
+                std.mem.writeInt(u64, request[8..16], @bitCast(key), .little);
+                std.mem.writeInt(u64, request[20..28], @bitCast(size), .little);
+                std.mem.writeInt(u32, request[16..20], format.rate, .little);
+                request[6] = format.channels;
+                try checkCompiledMediaPlan(request[0 .. 28 + count * 16]);
+                comparisons += 1;
+            };
+        }
+        const identities = [_]u64{ 0, 1, 4294967296, 9007199254740993, std.math.maxInt(u64) };
+        for (0..count) |owner| for (identities) |key| {
+            @memset(request[28..], 0);
+            const at = 28 + owner * 16;
+            request[at] = 1;
+            std.mem.writeInt(u64, request[at + 1 ..][0..8], key, .little);
+            request[at + 9] = @intCast(owner * 16);
+            request[at + 10] = 1;
+            std.mem.writeInt(u32, request[at + 11 ..][0..4], 24000, .little);
+            request[at + 15] = 2;
+            if (owner + 1 < count) {
+                @memcpy(request[at + 16 ..][0..16], request[at..][0..16]);
+                request[at + 25] = 255; // Duplicate owner must keep the first route.
+            }
+            std.mem.writeInt(u64, request[8..16], key, .little);
+            request[0] = 7;
+            try checkCompiledMediaPlan(request[0 .. 28 + count * 16]);
+            const kinds: usize = if (family == 0) 1 else if (family == 1) 3 else 5;
+            request[0] = 5;
+            for (0..kinds) |kind| for ([_]bool{ false, true }) |envelope| {
+                request[3] = @intCast(kind);
+                request[6] = if (envelope) 0 else 255;
+                std.mem.writeInt(u32, request[16..20], if (envelope) 0 else std.math.maxInt(u32), .little);
+                try checkCompiledMediaPlan(request[0 .. 28 + count * 16]);
+                comparisons += 1;
+            };
+            request[0] = 4;
+            for (keys) |value| {
+                std.mem.writeInt(u64, request[8..16], @bitCast(value), .little);
+                try checkCompiledMediaPlan(request[0 .. 28 + count * 16]);
+                comparisons += 1;
+            }
+        };
+    }
+    // Two pure entries must leave the complete borrowed boot command alive.
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copy = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copy);
+    @memset(&request, 0);
+    request[0] = 4;
+    std.mem.writeInt(u64, request[8..16], @bitCast(@as(f64, 9007199254740991)), .little);
+    var output: [28]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeEffectPolicy(request[0..28], &output));
+    const frozen = output;
+    var transport: [12]u8 = undefined;
+    try std.testing.expectEqual(transport.len, core.nativeEffectPolicy(&.{ 6, 1, 0, 2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &transport));
+    try std.testing.expectEqualSlices(u8, copy, borrowed);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &frozen, &output);
+    try std.testing.expectEqual(@as(usize, 30180), comparisons);
+}
+
+test "compiled media transport preserves complete actions exact key bytes ownership and all scalar boundaries" {
+    var request: [15 + 64 * 2]u8 = @splat(0);
+    const long = [_]u8{255} ** 64;
+    const keys = [_][]const u8{ "", "clip", "\x00\xff", &long };
+    const scalars = [_]f64{ std.math.nan(f64), -std.math.inf(f64), std.math.inf(f64), -1, -0.0, 0, 0.5, 1.5, 9007199254740991, 9007199254740992, 9007199254740994, std.math.floatMax(f64) };
+    var comparisons: usize = 0;
+    defer core.rt.frameReset();
+    for ([_]bool{ false, true }) |video| for ([_]bool{ false, true }) |used| for (0..3) |ownership| for (0..if (video) @as(usize, 8) else 5) |verb| for (scalars) |value| for (keys) |requested| for (keys) |stored| {
+        request[0..7].* = .{ 6, @intFromBool(video), @intFromBool(used), @intCast(ownership), @intCast(verb), @intCast(requested.len), @intCast(stored.len) };
+        std.mem.writeInt(u64, request[7..15], @bitCast(value), .little);
+        @memcpy(request[15..][0..requested.len], requested);
+        @memcpy(request[15 + requested.len ..][0..stored.len], stored);
+        var expected: [12]u8 = @splat(0);
+        expected[0] = 255;
+        if (used and std.mem.eql(u8, requested, stored) and (!video or verb == 2 or ownership == 1 or verb == 4 and ownership == 2)) {
+            expected[0] = @intCast(verb);
+            expected[1] = @intFromBool(verb == 2);
+            expected[2] = @intFromBool(video and verb == 7);
+            @memcpy(expected[4..12], request[7..15]);
+            if (verb == 3) {
+                const seek: u64 = if (value >= 0 and value <= 9007199254740992.0) @intFromFloat(value) else if (video and value > 9007199254740992.0 and std.math.isFinite(value)) 9007199254740991 else 0;
+                std.mem.writeInt(u64, expected[4..12], @bitCast(@as(f64, @floatFromInt(seek))), .little);
+            } else if (video and (verb == 5 or verb == 6)) std.mem.writeInt(u64, expected[4..12], @bitCast(@as(f64, if (value != 0) 1 else 0)), .little);
+        }
+        var result: [12]u8 = undefined;
+        try std.testing.expectEqual(result.len, core.nativeEffectPolicy(request[0 .. 15 + requested.len + stored.len], &result));
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &expected, &result);
+        comparisons += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 14976), comparisons);
+}

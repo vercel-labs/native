@@ -2400,6 +2400,104 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagBytes(entry.err_tag, @tagName(response.outcome));
         }
 
+        const MediaPlan = struct {
+            valid: bool,
+            slot: ?usize,
+            tag: u8,
+            retire: bool,
+            key: u64,
+            expected_bytes: u64,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32,
+            capture_channels: u8,
+        };
+
+        /// The tables and capability identities remain native-owned. The
+        /// compiled core selects admission, routing and terminal retirement;
+        /// exact u64 keys cross as opaque bytes, never as rounded numbers.
+        fn compiledMediaPlan(
+            comptime family: u8,
+            operation: u8,
+            key_bits: u64,
+            event_kind: u8,
+            tag: u8,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32,
+            capture_channels: u8,
+            expected: f64,
+            table: anytype,
+        ) MediaPlan {
+            var request: [28 + @as(usize, @max(runtime_effects.max_effects, runtime_effects.max_effect_channels)) * 16]u8 = @splat(0);
+            request[0] = operation;
+            request[1] = family;
+            request[2] = @intCast(table.len);
+            request[3] = event_kind;
+            request[4] = tag;
+            request[5] = @intFromEnum(source);
+            request[6] = capture_channels;
+            std.mem.writeInt(u64, request[8..16], key_bits, .little);
+            std.mem.writeInt(u32, request[16..20], sample_rate, .little);
+            std.mem.writeInt(u64, request[20..28], @bitCast(expected), .little);
+            for (table, 0..) |entry, slot| {
+                const at = 28 + slot * 16;
+                request[at] = @intFromBool(entry.used);
+                std.mem.writeInt(u64, request[at + 1 ..][0..8], if (comptime family == 0) entry.id else entry.key, .little);
+                request[at + 9] = entry.event_tag;
+                if (comptime family == 2) {
+                    request[at + 10] = @intFromEnum(entry.source);
+                    std.mem.writeInt(u32, request[at + 11 ..][0..4], entry.sample_rate, .little);
+                    request[at + 15] = entry.channels;
+                }
+            }
+            var result: [28]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 28 + table.len * 16], &result) != result.len or
+                result[0] > 1 or result[3] > 1 or result[4] > 1 or result[6] != 0 or result[7] != 0)
+                @panic("ts core host: invalid compiled media plan");
+            const slot: ?usize = if (result[1] == 255) null else result[1];
+            if (slot) |index| {
+                if (index >= table.len) @panic("ts core host: invalid compiled media slot");
+                if (operation != 3 and !table[index].used) @panic("ts core host: compiled media lookup names an idle slot");
+                if (operation == 3 and table[index].used) @panic("ts core host: compiled media admission names a live slot");
+            }
+            return .{
+                .valid = result[0] == 1,
+                .slot = slot,
+                .tag = result[2],
+                .retire = result[3] == 1,
+                .source = @enumFromInt(result[4]),
+                .capture_channels = result[5],
+                .key = std.mem.readInt(u64, result[8..16], .little),
+                .expected_bytes = std.mem.readInt(u64, result[16..24], .little),
+                .sample_rate = std.mem.readInt(u32, result[24..28], .little),
+            };
+        }
+
+        fn compiledMediaLookup(comptime family: u8, key: u64, table: anytype) ?usize {
+            return compiledMediaPlan(family, 7, key, 0, 0, .microphone, 0, 0, 0, table).slot;
+        }
+
+        const MediaTransportPlan = struct { action: u8, retire: bool, rekey: bool, value: f64 };
+
+        fn compiledMediaTransport(video: bool, used: bool, ownership: u8, stored: []const u8, key: []const u8, verb: u8, value: f64) MediaTransportPlan {
+            var request: [15 + max_wire_key_bytes * 2]u8 = @splat(0);
+            request[0] = 6;
+            request[1] = @intFromBool(video);
+            request[2] = @intFromBool(used);
+            request[3] = ownership;
+            request[4] = verb;
+            request[5] = @intCast(key.len);
+            request[6] = @intCast(stored.len);
+            std.mem.writeInt(u64, request[7..15], @bitCast(value), .little);
+            @memcpy(request[15..][0..key.len], key);
+            @memcpy(request[15 + key.len ..][0..stored.len], stored);
+            var result: [12]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 15 + key.len + stored.len], &result) != result.len or
+                (result[0] != 255 and result[0] > (if (video) @as(u8, 7) else @as(u8, 4))) or
+                result[1] > 1 or result[2] > 1 or result[3] != 0)
+                @panic("ts core host: invalid compiled media transport plan");
+            return .{ .action = result[0], .retire = result[1] == 1, .rekey = result[2] == 1, .value = @bitCast(std.mem.readInt(u64, result[4..12], .little)) };
+        }
+
         // ------------------------------------------------- audio stream
 
         /// The audio_ctl record: drive the single playback channel,
@@ -2409,6 +2507,20 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the stream: the entry retires and later platform stragglers
         /// are the engine's to swallow.
         fn runAudioCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaTransport(false, audio_entry.used, 1, audio_entry.wireKey(), key, verb, value);
+                if (plan.retire) audio_entry.used = false;
+                switch (plan.action) {
+                    0 => fx.pauseAudio(),
+                    1 => fx.resumeAudio(),
+                    2 => fx.stopAudio(),
+                    3 => fx.seekAudio(@intFromFloat(plan.value)),
+                    4 => fx.setAudioVolume(@floatCast(value)),
+                    255 => {},
+                    else => unreachable,
+                }
+                return;
+            }
             if (!audio_entry.used or !std.mem.eql(u8, audio_entry.wireKey(), key)) return;
             switch (verb) {
                 0 => fx.pauseAudio(),
@@ -2417,12 +2529,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     audio_entry.used = false;
                     fx.stopAudio();
                 },
-                // The wire carries the app's f64; anything that is not a
-                // millisecond offset seeks to 0 (the engine clamps the
-                // high end to the duration itself).
                 3 => fx.seekAudio(if (value >= 0 and value <= 9007199254740992.0) @intFromFloat(value) else 0),
-                // The engine clamps volume to 0..1 (NaN clamps to the
-                // bound arithmetic's result deterministically).
                 4 => fx.setAudioVolume(@floatCast(value)),
                 else => @panic("ts core host: unknown audio_ctl verb wire value - the core and this runtime disagree on cmd_format_version"),
             }
@@ -2449,6 +2556,26 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the stream: the entry retires and later platform stragglers
         /// are the engine's to swallow.
         fn runVideoCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const owner = fx.videoOwnerToken();
+                const ownership: u8 = if (owner == video_entry.token) 1 else if (owner == 0) 2 else 0;
+                const plan = compiledMediaTransport(true, video_entry.used, ownership, video_entry.wireKey(), key, verb, value);
+                if (plan.retire) video_entry.used = false;
+                switch (plan.action) {
+                    0 => fx.playVideo(),
+                    1 => fx.pauseVideo(),
+                    2 => fx.stopVideoCancel(video_entry.token),
+                    3 => fx.seekVideo(@intFromFloat(plan.value)),
+                    4 => fx.setVideoVolume(@floatCast(value)),
+                    5 => fx.setVideoMuted(plan.value != 0),
+                    6 => fx.setVideoLoop(plan.value != 0),
+                    7 => fx.restartVideo(),
+                    255 => {},
+                    else => unreachable,
+                }
+                if (plan.rekey) video_entry.token = fx.videoMintedToken();
+                return;
+            }
             if (!video_entry.used or !std.mem.eql(u8, video_entry.wireKey(), key)) return;
             if (verb == 2) {
                 // `Cmd.videoStop` is the stream's CANCEL: the engine
@@ -2553,39 +2680,53 @@ pub fn TsCoreHost(comptime core: type) type {
             cache_path: []const u8,
             expected: f64,
         ) void {
-            // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
-            // grid steps by 2, so 2^53 is the first value that aliases
-            // a neighbor (2^53 + 1) on the wire — the bridge rejects it
-            // rather than guess which integer the app meant. 2^53 - 1
-            // is the last id every tier carries exactly.
-            const representable = std.math.isFinite(id_value) and
-                id_value >= 1 and id_value < 9007199254740992.0 and
-                @floor(id_value) == id_value;
-            if (!representable) {
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }));
-                return;
-            }
-            const id: u64 = @intFromFloat(id_value);
-            if (findImage(id) != null) {
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
-                return;
-            }
-            const index = freeImageIndex() orelse {
-                // All 16 entries hold live loads — one gallery screen's
-                // Cmd.batch reaches this. The engine answers its own
-                // slot exhaustion with a dynamic `.rejected` result, and
-                // the audio channel's exhaustion story is a quiet
-                // in-place replace; a full bridge table speaks the same
-                // vocabulary: exactly one rejected result through the
-                // event arm, never a crash — however many loads one
-                // batch stages against it.
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
-                return;
+            const Selection = struct { key: u64, index: usize, tag: u8, expected_bytes: u64 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(0, 3, @bitCast(id_value), 0, event_tag, .microphone, 0, 0, expected, &images);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagImage(plan.tag, .{ .id = plan.key, .outcome = .rejected }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag, .expected_bytes = plan.expected_bytes };
+            } else native: {
+                // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
+                // grid steps by 2, so 2^53 is the first value that aliases
+                // a neighbor (2^53 + 1) on the wire — the bridge rejects it
+                // rather than guess which integer the app meant. 2^53 - 1
+                // is the last id every tier carries exactly.
+                const representable = std.math.isFinite(id_value) and
+                    id_value >= 1 and id_value < 9007199254740992.0 and
+                    @floor(id_value) == id_value;
+                if (!representable) {
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }));
+                    break :native null;
+                }
+                const id: u64 = @intFromFloat(id_value);
+                if (findImage(id) != null) {
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
+                    break :native null;
+                }
+                const index = freeImageIndex() orelse {
+                    // All 16 entries hold live loads — one gallery screen's
+                    // Cmd.batch reaches this. The engine answers its own
+                    // slot exhaustion with a dynamic `.rejected` result, and
+                    // the audio channel's exhaustion story is a quiet
+                    // in-place replace; a full bridge table speaks the same
+                    // vocabulary: exactly one rejected result through the
+                    // event arm, never a crash — however many loads one
+                    // batch stages against it.
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
+                    break :native null;
+                };
+                break :native .{ .key = id, .index = index, .tag = event_tag, .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected) @intFromFloat(expected) else 0 };
             };
+            const chosen = selection orelse return;
+            const id = chosen.key;
+            const index = chosen.index;
             const entry = &images[index];
             entry.used = true;
             entry.id = id;
-            entry.event_tag = event_tag;
+            entry.event_tag = chosen.tag;
             fx.loadImage(.{
                 .id = id,
                 .path = image_path,
@@ -2606,15 +2747,13 @@ pub fn TsCoreHost(comptime core: type) type {
                 // size every real download misses. 0 is the honest
                 // mapping; the emitter already stops the literal
                 // spellings (NS1030).
-                .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected)
-                    @intFromFloat(expected)
-                else
-                    0,
+                .expected_bytes = chosen.expected_bytes,
                 .on_result = imageResultMsg,
             });
         }
 
         fn findImage(id: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(0, id, &images);
             for (&images, 0..) |*entry, index| {
                 if (entry.used and entry.id == id) return index;
             }
@@ -2640,6 +2779,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// bridge namespace), and every bridge key base sits above 2^53,
         /// so the cancel can never reach another table's slot.
         fn runImageCancel(fx: *Fx, id_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 4, @bitCast(id_value), 0, 0, .microphone, 0, 0, 0, &images);
+                if (plan.slot != null) fx.cancel(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(id_value) and
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
@@ -2662,6 +2806,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// id the wire cannot carry exactly could never have been
         /// registered through this bridge, so it no-ops the same way.
         fn runImageUnregister(fx: *Fx, id_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 4, @bitCast(id_value), 0, 0, .microphone, 0, 0, 0, &[_]ImageEntry{});
+                if (plan.valid) _ = fx.unregisterImage(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(id_value) and
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
@@ -2673,6 +2822,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `ImageMsgFn` for image loads: the ONE terminal routes the
         /// entry's event arm and retires the entry.
         fn imageResultMsg(result: runtime_effects.EffectImageResult) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 5, result.id, 0, 0, .microphone, 0, 0, 0, &images);
+                const index = plan.slot orelse @panic("ts core host: image result has no compiled owner");
+                if (plan.retire) images[index].used = false;
+                return msgFromTagImage(plan.tag, result);
+            }
             const index = findImage(result.id) orelse
                 @panic("ts core host: an image result arrived with no open bridge entry");
             const entry = &images[index];
@@ -2702,26 +2857,40 @@ pub fn TsCoreHost(comptime core: type) type {
             event_tag: u8,
             max_pending: u8,
         ) bool {
-            const representable = std.math.isFinite(key_value) and
-                key_value >= 1 and key_value < 9007199254740992.0 and
-                @floor(key_value) == key_value;
-            if (!representable) {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
-                return false;
-            }
-            const key: u64 = @intFromFloat(key_value);
-            if (findChannel(key) != null) {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return false;
-            }
-            const index = freeChannelIndex() orelse {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return false;
+            const Selection = struct { key: u64, index: usize, tag: u8 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(1, 3, @bitCast(key_value), 0, event_tag, .microphone, 0, 0, 0, &channels);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagChannel(plan.tag, .{ .key = plan.key, .kind = .rejected }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag };
+            } else native: {
+                const representable = std.math.isFinite(key_value) and
+                    key_value >= 1 and key_value < 9007199254740992.0 and
+                    @floor(key_value) == key_value;
+                if (!representable) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
+                    break :native null;
+                }
+                const key: u64 = @intFromFloat(key_value);
+                if (findChannel(key) != null) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
+                    break :native null;
+                }
+                const index = freeChannelIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
+                    break :native null;
+                };
+                break :native .{ .key = key, .index = index, .tag = event_tag };
             };
+            const chosen = selection orelse return false;
+            const key = chosen.key;
+            const index = chosen.index;
             const entry = &channels[index];
             entry.used = true;
             entry.key = key;
-            entry.event_tag = event_tag;
+            entry.event_tag = chosen.tag;
             _ = fx.openChannel(.{
                 .key = key,
                 .on_event = channelEventMsg,
@@ -2735,6 +2904,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findChannel(key: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(1, key, &channels);
             for (&channels, 0..) |*entry, index| {
                 if (entry.used and entry.key == key) return index;
             }
@@ -2758,6 +2928,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// convention; every bridge key base sits above 2^53, so this
         /// can never reach another table's slot).
         fn runChannelClose(fx: *Fx, key_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(1, 4, @bitCast(key_value), 0, 0, .microphone, 0, 0, 0, &channels);
+                if (plan.slot != null) fx.closeChannel(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
@@ -2772,6 +2947,17 @@ pub fn TsCoreHost(comptime core: type) type {
         /// terminals retire the entry (freeing the key for a fresh
         /// open), `data` events keep it live — the spawn stream shape.
         fn channelEventMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const kind: u8 = switch (event.kind) {
+                    .data => 0,
+                    .closed => 1,
+                    .rejected => 2,
+                };
+                const plan = compiledMediaPlan(1, 5, event.key, kind, 0, .microphone, 0, 0, 0, &channels);
+                const index = plan.slot orelse @panic("ts core host: channel event has no compiled owner");
+                if (plan.retire) channels[index].used = false;
+                return msgFromTagChannel(plan.tag, event);
+            }
             const index = findChannel(event.key) orelse
                 @panic("ts core host: a channel event arrived with no open bridge entry");
             const entry = &channels[index];
@@ -2789,62 +2975,77 @@ pub fn TsCoreHost(comptime core: type) type {
             capture_channels: u8,
             event_tag: u8,
         ) void {
-            const representable = std.math.isFinite(key_value) and
-                key_value >= 1 and key_value < 9007199254740992.0 and
-                @floor(key_value) == key_value;
-            const format: platform.AudioCaptureFormat = .{
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+            const Selection = struct { key: u64, index: usize, tag: u8, source: platform.AudioCaptureSource, rate: u32, channels: u8 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(2, 3, @bitCast(key_value), 0, event_tag, source, sample_rate, capture_channels, 0, &audio_captures);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(plan.tag, .{ .key = plan.key, .kind = .rejected, .source = plan.source, .sample_rate = plan.sample_rate, .channels = plan.capture_channels }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag, .source = plan.source, .rate = plan.sample_rate, .channels = plan.capture_channels };
+            } else native: {
+                const representable = std.math.isFinite(key_value) and
+                    key_value >= 1 and key_value < 9007199254740992.0 and
+                    @floor(key_value) == key_value;
+                const format: platform.AudioCaptureFormat = .{
+                    .sample_rate = sample_rate,
+                    .channels = capture_channels,
+                };
+                if (!representable or !format.valid()) {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = if (representable) @intFromFloat(key_value) else 0,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                }
+                const key: u64 = @intFromFloat(key_value);
+                if (findAudioCapture(key) != null) {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = key,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                }
+                const index = freeAudioCaptureIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = key,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                };
+                break :native .{ .key = key, .index = index, .tag = event_tag, .source = source, .rate = sample_rate, .channels = capture_channels };
             };
-            if (!representable or !format.valid()) {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = if (representable) @intFromFloat(key_value) else 0,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            }
-            const key: u64 = @intFromFloat(key_value);
-            if (findAudioCapture(key) != null) {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = key,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            }
-            const index = freeAudioCaptureIndex() orelse {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = key,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            };
+            const chosen = selection orelse return;
+            const key = chosen.key;
+            const index = chosen.index;
             audio_captures[index] = .{
                 .used = true,
                 .key = key,
-                .event_tag = event_tag,
-                .source = source,
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+                .event_tag = chosen.tag,
+                .source = chosen.source,
+                .sample_rate = chosen.rate,
+                .channels = chosen.channels,
             };
             fx.startAudioCapture(.{
                 .key = key,
-                .source = source,
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+                .source = chosen.source,
+                .sample_rate = chosen.rate,
+                .channels = chosen.channels,
                 .on_event = audioCaptureEventMsg,
             });
         }
 
         fn findAudioCapture(key: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(2, key, &audio_captures);
             for (&audio_captures, 0..) |*entry, index| {
                 if (entry.used and entry.key == key) return index;
             }
@@ -2859,6 +3060,11 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn runAudioCaptureStop(fx: *Fx, key_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(2, 4, @bitCast(key_value), 0, 0, .microphone, 0, 0, 0, &audio_captures);
+                if (plan.slot != null) fx.stopAudioCapture(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
@@ -2869,6 +3075,23 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn audioCaptureEventMsg(channel_event: runtime_effects.EffectChannelEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var event = runtime_effects.decodeAudioCaptureChannelEvent(channel_event);
+                const kind: u8 = switch (event.kind) {
+                    .started => 0,
+                    .data => 1,
+                    .failed => 2,
+                    .stopped => 3,
+                    .rejected => 4,
+                };
+                const plan = compiledMediaPlan(2, 5, channel_event.key, kind, 0, event.source, event.sample_rate, event.channels, 0, &audio_captures);
+                const index = plan.slot orelse @panic("ts core host: capture event has no compiled owner");
+                event.source = plan.source;
+                event.sample_rate = plan.sample_rate;
+                event.channels = plan.capture_channels;
+                if (plan.retire) audio_captures[index].used = false;
+                return msgFromTagAudioCapture(plan.tag, event);
+            }
             const index = findAudioCapture(channel_event.key) orelse
                 @panic("ts core host: an audio capture event arrived with no open bridge entry");
             const entry = &audio_captures[index];

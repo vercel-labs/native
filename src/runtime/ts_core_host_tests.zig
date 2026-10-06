@@ -4248,3 +4248,173 @@ test "complete storage owners refuse later basic commands and retain same-family
     StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 20, reply_tag) });
     try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
 }
+
+// Deliberately redirect portable decisions. OS requests and owned table facts
+// expose whether the consumer obeys the returned plan instead of recomputing it.
+const media_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup = true;
+    var retire = true;
+    var transport = true;
+    var calls = [_]usize{0} ** 8;
+    var owned_after_restart = false;
+
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        if (request[0] == 1) { output[0] = 255; return 1; }
+        // Allocate without resetting the borrowed command or event arena.
+        @memset(rt.frameAlloc(u8, 37), 255);
+        if (request[0] == 6) {
+            @memset(output[0..12], 0);
+            output[0] = 255;
+            if (!transport) return 12;
+            const video = request[1] == 1;
+            const verb = request[4];
+            output[0] = if (verb == 2) 2 else if (video and verb == 1) 7 else if (video and verb == 0) 1 else 3;
+            output[1] = @intFromBool(verb == 2 and retire);
+            output[2] = @intFromBool(output[0] == 7);
+            std.mem.writeInt(u64, output[4..12], @bitCast(@as(f64, 321)), .little);
+            if (video and verb == 0) owned_after_restart = request[3] == 1;
+            return 12;
+        }
+        @memset(output[0..28], 0);
+        output[0] = 1;
+        output[1] = 255;
+        output[2] = if (request[1] == 1) 53 else request[4];
+        output[4] = request[5];
+        output[5] = request[6];
+        std.mem.writeInt(u32, output[24..28], std.mem.readInt(u32, request[16..20], .little), .little);
+        const numeric = request[0] == 3 or request[0] == 4;
+        const key: u64 = if (numeric) @as(u64, @intFromFloat(@as(f64, @bitCast(std.mem.readInt(u64, request[8..16], .little))))) else std.mem.readInt(u64, request[8..16], .little);
+        std.mem.writeInt(u64, output[8..16], key, .little);
+        std.mem.writeInt(u64, output[16..24], 987, .little);
+        var matching: u8 = 255;
+        for (0..request[2]) |slot| {
+            const at = 28 + slot * 16;
+            if (request[at] == 1 and std.mem.readInt(u64, request[at + 1 ..][0..8], .little) == key) matching = @intCast(slot);
+        }
+        if (request[0] == 3) {
+            if (matching == 255) {
+                for (0..request[2]) |offset| {
+                    const slot = (offset + 5) % request[2];
+                    if (request[28 + slot * 16] == 0) {
+                        output[1] = @intCast(slot);
+                        break;
+                    }
+                }
+            }
+        } else if (lookup) output[1] = matching;
+        if (request[0] == 5 and matching != 255) {
+            const at = 28 + @as(usize, matching) * 16;
+            // An accepted channel route was selected by the admission policy.
+            std.debug.assert(request[1] != 1 or request[at + 9] == 53);
+            output[2] = if (request[1] == 1) 47 else request[at + 9];
+            output[3] = @intFromBool(retire and (request[1] == 0 or request[1] == 1 and request[3] != 0 or request[1] == 2 and request[3] >= 3));
+            if (request[1] == 2) {
+                output[4] = 1;
+                output[5] = 2;
+                std.mem.writeInt(u32, output[24..28], 24_000, .little);
+            }
+        }
+        return 28;
+    }
+};
+
+const MediaProbe = ts_core_host.TsCoreHost(media_policy_probe_core);
+fn freshMediaProbe() *MediaProbe.Fx {
+    media_policy_probe_core.lookup = true;
+    media_policy_probe_core.retire = true;
+    media_policy_probe_core.transport = true;
+    media_policy_probe_core.owned_after_restart = false;
+    media_policy_probe_core.calls = @splat(0);
+    const fx = freshChannel();
+    MediaProbe.init(fx);
+    return fx;
+}
+
+test "media host consumes redirected admission slots routes sizes lookup and terminal retirement" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .load_img);
+    try std.testing.expectEqual(@as(u64, 987), fx.pendingImageLoadAt(0).?.expected_bytes);
+    MediaProbe.dispatch(fx, .open_chan);
+    const handle = fx.channelHandle(41).?;
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, handle.post("owned\x00\xff"));
+    MediaProbe.drain(fx);
+    try std.testing.expectEqualStrings("owned\x00\xff", MediaProbe.model().chan_bytes);
+    media_policy_probe_core.lookup = false;
+    MediaProbe.dispatch(fx, .close_chan);
+    try std.testing.expect(fx.channelHandle(41) != null);
+    media_policy_probe_core.lookup = true;
+    MediaProbe.dispatch(fx, .close_chan);
+    MediaProbe.drain(fx);
+    try std.testing.expect(fx.channelHandle(41) == null);
+    MediaProbe.dispatch(fx, .open_chan);
+    try std.testing.expect(fx.channelHandle(41) != null);
+    media_policy_probe_core.retire = false;
+    try fx.feedImageResult(7, .loaded, 2, 3, 200, "");
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), MediaProbe.model().img_events);
+    MediaProbe.dispatch(fx, .load_img);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.ImageState.rejected, MediaProbe.model().img_state);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+    try std.testing.expect(media_policy_probe_core.calls[3] >= 4);
+    try std.testing.expect(media_policy_probe_core.calls[4] >= 2);
+    try std.testing.expect(media_policy_probe_core.calls[5] >= 3);
+}
+
+test "media host consumes capture restoration data and terminal retirement" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .start_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureSource.system, MediaProbe.model().capture_source);
+    try std.testing.expectEqual(@as(f64, 24_000), MediaProbe.model().capture_rate);
+    try std.testing.expectEqual(@as(f64, 2), MediaProbe.model().capture_channels);
+    try fx.feedAudioCapture(91, 9_876_543, &.{ 1, 0, 2, 0 });
+    MediaProbe.drain(fx);
+    try std.testing.expectEqualStrings("\x01\x00\x02\x00", MediaProbe.model().capture_pcm);
+    MediaProbe.dispatch(fx, .stop_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.stopped, MediaProbe.model().capture_state);
+    try std.testing.expectEqual(@as(f64, 24_000), MediaProbe.model().capture_rate);
+    MediaProbe.dispatch(fx, .start_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.started, MediaProbe.model().capture_state);
+    try std.testing.expectEqual(@as(usize, 4), media_policy_probe_core.calls[5]);
+}
+
+test "media host consumes transport suppression scalar restart rekey and scoped foreign cancellation" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .play);
+    media_policy_probe_core.transport = false;
+    const before = fx.audioSnapshot();
+    MediaProbe.dispatch(fx, .pause_it);
+    try std.testing.expectEqualDeep(before, fx.audioSnapshot());
+    media_policy_probe_core.transport = true;
+    MediaProbe.dispatch(fx, .seek_it);
+    try std.testing.expectEqual(@as(u64, 321), fx.audioSnapshot().position_ms);
+    MediaProbe.dispatch(fx, .vload);
+    const token = fx.videoOwnerToken();
+    MediaProbe.dispatch(fx, .vpause_it); // Policy requests restart instead.
+    try std.testing.expect(fx.videoOwnerToken() != token);
+    MediaProbe.dispatch(fx, .vplay_it);
+    try std.testing.expect(media_policy_probe_core.owned_after_restart);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    MediaProbe.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 321), fx.videoSnapshot().position_ms);
+    fx.loadVideo(.{ .key = 77, .surface = 99, .path = "foreign.mp4" });
+    const foreign = fx.videoSnapshot();
+    MediaProbe.dispatch(fx, .vstop_it);
+    try std.testing.expectEqualDeep(foreign, fx.videoSnapshot());
+    try std.testing.expect(media_policy_probe_core.calls[6] >= 6);
+}

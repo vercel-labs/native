@@ -430,3 +430,101 @@ test("complete timers return explicit admission refusals without hiding malforme
   assert.throws(() => native_timer_policy(new Uint8Array([...valid, 0])), /trailing/);
   assert.throws(() => native_timer_policy(make(key("save"), 800, 2)), /admission/);
 });
+
+interface MediaSlot { used: boolean; key: bigint; tag: number; source: number; rate: number; channels: number }
+const mediaSlots = (count = 16): MediaSlot[] => Array.from({ length: count }, (_, i) => ({ used: false, key: BigInt(i + 1), tag: 255 - i, source: i % 2, rate: 16000 + i, channels: i % 2 + 1 }));
+function mediaRequest(op: number, family: number, slots: MediaSlot[], value: number | bigint, event = 0, tag = 127, source = 0, rate = 48000, channels = 1, expected = 0): Uint8Array {
+  const bytes = new Uint8Array(28 + slots.length * 16), wire = new DataView(bytes.buffer);
+  bytes.set([op, family, slots.length, event, tag, source, channels]);
+  if (typeof value === "bigint") wire.setBigUint64(8, value, true); else wire.setFloat64(8, value, true);
+  wire.setUint32(16, rate, true); wire.setFloat64(20, expected, true);
+  slots.forEach((slot, i) => { const at = 28 + i * 16; bytes[at] = +slot.used; wire.setBigUint64(at + 1, slot.key, true); bytes[at + 9] = slot.tag; bytes[at + 10] = slot.source; wire.setUint32(at + 11, slot.rate, true); bytes[at + 15] = slot.channels; });
+  return bytes;
+}
+function referenceMedia(op: number, family: number, slots: MediaSlot[], value: number | bigint, event = 0, tag = 127, source = 0, rate = 48000, channels = 1, expected = 0): Uint8Array {
+  const result = new Uint8Array(28), wire = new DataView(result.buffer);
+  const valid = typeof value === "bigint" || Number.isSafeInteger(value) && value > 0;
+  const id = valid ? BigInt(value) : 0n;
+  result.set([+valid, 255, tag, 0, source, channels]); wire.setBigUint64(8, id, true); wire.setUint32(24, rate, true);
+  wire.setBigUint64(16, Number.isSafeInteger(expected) && expected > 0 ? BigInt(expected) : 0n, true);
+  const match = slots.findIndex(slot => slot.used && valid && slot.key === id);
+  if (op === 3) {
+    const good = family !== 2 || [16000, 24000, 48000].includes(rate) && [1, 2].includes(channels);
+    const free = slots.findIndex(slot => !slot.used);
+    if (valid && good && match < 0 && free >= 0) result[1] = free;
+  } else if (match >= 0) {
+    const slot = slots[match]!; result[1] = match; result[2] = slot.tag;
+    if (op === 5) {
+      result[3] = +(family === 0 || family === 1 && event !== 0 || family === 2 && (event === 3 || event === 4));
+      if (family === 2) { result[4] = slot.source; result[5] = channels || slot.channels; wire.setUint32(24, rate || slot.rate, true); }
+    }
+  } else if (op === 5) throw new Error("missing reference owner");
+  return result;
+}
+
+test("media admission preserves native key gates, every table hole, duplicates, refusal identity and exact expected sizes", () => {
+  const keys = [NaN, -Infinity, Infinity, -1, -0, 0, .5, 1, 2, 1.5, 4294967295, 4294967296, Number.MAX_SAFE_INTEGER, 2 ** 53];
+  const sizes = [NaN, Infinity, -1, 0, .5, 1, 1.5, 4294967296, Number.MAX_SAFE_INTEGER, 2 ** 53];
+  for (let family = 0; family < 3; family++) for (let hole = -1; hole < (family === 0 ? 16 : 8); hole++) {
+    const slots = mediaSlots(family === 0 ? 16 : 8); slots.forEach((slot, i) => { slot.used = i !== hole; slot.key = i % 3 === 0 ? 1n : BigInt(i + 100); });
+    for (const value of keys) for (const expected of sizes) for (const [rate, channels] of [[0, 0], [16000, 1], [24000, 2], [48000, 2], [44100, 1], [48000, 3]]) {
+      const input = mediaRequest(3, family, slots, value, 0, 253, 1, rate!, channels!, expected);
+      assert.deepEqual(native_effect_policy(input), referenceMedia(3, family, slots, value, 0, 253, 1, rate!, channels!, expected));
+    }
+  }
+});
+
+test("media controls and terminal routes retain opaque u64 identities, first-match tags and capture envelope restoration", () => {
+  const identities = [0n, 1n, 4294967296n, 9007199254740993n, (1n << 64n) - 1n];
+  for (let family = 0; family < 3; family++) for (let slot = 0; slot < (family === 0 ? 16 : 8); slot++) for (const id of identities) {
+    const slots = mediaSlots(family === 0 ? 16 : 8); slots[slot] = { used: true, key: id, tag: slot * 16, source: 1, rate: 24000, channels: 2 };
+    if (slot + 1 < slots.length) slots[slot + 1] = { ...slots[slot]!, tag: 255 };
+    assert.deepEqual(native_effect_policy(mediaRequest(7, family, slots, id)), referenceMedia(7, family, slots, id));
+    for (let event = 0; event <= (family === 0 ? 0 : family === 1 ? 2 : 4); event++) for (const [rate, channels] of [[0, 0], [16000, 1], [4294967295, 255]]) {
+      assert.deepEqual(native_effect_policy(mediaRequest(5, family, slots, id, event, 127, 0, rate!, channels!)), referenceMedia(5, family, slots, id, event, 127, 0, rate!, channels!));
+    }
+    for (const value of [Number(id), NaN, Infinity, 0, 1.5, Number.MAX_SAFE_INTEGER]) assert.deepEqual(native_effect_policy(mediaRequest(4, family, slots, value)), referenceMedia(4, family, slots, value));
+  }
+  for (const id of [1, NaN, Number.MAX_SAFE_INTEGER, 2 ** 53]) assert.deepEqual(native_effect_policy(mediaRequest(4, 0, [], id)), referenceMedia(4, 0, [], id));
+});
+
+function transportRequest(video: boolean, used: boolean, owner: number, verb: number, scalar: number, requested: Uint8Array, stored: Uint8Array): Uint8Array {
+  const out = new Uint8Array(15 + requested.length + stored.length); out.set([6, +video, +used, owner, verb, requested.length, stored.length]);
+  new DataView(out.buffer).setFloat64(7, scalar, true); out.set(requested, 15); out.set(stored, 15 + requested.length); return out;
+}
+test("playback controls preserve stale keys, foreign ownership, idle volume, token cancellation, re-key and seek saturation", () => {
+  const keys = [key(""), key("clip"), new Uint8Array([0, 255]), new Uint8Array(64).fill(255)];
+  const values = [NaN, -Infinity, Infinity, -1, -0, 0, .5, 1.5, Number.MAX_SAFE_INTEGER, 2 ** 53, 2 ** 53 + 2, Number.MAX_VALUE];
+  for (const video of [false, true]) for (const used of [false, true]) for (let owner = 0; owner < 3; owner++) for (let verb = 0; verb < (video ? 8 : 5); verb++) for (const value of values) for (const a of keys) for (const b of keys) {
+    const request = transportRequest(video, used, owner, verb, value, a, b), expected = new Uint8Array(12); expected[0] = 255;
+    if (used && Buffer.from(a).equals(b) && (!video || verb === 2 || owner === 1 || verb === 4 && owner === 2)) {
+      expected.set([verb, +(verb === 2), +(video && verb === 7)]); expected.set(request.subarray(7, 15), 4);
+      const scalar = verb === 3 ? value >= 0 && value <= 2 ** 53 ? Math.floor(value) : video && Number.isFinite(value) && value > 2 ** 53 ? Number.MAX_SAFE_INTEGER : 0 : video && [5, 6].includes(verb) ? +(value !== 0) : null;
+      if (scalar !== null) new DataView(expected.buffer).setFloat64(4, scalar === 0 ? 0 : scalar, true);
+    }
+    assert.deepEqual(native_effect_policy(request), expected);
+  }
+});
+
+test("media policy rejects damaged packets before a plan and keeps input and output ownership independent", () => {
+  const slots = mediaSlots(8); slots[0]!.used = true;
+  const requests = [mediaRequest(3, 0, slots, 99), mediaRequest(4, 1, slots, 1), mediaRequest(5, 2, slots, 1n, 3), mediaRequest(7, 0, slots, 1n), transportRequest(true, true, 1, 7, 0, key("clip"), key("clip"))];
+  for (const input of requests) {
+    for (let end = 0; end < input.length; end++) assert.throws(() => native_effect_policy(input.subarray(0, end)));
+    assert.throws(() => native_effect_policy(new Uint8Array([...input, 0])));
+    const offset = new Uint8Array(input.length + 11); offset.set(input, 7);
+    const before = input.slice(), output = native_effect_policy(offset.subarray(7, 7 + input.length)), saved = output.slice();
+    assert.deepEqual(input, before); offset.fill(0); native_effect_policy(requests[0]!); assert.deepEqual(output, saved);
+  }
+  for (const [at, value] of [[0, 8], [1, 3], [2, 17], [5, 2], [7, 1], [28, 2], [38, 2]]) {
+    const broken = requests[0]!.slice(); broken[at!] = value!; assert.throws(() => native_effect_policy(broken));
+  }
+  assert.throws(() => native_effect_policy(mediaRequest(5, 1, slots, 99n)));
+  assert.throws(() => native_effect_policy(mediaRequest(5, 2, slots, 1n, 5)));
+  assert.throws(() => native_effect_policy(transportRequest(false, true, 1, 5, 0, key("same"), key("same"))));
+  assert.equal(native_effect_policy(transportRequest(true, true, 0, 255, 0, key("same"), key("same")))[0], 255);
+});
+
+test("numeric media owners enforce the native family capacities", () => {
+  for (const family of [1, 2]) assert.throws(() => native_effect_policy(mediaRequest(3, family, mediaSlots(9), 99)));
+});
