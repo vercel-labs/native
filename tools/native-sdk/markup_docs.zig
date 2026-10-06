@@ -92,6 +92,8 @@ pub const element_docs = [_]Doc{
 };
 
 pub const structure_docs = [_]Doc{
+    .{ .name = "virtual-window", .doc = "Declare one retained virtual range around a single root; its as name exposes the complete range to children, and exactly one virtual-list consumes it." },
+    .{ .name = "virtual-list", .doc = "Render the enclosing virtual window through a Model-first range query. Each returned row has one keyed root; ordinary scroll styles and reach events apply." },
     .{ .name = "for", .doc = "Structure tag: repeats its element children over each (elements, use, if/else, nested for); requires each and as, key names an item field. A directly following else renders when the iterable is empty." },
     .{ .name = "if", .doc = "Structure tag: renders children when test={binding} or {a == b} is true." },
     .{ .name = "else", .doc = "Structure tag: must directly follow an if (renders when the test is false) or a for (renders when the iterable is empty)." },
@@ -99,6 +101,25 @@ pub const structure_docs = [_]Doc{
     .{ .name = "use", .doc = "Expands a template in place: template names an earlier definition, value attributes must match its args exactly (defaulted args may be omitted), and on-press may forward a typed message to the expanded root. Children are slot content: built in the consumer's scope and inserted at the template's <slot/>." },
     .{ .name = "import", .doc = "Top of the file, before templates: <import src=\"components/cards.native\"/> splices a component file's templates (transitively) before this file's own. Paths resolve relative to this file, under the markup root." },
     .{ .name = "slot", .doc = "Template bodies only, at most one: marks where use-site children are inserted. Attribute-less leaf; a use with no children renders it empty." },
+};
+
+pub const virtual_window_attr_docs = [_]Doc{
+    .{ .name = "id", .doc = "Stable retained-list identity, unique within the view." },
+    .{ .name = "as", .doc = "Local name exposing the complete virtual range, including visible and rendered bounds, content extent, offset, and row extent." },
+    .{ .name = "item-count", .doc = "Total number of available rows, a literal or one model binding." },
+    .{ .name = "item-extent", .doc = "Fixed row extent in points." },
+    .{ .name = "extent-estimate", .doc = "Exported Model-first numeric index helper returning a row extent; its identity survives view rebuilds." },
+    .{ .name = "gap", .doc = "Space between rows; included in the virtual content extent." },
+    .{ .name = "overscan", .doc = "Number of extra rows rendered before and after the visible range." },
+    .{ .name = "viewport-fallback", .doc = "Viewport extent before the retained scroll widget has reported its actual size." },
+    .{ .name = "index-base", .doc = "Global starting index for the virtual range; defaults to zero." },
+    .{ .name = "anchor", .doc = "leading or trailing virtual-list anchor; defaults to leading." },
+};
+
+pub const virtual_list_attr_docs = [_]Doc{
+    .{ .name = "window", .doc = "Enclosing virtual-window as name; each declaration is consumed exactly once." },
+    .{ .name = "each", .doc = "Exported Model-first query taking the complete virtual range and returning exactly one record per rendered index." },
+    .{ .name = "as", .doc = "Local row binding used by the single keyed child template." },
 };
 
 pub const attribute_docs = [_]Doc{
@@ -151,6 +172,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "accent-foreground", .doc = "Accent foreground color token (literal ColorTokens field name, e.g. accent_text)." },
     .{ .name = "border-color", .doc = "Border color token (literal ColorTokens field name, e.g. border)." },
     .{ .name = "focus-ring", .doc = "Focus ring color token (literal ColorTokens field name, e.g. focus_ring)." },
+    .{ .name = "focusable", .doc = "Whether the widget participates in keyboard focus (true/false); overrides its ordinary focusability, including on interactive list items." },
     .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)." },
 };
 
@@ -340,6 +362,8 @@ pub fn elementDoc(name: []const u8) ?[]const u8 {
 
 pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&attribute_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_window_attr_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
     if (findDoc(&event_docs, name)) |doc| return doc;
     if (findDoc(&for_attr_docs, name)) |doc| return doc;
     if (findDoc(&template_attr_docs, name)) |doc| return doc;
@@ -364,7 +388,11 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
 /// shared registry. Composite elements intentionally reuse names such as
 /// `source`, so context-free lookup cannot choose the right authoring help.
 pub fn attributeDocForElement(element: []const u8, name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, element, "markdown")) {
+    if (std.mem.eql(u8, element, "virtual-window")) {
+        return findDoc(&virtual_window_attr_docs, name);
+    } else if (std.mem.eql(u8, element, "virtual-list")) {
+        if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
+    } else if (std.mem.eql(u8, element, "markdown")) {
         if (findDoc(&markdown_attr_docs, name)) |doc| return doc;
     } else if (std.mem.eql(u8, element, "code")) {
         if (findDoc(&code_attr_docs, name)) |doc| return doc;

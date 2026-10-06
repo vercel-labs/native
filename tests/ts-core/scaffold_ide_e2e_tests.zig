@@ -77,6 +77,7 @@ test "a fresh ts scaffold typechecks under stock tsc, and builds never need the 
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/tsconfig.json"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/package.json"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/core.ts"));
+    try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/bytes.ts"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
 

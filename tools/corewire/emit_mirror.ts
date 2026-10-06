@@ -1,6 +1,6 @@
 // The host mirror projection of the compiled core's complete contract.
 import type { TypeRef, MsgArm } from "./core_contract.ts";
-import { findRecord } from "./core_contract.ts";
+import { findRecord, usesVirtualExtentHelpers } from "./core_contract.ts";
 import { projectionPlan, validateMirror } from "./core_projection.ts";
 import { CodeWriter, commentText, zigString, zigIdent, synthesized, scrollIndexes, isTextInputUnion } from "./core_emission.ts";
 import type { EmissionInput, EmissionContract, EmissionResult } from "./core_emission.ts";
@@ -125,7 +125,9 @@ class MirrorEmitter extends CodeWriter {
           [zigIdent(h.name), zigIdent(model.name), params, returns, tuple, returns, String(i), h.arena ? "arena" : "shim_rt.frameAllocator()"]);
       }
     }
-    if (this.s.abi.exports.includes("native_virtual_requests")) this.virtualEstimates();
+    // Native markup and its Debug interpreter need the same stable helpers
+    // even when the compiled TypeScript view ABI is absent.
+    if (usesVirtualExtentHelpers(this.s)) this.virtualEstimates();
     this.unboundDecl(this.s.model_unbound); this.raw("\n};\n");
   }
   virtualEstimates(): void {

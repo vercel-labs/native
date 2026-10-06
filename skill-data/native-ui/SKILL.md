@@ -153,6 +153,25 @@ fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusIt
 
 Title updates retitle the live `NSStatusItem` button without re-creating it; platforms without a tray-title seam keep menu updates and log the title gap once.
 
+### Windowed lists in markup
+
+Use `<virtual-window>` to resolve one retained range before rendering, then `<virtual-list>` to request only its rendered rows. The window declares a stable literal `id`, an `as` range name, an `item-count`, and either `item-extent` or an exported Model-first `extent-estimate` helper. Optional `gap`, `overscan`, `viewport-fallback`, `index-base`, and `anchor="leading|trailing"` describe the complete content geometry.
+
+```html
+<virtual-window id="records" as="range" item-count="{loaded}" item-extent="48" overscan="4">
+  <column>
+    <virtual-list window="range" each="rows" as="row" grow="1" label="Records">
+      <list-item key="{row.id}" focusable="true" on-press="select:{row.id}">{row.title}</list-item>
+    </virtual-list>
+    <status-bar>{range.first_visible_index}–{range.last_visible_index}</status-bar>
+  </column>
+</virtual-window>
+```
+
+In a TypeScript core, `rows(model: Model, range: VirtualListRange): readonly Row[]` takes the complete SDK range from `@native-sdk/core/events` and returns exactly `range.end_index - range.start_index` rows in rendered-index order. An extent estimator has shape `rowExtent(model: Model, index: number): number`; its retained identity survives rebuilds. Each row has one keyed root. Ordinary scroll styling, `on-scroll`, and reach-start/end messages belong on `virtual-list`.
+
+Each window has one root and exactly one consuming list; windows cannot nest. A range can pass through a template argument, and secondary window views have their own retained descriptors. The full range exposes visible and rendered bounds, content extent, row extent, and offset; use it for footer text without copying scroll state into the model. See `examples/feed` for variable-height estimates, stable row queries, and retained selection.
+
 ### Native scrolling (macOS)
 
 Zero app code: on macOS every non-virtualized `scroll` region — and every windowed virtual list (`ui.virtualList`), whose driver content size is the full virtual extent — is driven by an invisible `NSScrollView` — OS momentum and the system overlay scrollbar — while the engine renders the content. `widget.value` stays the offset of record, so the rebuild reconcile rule ("user offset survives rebuilds until the source offset changes"), automation snapshot offsets (`scroll=[offset=..]`), and `Options.sync` all work exactly as before; the engine-drawn scrollbar simply stops painting for natively driven regions. Programmatic scrolls still work: change the source offset (or scroll via keyboard/automation) and the runtime pushes it into the native scroller. GTK/Win32 and mobile embeds keep the engine's wheel physics unchanged. Nested-scroll saturation handoff (inner region exhausted, outer continues) is per-region native today: the inner region stops at its edge like a standalone scroller.

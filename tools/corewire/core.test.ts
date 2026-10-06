@@ -51,7 +51,6 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     { name: "estimate", params: [{ kind: "i64" }], returns: { kind: "f64" }, arena: false },
   );
   contract.integer_slots.push({ slot: "Range.first", class: "i64" }, { slot: "helpers.estimate.params[0]", class: "u64" });
-  contract.abi.exports.push("native_virtual_requests", "native_virtual_view");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-helper-codecs-"));
   try {
     fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(contract, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
@@ -60,9 +59,29 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     const mirror = fs.readFileSync(path.join(dir, "mirror"), "utf8"), facade = fs.readFileSync(path.join(dir, "facade"), "utf8");
     assert.match(mirror, /pub fn rows\(self: \*const Model, p0: Range, p1: \?\[\]const u8, arena: std.mem.Allocator\)/);
     assert.match(mirror, /const args_tuple = \.\{ p0, p1 \}/);
+    assert.match(mirror, /pub fn virtualExtentHelper/);
+    assert.match(mirror, /pub fn virtualExtentEstimate/);
     assert.match(mirror, /callHelper\(\[\]const Range, 0, args, arena\)/);
     assert.match(mirror, /@bitCast\(@as\(u64, @intCast\(index\)\)\)/);
     assert.match(facade, /rows\(nscfCommitted,/);
     assert.match(facade, /estimate\(nscfCommitted,/);
+    for (const name of ["virtualExtentHelper", "virtualExtentEstimate"]) {
+      const conflicting = structuredClone(contract);
+      conflicting.model_helpers[1].name = name;
+      conflicting.integer_slots.find(slot => slot.slot === "helpers.estimate.params[0]")!.slot = `helpers.${name}.params[0]`;
+      fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(conflicting, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
+      fs.writeFileSync(path.join(dir, "mirror"), "retain");
+      const refused = spawnSync(corewire, ["--sidecar", "input.json", "--out", "mirror"], { cwd: dir, encoding: "utf8" });
+      assert.ifError(refused.error); assert.equal(refused.status, 1, refused.stderr);
+      assert.match(refused.stderr, /collides with a declaration the generated shim/);
+      assert.equal(fs.readFileSync(path.join(dir, "mirror"), "utf8"), "retain");
+      const fieldConflict = structuredClone(contract);
+      fieldConflict.types.structs[0].fields.push({ name, type: { kind: "f64" } });
+      fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(fieldConflict, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
+      const fieldRefused = spawnSync(corewire, ["--sidecar", "input.json", "--out", "mirror"], { cwd: dir, encoding: "utf8" });
+      assert.ifError(fieldRefused.error); assert.equal(fieldRefused.status, 1, fieldRefused.stderr);
+      assert.match(fieldRefused.stderr, /model field .*collides with a declaration the generated shim/);
+      assert.equal(fs.readFileSync(path.join(dir, "mirror"), "utf8"), "retain");
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

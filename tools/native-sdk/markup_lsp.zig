@@ -307,7 +307,13 @@ pub const Server = struct {
                 for (structure_docs) |doc| try writeCompletionItem(&js, doc.name, .keyword, "markup structure tag", doc.doc);
             },
             .attributes => |element_name| {
-                if (std.mem.eql(u8, element_name, "for")) {
+                if (std.mem.eql(u8, element_name, "virtual-window")) {
+                    for (markup_docs.virtual_window_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "virtual-window attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "virtual-list")) {
+                    for (markup_docs.virtual_list_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "virtual-list attribute", doc.doc);
+                    for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
+                    for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "markup event", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "for")) {
                     for (for_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "for attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "if")) {
                     for (if_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "if attribute", doc.doc);
@@ -947,7 +953,7 @@ test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video", "segmented-control" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "virtual-window", "virtual-list", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video", "segmented-control" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.schema.attrs) |entry| {
@@ -979,4 +985,15 @@ test "doc tables cover every known element, attribute, and event" {
         const name = try std.fmt.bufPrint(&buffer, "on-{s}", .{event});
         try testing.expect(attributeDoc(name) != null);
     }
+}
+
+test "virtual range attributes have contextual hover documentation" {
+    const window = "<virtual-window item-count=\"{loaded}\" extent-estimate=\"rowExtent\">";
+    const count = hoverAt(window, std.mem.indexOf(u8, window, "item-count").? + 2).?;
+    try testing.expectEqualStrings("item-count", count.name);
+    try testing.expect(std.mem.indexOf(u8, count.doc, "available rows") != null);
+    const list = "<virtual-list window=\"range\" each=\"rows\" as=\"row\">";
+    const query = hoverAt(list, std.mem.indexOf(u8, list, "each").? + 1).?;
+    try testing.expect(std.mem.indexOf(u8, query.doc, "complete virtual range") != null);
+    try testing.expect(attributeDocForElement("virtual-window", "foreground") == null);
 }

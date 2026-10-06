@@ -13,12 +13,14 @@ test("compiled Feed retains complete interaction state across window shifts and 
   snapshot = await app.action(findWidget(snapshot, { role: "button", name: "Like post 0" }), "toggle");
   assert.equal((snapshot.model.liked as number[])[0], 1);
   const original = snapshot.model;
-  snapshot = await app.wheel(findWidget(snapshot, { role: "group", name: "Timeline" }), -1800);
+  snapshot = await app.wheel(findWidget(snapshot, { role: "list", name: "Timeline" }), 1800);
   snapshot = await app.frame();
+  assert.ok(findWidget(snapshot, { role: "list", name: "Timeline" }).scroll!.offsetY > 0);
   assert.ok(!snapshot.widgets.some(widget => widget.name === first.name));
   assert.deepEqual(snapshot.model, original);
-  snapshot = await app.wheel(findWidget(snapshot, { role: "group", name: "Timeline" }), 100000);
+  snapshot = await app.wheel(findWidget(snapshot, { role: "list", name: "Timeline" }), -100000);
   snapshot = await app.frame();
+  assert.equal(findWidget(snapshot, { role: "list", name: "Timeline" }).scroll!.offsetY, 0);
   assert.equal(findWidget(snapshot, { role: "listitem", name: first.name }).id, first.id);
   assert.equal((snapshot.model.liked as number[])[0], 1);
   const replay = await app.verifyReplay();

@@ -1,5 +1,5 @@
 // Shared layout planning and admission rules for the two core projections.
-import { findRecord, findEnum, findUnion, findArm, flag, walkRefs } from "./core_contract.ts";
+import { findRecord, findEnum, findUnion, findArm, flag, walkRefs, usesVirtualExtentHelpers } from "./core_contract.ts";
 import type { CoreContract, TypeRef, Payload, RecordType, Diagnostic } from "./core_contract.ts";
 import { tsReservedWords, fixedExports, ambientValues, zigKeywords, zigPrimitives } from "./core_vocabulary.ts";
 
@@ -108,7 +108,8 @@ function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
   if (s.model !== "Model") reserved.push("Model");
   if (s.msg.name !== "Msg") reserved.push("Msg");
   if (s.abi.exports.includes("native_view")) reserved.push("nativeView", "nativeViewEvent", "ptr", "len", "arena");
-  if (s.abi.exports.includes("native_virtual_requests")) reserved.push("nativeVirtualRequests", "nativeVirtualView", "virtualExtentHelper", "virtualExtentEstimate");
+  if (s.abi.exports.includes("native_virtual_requests")) reserved.push("nativeVirtualRequests", "nativeVirtualView");
+  if (usesVirtualExtentHelpers(s)) reserved.push("virtualExtentHelper", "virtualExtentEstimate");
   if (s.abi.exports.includes("native_media_view")) reserved.push("nativeMediaView");
   if (s.abi.exports.includes("native_media_window_view")) reserved.push("nativeMediaWindowView");
   if (s.abi.exports.includes("native_window_view")) reserved.push("nativeWindowView", "label", "ptr", "len", "arena");
@@ -137,6 +138,9 @@ function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
   }
   const model = findRecord(s, s.model);
   if (model !== null) {
+    if (usesVirtualExtentHelpers(s)) for (const f of model.fields) {
+      if (f.name === "virtualExtentHelper" || f.name === "virtualExtentEstimate") flag(out, "types", `model field "${f.name}" collides with a declaration the generated shim itself must make; rename the field in the core source`);
+    }
     for (const h of s.model_helpers) {
       if (h.name === "view_unbound") flag(out, "model_helpers", 'helper "view_unbound" takes the unbound-list declaration\'s spelling — the contract reflection reads that name as the opt-out tuple; rename the helper in the core source');
       for (const f of model.fields) if (f.name === h.name) flag(out, "model_helpers", `helper "${h.name}" collides with the model field of the same name — the mirror declares helpers as model methods, one member namespace; rename one in the core source`);

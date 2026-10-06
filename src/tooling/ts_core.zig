@@ -801,7 +801,7 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
 // to npm, the CLI materializes `node_modules/@native-sdk/core` inside the
 // app itself — a plain COPY (never a symlink; cache paths get GC'd) of
 // exactly the files the published artifact will contain (package.json plus
-// the `files: ["sdk"]` allowlist: sdk/core.ts, sdk/text.ts, sdk/events.ts,
+// the `files: ["sdk"]` allowlist: sdk/core.ts, sdk/bytes.ts, sdk/text.ts, sdk/events.ts,
 // and the ambient bytes-text method surface core.ts references).
 // The copy is
 // EDITOR-AND-VERSIONING SURFACE ONLY: builds check and compile against the
@@ -818,7 +818,7 @@ pub const editor_package_dir = "node_modules/@native-sdk/core";
 /// materialized copy): package.json, core editor sources, and the test driver.
 /// packages/core/test/package_manifest.test.ts pins the manifest to this
 /// shape, so copy and tarball cannot drift apart.
-const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/text.ts", "sdk/events.ts", "testing/index.ts", "sdk/bytes_text_methods.d.ts" };
+const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/bytes.ts", "sdk/text.ts", "sdk/events.ts", "testing/index.ts", "sdk/bytes_text_methods.d.ts" };
 const sqlite_editor_overlay_marker = ".native/cache/sqlite/editor-overlay";
 
 /// Extract the top-level "version" of a package.json. A targeted scan, not
@@ -1071,6 +1071,7 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try cwd.createDirPath(io, app ++ "/src");
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/package.json", .data = "{ \"name\": \"@native-sdk/core\", \"version\": \"0.0.9\" }" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/core.ts", .data = "// core module" });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/bytes.ts", .data = "// byte module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/text.ts", .data = "// text module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/events.ts", .data = "// events module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/bytes_text_methods.d.ts", .data = "// ambient text methods" });
@@ -1086,6 +1087,7 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try std.testing.expectEqual(EnsureOutcome.materialized, try ensureEditorPackage(allocator, io, sdk, app));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/package.json"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts"));
+    try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/bytes.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/testing/index.ts"));

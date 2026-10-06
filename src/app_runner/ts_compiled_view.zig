@@ -697,7 +697,7 @@ pub fn testContextMenuRecords() !void {
         const oversized = try ui.arena.alloc(ContextMenuRecord, 33);
         @memset(oversized, .{ .label = "", .enabled = true, .separator = true });
         const records = [_]Record{.{ .end = 1, .kind = .list_item, .text = "", .contextMenu = oversized }};
-        try std.testing.expectError(error.InvalidView, node(&ui, &records, 0, 1, 0));
+        try std.testing.expectError(error.InvalidView, node(&ui, &records, 0, 1, 0, &.{}));
         inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
             if (comptime field.type == void) {
                 const source = try std.fmt.allocPrint(std.testing.allocator, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"list_item\",\"text\":\"Task\",\"contextMenu\":[{{\"label\":\"Café\",\"press\":[1,{d}],\"enabled\":false,\"separator\":false}},{{\"label\":\"\",\"enabled\":true,\"separator\":true}}]}}]}}", .{tag});

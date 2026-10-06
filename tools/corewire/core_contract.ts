@@ -27,6 +27,9 @@ export interface CoreContract {
   abi: { exports: string[]; snapshot_format: number };
   integer_slots: { slot: string; class: string }[];
 }
+export function usesVirtualExtentHelpers(s: CoreContract): boolean {
+  return s.abi.exports.includes("native_virtual_requests") || s.model_helpers.some(helper => helper.params.length === 1 && ["i64", "f64"].includes(helper.params[0].kind) && ["i64", "f64"].includes(helper.returns.kind));
+}
 export interface Diagnostic { path: string; message: string }
 export interface CoreInput { sidecar: CoreContract; wire_text: string; abi_text: string; snapshot_text: string }
 export function flag(out: Diagnostic[], path: string, message: string): void { out.push({ path, message }); }
