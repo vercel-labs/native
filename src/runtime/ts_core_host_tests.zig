@@ -3629,7 +3629,14 @@ const effect_policy_probe_core = struct {
     var calls = [_]usize{0} ** 3;
 
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
-        if (request[0] >= 8) return referenceCoordinationPolicy(request, output);
+        if (request[0] >= 8) {
+            const size = referenceCoordinationPolicy(request, output);
+            if (request[0] == 12 and !lookup_enabled and output[0] == 1) {
+                output[0] = 255;
+                output[1] = 255;
+            }
+            return size;
+        }
         calls[request[0]] += 1;
         if (request[0] == 2) {
             const at = 5 + @as(usize, request[1]) * 4;

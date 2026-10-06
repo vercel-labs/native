@@ -7417,7 +7417,7 @@ test "compiled pointer interaction matches complete native state and fallible co
             }
         }
     };
-    try std.testing.expectEqual(@as(usize, 1792), comparisons);
+    try std.testing.expectEqual(@as(usize, 1728), comparisons);
     try std.testing.expect(semantics_failures > 0);
     try std.testing.expect(cursor_failures > 0);
     core.rt.frameReset();
