@@ -7417,7 +7417,7 @@ test "compiled pointer interaction matches complete native state and fallible co
             }
         }
     };
-    try std.testing.expectEqual(@as(usize, 1728), comparisons);
+    try std.testing.expectEqual(@as(usize, 1792), comparisons);
     try std.testing.expect(semantics_failures > 0);
     try std.testing.expect(cursor_failures > 0);
     core.rt.frameReset();
@@ -9711,4 +9711,186 @@ test "compiled media PTY coordination matches native bindings first slot routing
         comparisons += 1;
     };
     std.debug.print("compiled PTY complete comparisons: {d}\n", .{comparisons});
+}
+
+fn checkCompiledRequestPlan(request: []const u8) !void {
+    var expected: [20]u8 = undefined;
+    const size = @import("request_policy_reference").plan(request, &expected);
+    var result: [20]u8 = undefined;
+    try std.testing.expectEqual(size, core.nativeEffectPolicy(request, result[0..size]));
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, expected[0..size], result[0..size]);
+}
+
+fn requestCoordinationPacket(buffer: []u8, name: []const u8, used: usize, stored: []const u8, flags: u8) []u8 {
+    @memset(buffer, 0);
+    buffer[0] = 11;
+    buffer[3] = @intCast(name.len);
+    buffer[6] = 7;
+    buffer[7] = 255;
+    @memcpy(buffer[16..][0..name.len], name);
+    var at: usize = 16 + name.len;
+    for (0..36) |slot| {
+        buffer[at] = @intFromBool(slot < used);
+        buffer[at + 1] = @intCast(stored.len);
+        @memcpy(buffer[at + 2 ..][0..stored.len], stored);
+        const route = at + 2 + stored.len;
+        buffer[route] = @intCast(slot * 7);
+        buffer[route + 1] = @intCast(255 - slot * 7);
+        buffer[route + 2] = flags & 1;
+        buffer[route + 3] = (flags >> 1) & 1;
+        buffer[route + 4] = (flags >> 2) & 1;
+        std.mem.writeInt(u64, buffer[route + 5 ..][0..8], 0xfedcba9876543210, .little);
+        at = route + 13;
+    }
+    return buffer[0..at];
+}
+
+test "compiled request complete admission lookup result retirement and opaque channel ownership" {
+    var buffer: [10000]u8 = undefined;
+    const long = [_]u8{255} ** 255;
+    const keys = [_][]const u8{ "", "route", "\x00\xff", &long };
+    var comparisons: usize = 0;
+    for (keys) |name| for (keys) |stored| for (0..37) |used| for (0..3) |pool| {
+        const request = requestCoordinationPacket(&buffer, name, used, stored, 0);
+        request[2] = @intCast(pool);
+        for (0..2) |blocked| for (0..2) |reject| {
+            request[1] = 0;
+            request[4] = @intCast(blocked);
+            request[5] = @intCast(reject);
+            try checkCompiledRequestPlan(request);
+            comparisons += 1;
+        };
+        request[1] = 1;
+        try checkCompiledRequestPlan(request);
+        comparisons += 1;
+        request[1] = 3;
+        for (0..2) |blocked| for (0..2) |occupied| {
+            request[4] = @intCast(blocked);
+            request[11] = @intCast(occupied);
+            try checkCompiledRequestPlan(request);
+            comparisons += 1;
+        };
+    };
+    for (0..36) |slot| for (0..8) |flags| for (0..2) |ok| {
+        const request = requestCoordinationPacket(&buffer, "", 36, &long, @intCast(flags));
+        request[1] = 2;
+        request[9] = @intCast(ok);
+        request[10] = @intCast(slot);
+        try checkCompiledRequestPlan(request);
+        comparisons += 1;
+    };
+    // A predecessor in a different pool retires even if the destination is full.
+    for (0..36) |owner| for (0..3) |pool| {
+        const request = requestCoordinationPacket(&buffer, "x", 36, "y", 0);
+        request[2] = @intCast(pool);
+        const entry = 17 + owner * 16;
+        request[entry + 2] = 'x';
+        try checkCompiledRequestPlan(request);
+        comparisons += 1;
+    };
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const copied = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(copied);
+    const request = requestCoordinationPacket(&buffer, "\x00\xff", 36, "\x00\xff", 7);
+    request[1] = 2;
+    request[9] = 1;
+    request[10] = 35;
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeEffectPolicy(request, &output));
+    const frozen = output;
+    try checkCompiledRequestPlan(request);
+    try std.testing.expectEqualSlices(u8, copied, borrowed);
+    try std.testing.expectEqualSlices(u8, &frozen, &output);
+    try std.testing.expectEqual(@as(usize, 16668), comparisons);
+}
+
+test "compiled request cancellation keeps family priority dropped routes live DB and file sink semantics" {
+    var buffer: [32000]u8 = undefined;
+    const counts = [_]usize{ 36, 16, 16, 16, 4, 16, 16 };
+    const long = [_]u8{255} ** 255;
+    const keys = [_][]const u8{ "", "route", "\x00\xff", &long };
+    var comparisons: usize = 0;
+    for (keys) |name| for (0..7) |selected_family| for (0..counts[selected_family]) |owner| for (0..if (selected_family == 6) @as(usize, 4) else if (selected_family == 0 or selected_family == 1 or selected_family == 4) 2 else 1) |flags| for (0..2) |duplicate| {
+        @memset(&buffer, 0);
+        buffer[0] = 12;
+        buffer[1] = @intCast(name.len);
+        @memcpy(buffer[2..][0..name.len], name);
+        var at: usize = 2 + name.len;
+        for (counts, 0..) |count, family| for (0..count) |slot| {
+            const used = family == selected_family and slot == owner or duplicate == 1 and family > selected_family;
+            buffer[at] = @intFromBool(used);
+            buffer[at + 1] = if (family == selected_family) @intCast(flags) else 0;
+            buffer[at + 2] = @intCast(name.len);
+            @memcpy(buffer[at + 3 ..][0..name.len], name);
+            buffer[at + 3 + name.len] = @intCast(255 - slot);
+            at += 4 + name.len;
+        };
+        try checkCompiledRequestPlan(buffer[0..at]);
+        comparisons += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1792), comparisons);
+}
+
+test "compiled request credentials reject malformed records and copy only borrowed payload offsets" {
+    var buffer: [600]u8 = @splat(0);
+    const names = [_][]const u8{ "core.credentials.set", "core.credentials.get", "core.credentials.delete", "core.credentials.other", "core.credentials.get\x00", "\xff" };
+    var comparisons: usize = 0;
+    for (names) |name| {
+        buffer[0] = 13;
+        buffer[1] = @intCast(name.len);
+        @memcpy(buffer[2..][0..name.len], name);
+        const start = 2 + name.len;
+        for ([_]u32{ 0, 1, 255, std.math.maxInt(u32) }) |first| for ([_]u32{ 0, 1, 255, std.math.maxInt(u32) }) |second| {
+            @memset(buffer[start..], 0xff);
+            std.mem.writeInt(u32, buffer[start..][0..4], first, .little);
+            if (first <= 255) std.mem.writeInt(u32, buffer[start + 4 + first ..][0..4], second, .little);
+            const end: usize = if (first <= 255 and second <= 255) start + 8 + first + second else start + 8;
+            for (0..end - start + 1) |length| {
+                try checkCompiledRequestPlan(buffer[0 .. start + length]);
+                comparisons += 1;
+            }
+        };
+    }
+    try std.testing.expect(comparisons > 10000);
+}
+
+test "compiled request DB commands preserve complete page done exec errors and subscription routes" {
+    var buffer: [4500]u8 = undefined;
+    const long = [_]u8{255} ** 255;
+    const keys = [_][]const u8{ "", "query", "\x00\xff", &long };
+    var comparisons: usize = 0;
+    for (keys) |name| for (keys) |stored| for (0..17) |used| for (0..4) |flags| {
+        @memset(&buffer, 0);
+        buffer[0] = 14;
+        buffer[2] = @intCast(name.len);
+        buffer[5] = 7;
+        buffer[6] = 12;
+        buffer[7] = 255;
+        @memcpy(buffer[12..][0..name.len], name);
+        var at: usize = 12 + name.len;
+        for (0..16) |slot| {
+            buffer[at..][0..7].* = .{ @intFromBool(slot < used), @intCast(flags & 1), @intCast(flags >> 1), @intCast(slot * 16), @intCast(slot * 16 + 7), @intCast(255 - slot), @intCast(stored.len) };
+            @memcpy(buffer[at + 7 ..][0..stored.len], stored);
+            at += 7 + stored.len;
+        }
+        for (0..2) |blocked| for (0..2) |query| {
+            buffer[1] = 0;
+            buffer[3] = @intCast(blocked);
+            buffer[4] = @intCast(query);
+            try checkCompiledRequestPlan(buffer[0..at]);
+            comparisons += 1;
+        };
+        for (0..used) |slot| for (0..3) |kind| for (0..2) |ok| {
+            if (ok == 1 and (kind == 1 and flags & 1 == 0 or kind == 2 and flags & 1 == 1)) continue;
+            buffer[1] = 1;
+            buffer[8] = @intCast(slot);
+            buffer[9] = @intCast(kind);
+            buffer[10] = @intCast(ok);
+            try checkCompiledRequestPlan(buffer[0..at]);
+            comparisons += 1;
+        };
+    };
+    try std.testing.expectEqual(@as(usize, 47872), comparisons);
 }

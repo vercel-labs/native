@@ -3542,6 +3542,7 @@ test "database key lookup is owned by the compiled policy and preserves live com
 // Independent native behavior for unrelated forced-policy probes. New probes
 // override these bytes explicitly to prove that the consumer applies the plan.
 fn referenceCoordinationPolicy(request: []const u8, output: []u8) usize {
+    if (request[0] >= 11) return @import("request_policy_test_reference.zig").plan(request, output);
     if (request[0] == 10) {
         output[0] = if (request[1] == 1) request[4] else request[3];
         return 1;
@@ -4515,6 +4516,7 @@ const coordination_policy_probe_core = struct {
     var retire = true;
     var calls = [_]usize{0} ** 11;
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 11) return referenceCoordinationPolicy(request, output);
         calls[request[0]] += 1;
         @memset(rt.frameAlloc(u8, 19), 173);
         if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
@@ -4645,4 +4647,175 @@ test "media host consumes PTY retirement while named bindings retain ended grids
         CoordinationProbe.dispatch(fx, .kill_pty);
         try std.testing.expect(fx.ptyKillRequested(engine));
     }
+}
+
+const request_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = struct { bytes: []const u8 = "", error_bytes: []const u8 = "", done: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, loaded: []const u8, failed: []const u8, done };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [2][1024]u8 = undefined;
+    var admit = true;
+    var route_error = false;
+    var retire = true;
+    var cancel = true;
+    var credential_suffix = false;
+    var calls: [15]usize = @splat(0);
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .loaded => |bytes| {
+                @memcpy(owned[0][0..bytes.len], bytes);
+                model.bytes = owned[0][0..bytes.len];
+            },
+            .failed => |bytes| {
+                @memcpy(owned[1][0..bytes.len], bytes);
+                model.error_bytes = owned[1][0..bytes.len];
+            },
+            .done => model.done += 1,
+        }
+        return .{ .model = &model, .cmd = "" };
+    }
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 23), 173);
+        const size = referenceCoordinationPolicy(request, output);
+        if (request[0] == 11 and request[1] == 0) {
+            if (!admit) output[0] = 255 else if (request[2] == 0 and output[0] == 0) output[0] = 15;
+        } else if (request[0] == 11 and request[1] == 2) {
+            if (route_error) output[2] = 2;
+            output[4] = @intFromBool(retire);
+        } else if (request[0] == 12 and !cancel) {
+            output[0] = 255;
+            output[1] = 255;
+        } else if (request[0] == 13 and credential_suffix and output[0] == 1) {
+            const offset = std.mem.readInt(u32, output[4..8], .little);
+            const length = std.mem.readInt(u32, output[8..12], .little);
+            std.mem.writeInt(u32, output[4..8], offset + 1, .little);
+            std.mem.writeInt(u32, output[8..12], length - 1, .little);
+        } else if (request[0] == 14) {
+            if (request[1] == 0 and output[0] == 0) output[0] = 15;
+            if (request[1] == 1) {
+                if (route_error) output[4] = 2;
+                output[6] = @intFromBool(retire and output[6] == 1);
+            }
+        }
+        return size;
+    }
+};
+const RequestProbe = ts_core_host.TsCoreHost(request_policy_probe_core);
+fn freshRequestProbe(fx: *RequestProbe.Fx) void {
+    request_policy_probe_core.admit = true;
+    request_policy_probe_core.route_error = false;
+    request_policy_probe_core.retire = true;
+    request_policy_probe_core.cancel = true;
+    request_policy_probe_core.credential_suffix = false;
+    request_policy_probe_core.calls = @splat(0);
+    fx.* = RequestProbe.Fx.init(std.testing.allocator);
+    fx.executor = .fake;
+    RequestProbe.init(fx);
+}
+
+test "request host consumes compiled admission routes retirement cancellation and retains all result bytes" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", 1, 2, "body\x00\xff") });
+    const first = fx.pendingHostAt(0).?;
+    try std.testing.expectEqual(ts_core_host.request_key_base + 15, first.key);
+    try std.testing.expectEqualStrings("body\x00\xff", first.payload);
+    request_policy_probe_core.cancel = false;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
+    request_policy_probe_core.route_error = true;
+    request_policy_probe_core.retire = false;
+    try fx.feedHostResult(first.key, true, "answer\x00\xff");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("answer\x00\xff", RequestProbe.model().error_bytes);
+    mini_core.rt.frameReset();
+    @memset(mini_core.rt.frameAlloc(u8, 2048), 165);
+    try std.testing.expectEqualStrings("answer\x00\xff", RequestProbe.model().error_bytes);
+    // Keeping the route affects duplicate rejection after the engine terminal.
+    const duplicate = mini_core.cmdRequest("echo", "owned", 1, 2, "next");
+    @constCast(duplicate)[2 + 4 + 1 + 5 + 2] = 1;
+    RequestProbe.dispatch(&fx, .{ .commands = duplicate });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    request_policy_probe_core.cancel = true;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", 1, 2, "new") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
+    request_policy_probe_core.admit = false;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "other", 1, 2, "deny") });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    try std.testing.expect(request_policy_probe_core.calls[11] >= 5);
+    try std.testing.expect(request_policy_probe_core.calls[12] >= 2);
+}
+
+test "request host consumes compiled credential offsets without retaining borrowed packets" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    var backing = platform.NullPlatform.init(.{});
+    defer backing.deinit();
+    var services = backing.platform();
+    fx.bindCredentialsStore(.{ .services = &services.services, .service = "dev.native-sdk.request-test", .permitted = true });
+    request_policy_probe_core.credential_suffix = true;
+    const payload = [_]u8{ 4, 0, 0, 0, 'x', 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 };
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("core.credentials.set", "credential", 3, 2, &payload) });
+    const pending = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 }, pending.payload);
+    mini_core.rt.frameReset();
+    @memset(mini_core.rt.frameAlloc(u8, 2048), 165);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 }, pending.payload);
+    try fx.feedHostResult(pending.key, true, "");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), RequestProbe.model().done);
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("core.credentials.set", "credential", 3, 2, payload[0..8]) });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expect(request_policy_probe_core.calls[13] == 2);
+}
+
+test "request host consumes compiled database admission complete routing and retirement" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdDbQuery("query", 1, 3, 2, "SELECT 1") });
+    const pending = fx.pendingDbAt(0).?;
+    try std.testing.expectEqual(ts_core_host.db_key_base + 15, pending.key);
+    request_policy_probe_core.route_error = true;
+    const page = "\x01\x00\x00\x00\x01\x00\x00\x00\x04\x00\x00\x00blob\x04\x06\x00\x00\x00rows\x00\xff";
+    try fx.feedDbResult(pending.key, .page, .ok, page);
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings(page, RequestProbe.model().error_bytes);
+    request_policy_probe_core.route_error = false;
+    request_policy_probe_core.retire = false;
+    try fx.feedDbResult(pending.key, .done, .ok, "");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), RequestProbe.model().done);
+    // The retained query route still owns the key and refuses an exec collision.
+    const exec = mini_core.rt.frameAlloc(u8, 4 + 5 + 4);
+    exec[0..2].* = .{ 0x2A, 5 };
+    @memcpy(exec[2..7], "query");
+    exec[7..9].* = .{ 3, 2 };
+    @memset(exec[9..], 0);
+    RequestProbe.dispatch(&fx, .{ .commands = exec });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("query") });
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdDbQuery("query", 1, 3, 2, "SELECT 2") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expect(request_policy_probe_core.calls[14] >= 5);
 }

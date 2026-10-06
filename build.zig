@@ -1372,6 +1372,9 @@ pub fn build(b: *std.Build) void {
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
+        const request_reference_files = b.addWriteFiles();
+        ts_core_artifacts.feed_reader.root_module.addImport("request_policy_reference", b.createModule(.{ .root_source_file = request_reference_files.addCopyFile(b.path("src/runtime/request_policy_test_reference.zig"), "request_policy_reference.zig"), .target = target, .optimize = optimize }));
+        b.step("test-ts-request-policy", "Compare compiled request routing cancellation and credential plans with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-request-policy-tests", &.{"compiled request"})).step);
         const media_policy_step = b.step("test-ts-media-policy", "Verify compiled media lifecycle and transport decisions against the native reference");
         media_policy_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-media-policy-tests", &.{"compiled media"})).step);
         const shell_layout_e2e_run = b.addRunArtifact(ts_core_artifacts.shell_layout);
@@ -2411,6 +2414,7 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host_tests.test.delay host consumes compiled",
         "runtime.ts_core_host_tests.test.delay admission supplies",
         "runtime.ts_core_host_tests.test.media host consumes",
+        "runtime.ts_core_host_tests.test.request host consumes",
     }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",

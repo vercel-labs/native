@@ -114,6 +114,10 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 5) return nscvContainerLayout(request);
   if (request[0] === 6) return nscvIntrinsicLayout(request);
   if (request[0] === 7) return nscvWrappedLayout(request);
+  if (request[0] === 11) return requestCoordinationPolicy(request);
+  if (request[0] === 12) return cancellationPolicy(request);
+  if (request[0] === 13) return credentialRecordPolicy(request);
+  if (request[0] === 14) return dbCommandPolicy(request);
   if (request[0] === 8) return nscvVirtualFlow(request);
   if (request[0] === 9) return nscvSemanticTree(request);
   if (request[0] === 10) return nscvExtentPolicy(request);
@@ -385,7 +389,11 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 10) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 14) throw new Error("invalid effect policy request");
+  if (request[0] === 11) return requestCoordinationPolicy(request);
+  if (request[0] === 12) return cancellationPolicy(request);
+  if (request[0] === 13) return credentialRecordPolicy(request);
+  if (request[0] === 14) return dbCommandPolicy(request);
   if (request[0] === 8) return playbackLoadPolicy(request);
   if (request[0] === 9) return ptyCoordinationPolicy(request);
   if (request[0] === 10) return playbackEventPolicy(request);
@@ -2289,3 +2297,170 @@ function nscvDamageSnap(bounds: NscSurfaceRect | null, scale: number, width: num
   return { x: x.edge, y: y.edge, width: x.span, height: y.span };
 }
 interface NscDamageAxis { readonly edge: number; readonly span: number; }
+
+/** Routed requests borrow all 36 native-owned slots: 16 host, 16 record-store,
+ * four credentials. Admission preserves cross-pool cancellation before capacity
+ * refusal. Completion returns owned routing data and copies opaque channel words.
+ */
+function requestCoordinationPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 16 || request[1]! > 3 || request[2]! > 2 || request[4]! > 1 || request[5]! > 1 || request[8]! > 1 || request[9]! > 1 || request[11]! > 1)
+    throw new Error("invalid request coordination header");
+  for (let i = 12; i < 16; i++) if (request[i] !== 0) throw new Error("reserved request coordination byte");
+  const action = request[1]!, length = request[3]!;
+  const positions = new DataView(new ArrayBuffer(36 * 4));
+  let at = 16 + length, matching = -1, free = -1;
+  const first = request[2] === 0 ? 0 : request[2] === 1 ? 16 : 32;
+  const end = request[2] === 0 ? 16 : request[2] === 1 ? 32 : 36;
+  for (let slot = 0; slot < 36; slot++) {
+    if (at + 2 > request.length) throw new Error("truncated request coordination table");
+    const size = request[at + 1]!, route = at + 2 + size;
+    if (route + 13 > request.length || request[at]! > 1 || request[route + 2]! > 1 || request[route + 3]! > 1 || request[route + 4]! > 1)
+      throw new Error("invalid request coordination slot");
+    positions.setUint32(slot * 4, at, true);
+    let equal = request[at] === 1 && size === length;
+    for (let i = 0; i < size; i++) if (request[at + 2 + i] !== request[16 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (request[at] === 0 && slot >= first && slot < end && free < 0) free = slot;
+    at = route + 13;
+  }
+  if (at !== request.length) throw new Error("trailing request coordination bytes");
+  const result = new Uint8Array(16);
+  result[0] = 255; result[1] = 255;
+  if (action === 1) { result[0] = matching < 0 ? 255 : matching; return result; }
+  if (action === 2) {
+    const slot = request[10]!;
+    if (slot >= 36) throw new Error("request result slot is out of bounds");
+    const entry = positions.getUint32(slot * 4, true), route = entry + 2 + request[entry + 1]!;
+    if (request[entry] !== 1) throw new Error("request result has no tracked owner");
+    const ok = request[9] === 1;
+    result[0] = slot; result[2] = request[route + (ok ? 0 : 1)]!;
+    result[3] = ok && request[route + 3] === 1 ? 2 : ok && request[route + 2] === 1 ? 1 : 0;
+    result[4] = 1; result[5] = request[route + 4]!;
+    if (result[5] === 1) for (let i = 0; i < 8; i++) result[8 + i] = request[route + 5 + i]!;
+    return result;
+  }
+  if (action === 3) {
+    // Duplicate/collision refusal precedes capacity, which precedes channel
+    // ownership refusal. The engine's actual channel admission follows this.
+    result[3] = length > 0 && (matching >= 0 || request[4] === 1) ? 1 : free < 0 ? 2 : request[11] === 1 ? 3 : 0;
+    result[0] = free < 0 ? 255 : free;
+    return result;
+  }
+  result[2] = request[6]!; result[3] = request[7]!; result[4] = request[8]!;
+  if (request[4] === 1 || length > 0 && matching >= 0 && request[5] === 1) return result;
+  if (length > 0 && matching >= 0) {
+    if (matching >= first && matching < end) { result[0] = matching; return result; }
+    result[1] = matching; // Retire the old pool even if the destination is full.
+  }
+  result[0] = free < 0 ? 255 : free;
+  return result;
+}
+
+/** First-match cancellation over requests, named effects, clipboard writes,
+ * subprocess streams, file streams, delays and DB commands. Declarative live
+ * queries and synchronous exec terminals keep their owners and never cancel.
+ */
+function cancellationPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 2) throw new Error("invalid cancellation request");
+  const length = request[1]!;
+  let at = 2 + length;
+  const counts = [36, 16, 16, 16, 4, 16, 16];
+  const result = new Uint8Array(8); result[0] = 255; result[1] = 255;
+  for (let family = 0; family < 7; family++) for (let slot = 0; slot < counts[family]!; slot++) {
+    if (at + 3 > request.length) throw new Error("truncated cancellation table");
+    const used = request[at]!, flags = request[at + 1]!, size = request[at + 2]!;
+    if (used > 1 || flags > (family === 6 ? 3 : family === 0 || family === 1 || family === 4 ? 1 : 0) || at + 4 + size > request.length)
+      throw new Error("invalid cancellation slot");
+    let equal = length > 0 && used === 1 && size === length && (family !== 1 || flags === 0);
+    for (let i = 0; i < size; i++) if (request[at + 3 + i] !== request[2 + i]) equal = false;
+    if (equal && result[0] === 255) {
+      result[0] = family; result[1] = slot; result[2] = family === 0 || family === 5 || family === 4 && flags === 0 || family === 6 && flags === 1 ? 1 : 0;
+      result[3] = family !== 6 || flags === 1 ? 1 : 0;
+      result[4] = family === 4 && flags === 1 ? 1 : 0;
+      result[5] = family === 0 && flags === 1 ? 1 : 0;
+      result[6] = request[at + 3 + size]!;
+      result[7] = result[5]!;
+    }
+    at += 4 + size;
+  }
+  if (at !== request.length) throw new Error("trailing cancellation bytes");
+  return result;
+}
+
+/** Fallible credential request decoding returns offsets into the original
+ * borrowed packet. Malformed authored payloads are normal rejections; no secret
+ * or credential bytes are copied into the policy result or retained by it.
+ */
+function credentialRecordPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 2 || 2 + request[1]! > request.length) throw new Error("truncated credential policy header");
+  const names = ["core.credentials.set", "core.credentials.get", "core.credentials.delete"];
+  let operation = -1;
+  for (let candidate = 0; candidate < 3; candidate++) {
+    const name = names[candidate]!;
+    let equal = name.length === request[1];
+    if (equal) for (let i = 0; i < name.length; i++) if (name.charCodeAt(i) !== request[2 + i]) equal = false;
+    if (equal) operation = candidate;
+  }
+  const result = new Uint8Array(20);
+  if (operation < 0) return result;
+  const data = new DataView(request.buffer, request.byteOffset, request.byteLength), out = new DataView(result.buffer);
+  const start = 2 + request[1]!;
+  let at = start;
+  for (let field = 0; field < (operation === 0 ? 2 : 1); field++) {
+    if (at + 4 > request.length) return new Uint8Array(20);
+    const length = data.getUint32(at, true); at += 4;
+    if (length > request.length - at) return new Uint8Array(20);
+    out.setUint32(4 + field * 8, at - start, true); out.setUint32(8 + field * 8, length, true);
+    at += length;
+  }
+  if (at !== request.length) return new Uint8Array(20);
+  result[0] = 1; result[1] = operation;
+  return result;
+}
+
+/** Database command admission and complete page/done/exec result routing are
+ * separate from live-query reconciliation. Replacement may reuse only a
+ * one-shot query; an exec or live subscription keeps its original route.
+ */
+function dbCommandPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 12 || request[1]! > 1 || request[3]! > 1 || request[4]! > 1 || request[9]! > 2 || request[10]! > 1 || request[11] !== 0)
+    throw new Error("invalid database command header");
+  const positions = new DataView(new ArrayBuffer(64)), length = request[2]!;
+  let at = 12 + length, matching = -1, free = -1;
+  for (let slot = 0; slot < 16; slot++) {
+    if (at + 7 > request.length) throw new Error("truncated database command table");
+    const size = request[at + 6]!;
+    if (request[at]! > 1 || request[at + 1]! > 1 || request[at + 2]! > 1 || at + 7 + size > request.length)
+      throw new Error("invalid database command slot");
+    positions.setUint32(slot * 4, at, true);
+    let equal = length > 0 && request[at] === 1 && size === length;
+    for (let i = 0; i < size; i++) if (request[at + 7 + i] !== request[12 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (request[at] === 0 && free < 0) free = slot;
+    at += 7 + size;
+  }
+  if (at !== request.length) throw new Error("trailing database command bytes");
+  const result = new Uint8Array(8); result[0] = 255;
+  result[1] = request[5]!; result[2] = request[6]!; result[3] = request[7]!;
+  if (request[1] === 0) {
+    if (request[3] === 1) return result;
+    if (matching >= 0) {
+      const entry = positions.getUint32(matching * 4, true);
+      if (request[4] !== 1 || request[entry + 1] !== 1 || request[entry + 2] === 1) return result;
+    }
+    result[0] = matching < 0 ? free < 0 ? 255 : free : matching;
+    return result;
+  }
+  const slot = request[8]!;
+  if (slot >= 16) throw new Error("database result slot is out of bounds");
+  const entry = positions.getUint32(slot * 4, true);
+  if (request[entry] !== 1) throw new Error("database result has no tracked owner");
+  result[0] = slot;
+  if (request[10] === 0) { result[4] = request[entry + 5]!; result[5] = 2; result[6] = request[entry + 2] === 1 ? 0 : 1; return result; }
+  const kind = request[9]!;
+  if (kind === 1 && request[entry + 1] !== 1 || kind === 2 && request[entry + 1] === 1) throw new Error("database terminal reached the wrong route");
+  result[4] = request[entry + (kind === 0 ? 3 : 4)]!;
+  result[5] = kind === 0 ? 0 : 1;
+  result[6] = kind === 2 || kind === 1 && request[entry + 2] === 0 ? 1 : 0;
+  return result;
+}

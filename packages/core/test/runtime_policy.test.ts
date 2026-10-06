@@ -617,3 +617,55 @@ test("PTY resize rejects inexact grids and malformed protocols fail before publi
   const audio = packets[2]!.slice(); audio[1] = 0; assert.throws(() => native_effect_policy(audio), /owner/); audio[2] = 1; audio[3] = 254;
   assert.deepEqual([...native_effect_policy(audio)], [254]);
 });
+
+function routedRequestPacket(action = 0, pool = 0, name = new Uint8Array(0), occupied = 0, stored = new Uint8Array(0)): Uint8Array {
+  const bytes = new Uint8Array(16 + name.length + 36 * (15 + stored.length));
+  bytes.set([11, action, pool, name.length, 0, 0, 7, 8], 0); bytes.set(name, 16);
+  let at = 16 + name.length;
+  for (let i = 0; i < 36; i++) {
+    bytes[at] = +(i < occupied); bytes[at + 1] = stored.length; bytes.set(stored, at + 2);
+    const route = at + 2 + stored.length;
+    bytes[route] = i; bytes[route + 1] = 255 - i;
+    new DataView(bytes.buffer).setBigUint64(route + 5, 0xfedcba9876543210n, true);
+    at = route + 13;
+  }
+  return bytes;
+}
+
+test("request coordination preserves cross-pool retirement capacity duplicate priority and anonymous lookup", () => {
+  const bytes = routedRequestPacket(0, 2, key("same"), 36, key("else"));
+  bytes[16 + 4 + 2] = 115; bytes.set(key("same"), 16 + 4 + 2);
+  assert.deepEqual([...native_effect_policy(bytes)], [255, 0, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  bytes[5] = 1; assert.equal(native_effect_policy(bytes)[1], 255);
+  bytes[1] = 3; bytes[11] = 1; assert.equal(native_effect_policy(bytes)[3], 1);
+  bytes[3] = 4; bytes.set(key("new!"), 16); assert.equal(native_effect_policy(bytes)[3], 2);
+  const anonymous = routedRequestPacket(1, 0, key(""), 1, key(""));
+  assert.equal(native_effect_policy(anonymous)[0], 0);
+  anonymous[1] = 0; assert.equal(native_effect_policy(anonymous)[0], 1);
+  for (let size = 0; size < anonymous.length; size++) assert.throws(() => native_effect_policy(anonymous.subarray(0, size)));
+  assert.throws(() => native_effect_policy(new Uint8Array([...anonymous, 0])));
+});
+
+test("request completion copies exact channel words and every payload route before packet reuse", () => {
+  const bytes = routedRequestPacket(2, 0, key(""), 36, key("route")); bytes[10] = 35;
+  const route = 16 + 35 * 20 + 2 + 5;
+  for (const ok of [0, 1]) for (const voidResult of [0, 1]) for (const typed of [0, 1]) for (const channel of [0, 1]) {
+    bytes[9] = ok; bytes[route + 2] = voidResult; bytes[route + 3] = typed; bytes[route + 4] = channel;
+    const plan = native_effect_policy(bytes), copy = plan.slice();
+    assert.equal(plan[2], ok ? 35 : 220); assert.equal(plan[3], ok && typed ? 2 : ok && voidResult ? 1 : 0);
+    assert.equal(plan[4], 1); assert.equal(plan[5], channel);
+    assert.equal(new DataView(plan.buffer).getBigUint64(8, true), channel ? 0xfedcba9876543210n : 0n);
+    native_effect_policy(bytes); assert.deepEqual(plan, copy);
+  }
+});
+
+test("credential policy rejects arbitrary malformed lengths and exposes offsets without secret bytes", () => {
+  const name = key("core.credentials.set"), fields = Uint8Array.from([3, 0, 0, 0, 0, 255, 107, 2, 0, 0, 0, 115, 0]);
+  const bytes = new Uint8Array(2 + name.length + fields.length); bytes.set([13, name.length]); bytes.set(name, 2); bytes.set(fields, 2 + name.length);
+  const plan = native_effect_policy(bytes), data = new DataView(plan.buffer);
+  assert.deepEqual([plan[0], plan[1], data.getUint32(4, true), data.getUint32(8, true), data.getUint32(12, true), data.getUint32(16, true)], [1, 0, 4, 3, 11, 2]);
+  for (let size = 2 + name.length; size < bytes.length; size++) assert.deepEqual(native_effect_policy(bytes.subarray(0, size)), new Uint8Array(20));
+  assert.deepEqual(native_effect_policy(new Uint8Array([...bytes, 0])), new Uint8Array(20));
+  const bad = bytes.slice(); new DataView(bad.buffer).setUint32(2 + name.length, 0xffffffff, true);
+  assert.deepEqual(native_effect_policy(bad), new Uint8Array(20));
+});
