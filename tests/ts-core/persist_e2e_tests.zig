@@ -23,6 +23,62 @@ const windows = [_]native_sdk.ShellWindow{.{
 }};
 const scene: native_sdk.ShellConfig = .{ .windows = &windows };
 
+fn compareLifecycle(request: []const u8) !void {
+    const reference = @import("lifecycle_policy_reference");
+    const frozen = try std.testing.allocator.dupe(u8, request);
+    defer std.testing.allocator.free(frozen);
+    var actual: [32]u8 = undefined;
+    const expected = reference.plan(request);
+    try std.testing.expectEqual(actual.len, core.nativeEffectPolicy(request, &actual));
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+    try std.testing.expectEqualSlices(u8, frozen, request);
+    const owned = actual;
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &owned, &actual);
+}
+
+test "compiled app lifecycle plans preserve complete native decisions and exact word boundaries" {
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var initial: [32]u8 = undefined;
+    _ = core.nativeEffectPolicy(&.{ 18, 0, 0, 0, 0, 0 }, &initial);
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    for (0..6) |event| for (0..2) |mapped| for (0..2) |pending| {
+        try compareLifecycle(&.{ 18, 0, @intCast(event), @intCast(mapped), @intCast(pending), 0 });
+    };
+    for (0..16) |bits| try compareLifecycle(&.{ 18, 1, @intCast(bits & 1), @intCast((bits >> 1) & 1), @intCast((bits >> 2) & 1), @intCast((bits >> 3) & 1) });
+    for (0..8) |bits| try compareLifecycle(&.{ 18, 2, @intCast(bits & 1), @intCast((bits >> 1) & 1), @intCast((bits >> 2) & 1) });
+    const words = [_]u64{ 0, 1, 16 * 1024 * 1024 - 1, 16 * 1024 * 1024, 16 * 1024 * 1024 + 1, 0xffff_ffff, 0x1_0000_0000, 9_007_199_254_740_991, 9_007_199_254_740_993, std.math.maxInt(u64) };
+    for (0..3) |source| for (0..2) |available| for (0..2) |success| for (0..7) |outcome| for (words) |length| {
+        var request: [16]u8 = @splat(0);
+        request[0..6].* = .{ 18, 3, @intCast(source), @intCast(available), @intCast(success), @intCast(outcome) };
+        std.mem.writeInt(u64, request[8..16], length, .little);
+        try compareLifecycle(&request);
+    };
+    for (0..7) |outcome| try compareLifecycle(&.{ 18, 4, @intCast(outcome) });
+    for (0..3) |event| try compareLifecycle(&.{ 18, 5, @intCast(event) });
+    for (0..2) |replay| for (words) |recorded| for (words) |live| for (words) |index| {
+        var request: [32]u8 = @splat(0);
+        request[0..3].* = .{ 18, 6, @intCast(replay) };
+        std.mem.writeInt(u64, request[8..16], recorded, .little);
+        std.mem.writeInt(u64, request[16..24], live, .little);
+        std.mem.writeInt(u64, request[24..32], index, .little);
+        try compareLifecycle(&request);
+    };
+    for (0..8) |operation| {
+        const names: []const []const u8 = if (operation < 2) &.{ "", "core.persist", "core.persist.flush", "core.persist.flush.more", "core.persist\x00", "core.persist\xff", "service.read" } else &.{""};
+        for (names) |name| {
+            var request: [64]u8 = @splat(0);
+            request[0..3].* = .{ 18, 7, @intCast(operation) };
+            @memcpy(request[3..][0..name.len], name);
+            try compareLifecycle(request[0 .. 3 + name.len]);
+        }
+    }
+}
+
 fn view(ui: *App.Ui, model: *const core.Model) App.Ui.Node {
     return ui.text(.{}, ui.fmt("value {d}", .{model.value}));
 }
@@ -93,6 +149,10 @@ const Harness = struct {
     app: native_sdk.App,
 
     fn create(core_options: Adapter.CoreOptions, replay_restore: ?ReplayRestore) !*Harness {
+        return createWithEnvironment(core_options, replay_restore, null);
+    }
+
+    fn createWithEnvironment(core_options: Adapter.CoreOptions, replay_restore: ?ReplayRestore, replay_env: ?[]const Adapter.EnvValue) !*Harness {
         const self = try std.testing.allocator.create(Harness);
         errdefer std.testing.allocator.destroy(self);
         self.harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
@@ -106,6 +166,10 @@ const Harness = struct {
         if (replay_restore) |restore| {
             self.state.effects.armReplay();
             try self.state.effects.pushReplayPersist(restore.outcome, restore.bytes);
+        }
+        if (replay_env) |entries| {
+            self.state.effects.armReplay();
+            for (entries) |entry| try self.state.effects.pushReplayEnv(entry.msg, entry.value);
         }
         self.app = self.state.app();
         try self.harness.start(self.app);
@@ -346,4 +410,53 @@ test "a store worker failure is delivered through the configured err route" {
 
     try std.testing.expectEqual(@as(i64, 3), Bridge.model().restoreState);
     try std.testing.expectEqualStrings("io_failed", Bridge.model().lastError);
+}
+
+test "compiled launch environment keeps byte ownership and declaration order across live replay and old journals" {
+    var first = [_]u8{ ':', 'A', 0, 255 };
+    var second = [_]u8{ ':', 'B' };
+    const values = [_]Adapter.EnvValue{
+        .{ .msg = "launch_value", .value = &first },
+        .{ .msg = "launch_value", .value = &second },
+    };
+    var host: StoreHost = .{};
+    const live = try Harness.create(.{ .env_values = &values, .persist = .{ .binding = host.binding(), .routes = routes(), .restore = .{ .outcome = .none } } }, null);
+    const expected = "initial:A\x00\xff:B";
+    try std.testing.expectEqualStrings(expected, Bridge.model().label);
+    try std.testing.expectEqual(@as(i64, 2), Bridge.model().restoreState);
+    const snapshot = try std.testing.allocator.dupe(u8, core.persistenceSnapshot());
+    defer std.testing.allocator.free(snapshot);
+    first[1] = 'X';
+    second[1] = 'Y';
+    try std.testing.expectEqualStrings(expected, Bridge.model().label);
+    live.destroy();
+    const recorded = [_]Adapter.EnvValue{
+        .{ .msg = "launch_value", .value = ":A\x00\xff" },
+        .{ .msg = "launch_value", .value = ":B" },
+    };
+    const replayed = try Harness.createWithEnvironment(.{ .env_values = &values, .persist = .{ .binding = host.binding(), .routes = routes(), .restore = .{ .outcome = .io_failed, .migration_from_version = 2 } } }, .{ .outcome = .none, .bytes = "" }, &recorded);
+    try std.testing.expectEqualStrings(expected, Bridge.model().label);
+    try std.testing.expectEqualSlices(u8, snapshot, core.persistenceSnapshot());
+    try std.testing.expectEqual(@as(usize, 0), replayed.state.effects.replay_env_len);
+    replayed.destroy();
+    const old = try Harness.createWithEnvironment(.{ .env_values = &values }, null, &.{});
+    try std.testing.expectEqualStrings("initial:X\x00\xff:Y", Bridge.model().label);
+    old.destroy();
+    const fresh = try Harness.create(.{}, null);
+    defer fresh.destroy();
+    try std.testing.expectEqualStrings("initial", Bridge.model().label);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().restoreState);
+}
+
+test "compiled restore dispatches every complete outcome and stop flushes without a mapped message" {
+    const outcomes = [_]native_sdk.persist_store.Outcome{ .none, .corrupt, .version_unknown, .migrate_failed, .io_failed, .rejected };
+    for (outcomes) |outcome| {
+        var host: StoreHost = .{};
+        const running = try Harness.create(.{ .persist = .{ .binding = host.binding(), .routes = routes(), .restore = .{ .outcome = outcome } } }, null);
+        defer running.destroy();
+        try std.testing.expectEqual(@as(i64, if (outcome == .none) 2 else 3), Bridge.model().restoreState);
+        try std.testing.expectEqualStrings(if (outcome == .none) "" else @tagName(outcome), Bridge.model().lastError);
+        try running.harness.runtime.dispatchEvent(running.app, .{ .lifecycle = .stop });
+        try std.testing.expectEqual(@as(usize, 1), host.flush_count);
+    }
 }

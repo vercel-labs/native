@@ -472,7 +472,8 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 17) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 18) throw new Error("invalid effect policy request");
+  if (request[0] === 18) return appLifecyclePolicy(request);
   if (request[0] === 17) return bufferedCompletionPolicy(request);
   if (request[0] === 15) return fileStreamPolicy(request);
   if (request[0] === 16) return clipboardWritePolicy(request);
@@ -536,6 +537,114 @@ export function native_effect_policy(request: Uint8Array): Uint8Array {
   result[1] = blocked === 1 || free < 0 ? 255 : free;
   result[2] = blocked === 1 || length === 0 || matching < 0 ? 255 : matching;
   result[3] = ok; result[4] = err;
+  return result;
+}
+
+/** App coordination over native-owned capabilities. Operation 18 returns a
+ * copied 32-byte plan without resetting the frame. Suboperations: 0 lifecycle
+ * flush, 1 ordered installation, 2 restore source, 3 restore completion,
+ * 4 restore route/reason, 5 store-channel reason, 6 ordered launch values,
+ * 7 service carrier routing. Sizes and indices cross as exact u64 word pairs.
+ * Native retains buffers, migration versions, channel handles and typed Msgs.
+ */
+function appLifecyclePolicy(request: Uint8Array): Uint8Array {
+  const mode = request[1]!;
+  const size = mode === 0 ? 6 : mode === 1 ? 6 : mode === 2 ? 5 :
+    mode === 3 ? 16 : mode === 4 || mode === 5 ? 3 : mode === 6 ? 32 : 0;
+  if (mode > 7 || (mode === 7 ? request.length < 3 : request.length !== size))
+    throw new Error("invalid app lifecycle request");
+  const result = new Uint8Array(32);
+  if (mode === 0) {
+    if (request[2]! > 5 || request[3]! > 1 || request[4]! > 1 || request[5] !== 0)
+      throw new Error("invalid app lifecycle flush facts");
+    const pending = request[4] === 1;
+    if (request[2] === 5) { result[1] = pending ? 1 : 0; return result; }
+    const terminal = request[2] === 2 || request[2] === 4;
+    result[0] = terminal && request[3] === 1 ? 1 : pending ? 1 : 0;
+    result[1] = terminal && request[3] === 0 ? 1 : 0;
+    return result;
+  }
+  if (mode === 1) {
+    for (let i = 2; i < 6; i++) if (request[i]! > 1) throw new Error("invalid app installation facts");
+    // Carrier precedence, then assets/channel/restore, boot, outcome, env, root.
+    result[0] = request[2] === 1 ? 1 : request[3] === 1 ? 2 : request[4] === 1 ? 3 : 0;
+    let at = result[0] === 0 ? 0 : 1;
+    result[at++] = 4;
+    if (request[4] === 1 && request[5] === 1) result[at++] = 5;
+    if (request[4] === 1) result[at++] = 6;
+    result[at++] = 7; result[at++] = 8; result[at++] = 9; result[at] = 10;
+    return result;
+  }
+  if (mode === 2) {
+    for (let i = 2; i < 5; i++) if (request[i]! > 1) throw new Error("invalid app restore source facts");
+    result[0] = request[2] === 0 ? 0 : request[3] === 1 ? 1 : request[4] === 1 ? 2 : 3;
+    return result;
+  }
+  if (mode === 3) {
+    if (request[2]! > 2 || request[3]! > 1 || request[4]! > 1 || request[5]! > 6 ||
+        request[6] !== 0 || request[7] !== 0) throw new Error("invalid app restore completion facts");
+    result[0] = 255;
+    if (request[3] === 0) return result;
+    const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+    const migrated = request[2] === 2;
+    const refused = data.getUint32(12, true) !== 0 || data.getUint32(8, true) > 16777216;
+    const outcome = migrated ? request[4] === 0 ? 4 : refused ? 6 : 0 : request[5]!;
+    result[0] = outcome;
+    // Actions 1 restore, 2 save, 3 journal. Refused migrations journal empty.
+    let at = 1;
+    if (outcome === 0) result[at++] = 1;
+    if (migrated && outcome === 0) result[at++] = 2;
+    if (request[2] !== 0) result[at] = 3;
+    result[5] = migrated && outcome !== 0 ? 0 : 1;
+    return result;
+  }
+  if (mode === 4) {
+    if (request[2]! > 6) throw new Error("invalid app persistence outcome");
+    result[0] = request[2] === 0 ? 1 : request[2] === 1 ? 2 : 3;
+    if (result[0] === 3) {
+      const reason = request[2] === 2 ? "corrupt" : request[2] === 3 ? "version_unknown" :
+        request[2] === 4 ? "migrate_failed" : request[2] === 5 ? "io_failed" : "rejected";
+      result[1] = reason.length;
+      for (let i = 0; i < reason.length; i++) result[2 + i] = reason.charCodeAt(i);
+    }
+    return result;
+  }
+  if (mode === 5) {
+    if (request[2]! > 2) throw new Error("invalid app persistence channel event");
+    if (request[2] === 0) return result; // Borrow the complete incoming bytes.
+    const reason = request[2] === 1 ? "io_failed" : "rejected";
+    result[0] = 1; result[1] = reason.length;
+    for (let i = 0; i < reason.length; i++) result[2 + i] = reason.charCodeAt(i);
+    return result;
+  }
+  if (mode === 6) {
+    if (request[2]! > 1) throw new Error("invalid app launch replay flag");
+    for (let i = 3; i < 8; i++) if (request[i] !== 0) throw new Error("invalid app launch reserved byte");
+    const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
+    const replay = request[2] === 1 && (data.getUint32(8, true) !== 0 || data.getUint32(12, true) !== 0);
+    const countAt = replay ? 8 : 16, low = data.getUint32(24, true), high = data.getUint32(28, true);
+    const countLow = data.getUint32(countAt, true), countHigh = data.getUint32(countAt + 4, true);
+    if (high > countHigh || (high === countHigh && low >= countLow)) return result;
+    result[0] = replay ? 2 : 1; result[1] = replay ? 0 : 1;
+    const output = new DataView(result.buffer);
+    output.setUint32(8, low, true); output.setUint32(12, high, true);
+    output.setUint32(16, (low + 1) >>> 0, true); output.setUint32(20, high + (low === 4294967295 ? 1 : 0), true);
+    return result;
+  }
+  if (request[2]! > 7) throw new Error("invalid app service carrier operation");
+  if (request[2]! >= 2) {
+    if (request.length !== 3) throw new Error("invalid app service carrier facts");
+    result[0] = 1;
+    if (request[2]! >= 5) result[1] = 2;
+    return result;
+  }
+  const persist = "core.persist", flush = "core.persist.flush";
+  let isPersist = request.length === persist.length + 3, isFlush = request.length === flush.length + 3;
+  for (let i = 3; i < request.length; i++) {
+    if (isPersist && request[i] !== persist.charCodeAt(i - 3)) isPersist = false;
+    if (isFlush && request[i] !== flush.charCodeAt(i - 3)) isFlush = false;
+  }
+  result[0] = isPersist || isFlush ? 2 : 1;
   return result;
 }
 

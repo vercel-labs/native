@@ -1,0 +1,6 @@
+<column gap="8">
+  <text>{value}</text>
+  <text>{label}</text>
+  <text>{lastError}</text>
+  <button on-press="increment_and_persist">Persist</button>
+</column>

@@ -15,6 +15,7 @@ export type Msg =
   | { readonly kind: "increment_and_persist" }
   | { readonly kind: "restored" }
   | { readonly kind: "fresh_boot" }
+  | { readonly kind: "launch_value"; readonly value: Uint8Array }
   | { readonly kind: "restore_failed"; readonly reason: Uint8Array };
 
 export type MigrateError = { readonly kind: "unsupported_persist_version" };
@@ -44,6 +45,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, restoreState: 2 }, Cmd.none];
     case "restore_failed":
       return [{ ...model, restoreState: 3, lastError: msg.reason }, Cmd.none];
+    case "launch_value": {
+      const label = new Uint8Array(model.label.length + msg.value.length);
+      label.set(model.label);
+      label.set(msg.value, model.label.length);
+      return [{ ...model, label }, Cmd.none];
+    }
   }
 }
 
@@ -69,4 +76,10 @@ export const viewUnbound = [
   "restore_failed",
   "restoreState",
   "lastError",
+  "launch_value",
+] as const;
+
+export const envMsgs = [
+  { env: "LIFECYCLE_FIRST", msg: "launch_value" },
+  { env: "LIFECYCLE_SECOND", msg: "launch_value" },
 ] as const;

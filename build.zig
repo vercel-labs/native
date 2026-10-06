@@ -1328,6 +1328,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
         const workbench_run = b.addRunArtifact(ts_core_artifacts.workbench);
@@ -2411,6 +2412,7 @@ pub fn build(b: *std.Build) void {
         "named effect host applies policy admission slots cancellation routes and dropped terminal retirement",
         "runtime.ts_core_host.test.PTY name bindings",
         "runtime.ts_ui_app.test.web pane exact decimal",
+        "runtime.ts_ui_app.test.lifecycle host consumes",
         "runtime.ts_core_host_tests.test.complete subprocess records",
         "runtime.ts_core_host_tests.test.routed clipboard duplicates",
         "runtime.ts_core_host_tests.test.routed clipboard keys",
@@ -4237,10 +4239,18 @@ fn tsCoreE2eArtifact(
         .src_dir = persist_src.getDirectory(),
         .name = "persist_fixture_core",
         .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/persist_fixture.native",
     });
     const persist_mod = module(b, target, optimize, "tests/ts-core/persist_e2e_tests.zig");
     persist_mod.addImport("native_sdk", desktop_mod);
     persist_mod.addImport("ts_persist_core", persist_fixture.module);
+    const lifecycle_reference_files = b.addWriteFiles();
+    persist_mod.addImport("lifecycle_policy_reference", b.createModule(.{
+        .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/lifecycle_policy_test_reference.zig"), "lifecycle_policy_reference.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
     const markup_src = b.addWriteFiles();
     _ = markup_src.addCopyFile(b.path("tests/ts-core/markup_fixture.ts"), "markup_fixture.ts");
     const markup_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
@@ -5085,6 +5095,7 @@ const ExternalCoreFixtureSpec = struct {
     emit_services: bool = false,
     service_packages: []const []const u8 = &.{},
     typescript_view: bool = false,
+    view_markup: ?[]const u8 = null,
     window_views: []const []const u8 = &.{},
 };
 
@@ -5190,7 +5201,7 @@ fn externalCoreFixtureModule(
     }
     if (spec.typescript_view) {
         stage_run.addArg("--view-markup");
-        stage_run.addFileArg(b.path(b.fmt("{s}/app.native", .{std.fs.path.dirname(spec.entry).?})));
+        stage_run.addFileArg(b.path(spec.view_markup orelse b.fmt("{s}/app.native", .{std.fs.path.dirname(spec.entry).?})));
         stage_run.addArg("--view-contract");
         stage_run.addFileArg(contract);
     }

@@ -203,55 +203,89 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 };
             }
 
-            fn persistenceName(name: []const u8) bool {
-                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+            fn targets(operation: u8, name: []const u8) [2]u8 {
+                if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                    var inline_request: [256]u8 = undefined;
+                    const request_bytes = if (name.len <= inline_request.len - 3) inline_request[0 .. 3 + name.len] else std.heap.page_allocator.alloc(u8, 3 + name.len) catch @panic("service carrier request allocation failed");
+                    defer if (name.len > inline_request.len - 3) std.heap.page_allocator.free(request_bytes);
+                    request_bytes[0..3].* = .{ 18, 7, operation };
+                    @memcpy(request_bytes[3..], name);
+                    const plan = compiledLifecycle(request_bytes);
+                    if (plan[0] == 0 or plan[0] > 2 or plan[1] > 2 or (operation < 5 and plan[1] != 0))
+                        @panic("invalid compiled service carrier plan");
+                    for (plan[2..]) |byte| if (byte != 0) @panic("invalid compiled service carrier reserved byte");
+                    return plan[0..2].*;
+                }
+                return if (operation < 2 and (std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush")))
+                    .{ 2, 0 }
+                else if (operation >= 5) .{ 1, 2 } else .{ 1, 0 };
+            }
+
+            fn carrier(self: *HostCallMux, target: u8) runtime_effects.HostCallBinding {
+                return switch (target) {
+                    1 => self.primary,
+                    2 => self.persist,
+                    else => @panic("invalid service carrier target"),
+                };
             }
 
             fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = self.carrier(targets(0, name)[0]);
                 target.send_fn(target.context, name, payload);
             }
 
             fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = self.carrier(targets(1, name)[0]);
                 target.request_fn(target.context, name, key, payload);
             }
 
             fn cancel(context: *anyopaque, key: u64) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+                const target = self.carrier(targets(2, "")[0]);
+                if (target.cancel_fn) |cancel_fn| cancel_fn(target.context, key);
             }
 
             fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const poll_fn = self.primary.poll_fn orelse return null;
-                return poll_fn(self.primary.context);
+                const target = self.carrier(targets(3, "")[0]);
+                const poll_fn = target.poll_fn orelse return null;
+                return poll_fn(target.context);
             }
 
             fn pending(context: *anyopaque) bool {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const pending_fn = self.primary.pending_fn orelse return false;
-                return pending_fn(self.primary.context);
+                const target = self.carrier(targets(4, "")[0]);
+                const pending_fn = target.pending_fn orelse return false;
+                return pending_fn(target.context);
             }
 
             fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
-                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+                for (targets(5, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.bind_services_fn) |bind_fn| bind_fn(target.context, services);
+                }
             }
 
             fn bindChannels(context: *anyopaque, channels: runtime_effects.HostChannelBinding) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_channels_fn) |bind_fn| bind_fn(self.primary.context, channels);
-                if (self.persist.bind_channels_fn) |bind_fn| bind_fn(self.persist.context, channels);
+                for (targets(6, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.bind_channels_fn) |bind_fn| bind_fn(target.context, channels);
+                }
             }
 
             fn shutdown(context: *anyopaque) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
-                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+                for (targets(7, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.shutdown_fn) |shutdown_fn| shutdown_fn(target.context);
+                }
             }
         };
 
@@ -579,6 +613,12 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
 
         fn lifecycleAdapter(event: runtime_core.LifecycleEvent) ?Msg {
             const mapped = if (lifecycle_store) |map| map(event) else null;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFlush(@intCast(@intFromEnum(event)), mapped != null);
+                lifecycle_flush_after_update = plan[0] == 1;
+                if (plan[1] == 1) flushPersistence();
+                return mapped;
+            }
             if (event != .deactivate and event != .stop) return mapped;
             if (mapped != null) {
                 // UiApp dispatches the mapped Msg after this callback returns.
@@ -595,6 +635,20 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (persist_options_store) |persist| {
                 persist.binding.send_fn(persist.binding.context, "core.persist.flush", "");
             }
+        }
+
+        fn compiledLifecycle(request: []const u8) [32]u8 {
+            var plan: [32]u8 = undefined;
+            if (core.nativeEffectPolicy(request, &plan) != plan.len)
+                @panic("invalid compiled app lifecycle plan size");
+            return plan;
+        }
+
+        fn compiledFlush(event: u8, mapped: bool) [32]u8 {
+            const plan = compiledLifecycle(&.{ 18, 0, event, @intFromBool(mapped), @intFromBool(lifecycle_flush_after_update), 0 });
+            if (plan[0] > 1 or plan[1] > 1) @panic("invalid compiled lifecycle flush plan");
+            for (plan[2..]) |byte| if (byte != 0) @panic("invalid compiled lifecycle flush reserved byte");
+            return plan;
         }
 
         fn themePackAdapter(model: *const Model) canvas.ThemePack {
@@ -1411,6 +1465,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                compiledInitFx(model, fx);
+                return;
+            }
             if (host_call_mux_store) |*mux| {
                 fx.bindHostCalls(mux.binding());
             } else if (host_calls_store) |binding| {
@@ -1440,10 +1498,38 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             model.* = Host.model().*;
         }
 
+        fn compiledInitFx(model: *Model, fx: *Effects) void {
+            const plan = compiledLifecycle(&.{ 18, 1, @intFromBool(host_call_mux_store != null), @intFromBool(host_calls_store != null), @intFromBool(persist_options_store != null), @intFromBool(if (persist_options_store) |persist| persist.outcome_handle != null else false) });
+            var outcome: ?persist_store.Outcome = null;
+            for (plan) |action| switch (action) {
+                0 => break,
+                1 => fx.bindHostCalls(host_call_mux_store.?.binding()),
+                2 => fx.bindHostCalls(host_calls_store.?),
+                3 => fx.bindHostCalls(persist_options_store.?.binding),
+                4 => for (boot_images_store) |image| {
+                    _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
+                },
+                5 => persist_options_store.?.outcome_handle.?.* = fx.openChannel(.{
+                    .key = persist_outcome_channel_key,
+                    .on_event = persistOutcomeMsg,
+                    .max_pending = 8,
+                }),
+                6 => outcome = preparePersistRestore(fx),
+                7 => Host.performBoot(fx),
+                8 => if (outcome) |value| {
+                    dispatchPersistOutcome(fx, value);
+                },
+                9 => dispatchEnvValues(fx),
+                10 => model.* = Host.model().*,
+                else => @panic("invalid compiled installation action"),
+            };
+        }
+
         /// Resolve the boot snapshot entirely at the effect boundary. Live
         /// launches journal the runner-provided result; replay consumes the
         /// recorded result and never consults the current app-data directory.
         fn preparePersistRestore(fx: *Effects) ?persist_store.Outcome {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledPreparePersistRestore(fx);
             const persist = persist_options_store orelse return null;
             const restore = if (fx.replay) fx.takeReplayPersist() orelse return null else blk: {
                 if (persist.restore.migration_from_version) |from_version| {
@@ -1468,8 +1554,61 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return restore.outcome;
         }
 
+        fn compiledPreparePersistRestore(fx: *Effects) ?persist_store.Outcome {
+            const start = compiledLifecycle(&.{ 18, 2, @intFromBool(persist_options_store != null), @intFromBool(fx.replay), @intFromBool(if (persist_options_store) |persist| persist.restore.migration_from_version != null else false) });
+            var migrated: ?[]u8 = null;
+            defer if (migrated) |bytes| std.heap.page_allocator.free(bytes);
+            var source: u8 = 0;
+            var entry: ?runtime_effects.ReplayPersistEntry = null;
+            switch (start[0]) {
+                0 => return null,
+                1 => entry = fx.takeReplayPersist(),
+                2 => {
+                    source = 2;
+                    const persist = persist_options_store.?;
+                    migrated = Host.migrateSnapshot(persist.restore.bytes, persist.restore.migration_from_version.?, std.heap.page_allocator);
+                    entry = .{ .outcome = .ok, .bytes = migrated orelse "" };
+                },
+                3 => {
+                    source = 1;
+                    const restore = persist_options_store.?.restore;
+                    entry = .{ .outcome = restore.outcome, .bytes = restore.bytes };
+                },
+                else => @panic("invalid compiled restore source"),
+            }
+            var request: [16]u8 = @splat(0);
+            request[0..6].* = .{ 18, 3, source, @intFromBool(entry != null), @intFromBool(migrated != null), @intFromEnum(if (entry) |value| value.outcome else persist_store.Outcome.none) };
+            std.mem.writeInt(u64, request[8..16], if (entry) |value| value.bytes.len else 0, .little);
+            const plan = compiledLifecycle(&request);
+            if (plan[0] == 255) return null;
+            const outcome = std.enums.fromInt(persist_store.Outcome, plan[0]) orelse @panic("invalid compiled restore outcome");
+            if (plan[5] > 1) @panic("invalid compiled restore payload source");
+            const bytes = if (plan[5] == 1) entry.?.bytes else "";
+            for (plan[1..5]) |action| switch (action) {
+                0 => break,
+                1 => Host.restoreSnapshot(bytes),
+                2 => {
+                    const binding = persist_options_store.?.binding;
+                    binding.send_fn(binding.context, "core.persist", bytes);
+                },
+                3 => fx.journalPersistRestore(outcome, bytes),
+                else => @panic("invalid compiled restore action"),
+            };
+            return outcome;
+        }
+
         fn dispatchPersistOutcome(fx: *Effects, outcome: persist_store.Outcome) void {
             const routes = persist_options_store.?.routes;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledLifecycle(&.{ 18, 4, @intFromEnum(outcome) });
+                switch (plan[0]) {
+                    1 => dispatchPersistVoid(fx, routes.ok),
+                    2 => dispatchPersistVoid(fx, routes.none),
+                    3 => dispatchPersistError(fx, routes.err, compiledReason(&plan)),
+                    else => @panic("invalid compiled persistence route"),
+                }
+                return;
+            }
             switch (outcome) {
                 .ok => dispatchPersistVoid(fx, routes.ok),
                 .none => dispatchPersistVoid(fx, routes.none),
@@ -1479,7 +1618,16 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
 
         fn persistOutcomeMsg(event: runtime_effects.EffectChannelEvent) Msg {
             @setEvalBranchQuota(msg_scan_quota);
-            const reason: []const u8 = switch (event.kind) {
+            var plan: [32]u8 = undefined;
+            const reason: []const u8 = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                plan = compiledLifecycle(&.{ 18, 5, @intFromEnum(event.kind) });
+                if (plan[0] == 0) break :blk event.bytes;
+                if (plan[0] != 1) @panic("invalid compiled persistence channel payload");
+                const bytes = compiledReason(&plan);
+                const copy = core.rt.frameAlloc(u8, bytes.len);
+                @memcpy(copy, bytes);
+                break :blk copy;
+            } else switch (event.kind) {
                 .data => event.bytes,
                 .rejected => "rejected",
                 .closed => "io_failed",
@@ -1491,6 +1639,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
             }
             @panic("TsUiApp persistence err route does not name a one-Uint8Array-field Msg arm");
+        }
+
+        fn compiledReason(plan: *const [32]u8) []const u8 {
+            if (plan[1] > 30) @panic("invalid compiled persistence reason length");
+            return plan[2..][0..plan[1]];
         }
 
         fn dispatchPersistVoid(fx: *Effects, route: []const u8) void {
@@ -1537,6 +1690,32 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         fn dispatchEnvValues(fx: *Effects) void {
             if (comptime !@hasDecl(core, "envMsgs")) return;
             comptime validateEnvMsgs();
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var request: [32]u8 = @splat(0);
+                request[0..3].* = .{ 18, 6, @intFromBool(fx.replay) };
+                // Capture the replay count before consuming entries; an empty
+                // older journal uses launch values, but a drained new one does
+                // not switch sources halfway through installation.
+                std.mem.writeInt(u64, request[8..16], fx.replay_env_len, .little);
+                std.mem.writeInt(u64, request[16..24], env_values_store.len, .little);
+                while (true) {
+                    const plan = compiledLifecycle(&request);
+                    if (plan[0] == 0) return;
+                    if (plan[1] > 1) @panic("invalid compiled environment journal flag");
+                    const index = std.mem.readInt(u64, plan[8..16], .little);
+                    const entry: EnvValue = switch (plan[0]) {
+                        1 => env_values_store[@intCast(index)],
+                        2 => blk: {
+                            const recorded = fx.takeReplayEnv() orelse return;
+                            break :blk .{ .msg = recorded.msg, .value = recorded.value };
+                        },
+                        else => @panic("invalid compiled environment source"),
+                    };
+                    if (plan[1] == 1) fx.journalEnvValue(@intCast(index), entry.msg, entry.value);
+                    dispatchOneEnvValue(fx, entry.msg, entry.value);
+                    @memcpy(request[24..32], plan[16..24]);
+                }
+            }
             if (fx.replay and fx.replay_env_len > 0) {
                 while (fx.takeReplayEnv()) |entry| dispatchOneEnvValue(fx, entry.msg, entry.value);
                 return;
@@ -1871,12 +2050,235 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
             model.* = Host.model().*;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFlush(5, false);
+                lifecycle_flush_after_update = plan[0] == 1;
+                if (plan[1] == 1) flushPersistence();
+                return;
+            }
             if (lifecycle_flush_after_update) {
                 lifecycle_flush_after_update = false;
                 flushPersistence();
             }
         }
     };
+}
+
+fn LifecycleProbeCore(comptime identity: u8) type {
+    return struct {
+        pub const Model = struct { count: usize = identity, reason: []const u8 = "" };
+        pub const Msg = union(enum) { ok, none, err: []const u8, env: []const u8, increment };
+        pub const envMsgs = [_]struct { env: []const u8, msg: []const u8 }{.{ .env = "LIFECYCLE_VALUE", .msg = "env" }};
+        pub const rt = struct {
+            var arena: [4096]u8 align(16) = undefined;
+            var at: usize = 0;
+            pub fn resetAll() void {
+                at = 0;
+            }
+            pub fn frameReset() void {
+                at = 0;
+            }
+            pub fn frameAlloc(comptime T: type, count: usize) []T {
+                at = std.mem.alignForward(usize, at, @alignOf(T));
+                const start = at;
+                at += count * @sizeOf(T);
+                std.debug.assert(at <= arena.len);
+                const pointer: [*]T = @ptrCast(@alignCast(arena[start..].ptr));
+                return pointer[0..count];
+            }
+        };
+        var root: Model = .{};
+        var owned: [1024]u8 = undefined;
+        var override_mode: u8 = 255;
+        var forced_plan: [32]u8 = @splat(0);
+        var calls: [8]usize = @splat(0);
+        pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+            std.debug.assert(request[0] == 18 and request[1] < calls.len);
+            calls[request[1]] += 1;
+            const plan = if (request[1] == override_mode and !(override_mode == 6 and calls[6] > 1)) forced_plan else if (override_mode == 6 and request[1] == 6) @as([32]u8, @splat(0)) else @import("lifecycle_policy_test_reference.zig").plan(request);
+            @memcpy(output[0..plan.len], &plan);
+            return plan.len;
+        }
+        pub fn initialModel() *const Model {
+            root = .{};
+            return &root;
+        }
+        pub fn commitModelRoot(value: *const Model) *const Model {
+            return value;
+        }
+        pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+        pub fn update(_: *const Model, msg: Msg) UpdateResult {
+            switch (msg) {
+                .ok => root.count += 10,
+                .none => root.count += 20,
+                .increment => root.count += 1,
+                .err, .env => |bytes| {
+                    @memcpy(owned[0..bytes.len], bytes);
+                    root.reason = owned[0..bytes.len];
+                    root.count += 1;
+                },
+            }
+            return .{ .model = &root, .cmd = "" };
+        }
+        pub fn restoreModel(bytes: []const u8) *const Model {
+            root.count = if (bytes.len > 0) bytes[0] else 0;
+            return &root;
+        }
+    };
+}
+
+const LifecycleCarrierProbe = struct {
+    id: u8,
+    log: *std.ArrayList(u8),
+    sends: usize = 0,
+    fn binding(self: *LifecycleCarrierProbe) runtime_effects.HostCallBinding {
+        return .{ .context = self, .send_fn = send, .request_fn = request, .cancel_fn = cancel, .poll_fn = poll, .pending_fn = pending, .bind_services_fn = services, .bind_channels_fn = channels, .shutdown_fn = shutdown };
+    }
+    fn mark(context: *anyopaque) *LifecycleCarrierProbe {
+        const self: *LifecycleCarrierProbe = @ptrCast(@alignCast(context));
+        self.log.append(std.testing.allocator, self.id) catch @panic("test allocation failed");
+        return self;
+    }
+    fn send(context: *anyopaque, _: []const u8, _: []const u8) void {
+        mark(context).sends += 1;
+    }
+    fn request(context: *anyopaque, _: []const u8, _: u64, _: []const u8) void {
+        _ = mark(context);
+    }
+    fn cancel(context: *anyopaque, _: u64) void {
+        _ = mark(context);
+    }
+    fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+        _ = mark(context);
+        return null;
+    }
+    fn pending(context: *anyopaque) bool {
+        _ = mark(context);
+        return true;
+    }
+    fn services(context: *anyopaque, _: *const platform.PlatformServices) void {
+        _ = mark(context);
+    }
+    fn channels(context: *anyopaque, _: runtime_effects.HostChannelBinding) void {
+        _ = mark(context);
+    }
+    fn shutdown(context: *anyopaque) void {
+        _ = mark(context);
+    }
+};
+
+test "lifecycle host consumes flush plans and retains independent instance state" {
+    const First = LifecycleProbeCore(1);
+    const Second = LifecycleProbeCore(2);
+    const A = TsUiApp(First);
+    const B = TsUiApp(Second);
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var carrier: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    A.applyCoreOptions(.{ .persist = .{ .binding = carrier.binding(), .routes = .{ .ok = "ok", .none = "none", .err = "err" }, .restore = .{ .outcome = .none } } });
+    B.applyCoreOptions(.{});
+    First.override_mode = 0;
+    First.forced_plan = @splat(0);
+    First.forced_plan[0] = 1;
+    // Force an ordinary activation to delay a flush: native must consume it.
+    _ = A.lifecycleAdapter(.activate);
+    try std.testing.expect(A.lifecycle_flush_after_update);
+    try std.testing.expect(!B.lifecycle_flush_after_update);
+    First.forced_plan[0..2].* = .{ 0, 1 };
+    A.Host.boot();
+    var effects = A.Effects.init(std.testing.allocator);
+    defer effects.deinit();
+    var model = A.Host.model().*;
+    A.updateFx(&model, .increment, &effects);
+    try std.testing.expectEqual(@as(usize, 2), model.count);
+    try std.testing.expectEqual(@as(usize, 1), carrier.sends);
+    try std.testing.expect(!A.lifecycle_flush_after_update);
+    A.lifecycle_flush_after_update = true;
+    _ = A.stampOptions(.{ .name = "lifecycle-probe", .scene = .{ .windows = &.{} }, .canvas_label = "canvas" });
+    try std.testing.expect(!A.lifecycle_flush_after_update);
+    try std.testing.expect(!B.lifecycle_flush_after_update);
+}
+
+test "lifecycle host consumes installation restore and outcome plans with owned reasons" {
+    const Core = LifecycleProbeCore(3);
+    const Adapter = TsUiApp(Core);
+    Core.override_mode = 1;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 10; // Root refresh only: suppress all boot coordination.
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var carrier: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    Adapter.Host.boot();
+    Adapter.applyCoreOptions(.{ .persist = .{ .binding = carrier.binding(), .routes = .{ .ok = "ok", .none = "none", .err = "err" }, .restore = .{ .outcome = .none } } });
+    var fx = Adapter.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    var model: Core.Model = .{};
+    Adapter.initFx(&model, &fx);
+    try std.testing.expectEqual(@as(usize, 3), model.count);
+    try std.testing.expectEqual(@as(usize, 0), Core.calls[2]);
+    Core.override_mode = 2;
+    Core.forced_plan = @splat(0); // Refuse an otherwise available restoration.
+    try std.testing.expectEqual(@as(?persist_store.Outcome, null), Adapter.preparePersistRestore(&fx));
+    // Select recorded bytes even though the native live fact is false.
+    try fx.pushReplayPersist(.ok, "*");
+    Core.forced_plan[0] = 1;
+    try std.testing.expectEqual(persist_store.Outcome.ok, Adapter.preparePersistRestore(&fx).?);
+    try std.testing.expectEqual(@as(usize, 42), Adapter.Host.model().count);
+    Core.override_mode = 4;
+    Core.forced_plan[0..2].* = .{ 3, 6 };
+    @memcpy(Core.forced_plan[2..8], "forced");
+    Adapter.dispatchPersistOutcome(&fx, .ok);
+    try std.testing.expectEqualStrings("forced", Adapter.Host.model().reason);
+    Core.override_mode = 5;
+    Core.forced_plan[0] = 1;
+    const msg = Adapter.persistOutcomeMsg(.{ .key = 1, .kind = .data, .bytes = "original" });
+    @memset(Core.forced_plan[2..8], 'x');
+    try std.testing.expectEqualStrings("forced", msg.err);
+    Core.override_mode = 3;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 6; // Live none becomes rejected with no restore.
+    try std.testing.expectEqual(persist_store.Outcome.rejected, Adapter.preparePersistRestore(&fx).?);
+    Adapter.persist_options_store.?.restore.bytes = "*";
+    Core.forced_plan[0..6].* = .{ 0, 1, 2, 3, 0, 1 };
+    try std.testing.expectEqual(persist_store.Outcome.ok, Adapter.preparePersistRestore(&fx).?);
+    try std.testing.expectEqual(@as(usize, 42), Adapter.Host.model().count);
+    try std.testing.expectEqual(@as(usize, 1), carrier.sends);
+}
+
+test "lifecycle host consumes carrier targets ordering and exact environment indices" {
+    const Core = LifecycleProbeCore(4);
+    const Adapter = TsUiApp(Core);
+    Core.override_mode = 7;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0..2].* = .{ 2, 1 };
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var first: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    var second: LifecycleCarrierProbe = .{ .id = 2, .log = &log };
+    var mux: Adapter.HostCallMux = .{ .primary = first.binding(), .persist = second.binding() };
+    const binding = mux.binding();
+    binding.shutdown_fn.?(binding.context);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 1 }, log.items);
+    Core.forced_plan[1] = 0;
+    binding.send_fn(binding.context, "ordinary.service", "bytes");
+    binding.request_fn(binding.context, "ordinary.service", std.math.maxInt(u64), "bytes");
+    binding.cancel_fn.?(binding.context, std.math.maxInt(u64));
+    _ = binding.poll_fn.?(binding.context);
+    try std.testing.expect(binding.pending_fn.?(binding.context));
+    try std.testing.expectEqualSlices(u8, &.{ 2, 1, 2, 2, 2, 2, 2 }, log.items);
+    Core.override_mode = 6;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 1;
+    std.mem.writeInt(u64, Core.forced_plan[8..16], 1, .little);
+    std.mem.writeInt(u64, Core.forced_plan[16..24], 2, .little);
+    Adapter.Host.boot();
+    Adapter.applyCoreOptions(.{ .env_values = &.{ .{ .msg = "env", .value = "first" }, .{ .msg = "env", .value = "second" } } });
+    var fx = Adapter.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    // The probe returns one selected value, then a terminal plan.
+    Core.calls[6] = 0;
+    Adapter.dispatchEnvValues(&fx);
+    try std.testing.expectEqualStrings("second", Adapter.Host.model().reason);
 }
 
 const StatusItemsAdapterTestCore = struct {

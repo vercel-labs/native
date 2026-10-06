@@ -4,6 +4,99 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { native_timer_policy, native_db_policy, native_effect_policy } from "../src/runtime_policy.ts";
 
+const lifecycle = (...bytes: number[]) => native_effect_policy(new Uint8Array([18, ...bytes]));
+test("app lifecycle plans order installation and flush after the committed update", () => {
+  assert.deepEqual([...lifecycle(1, 1, 1, 1, 1)], [1, 4, 5, 6, 7, 8, 9, 10, ...Array(24).fill(0)]);
+  assert.deepEqual([...lifecycle(1, 0, 1, 1, 0).subarray(0, 8)], [2, 4, 6, 7, 8, 9, 10, 0]);
+  assert.deepEqual([...lifecycle(1, 0, 0, 1, 0).subarray(0, 8)], [3, 4, 6, 7, 8, 9, 10, 0]);
+  assert.deepEqual([...lifecycle(1, 0, 0, 0, 0).subarray(0, 6)], [4, 7, 8, 9, 10, 0]);
+  for (const event of [2, 4]) {
+    assert.deepEqual([...lifecycle(0, event, 1, 0, 0).subarray(0, 2)], [1, 0]);
+    assert.deepEqual([...lifecycle(0, event, 0, 0, 0).subarray(0, 2)], [0, 1]);
+  }
+  // An intervening ordinary event preserves the pending post-commit flush.
+  assert.deepEqual([...lifecycle(0, 1, 0, 1, 0).subarray(0, 2)], [1, 0]);
+  assert.deepEqual([...lifecycle(0, 5, 0, 1, 0).subarray(0, 2)], [0, 1]);
+  assert.deepEqual([...lifecycle(0, 5, 0, 0, 0).subarray(0, 2)], [0, 0]);
+});
+
+test("app restore plans preserve replay isolation, migration refusal and complete reasons", () => {
+  assert.equal(lifecycle(2, 0, 1, 1)[0], 0);
+  assert.equal(lifecycle(2, 1, 1, 1)[0], 1);
+  assert.equal(lifecycle(2, 1, 0, 1)[0], 2);
+  assert.equal(lifecycle(2, 1, 0, 0)[0], 3);
+  const request = new Uint8Array(16); request.set([18, 3, 2, 1, 1, 0]);
+  const data = new DataView(request.buffer);
+  for (const [low, high, outcome] of [[16777215, 0, 0], [16777216, 0, 0], [16777217, 0, 6], [0, 1, 6], [0xffffffff, 0xffffffff, 6]]) {
+    data.setUint32(8, low!, true); data.setUint32(12, high!, true);
+    const plan = native_effect_policy(request);
+    assert.equal(plan[0], outcome);
+    assert.deepEqual([...plan.subarray(1, 6)], outcome === 0 ? [1, 2, 3, 0, 1] : [3, 0, 0, 0, 0]);
+  }
+  request[4] = 0; assert.equal(native_effect_policy(request)[0], 4);
+  request[2] = 0; request[5] = 0;
+  assert.deepEqual([...native_effect_policy(request).subarray(0, 6)], [0, 1, 0, 0, 0, 1]);
+  request[3] = 0; assert.equal(native_effect_policy(request)[0], 255);
+  for (const [outcome, reason] of ["", "", "corrupt", "version_unknown", "migrate_failed", "io_failed", "rejected"].entries()) {
+    const plan = lifecycle(4, outcome);
+    assert.equal(plan[0], outcome === 0 ? 1 : outcome === 1 ? 2 : 3);
+    assert.equal(new TextDecoder().decode(plan.subarray(2, 2 + plan[1]!)), reason);
+  }
+  assert.equal(lifecycle(5, 0)[0], 0);
+  assert.equal(new TextDecoder().decode(lifecycle(5, 1).subarray(2, 11)), "io_failed");
+  assert.equal(new TextDecoder().decode(lifecycle(5, 2).subarray(2, 10)), "rejected");
+});
+
+test("app launch plans keep declaration order, old-journal fallback and exact index carry", () => {
+  const request = new Uint8Array(32); request.set([18, 6, 1]);
+  const data = new DataView(request.buffer); data.setUint32(16, 3, true);
+  assert.deepEqual([...native_effect_policy(request).subarray(0, 2)], [1, 1]);
+  data.setUint32(8, 2, true);
+  for (let i = 0; i < 3; i++) {
+    data.setUint32(24, i, true);
+    const plan = native_effect_policy(request);
+    assert.equal(plan[0], i < 2 ? 2 : 0);
+    if (i < 2) assert.equal(new DataView(plan.buffer).getUint32(16, true), i + 1);
+  }
+  data.setUint32(8, 0, true); data.setUint32(12, 2, true); data.setUint32(24, 0xffffffff, true);
+  const plan = native_effect_policy(request), out = new DataView(plan.buffer);
+  assert.equal(out.getUint32(8, true), 0xffffffff);
+  assert.equal(out.getUint32(16, true), 0); assert.equal(out.getUint32(20, true), 1);
+  request[2] = 0; assert.equal(native_effect_policy(request)[0], 0);
+});
+
+test("app carrier plans reserve only exact persistence verbs and preserve worker ordering", () => {
+  for (const operation of [0, 1]) for (const name of ["core.persist", "core.persist.flush", "core.persist.more", "core.persist\0", "service.read", ""]) {
+    const bytes = new TextEncoder().encode(name);
+    const request = new Uint8Array(3 + bytes.length); request.set([18, 7, operation]); request.set(bytes, 3);
+    assert.equal(native_effect_policy(request)[0], name === "core.persist" || name === "core.persist.flush" ? 2 : 1);
+  }
+  for (let operation = 2; operation < 8; operation++)
+    assert.deepEqual([...lifecycle(7, operation).subarray(0, 2)], operation < 5 ? [1, 0] : [1, 2]);
+});
+
+test("app lifecycle rejects malformed packets and retains borrowed input and owned output", () => {
+  const packets = [
+    [18, 0, 4, 1, 0, 0], [18, 1, 1, 1, 1, 1], [18, 2, 1, 1, 1],
+    [18, 3, 2, 1, 1, 0, 0, 0, ...Array(8).fill(0)], [18, 4, 6], [18, 5, 2],
+    [18, 6, 1, ...Array(29).fill(0)], [18, 7, 5],
+  ];
+  for (const bytes of packets) {
+    const wrapped = new Uint8Array(bytes.length + 13).fill(211), request = wrapped.subarray(7, 7 + bytes.length);
+    request.set(bytes); const frozen = wrapped.slice(), plan = native_effect_policy(request), owned = plan.slice();
+    assert.deepEqual(wrapped, frozen);
+    native_effect_policy(new Uint8Array(bytes)); assert.deepEqual(plan, owned);
+    for (let length = 0; length < request.length; length++) assert.throws(() => native_effect_policy(request.subarray(0, length)));
+    assert.throws(() => native_effect_policy(new Uint8Array([...bytes, 0])));
+  }
+  for (const packet of [[18, 8], [18, 0, 6, 0, 0, 0], [18, 0, 0, 2, 0, 0], [18, 1, 0, 0, 2, 0], [18, 2, 0, 2, 0], [18, 4, 7], [18, 5, 3], [18, 7, 8]])
+    assert.throws(() => native_effect_policy(new Uint8Array(packet)));
+  const restore = new Uint8Array(packets[3]!); restore[6] = 1;
+  assert.throws(() => native_effect_policy(restore));
+  const env = new Uint8Array(packets[6]!); env[7] = 1;
+  assert.throws(() => native_effect_policy(env));
+});
+
 interface Slot { used: boolean; key: Uint8Array; every: number; tag: number }
 const empty = (): Slot[] => Array.from({ length: 16 }, () => ({ used: false, key: new Uint8Array(0), every: 0, tag: 0 }));
 const key = (s: string) => new TextEncoder().encode(s);
