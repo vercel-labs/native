@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.2.2
+# Service compile surface — scriptc 0.2.4
 
 What TypeScript under `src/services/` can use, as stated by the pinned
-compiler itself (surface manifest schema 1, 602 entries:
-471 static, 14 dynamic-only, 117 unsupported).
+compiler itself (surface manifest schema 1, 645 entries:
+516 static, 14 dynamic-only, 115 unsupported).
 
 How to read the tables:
 
@@ -165,13 +165,11 @@ manifest row in the Notes column:
 | `node-builtin.assert.AssertionError` | assert.AssertionError | unsupported | `SC2020` | the class itself has no lowering — catch and test err.name === "AssertionError" or err.code === "ERR_ASSERTION" |
 | `node-builtin.assert.deepEqual` | assert.deepEqual | unsupported | `SC2020` | legacy deep equality has no lowering yet — deepStrictEqual and notDeepStrictEqual compare structures with Node's modern semantics |
 | `node-builtin.assert.doesNotReject` | assert.doesNotReject | unsupported | `SC2020` | await the promise directly — an unexpected rejection already fails the test |
-| `node-builtin.assert.doesNotThrow` | assert.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
 | `node-builtin.assert.ifError` | assert.ifError | unsupported | `SC2020` | test explicitly instead: assert.strictEqual(err, null) / assert.strictEqual(err, undefined) |
 | `node-builtin.assert.notDeepEqual` | assert.notDeepEqual | unsupported | `SC2020` | legacy deep equality has no lowering yet — deepStrictEqual and notDeepStrictEqual compare structures with Node's modern semantics |
 | `node-builtin.assert.rejects` | assert.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
 | `node-builtin.assert.strict.AssertionError` | assert/strict.AssertionError | unsupported | `SC2020` | the class itself has no lowering — catch and test err.name === "AssertionError" or err.code === "ERR_ASSERTION" |
 | `node-builtin.assert.strict.doesNotReject` | assert/strict.doesNotReject | unsupported | `SC2020` | await the promise directly — an unexpected rejection already fails the test |
-| `node-builtin.assert.strict.doesNotThrow` | assert/strict.doesNotThrow | unsupported | `SC2020` | call the function directly — an unexpected throw already fails the test |
 | `node-builtin.assert.strict.ifError` | assert/strict.ifError | unsupported | `SC2020` | test explicitly instead: assert.strictEqual(err, null) / assert.strictEqual(err, undefined) |
 | `node-builtin.assert.strict.rejects` | assert/strict.rejects | unsupported | `SC2020` | await the promise inside assert.throws's callback story instead: try { await p; assert.fail("expected rejection") } catch { ... } |
 | `node-builtin.buffer.isAscii` | buffer.isAscii | static |  |  |
@@ -243,26 +241,35 @@ manifest row in the Notes column:
 | `node-builtin.fs.fstatSync` | fs.fstatSync | static |  |  |
 | `node-builtin.fs.fsyncSync` | fs.fsyncSync | static |  |  |
 | `node-builtin.fs.ftruncateSync` | fs.ftruncateSync | static |  |  |
+| `node-builtin.fs.futimesSync` | fs.futimesSync | static |  |  |
 | `node-builtin.fs.linkSync` | fs.linkSync | static |  |  |
 | `node-builtin.fs.lstatSync` | fs.lstatSync | static |  |  |
+| `node-builtin.fs.lutimesSync` | fs.lutimesSync | static |  |  |
 | `node-builtin.fs.mkdirSync` | fs.mkdirSync | static |  |  |
 | `node-builtin.fs.mkdtempSync` | fs.mkdtempSync | static |  |  |
 | `node-builtin.fs.openSync` | fs.openSync | static |  |  |
 | `node-builtin.fs.promises.chmod` | fs/promises.chmod | static |  |  |
+| `node-builtin.fs.promises.link` | fs/promises.link | static |  |  |
 | `node-builtin.fs.promises.lstat` | fs/promises.lstat | static |  |  |
+| `node-builtin.fs.promises.lutimes` | fs/promises.lutimes | static |  |  |
 | `node-builtin.fs.promises.mkdir` | fs/promises.mkdir | static |  |  |
 | `node-builtin.fs.promises.open` | fs/promises.open | static |  |  |
 | `node-builtin.fs.promises.readFile` | fs/promises.readFile | static |  |  |
 | `node-builtin.fs.promises.readdir` | fs/promises.readdir | static |  |  |
+| `node-builtin.fs.promises.readlink` | fs/promises.readlink | static |  |  |
 | `node-builtin.fs.promises.realpath` | fs/promises.realpath | static |  |  |
 | `node-builtin.fs.promises.rename` | fs/promises.rename | static |  |  |
 | `node-builtin.fs.promises.rm` | fs/promises.rm | static |  |  |
 | `node-builtin.fs.promises.stat` | fs/promises.stat | static |  |  |
+| `node-builtin.fs.promises.statfs` | fs/promises.statfs | static |  |  |
+| `node-builtin.fs.promises.symlink` | fs/promises.symlink | static |  |  |
 | `node-builtin.fs.promises.unlink` | fs/promises.unlink | static |  |  |
+| `node-builtin.fs.promises.utimes` | fs/promises.utimes | static |  |  |
 | `node-builtin.fs.promises.writeFile` | fs/promises.writeFile | static |  |  |
 | `node-builtin.fs.readFileSync` | fs.readFileSync | static |  |  |
 | `node-builtin.fs.readSync` | fs.readSync | static |  |  |
 | `node-builtin.fs.readdirSync` | fs.readdirSync | static |  |  |
+| `node-builtin.fs.readlinkSync` | fs.readlinkSync | static |  |  |
 | `node-builtin.fs.readvSync` | fs.readvSync | static |  |  |
 | `node-builtin.fs.realpathSync` | fs.realpathSync | static |  |  |
 | `node-builtin.fs.realpathSync.native` | fs.realpathSync.native | static |  |  |
@@ -271,7 +278,10 @@ manifest row in the Notes column:
 | `node-builtin.fs.rmSync` | fs.rmSync | static |  |  |
 | `node-builtin.fs.rmdirSync` | fs.rmdirSync | static |  |  |
 | `node-builtin.fs.statSync` | fs.statSync | static |  |  |
+| `node-builtin.fs.statfsSync` | fs.statfsSync | static |  |  |
+| `node-builtin.fs.symlinkSync` | fs.symlinkSync | static |  |  |
 | `node-builtin.fs.unlinkSync` | fs.unlinkSync | static |  |  |
+| `node-builtin.fs.utimesSync` | fs.utimesSync | static |  |  |
 | `node-builtin.fs.watch` | fs.watch | static |  |  |
 | `node-builtin.fs.writeFileSync` | fs.writeFileSync | static |  |  |
 | `node-builtin.fs.writeSync` | fs.writeSync | static |  |  |
@@ -369,10 +379,43 @@ manifest row in the Notes column:
 | `node-builtin.tls.rootCertificates` | tls.rootCertificates | static |  | the value read; answers the same bundled array as getCACertificates('bundled'), but fenced under its own id — the spelling an author writes |
 | `node-builtin.tls.setDefaultCACertificates` | tls.setDefaultCACertificates | static |  | replaces the default set and the client trust anchors for the rest of the process |
 | `node-builtin.url.fileURLToPath` | url.fileURLToPath | static |  |  |
+| `node-builtin.url.fileURLToPathBuffer` | url.fileURLToPathBuffer | static |  |  |
 | `node-builtin.url.pathToFileURL` | url.pathToFileURL | static |  |  |
+| `node-builtin.util.getSystemErrorMap` | util.getSystemErrorMap | static |  |  |
+| `node-builtin.util.getSystemErrorMessage` | util.getSystemErrorMessage | static |  |  |
+| `node-builtin.util.getSystemErrorName` | util.getSystemErrorName | static |  |  |
+| `node-builtin.util.isDeepStrictEqual` | util.isDeepStrictEqual | static |  |  |
 | `node-builtin.util.parseArgs` | util.parseArgs | static |  |  |
 | `node-builtin.util.parseEnv` | util.parseEnv | static |  |  |
 | `node-builtin.util.promisify` | util.promisify | unsupported | `SC2020` | the lowered shapes are const bindings over child_process.execFile and fs.readFile; call the bound function directly |
+| `node-builtin.util.stripVTControlCharacters` | util.stripVTControlCharacters | static |  |  |
+| `node-builtin.util.styleText` | util.styleText | static |  |  |
+| `node-builtin.util.toUSVString` | util.toUSVString | static |  |  |
+| `node-builtin.util.types.isAnyArrayBuffer` | util/types.isAnyArrayBuffer | static |  |  |
+| `node-builtin.util.types.isArrayBuffer` | util/types.isArrayBuffer | static |  |  |
+| `node-builtin.util.types.isArrayBufferView` | util/types.isArrayBufferView | static |  |  |
+| `node-builtin.util.types.isAsyncFunction` | util/types.isAsyncFunction | static |  |  |
+| `node-builtin.util.types.isDataView` | util/types.isDataView | static |  |  |
+| `node-builtin.util.types.isFloat32Array` | util/types.isFloat32Array | static |  |  |
+| `node-builtin.util.types.isFloat64Array` | util/types.isFloat64Array | static |  |  |
+| `node-builtin.util.types.isGeneratorFunction` | util/types.isGeneratorFunction | static |  |  |
+| `node-builtin.util.types.isGeneratorObject` | util/types.isGeneratorObject | static |  |  |
+| `node-builtin.util.types.isInt16Array` | util/types.isInt16Array | static |  |  |
+| `node-builtin.util.types.isInt32Array` | util/types.isInt32Array | static |  |  |
+| `node-builtin.util.types.isInt8Array` | util/types.isInt8Array | static |  |  |
+| `node-builtin.util.types.isMap` | util/types.isMap | static |  |  |
+| `node-builtin.util.types.isNativeError` | util/types.isNativeError | static |  |  |
+| `node-builtin.util.types.isPromise` | util/types.isPromise | static |  |  |
+| `node-builtin.util.types.isProxy` | util/types.isProxy | static |  |  |
+| `node-builtin.util.types.isRegExp` | util/types.isRegExp | static |  |  |
+| `node-builtin.util.types.isSet` | util/types.isSet | static |  |  |
+| `node-builtin.util.types.isTypedArray` | util/types.isTypedArray | static |  |  |
+| `node-builtin.util.types.isUint16Array` | util/types.isUint16Array | static |  |  |
+| `node-builtin.util.types.isUint32Array` | util/types.isUint32Array | static |  |  |
+| `node-builtin.util.types.isUint8Array` | util/types.isUint8Array | static |  |  |
+| `node-builtin.util.types.isUint8ClampedArray` | util/types.isUint8ClampedArray | static |  |  |
+| `node-builtin.util.types.isWeakMap` | util/types.isWeakMap | static |  |  |
+| `node-builtin.util.types.isWeakSet` | util/types.isWeakSet | static |  |  |
 | `node-builtin.worker_threads.isMainThread` | worker_threads.isMainThread | static |  | constant value read |
 | `node-builtin.worker_threads.threadId` | worker_threads.threadId | static |  | constant value read |
 | `node-builtin.zlib.brotliCompressSync` | zlib.brotliCompressSync | unsupported | `SC2020` | the default-options deflate/inflate, raw, gzip/gunzip, and unzip sync/callback forms plus crc32 are the lowered zlib surface |
