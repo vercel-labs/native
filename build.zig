@@ -3657,7 +3657,13 @@ pub fn build(b: *std.Build) void {
         \\widget_id() {
         \\  role="$1"
         \\  name="$2"
-        \\  sed -n "s/.*widget @w1\\/components-canvas#\\([0-9][0-9]*\\) role=$role name=\\\"$name\\\".*/\\1/p" "$snapshot" | head -1
+        \\  lookup_attempts=0
+        \\  while [ "$lookup_attempts" -lt 50 ]; do
+        \\    id="$(sed -n "s/.*widget @w1\\/components-canvas#\\([0-9][0-9]*\\) role=$role name=\\\"$name\\\".*/\\1/p" "$snapshot" | head -1)"
+        \\    case "$id" in ''|*[!0-9]*) ;; *) printf '%s\n' "$id"; return ;; esac
+        \\    lookup_attempts=$((lookup_attempts + 1))
+        \\    sleep 0.1
+        \\  done
         \\}
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
@@ -4661,6 +4667,7 @@ fn tsCoreE2eArtifact(
     _ = feed_reader_stage.addCopyFile(b.path("src/app_runner/ts_compiled_view.zig"), "ts_compiled_view.zig");
     _ = feed_reader_stage.add("core.zig",
         \\const core = @import("ts_feed_reader_core");
+        \\pub const rt = core.rt;
         \\pub const Model = core.Model;
         \\pub const Msg = core.Msg;
         \\pub const nativeView = core.nativeView;
