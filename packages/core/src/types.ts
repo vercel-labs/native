@@ -432,7 +432,7 @@ export class TypeTable {
   /// each also emits as a forwarding declaration on the Model struct (the
   /// markup fn-backed-scalar shape), under its own TS name — markup binds
   /// `doneCount` as `{doneCount}`. The reserved entry points
-  /// (update/initialModel/subscriptions) never forward. Shared by the
+  /// (lifecycle and host-message channel functions) never forward. Shared by the
   /// checker (NS1031/NS1032) and the emitter.
   ///
   /// ENTRY-ONLY on purpose: under node the app's module object is the
@@ -465,7 +465,7 @@ export class TypeTable {
   /// The Model-first query shape, under the name the
   /// helper is exported as (the reserved entry points never forward).
   private isModelHelperShape(stmt: ts.FunctionDeclaration, exportedName: string): boolean {
-    if (exportedName === "update" || exportedName === "initialModel" || exportedName === "subscriptions") return false;
+    if (["update", "initialModel", "subscriptions", "migrate", "commandMsg", "frameMsg", "keyMsg", "pinchMsg", "dropMsg"].includes(exportedName)) return false;
     if (stmt.parameters.length < 1 || stmt.parameters.some(p => !p.type || p.questionToken || p.dotDotDotToken || p.initializer)) return false;
     const p = stmt.parameters[0];
     if (!p.type || !stmt.type) return false;

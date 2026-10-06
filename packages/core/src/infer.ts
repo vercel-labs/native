@@ -1448,7 +1448,9 @@ export class IntInference {
           );
           if (hardFed || tentativeFed) {
             demandSlot(s, !hardFed);
-            changed = true;
+            // Comparison demand may yield to a host-boundary inflow.
+            // An unchanged slot does not advance this fixed point.
+            if (s.demanded) changed = true;
           }
         } else if (s.comparisonDemanded && hardFed) {
           demandSlot(s, false);

@@ -458,3 +458,21 @@ export function query(model: Model, range: Bounds, tags: readonly Tag[], detail:
   assert.ok(c.integer_slots.some((s: any) => s.slot === "Bounds.first"));
   assert.ok(!c.integer_slots.some((s: any) => s.slot === "Bounds.offset" || s.slot === "Tag.score"));
 });
+
+test("Model-first host frame channels stay outside the generic helper surface", () => {
+  const value = contractOf(`
+    import { type FrameEvent } from "@native-sdk/core/events";
+    export interface Model { readonly count: number }
+    export type Msg = { readonly kind: "resize"; readonly size: number } | { readonly kind: "reset" };
+    export function initialModel(): Model { return { count: 0 }; }
+    export function update(model: Model, msg: Msg): Model { switch(msg.kind) { case "resize": return { count: msg.size }; case "reset": return { count: 0 }; } }
+    export function frameMsg(model: Model, frame: FrameEvent): Msg | null { return frame.width !== model.count ? { kind: "resize", size: frame.width } : null; }
+    export function query(model: Model, amount: number): number { return model.count + amount; }
+  `);
+  assert.deepEqual((value.model_helpers as { name: string }[]).map(helper => helper.name), ["query"]);
+  assert.equal((value.channels as { frame_msg: boolean }).frame_msg, true);
+  assert.ok(!(value.types as { unions: { name: string }[] }).unions.some(type => type.name === "Msg"));
+  const slots = (value.integer_slots as { slot: string }[]).map(slot => slot.slot);
+  assert.ok(!slots.includes("Model.count") && !slots.includes("Msg.resize"));
+  assert.ok(!slots.includes("helpers.query.amount") && !slots.includes("helpers.query.return"));
+});
