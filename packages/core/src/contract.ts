@@ -167,7 +167,7 @@ class ContractEmitter {
       case "optional":
         return { k: "optional", inner: this.reflect(t.inner, decl, top) };
       case "void":
-        throw new ContractError("a contract slot resolved to no subset type (internal)", this.entryFile);
+        throw new ContractError(`a contract slot resolved to no subset type: ${decl?.getText() ?? "unnamed slot"}`, decl ?? this.entryFile);
     }
   }
 
@@ -598,7 +598,13 @@ class ContractEmitter {
     const msgUnbound = unbound.msg.map((n) => js(n)).join(", ");
 
     // Channels: export presence IS the wiring decision.
-    const hasCommand = this.entryExportedFunction("commandMsg") !== null;
+    const command = this.entryExportedFunction("commandMsg");
+    const hasCommand = command !== null;
+    const commandParam = command?.parameters[0]?.type;
+    const commandInput = commandParam ? this.table.resolveTypeNode(commandParam).k : null;
+    if (command && (command.parameters.length !== 1 || (commandInput !== "bytes" && commandInput !== "string")))
+      throw new ContractError("commandMsg requires one string or Uint8Array command name", command);
+    const commandBytes = commandInput === "bytes";
     const hasFrame = this.entryExportedFunction("frameMsg") !== null;
     const hasKey = this.entryExportedFunction("keyMsg") !== null;
     const hasPinch = this.entryExportedFunction("pinchMsg") !== null;
@@ -670,7 +676,7 @@ class ContractEmitter {
     return (
       "{\n" +
       '  "format": 1,\n' +
-      '  "wire_version": 8,\n' +
+      '  "wire_version": 9,\n' +
       '  "abi_version": 2,\n' +
       '  "compiler_version": "0.0.1",\n' +
       `  "entry": ${js(this.entry)},\n` +
@@ -690,6 +696,7 @@ class ContractEmitter {
       `  "has_migrate": ${boolJson(hasMigrate)},\n` +
       '  "channels": {\n' +
       `    "command_msg": ${boolJson(hasCommand)},\n` +
+      (commandBytes ? '    "command_bytes": true,\n' : "") +
       `    "frame_msg": ${boolJson(hasFrame)},\n` +
       `    "key_msg": ${boolJson(hasKey)},\n` +
       `    "pinch_msg": ${boolJson(hasPinch)},\n` +

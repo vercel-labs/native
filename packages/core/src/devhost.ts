@@ -161,6 +161,7 @@ if (capabilities.size > 0 || permissions.size > 0 || windowViewsEnabled || (pers
     permissions: [...permissions],
     persistRoutes: persistOk !== null && persistNone !== null && persistErr !== null ? { ok: persistOk, none: persistNone, err: persistErr } : undefined,
     servicesContract: true,
+    contractEntry: "src/core.ts",
     servicePackages,
     sdkCorePath: sdkCore ?? undefined,
     windowViews: windowViewsEnabled ? windowViews : undefined,
@@ -274,6 +275,15 @@ const serviceContract = checked?.servicesContract ? JSON.parse(checked.servicesC
 const serviceOperations = new Map(serviceContract?.operations.map((operation) => [operation.name, operation]) ?? []);
 
 const mod = await import(pathToFileURL(path.resolve(entry)).href);
+let commandBytes: boolean | null = null;
+function commandMessage(name: string): unknown {
+  if (commandBytes === null) {
+    const contract = checked?.contract ?? checkFile(entry!, { sdkCorePath: sdkCore ?? undefined, contractEntry: "src/core.ts" }).contract;
+    if (!contract) throw new Error("cannot determine commandMsg input from the checked core contract");
+    commandBytes = JSON.parse(contract).channels.command_bytes === true;
+  }
+  return mod.commandMsg(commandBytes ? new TextEncoder().encode(name) : name);
+}
 if (typeof mod.initialModel !== "function" || typeof mod.update !== "function") {
   console.error(`${entry} is not an app core: it must export initialModel() and update(model, msg)`);
   process.exit(1);
@@ -321,6 +331,7 @@ let now = 0;
 const timers = new Map<string, { everyMs: number; msgKind: string; nextAt: number }>();
 /// Armed one-shots (Cmd.delay), by key.
 const delays = new Map<string, { msgKind: string; at: number }>();
+const resultTimers = new Map<string | symbol, { key: string; msgKind: string; at: number; interval: number; repeating: boolean }>();
 const serviceChannels = new Map<number, string>();
 /// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
 /// nested model data without making the app own a serialization format.
@@ -1678,9 +1689,28 @@ function performCmd(cmd: Cmdish): void {
       say(`cmd now -> ${cmd.msgKind} @ ${now}`);
       dispatch(timestampMsg(cmd.msgKind as string, now));
       return;
+    case "wall_time":
+      say(`cmd wall_time -> ${cmd.msgKind} @ ${now}`);
+      dispatch(bytesMsg(cmd.msgKind as string, encoder.encode(String(Math.trunc(now)))));
+      return;
+    case "timer_result": {
+      const key = cmd.key as string, interval = cmd.afterMs as number, kind = cmd.msgKind as string;
+      const slot = key.length === 0 ? Symbol() : key;
+      const blocked = key.length > 0 && (pendingStoreByKey.has(key) || pendingDbByKey.has(key) || liveDbByKey.has(key) || serviceTasksByKey.has(key));
+      if (blocked || !(interval >= 1 && interval <= 31536000000) || (!resultTimers.has(slot) && !(key.length > 0 && delays.has(key)) && resultTimers.size + delays.size >= 16)) {
+        dispatch({ kind, key: encoder.encode(key), timestampNs: encoder.encode("0"), outcome: "rejected" });
+        return;
+      }
+      if (key.length > 0) delays.delete(key);
+      const rounded = Math.round(interval);
+      resultTimers.set(slot, { key, msgKind: kind, at: now + rounded, interval: rounded, repeating: cmd.mode === "repeating" });
+      say(`cmd timer_result arm ${key} +${rounded}ms -> ${kind}`);
+      return;
+    }
     case "delay": {
       const key = cmd.key as string;
-      const rearmed = delays.has(key);
+      const rearmed = delays.has(key) || resultTimers.has(key);
+      resultTimers.delete(key);
       delays.set(key, { msgKind: cmd.msgKind as string, at: now + (cmd.afterMs as number) });
       say(`cmd delay ${rearmed ? "re-arm" : "arm"} ${key} +${cmd.afterMs}ms -> ${cmd.msgKind}`);
       return;
@@ -1691,7 +1721,7 @@ function performCmd(cmd: Cmdish): void {
         say(`cmd cancel ${key} (store result dropped)`);
       } else if (cancelPendingDb(key)) {
         say(`cmd cancel ${key} (database query result dropped)`);
-      } else if (delays.delete(key)) {
+      } else if (resultTimers.delete(key) || delays.delete(key)) {
         say(`cmd cancel ${key} (delay dropped)`);
       } else if (cancelService(key)) {
         say(`cmd cancel ${key} (service cancellation requested)`);
@@ -1801,6 +1831,11 @@ function performCmd(cmd: Cmdish): void {
     case "db_query":
     case "db_exec":
       performDbCmd(cmd);
+      return;
+    case "read_file_result":
+    case "write_file_result":
+      say(`cmd ${cmd.op} (rejected by the virtual host; native filesystem IO is required)`);
+      dispatch({ kind: cmd.resultKind, key: encoder.encode(cmd.key as string), operation: cmd.op === "read_file_result" ? "read" : "write", event: "terminal", outcome: "rejected", bytes: new Uint8Array(0), totalBytes: encoder.encode("0"), mtimeMs: encoder.encode("0"), exists: false, droppedBefore: 0 });
       return;
     case "read_file":
     case "write_file":
@@ -1966,6 +2001,16 @@ function advance(ms: number): void {
         };
       }
     }
+    for (const [key, timer] of resultTimers) {
+      if (timer.at <= deadline && timer.at < dueAt) {
+        dueAt = timer.at;
+        fire = () => {
+          if (timer.repeating) timer.at += timer.interval; else resultTimers.delete(key);
+          say(`fire ${timer.key} -> ${timer.msgKind} @ ${now}`);
+          dispatch({ kind: timer.msgKind, key: encoder.encode(timer.key), timestampNs: encoder.encode(String(BigInt(Math.trunc(now)) * 1000000n + BigInt(Math.trunc((now - Math.trunc(now)) * 1000000)))), outcome: "fired" });
+        };
+      }
+    }
     if (!fire) break;
     now = dueAt;
     fire();
@@ -2037,7 +2082,7 @@ function handleLine(raw: string): void {
   const record = parsed as Record<string, unknown>;
   if (typeof record.command === "string") {
     if (typeof mod.commandMsg !== "function") throw new Error("journalable dev-host commands require the core to export commandMsg(name)");
-    const msg = mod.commandMsg(record.command);
+    const msg = commandMessage(record.command);
     if (msg === null || msg === undefined) throw new Error(`commandMsg refused ${record.command}`);
     dispatch(msg);
     if (journalWriter) journalWriter.menuCommand(record.command);
@@ -2050,6 +2095,7 @@ function handleLine(raw: string): void {
   if (record.restart === true) {
     timers.clear();
     delays.clear();
+    resultTimers.clear();
     for (const live of liveDbByKey.values()) releaseDbOperation(live.operation, true);
     liveDbByKey.clear();
     dirtyLiveDbKeys.clear();
@@ -2109,7 +2155,7 @@ function replaySession(): void {
     for (const effect of pending.splice(0)) replayServiceEffect(effect);
     if (record.tag === 14) {
       if (typeof mod.commandMsg !== "function") throw new Error("this recorded menu command requires the core to export commandMsg(name)");
-      const msg = mod.commandMsg(record.name);
+      const msg = commandMessage(record.name);
       if (msg === null || msg === undefined) throw new Error(`commandMsg refused recorded command ${record.name}`);
       dispatch(msg);
     }

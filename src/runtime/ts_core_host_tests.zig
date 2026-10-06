@@ -4011,3 +4011,240 @@ test "routed clipboard keys reject cross-family collisions and every full-capaci
     CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("reused") });
     try std.testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
 }
+
+const complete_storage_core = struct {
+    pub const rt = mini_core.rt;
+    const File = struct {
+        key: []const u8,
+        operation: effects_mod.EffectFileOp,
+        event: enum { done, chunk, terminal },
+        outcome: effects_mod.EffectFileOutcome,
+        bytes: []const u8,
+        totalBytes: []const u8,
+        mtimeMs: []const u8,
+        exists: bool,
+        droppedBefore: f64,
+    };
+    const Timer = struct { key: []const u8, timestampNs: []const u8, outcome: enum { rejected, fired } };
+    pub const Model = struct { file: ?File = null, timer: ?Timer = null, stamp: []const u8 = "", replies: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, file: File, timer: Timer, stamp: []const u8 };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [7][8192]u8 = undefined;
+    fn bytes(value: []const u8, slot: usize) []const u8 {
+        std.debug.assert(value.len <= owned[slot].len);
+        @memcpy(owned[slot][0..value.len], value);
+        return owned[slot][0..value.len];
+    }
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .file => |file| {
+                model.file = file;
+                model.file.?.key = bytes(file.key, 0);
+                model.file.?.bytes = bytes(file.bytes, 1);
+                model.file.?.totalBytes = bytes(file.totalBytes, 2);
+                model.file.?.mtimeMs = bytes(file.mtimeMs, 3);
+            },
+            .timer => |timer| {
+                model.timer = timer;
+                model.timer.?.key = bytes(timer.key, 4);
+                model.timer.?.timestampNs = bytes(timer.timestampNs, 5);
+            },
+            .stamp => |stamp| model.stamp = bytes(stamp, 6),
+        }
+        model.replies += 1;
+        return .{ .model = &model, .cmd = "" };
+    }
+    fn fileCommand(key: []const u8, write: bool) []const u8 {
+        const path = "notes.bin";
+        const content = "body\x00\xff";
+        const out = rt.frameAlloc(u8, 3 + key.len + 4 + path.len + (if (write) @as(usize, 4 + content.len) else 0));
+        out[0] = if (write) 0x38 else 0x37;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = @intFromEnum(std.meta.Tag(Msg).file);
+        const at = mini_core.writeLongBytes(out, 3 + key.len, path);
+        if (write) _ = mini_core.writeLongBytes(out, at, content);
+        return out;
+    }
+    fn timerCommand(key: []const u8, repeating: bool, ms: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 12 + key.len);
+        out[0] = 0x3A;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = @intFromBool(repeating);
+        std.mem.writeInt(u64, out[3 + key.len ..][0..8], @bitCast(ms), .little);
+        out[11 + key.len] = @intFromEnum(std.meta.Tag(Msg).timer);
+        return out;
+    }
+};
+const StorageHost = ts_core_host.TsCoreHost(complete_storage_core);
+
+test "complete storage records own binary keys bodies and exact signed clock and file metadata" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var clock: runtime_clock.TestClock = .{};
+    fx.clock = clock.clock();
+    StorageHost.init(&fx);
+    for ([_]i64{ std.math.minInt(i64), -9007199254740993, -1, 0, 9007199254740993, std.math.maxInt(i64) }) |value| {
+        clock.setWallMs(value);
+        StorageHost.dispatch(&fx, .{ .commands = &.{ 0x39, @intFromEnum(std.meta.Tag(complete_storage_core.Msg).stamp) } });
+        var buffer: [21]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{d}", .{value}), StorageHost.model().stamp);
+        complete_storage_core.rt.frameReset();
+        @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{d}", .{value}), StorageHost.model().stamp);
+    }
+    inline for (std.meta.tags(effects_mod.EffectFileOutcome)) |outcome| {
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("file\x00\xff", false) });
+        const pending = fx.pendingFileAt(0).?;
+        try std.testing.expectEqualStrings("notes.bin", pending.path);
+        try fx.feedFileResultDetailed(.{ .key = pending.key, .op = .read, .outcome = outcome, .bytes = "body\x00\xff", .total = std.math.maxInt(u64), .mtime_ms = std.math.minInt(i64), .exists = true });
+        StorageHost.drain(&fx);
+        try std.testing.expectEqualDeep(complete_storage_core.File{
+            .key = "file\x00\xff",
+            .operation = .read,
+            .event = .terminal,
+            .outcome = outcome,
+            .bytes = if (outcome == .ok or outcome == .truncated) "body\x00\xff" else "",
+            .totalBytes = "18446744073709551615",
+            .mtimeMs = "-9223372036854775808",
+            .exists = true,
+            .droppedBefore = 0,
+        }, StorageHost.model().file.?);
+        complete_storage_core.rt.frameReset();
+        @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+        try std.testing.expectEqualStrings("file\x00\xff", StorageHost.model().file.?.key);
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("write", true) });
+        const write = fx.pendingFileAt(0).?;
+        try std.testing.expectEqualStrings("body\x00\xff", write.bytes);
+        try fx.feedFileResult(write.key, outcome, "ignored");
+        StorageHost.drain(&fx);
+        try std.testing.expectEqual(outcome, StorageHost.model().file.?.outcome);
+        try std.testing.expectEqual(.write, StorageHost.model().file.?.operation);
+        try std.testing.expectEqualStrings("", StorageHost.model().file.?.bytes);
+    }
+}
+
+test "complete storage admission preserves key ownership cancellation replacement and capacity" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("timer", true, 30) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("timer", false) });
+    complete_storage_core.rt.frameReset();
+    @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().file.?.outcome);
+    try std.testing.expectEqualStrings("timer", StorageHost.model().file.?.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("replace", false) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("replace", true) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    try std.testing.expectEqual(.write, fx.pendingFileAt(0).?.op);
+    const count = StorageHost.model().replies;
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("replace") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(count, StorageHost.model().replies);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    for (0..16) |i| {
+        var key: [16]u8 = undefined;
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand(try std.fmt.bufPrint(&key, "file{d}", .{i}), false) });
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("overflow", true) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualDeep(complete_storage_core.File{ .key = "overflow", .operation = .write, .event = .terminal, .outcome = .rejected, .bytes = "", .totalBytes = "0", .mtimeMs = "0", .exists = false, .droppedBefore = 0 }, StorageHost.model().file.?);
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingFileCount());
+}
+
+test "complete timers preserve modes rearming explicit refusals cross-family ownership and cancellation" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("pulse", true, 30.5) });
+    const key = fx.pendingTimerAt(0).?.key;
+    try std.testing.expectEqual(@as(u64, 31), fx.pendingTimerAt(0).?.interval_ms);
+    for (0..2) |_| {
+        try fx.fireTimer(key);
+        StorageHost.drain(&fx);
+        try std.testing.expectEqualDeep(complete_storage_core.Timer{ .key = "pulse", .timestampNs = "0", .outcome = .fired }, StorageHost.model().timer.?);
+        try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("pulse", false, 40) });
+    try std.testing.expectEqual(key, fx.pendingTimerAt(0).?.key);
+    try fx.fireTimer(key);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("file", false) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("file", false, 40) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+    try std.testing.expectEqualStrings("file", StorageHost.model().timer.?.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    for ([_]f64{ 0, -1, std.math.nan(f64), std.math.inf(f64), 31536000001 }) |invalid| {
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("invalid", false, invalid) });
+        StorageHost.drain(&fx);
+        try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+        try std.testing.expectEqualStrings("invalid", StorageHost.model().timer.?.key);
+    }
+    for (0..16) |i| {
+        var name: [16]u8 = undefined;
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand(try std.fmt.bufPrint(&name, "timer{d}", .{i}), true, 1) });
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("overflow", false, 1) });
+    complete_storage_core.rt.frameReset();
+    @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+    try std.testing.expectEqualStrings("overflow", StorageHost.model().timer.?.key);
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("timer0") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingTimerCount());
+}
+
+test "complete storage owners refuse later basic commands and retain same-family replacement" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    const reply_tag = @intFromEnum(std.meta.Tag(complete_storage_core.Msg).stamp);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("owned", true, 50) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdReadFile("owned", reply_tag, reply_tag, "notes.bin") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", reply_tag, reply_tag, "body") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 100, reply_tag) });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(u32, 100), fx.pendingTimerAt(0).?.interval_ms);
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("owned", false) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 20, reply_tag) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", reply_tag, reply_tag, "body") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    StorageHost.drain(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 20, reply_tag) });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+}

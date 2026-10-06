@@ -183,6 +183,14 @@ Four effect families deliver MANY results from one command — a keyed stream th
 
 `Cmd.videoSnapshot({ snapshot })` captures current playback state when the command is issued and replies within the same dispatch, in command order like `Cmd.now`. Its arm carries `key: Uint8Array`, `active`, `surface`, `playing`, `buffering`, `completed`, `looping`, `muted`, `source` (`"local" | "stream"`), `positionMs`, `durationMs`, `width`, `height`, and `volume`. Flags are booleans and numeric mirrors are numbers. The key is empty when the playback belongs to another owner. `Cmd.videoRestart(key)` restarts completed playback and retains ownership for later keyed commands. See `examples/effects-probe` and `examples/video-player` for complete cores and views.
 
+`Cmd.wallTime(msgKind)` supplies the journaled signed-i64 wall clock as canonical decimal bytes, preserving values outside the exact JavaScript-number range. Use a single-byte-payload arm.
+
+`Cmd.readFileResult(path, { key?, result })` and `Cmd.writeFileResult(path, bytes, { key?, result })` supply the full file terminal: `key`, `operation`, `event`, `outcome`, `bytes`, `totalBytes`, `mtimeMs`, `exists`, and `droppedBefore`. Import `FileResultArm` for the complete shape. Totals and signed modification times are canonical decimal bytes. Named requests replace earlier requests and cancel silently; unrelated live capability owners and full tables return a complete `"rejected"` record. The virtual host returns explicit refusals because it performs no ambient filesystem IO.
+
+`Cmd.timerResult(key, afterMs, "one_shot" | "repeating", { result })` supplies `key: Uint8Array`, `timestampNs: Uint8Array`, and `outcome: "fired" | "rejected"`. Repeating timers stay armed after a fire; rearming replaces the same key; cancellation is silent. Rejection includes the requested key. See `examples/notes` for persistence coalescing and relative-time refresh.
+
+`commandMsg` may accept a `string` or `Uint8Array`; the checked contract selects the matching command ABI. Byte input preserves the command spelling without an ASCII conversion.
+
 ### The window verbs
 
 The menu-bar lifecycle verbs are fire-and-forget, with no result Msg (the window's own frame event carries visibility state):
@@ -618,3 +626,5 @@ node <sdk-repo>/packages/core/src/cli.ts src/core.ts
 ```
 
 Exit 0 means the module typechecked (real tsc semantics) and passed every subset rule — the exact pass every build runs before the external core compiler takes the graph. Because the subset is erasable TypeScript, `node` can import your core directly for quick behavioral checks (`node --input-type=module -e "..."` or a small `node --test` file) — the native build has the same semantics. If the core imports `@native-sdk/core` (for `Cmd`, `asciiBytes`, or `utf8Bytes`), map that one specifier for node first: copy the SDK module file next to the core and rewrite the import, or run through a loader that resolves it.
+
+For a migration that already stores files under the app's short name, `envMsgs` may request `NATIVE_SDK_APP_LEGACY_DATA_DIR`. The launcher resolves that name and explicitly grants its data directory as an additional file root. The ordinary `NATIVE_SDK_APP_DATA_DIR` remains the bundle-ID directory; raw ambient path overrides are never used for either capability.

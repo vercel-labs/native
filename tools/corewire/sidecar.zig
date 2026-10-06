@@ -34,7 +34,7 @@ pub const supported_format: i64 = 1;
 /// The command-wire vocabulary generation the SDK's bridge speaks
 /// (rt.zig `cmd_format_version`). A sidecar declaring a different
 /// generation is refused at generate time.
-pub const supported_wire_version: i64 = 8;
+pub const supported_wire_version: i64 = 9;
 
 /// The C-ABI generation of the core entry points this generator binds
 /// (core_abi.zig `abi_version`).
@@ -211,6 +211,7 @@ pub const EnvMsg = struct {
 
 pub const Channels = struct {
     command_msg: bool,
+    command_bytes: bool = false,
     frame_msg: bool,
     key_msg: bool,
     pinch_msg: bool,
@@ -872,7 +873,7 @@ const Mapper = struct {
 
     fn mapChannels(self: *Mapper, value: std.json.Value, drop_default: bool) error{ Refused, OutOfMemory }!Channels {
         const entry = try self.members(value, "channels", &.{
-            "command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "appearance_msg", "chrome_msg", "env_msgs",
+            "command_msg", "command_bytes", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "appearance_msg", "chrome_msg", "env_msgs",
         });
         entry.warnUnknown();
         const env_value = try self.array(try entry.get("env_msgs"), "channels.env_msgs");
@@ -888,6 +889,7 @@ const Mapper = struct {
         }
         return .{
             .command_msg = try self.boolean(try entry.get("command_msg"), "channels.command_msg"),
+            .command_bytes = try self.optionalBoolean(entry.map, "command_bytes", "channels", false),
             .frame_msg = try self.boolean(try entry.get("frame_msg"), "channels.frame_msg"),
             .key_msg = try self.boolean(try entry.get("key_msg"), "channels.key_msg"),
             .pinch_msg = try self.boolean(try entry.get("pinch_msg"), "channels.pinch_msg"),
@@ -1027,7 +1029,7 @@ const testing = std.testing;
 pub const minimal_valid_json =
     \\{
     \\  "format": 1,
-    \\  "wire_version": 8,
+    \\  "wire_version": 9,
     \\  "abi_version": 2,
     \\  "compiler_version": "0.0.1",
     \\  "entry": "src/core.ts",
@@ -1765,8 +1767,8 @@ test "unknown payload descriptor kinds refuse as reader-too-old" {
 test "wire and abi version mismatches refuse with both values named" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 8", "\"wire_version\": 9");
-    try expectRefusal(source, "wire_version", "generation 8, the sidecar declares 9");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 9", "\"wire_version\": 10");
+    try expectRefusal(source, "wire_version", "generation 9, the sidecar declares 10");
 }
 
 test "unknown fields warn and are ignored" {

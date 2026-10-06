@@ -107,6 +107,17 @@ else
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
+/// A migration may explicitly request its former short-name data directory.
+/// The launcher supplies and grants that directory through the same owned
+/// environment capability, rather than trusting an ambient path override.
+const legacy_data_dir_env = "NATIVE_SDK_APP_LEGACY_DATA_DIR";
+fn requestsLegacyDataDirectory() bool {
+    if (comptime @hasDecl(core, "envMsgs")) inline for (core.envMsgs) |entry| {
+        if (std.mem.eql(u8, entry.env, legacy_data_dir_env)) return true;
+    };
+    return false;
+}
+
 const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
 
 fn appOptions(io: ?std.Io) Adapter.Options {
@@ -191,6 +202,16 @@ pub fn main(init: std.process.Init) !void {
     ) catch "";
     if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
 
+    var legacy_data_dir_buffer: [512]u8 = undefined;
+    const legacy_data_dir = if (comptime requestsLegacyDataDirectory()) native_sdk.app_dirs.resolveOne(
+        .{ .name = manifest.name },
+        native_sdk.app_dirs.currentPlatform(),
+        native_sdk.debug.envFromMap(init.environ_map),
+        .data,
+        &legacy_data_dir_buffer,
+    ) catch "" else "";
+    if (legacy_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, legacy_data_dir) catch {};
+
     // TypeScript services, on the build-selected carrier (service_carrier.zig).
     // In-process (explicit opt-in): the service archive is linked into this
     // binary and ServicePool runs one instance per worker thread. Child (the
@@ -264,10 +285,11 @@ pub fn main(init: std.process.Init) !void {
     if (comptime @hasDecl(core, "envMsgs")) {
         inline for (core.envMsgs) |entry| {
             if (std.mem.eql(u8, entry.env, app_data_dir_env)) {
-                if (app_data_dir.len > 0) {
-                    env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
-                    env_value_count += 1;
-                }
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, legacy_data_dir_env)) {
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = legacy_data_dir };
+                env_value_count += 1;
             } else if (std.mem.eql(u8, entry.env, "NATIVE_SDK_TARGET_OS")) {
                 env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = @tagName(builtin.os.tag) };
                 env_value_count += 1;
@@ -371,6 +393,7 @@ pub fn main(init: std.process.Init) !void {
         .app_name = manifest.name,
         .window_title = comptime windowTitle(),
         .bundle_id = manifest.id,
+        .legacy_data_directory = comptime requestsLegacyDataDirectory(),
         .icon_path = "assets/icon.png",
         .default_frame = comptime defaultFrame(),
         .restore_state = comptime startupRestoreState(),

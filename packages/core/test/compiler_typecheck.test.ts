@@ -74,3 +74,32 @@ test("an npm package outside the static tier fails check with the compiler note 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("complete file and timer routes require every callback field and outcome", () => {
+  const source = `
+import { Cmd, asciiBytes, type FileResultArm, type TimerResultArm } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "go" }
+  | ({ readonly kind: "file" } & FileResultArm)
+  | ({ readonly kind: "timer" } & TimerResultArm)
+  | { readonly kind: "clock"; readonly stamp: Uint8Array };
+export function initialModel(): Model { return { done: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind !== "go") return { done: true };
+  return [model, Cmd.batch([
+    Cmd.readFileResult(asciiBytes("notes.txt"), { result: "file" }),
+    Cmd.writeFileResult(asciiBytes("notes.txt"), asciiBytes("body"), { result: "file" }),
+    Cmd.timerResult("save", 800, "one_shot", { result: "timer" }),
+    Cmd.timerResult("refresh", 30000, "repeating", { result: "timer" }),
+    Cmd.wallTime("clock"),
+  ])];
+}
+`;
+  let r = run(source); assert.equal(r.status, 0, r.out);
+  r = run(source.replace('({ readonly kind: "file" } & FileResultArm)', '{ readonly kind: "file"; readonly bytes: Uint8Array }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('({ readonly kind: "timer" } & TimerResultArm)', '{ readonly kind: "timer"; readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('readonly stamp: Uint8Array', 'readonly stamp: number'));
+  assert.equal(r.status, 1, r.out);
+});

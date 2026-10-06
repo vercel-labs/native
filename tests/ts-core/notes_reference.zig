@@ -24,7 +24,7 @@ const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
 const app_dirs = native_sdk.app_dirs;
 
-const model_mod = @import("model.zig");
+const model_mod = @import("notes_model_reference.zig");
 
 pub const Model = model_mod.Model;
 pub const Msg = model_mod.Msg;
@@ -223,7 +223,7 @@ pub fn onAppearance(appearance: native_sdk.Appearance) ?Msg {
 // -------------------------------------------------------------------- view
 
 pub const NotesUi = canvas.Ui(Msg);
-pub const notes_markup = @embedFile("notes.native");
+pub const notes_markup = @embedFile("app.native");
 
 /// The comptime-compiled engine: same tree, ids, and handlers as the
 /// interpreter, no parser in the binary.
@@ -270,6 +270,7 @@ pub fn main(init: std.process.Init) !void {
         .app_name = "notes",
         .window_title = "Native SDK Notes",
         .bundle_id = "dev.native_sdk.notes",
+        .legacy_data_directory = true,
         .icon_path = "assets/icon.png",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .js_window_api = false,
@@ -281,5 +282,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    _ = @import("tests.zig");
+    _ = @import("notes_reference_tests.zig");
 }

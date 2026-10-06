@@ -326,8 +326,8 @@ class FacadeEmitter extends CodeWriter {
   channelEntries(): void {
     const c = this.s.channels; this.use("sink"); this.use("trap");
     this.print(text.messageEnvelope, [this.s.msg.name]); this.msgPayloadWriter();
-    if (c.key_msg || c.command_msg) this.use("ascii_string");
-    if (c.command_msg) this.raw(text.commandEntry);
+    if (c.key_msg || c.command_msg && !c.command_bytes) this.use("ascii_string");
+    if (c.command_msg) this.raw(c.command_bytes ? text.commandBytesEntry : text.commandEntry);
     if (c.frame_msg) this.raw(text.frameEntry);
     if (c.key_msg) this.raw(text.keyEntry);
     if (c.pinch_msg) { this.needsPinchPhase = true; this.use("ascii_string"); this.raw(text.pinchEntry); this.needsMemberTrap = true; }

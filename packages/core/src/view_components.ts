@@ -4,11 +4,11 @@
  */
 import { textWordSelectionAtOffset as nscvWordSelection, textLineSelectionAtOffset as nscvLineSelection, caretSelectionAt as nscvSelection, applyTextInputEvent as nscvApplyTextEdit, sanitizedSingleLineTextInputEvent as nscvSanitizeTextInput, codeIndentationInsertion as nscvIndentation, parseCodeLineNumberSpec as nscvCodeLines, textClipboardRange as nscvClipboardRange, type TextInputEvent as NscvTextInputEvent } from "@native-sdk/core/text";
 
-type NscViewSpan = { text: string; weight?: string; color?: string; scale?: number; monospace?: boolean; italic?: boolean; underline?: boolean };
-type NscContextMenuItem = { label: string; press?: number[]; enabled: boolean; separator: boolean };
+type NscViewSpan = { text: string; textBytes?: readonly number[]; weight?: string; color?: string; scale?: number; monospace?: boolean; italic?: boolean; underline?: boolean };
+type NscContextMenuItem = { label: string; labelBytes?: readonly number[]; press?: number[]; enabled: boolean; separator: boolean };
 
 type NscViewNode = {
-  end: number; kind: string; text: string; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
+  end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
   key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
   columns?: number; virtualized?: boolean; virtualItemExtent?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
@@ -17,9 +17,9 @@ type NscViewNode = {
   videoSrc?: string; videoControls?: boolean; videoAutoplay?: boolean; videoLoop?: boolean; videoMuted?: boolean;
   videoControl?: string; zeroIntrinsic?: boolean; clipContent?: boolean; overflow?: string;
   image?: number; icon?: string; label?: string; role?: string;
-  background?: string; foreground?: string; borderColor?: string; radius?: string; windowDrag?: boolean;
+  background?: string; foreground?: string; borderColor?: string; focusRing?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
-  disabled?: boolean; selected?: boolean; focusable?: boolean;
+  disabled?: boolean; selected?: boolean; focusable?: boolean; autofocus?: boolean;
   expanded?: boolean; treeLevel?: number;
   listItemIndex?: number; listItemCount?: number;
   spans?: readonly NscViewSpan[]; textAlignment?: string;
@@ -32,6 +32,16 @@ type NscViewNode = {
   hoverEnter?: number[]; hoverLeave?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;
 };
+
+function nscvTextBytes(parts: readonly Uint8Array[]): number[] | undefined {
+  const out: number[] = [];
+  for (const part of parts) for (const byte of part) out.push(byte);
+  const bytes = new Uint8Array(out);
+  const roundtrip = new TextEncoder().encode(new TextDecoder().decode(bytes));
+  if (roundtrip.length !== bytes.length) return out;
+  for (let i = 0; i < bytes.length; i += 1) if (roundtrip[i] !== bytes[i]) return out;
+  return undefined;
+}
 
 function nscvSpanScale(value: number): number {
   if (!Number.isFinite(value) || value <= 0 || value > 3.4028234663852886e38) throw new Error("span scale requires a positive finite f32");

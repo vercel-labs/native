@@ -1,7 +1,7 @@
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const main = @import("main.zig");
-const model_mod = @import("model.zig");
+const main = @import("notes_reference.zig");
+const model_mod = @import("notes_model_reference.zig");
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;

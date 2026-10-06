@@ -1330,6 +1330,10 @@ pub fn build(b: *std.Build) void {
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
+        const notes_run = b.addRunArtifact(ts_core_artifacts.notes);
+        b.step("test-ts-notes-e2e", "Compare compiled Notes with the complete native reference").dependOn(&notes_run.step);
+        ts_core_e2e_step.dependOn(&notes_run.step);
+        test_step.dependOn(&notes_run.step);
         const effects_probe_run = b.addRunArtifact(ts_core_artifacts.effects_probe);
         b.step("test-ts-effects-probe-e2e", "Compare compiled effects-probe with complete native behavior").dependOn(&effects_probe_run.step);
         ts_core_e2e_step.dependOn(&effects_probe_run.step);
@@ -2389,6 +2393,8 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host_tests.test.routed clipboard duplicates",
         "runtime.ts_core_host_tests.test.routed clipboard keys",
         "runtime.ts_core_host_tests.test.playback snapshot captures",
+        "runtime.ts_core_host_tests.test.complete storage",
+        "runtime.ts_core_host_tests.test.complete timers",
     }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",
@@ -4064,6 +4070,7 @@ const TsCoreE2eArtifacts = struct {
     habits: *std.Build.Step.Compile,
     inbox: *std.Build.Step.Compile,
     effects_probe: *std.Build.Step.Compile,
+    notes: *std.Build.Step.Compile,
     video_player: *std.Build.Step.Compile,
     canvas_preview: *std.Build.Step.Compile,
     soundboard: *std.Build.Step.Compile,
@@ -4257,6 +4264,27 @@ fn tsCoreE2eArtifact(
     });
     kanban_mod.addImport("native_sdk", desktop_mod);
     kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
+
+    const notes_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/notes/src/core.ts",
+        .src_dir = b.path("examples/notes/src"),
+        .name = "notes_core",
+        .typescript_view = true,
+    });
+    const notes_stage = b.addWriteFiles();
+    const notes_root = notes_stage.addCopyFile(b.path("tests/ts-core/notes_e2e_tests.zig"), "notes_e2e_tests.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_reference.zig"), "notes_reference.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_model_reference.zig"), "notes_model_reference.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_reference_tests.zig"), "notes_reference_tests.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = notes_stage.addCopyFile(b.path("examples/notes/src/app.native"), "app.native");
+    const notes_mod = b.createModule(.{ .root_source_file = notes_root, .target = target, .optimize = optimize });
+    notes_mod.addImport("native_sdk", desktop_mod);
+    notes_mod.addImport("notes_core", notes_fixture.module);
+    const notes_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    notes_decoder.addImport("native_sdk", desktop_mod);
+    notes_decoder.addImport("core.zig", notes_fixture.module);
+    notes_mod.addImport("notes_decoder", notes_decoder);
 
     const effects_probe_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/effects-probe/src/core.ts",
@@ -4715,6 +4743,7 @@ fn tsCoreE2eArtifact(
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
+        .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
         .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
         .video_player = filteredTestArtifact(b, video_player_mod, "ts-video-player-e2e-tests", &.{}),
         .inbox = filteredTestArtifact(b, inbox_mod, "ts-inbox-e2e-tests", &.{}),

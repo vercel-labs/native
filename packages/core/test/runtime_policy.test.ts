@@ -305,7 +305,7 @@ test("window requests refuse malformed counts, labels, operations and trailing b
     for (let length = 0; length < valid.length; length++) assert.throws(() => native_window_policy(valid.subarray(0, length)), /window/);
     assert.throws(() => native_window_policy(new Uint8Array([...valid, 0])), /trailing/);
   }
-  assert.throws(() => native_window_policy(new Uint8Array([11])), /operation/);
+  assert.throws(() => native_window_policy(new Uint8Array([255])), /operation/);
   assert.throws(() => native_window_policy(new Uint8Array([0, 5])), /count/);
   assert.throws(() => native_window_policy(new Uint8Array([0, 0, 5])), /count/);
 });
@@ -411,4 +411,22 @@ test("status requests refuse malformed tables and preserve offset views", () => 
   corrupt[1] = 0;corrupt[3] = 9;assert.throws(() => native_status_policy(corrupt));
   corrupt[3] = 0;corrupt[8] = 2;assert.throws(() => native_status_policy(corrupt));
   corrupt[8] = 0;corrupt[0] = 3;assert.throws(() => native_status_policy(corrupt));
+});
+
+test("complete timers return explicit admission refusals without hiding malformed wire tables", () => {
+  const slots = empty();
+  const make = (name: Uint8Array, after: number, blocked = 0) => { const bytes = delayRequest(slots, name, after, 255, blocked); bytes[0] = 6; return bytes; };
+  for (const after of [NaN, Infinity, -Infinity, 0, .99, 31536000001]) assert.equal(native_timer_policy(make(key("save"), after))[0], 255);
+  for (const after of [1, 1.5, 800, 31536000000]) {
+    const out = native_timer_policy(make(key("save"), after));
+    assert.deepEqual([out[0], out[1], new DataView(out.buffer).getFloat64(2, true)], [0, 255, Math.round(after)]);
+    assert.equal(native_timer_policy(make(key("save"), after, 1))[0], 255);
+  }
+  slots.forEach((s, i) => { s.used = true; s.key = key(i === 7 ? "save" : "other"); });
+  assert.equal(native_timer_policy(make(key("save"), 800))[0], 7);
+  assert.equal(native_timer_policy(make(key("other-new"), 800))[0], 255);
+  const valid = make(key("save"), 800);
+  for (let length = 0; length < valid.length; length++) assert.throws(() => native_timer_policy(valid.subarray(0, length)));
+  assert.throws(() => native_timer_policy(new Uint8Array([...valid, 0])), /trailing/);
+  assert.throws(() => native_timer_policy(make(key("save"), 800, 2)), /admission/);
 });

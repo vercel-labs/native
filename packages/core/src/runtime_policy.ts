@@ -184,7 +184,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
  */
 
 export function native_timer_policy(request: Uint8Array): Uint8Array {
-  if (request[0] === 2 || request[0] === 3) return delayDeclaration(request);
+  if (request[0] === 2 || request[0] === 3 || request[0] === 6) return delayDeclaration(request);
   if (request[0] === 4) {
     if (request.length !== 20 || request[1]! >= 16) throw new Error("invalid delay completion request");
     const slot = request[1]!;
@@ -241,16 +241,21 @@ export function native_timer_policy(request: Uint8Array): Uint8Array {
  */
 function delayDeclaration(request: Uint8Array): Uint8Array {
   if (request.length < 2) throw new Error("invalid delay policy request");
-  const arm = request[0] === 2, keyLength = request[1]!;
+  const rejectable = request[0] === 6;
+  const arm = request[0] === 2 || rejectable, keyLength = request[1]!;
   let at = 2 + keyLength;
   if (at + (arm ? 10 : 0) > request.length) throw new Error("truncated delay declaration");
   let after = 0, tag = 0, blocked = 0;
   if (arm) {
     after = new DataView(request.buffer, request.byteOffset, request.byteLength).getFloat64(at, true);
     tag = request[at + 8]!;
-    if (!(after >= 1 && after <= 31536000000)) throw new Error("delay interval must be between 1ms and one year");
-    blocked = request[at + 9]!;
-    if (blocked > 1) throw new Error("invalid delay admission fact");
+    if (!(after >= 1 && after <= 31536000000)) {
+      if (!rejectable) throw new Error("delay interval must be between 1ms and one year");
+      blocked = 1;
+    }
+    const externalBlocked = request[at + 9]!;
+    blocked = Math.max(blocked, externalBlocked);
+    if (externalBlocked > 1) throw new Error("invalid delay admission fact");
     at += 10;
   }
   let matching = -1, free = -1;
@@ -272,9 +277,9 @@ function delayDeclaration(request: Uint8Array): Uint8Array {
     return result;
   }
   const slot = blocked === 1 ? 255 : keyLength > 0 && matching >= 0 ? matching : free;
-  if (slot < 0) throw new Error("more than 16 armed delays");
+  if (slot < 0 && !rejectable) throw new Error("more than 16 armed delays");
   const result = new Uint8Array(10);
-  result[0] = slot;
+  result[0] = slot < 0 ? 255 : slot;
   result[1] = tag;
   const whole = Math.floor(after);
   new DataView(result.buffer).setFloat64(2, after - whole >= 0.5 ? whole + 1 : whole, true);

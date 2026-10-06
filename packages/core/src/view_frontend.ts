@@ -222,6 +222,13 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (category(expr.type) !== type) fail(node, `expected ${type} binding`);
     return expr.code;
   };
+  const condition = (raw: string, node: Element, scope: Scope): string => {
+    const expr = binding(raw, node, scope);
+    if (expr.type.kind === "bool") return expr.code;
+    if (category(expr.type) === "number") return `(${expr.code} !== 0)`;
+    if (["bytes", "string", "enum"].includes(expr.type.kind)) return `(${expr.code}.length > 0)`;
+    return fail(node, "condition requires a scalar or text binding");
+  };
   const textValue = (expr: Expr, node: Element): string => {
     if (expr.type.kind === "bytes") return `new TextDecoder().decode(${expr.code})`;
     if (["number", "boolean", "enum", "string"].includes(category(expr.type))) return `String(${expr.code})`;
@@ -235,6 +242,19 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     parts.push(JSON.stringify(raw.slice(last)));
     if (raw.replace(/\{[^{}]*\}/g, "").match(/[{}]/)) fail(node, "unbalanced text binding");
     return parts.join(" + ");
+  };
+  const byteText = (raw: string, node: Element, scope: Scope): string | null => {
+    const parts: string[] = []; let last = 0, hasBytes = false;
+    for (const match of raw.matchAll(/\{([^{}]*)\}/g)) {
+      if (match.index > last) parts.push(`new TextEncoder().encode(${JSON.stringify(raw.slice(last, match.index))})`);
+      const expr = expression(match[1]!, node, scope);
+      if (expr.type.kind === "bytes") { hasBytes = true; parts.push(expr.code); }
+      else parts.push(`new TextEncoder().encode(${textValue(expr, node)})`);
+      last = match.index + match[0].length;
+    }
+    if (!hasBytes) return null;
+    if (last < raw.length) parts.push(`new TextEncoder().encode(${JSON.stringify(raw.slice(last))})`);
+    return `nscvTextBytes([${parts.join(", ")}])`;
   };
   const key = (raw: string, node: Element, scope: Scope): Expr => {
     if (/^-?\d+$/.test(raw)) {
@@ -274,10 +294,21 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
   const emitChildren = (nodes: Element[], scope: Scope, slot: Slot | undefined, stack: string[], depth: number) => {
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i]!;
-      if (node.name === "else") fail(node, "else must immediately follow if");
-      if (node.name !== "if") { emit(node, scope, slot, stack, depth); continue; }
+      if (node.name === "else") fail(node, "else must immediately follow if or for");
+      if (node.name !== "if" && node.name !== "for") { emit(node, scope, slot, stack, depth); continue; }
+      if (node.name === "for") {
+        emit(node, scope, slot, stack, depth);
+        const alternate = nodes[i + 1];
+        if (alternate?.name === "else") {
+          if (alternate.attrs.size || alternate.text.trim()) fail(alternate, "else accepts only child elements");
+          const items = path(node.attrs.get("each")!, node, scope);
+          output.push(`if (${items.code}.length === 0) {`);
+          emitChildren(alternate.children, scope, slot, stack, depth + 1); output.push("}"); i++;
+        }
+        continue;
+      }
       if (node.attrs.size !== 1 || !node.attrs.has("test") || node.text.trim()) fail(node, "if requires only test and child elements");
-      output.push(`if (${bound(node.attrs.get("test")!, "boolean", node, scope)}) {`);
+      output.push(`if (${condition(node.attrs.get("test")!, node, scope)}) {`);
       emitChildren(node.children, scope, slot, stack, depth + 1); output.push("}");
       const alternate = nodes[i + 1];
       if (alternate?.name === "else") {
@@ -420,37 +451,66 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvVideoElement(nscvNodes, { ${props.join(", ")} }, nscvVideo, ${stringAttr("src")}, ${flag("controls", "false")}, ${flag("autoplay", "true")}, ${flag("loop", "false")}, ${flag("muted", "false")});`);
       return;
     }
-    const kinds: Record<string, string> = { column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
+    const kinds: Record<string, string> = { icon: "icon", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
+    if (node.name === "icon" && (!node.attrs.has("name") || node.text.trim() || node.children.length)) fail(node, "icon requires name and no content");
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
     const menus = node.children.filter(child => child.name === "context-menu");
     if (menus.length > 1) fail(node, "an element takes at most one direct context-menu");
     const contentChildren = node.children.filter(child => child.name !== "context-menu");
     const container = ["column", "row", "stack", "grid", "card", "alert", "dialog", "drawer", "sheet", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
-    if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel"].includes(node.name)) fail(node, "compiled treeitem requires column, row or panel");
+    if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel", "list-item"].includes(node.name)) fail(node, "compiled treeitem requires column, row, panel or list-item");
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
     const paragraph = node.name === "text" && contentChildren.length > 0;
     if (!paragraph && (["list-item", "card", "alert"].includes(node.name) ? node.text.trim() !== "" && contentChildren.length !== 0 : container ? node.text.trim() !== "" : contentChildren.length !== 0)) fail(node, "mixed content is unsupported");
-    const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${text(node.text.trim(), node, scope)}`];
+    const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${node.name === "icon" ? JSON.stringify(node.attrs.get("name")) : text(node.text.trim(), node, scope)}`];
+    const rawText = byteText(node.text.trim(), node, scope);
+    if (rawText !== null) props.push(`textBytes: ${rawText}`);
     if (menus.length) {
       const menu = menus[0]!;
       const nonHitTargets = ["row", "column", "stack", "list", "grid", "split", "tree", "breadcrumb", "button-group", "pagination", "radio-group", "tabs", "toggle-group", "badge", "avatar", "tooltip", "separator", "spacer"];
       if (nonHitTargets.includes(node.name) && !["on-press", "on-toggle", "on-hold", "on-drag"].some(name => node.attrs.has(name))) fail(menu, "context-menu requires an interactive host");
-      if (menu.children.length === 0 || !menu.children.some(item => item.name === "menu-item")) fail(menu, "context-menu requires at least one menu-item");
-      if (menu.attrs.size || menu.text.trim() || menu.children.length > 32) fail(menu, "context-menu takes at most 32 item or separator children and no attributes");
-      const items = menu.children.map(item => {
-        if (item.name === "separator") {
-          if (item.attrs.size || item.children.length || item.text.trim()) fail(item, "context-menu separator must be empty");
-          return '{ label: "", enabled: true, separator: true }';
+      if (menu.attrs.size || menu.text.trim()) fail(menu, "context-menu accepts only item declarations");
+      const menuId = next++, menuName = `nscvContext${menuId}`;
+      output.push(`const ${menuName}: NscContextMenuItem[] = [];`);
+      let leaves = 0, items = 0;
+      const emitMenu = (nodes: Element[], menuScope: Scope, menuDepth: number): void => {
+        if (menuDepth > 64) fail(menu, "context-menu nesting exceeds 64");
+        for (let i = 0; i < nodes.length; i++) {
+          const item = nodes[i]!;
+          if (item.name === "if") {
+            if (item.attrs.size !== 1 || !item.attrs.has("test") || item.text.trim()) fail(item, "if requires only test and child elements");
+            output.push(`if (${condition(item.attrs.get("test")!, item, menuScope)}) {`);
+            emitMenu(item.children, menuScope, menuDepth + 1); output.push("}");
+            const alternate = nodes[i + 1];
+            if (alternate?.name === "else") {
+              if (alternate.attrs.size || alternate.text.trim()) fail(alternate, "else accepts only child elements");
+              output.push("else {"); emitMenu(alternate.children, menuScope, menuDepth + 1); output.push("}"); i++;
+            }
+            continue;
+          }
+          if (item.name === "else") fail(item, "else must immediately follow if");
+          leaves++;
+          if (leaves > 32) fail(menu, "context-menu takes at most 32 declared leaves");
+          let value: string;
+          if (item.name === "separator") {
+            if (item.attrs.size || item.children.length || item.text.trim()) fail(item, "context-menu separator must be empty");
+            value = '{ label: "", enabled: true, separator: true }';
+          } else {
+            if (item.name !== "menu-item" || item.children.length || !item.text.trim()) fail(item, "context-menu takes labeled menu-item leaves or conditional declarations");
+            for (const name of item.attrs.keys()) if (!["on-press", "disabled"].includes(name)) fail(item, `unsupported context-menu item attribute ${name}`);
+            const press = item.attrs.get("on-press"), disabled = item.attrs.get("disabled");
+            if (press === undefined) fail(item, "context-menu menu-item requires on-press");
+            const rawLabel = byteText(item.text.trim(), item, menuScope);
+            value = `{ label: ${text(item.text.trim(), item, menuScope)}, ${rawLabel === null ? "" : `labelBytes: ${rawLabel}, `}enabled: ${disabled === undefined ? "true" : `!(${bound(disabled, "boolean", item, menuScope)})`}, separator: false, press: ${event(press, "press", item, menuScope)} }`;
+            items++;
+          }
+          output.push(`${menuName}.push(${value});`);
         }
-        if (item.name !== "menu-item" || item.children.length || !item.text.trim()) fail(item, "context-menu takes labeled menu-item leaves");
-        for (const name of item.attrs.keys()) if (!["on-press", "disabled"].includes(name)) fail(item, `unsupported context-menu item attribute ${name}`);
-        const press = item.attrs.get("on-press");
-        const disabled = item.attrs.get("disabled");
-        if (press === undefined) fail(item, "context-menu menu-item requires on-press");
-        return `{ label: ${text(item.text.trim(), item, scope)}, enabled: ${disabled === undefined ? "true" : `!(${bound(disabled, "boolean", item, scope)})`}, separator: false${press === undefined ? "" : `, press: ${event(press, "press", item, scope)}`} }`;
-      });
-      props.push(`contextMenu: [${items.join(", ")}]`);
+      };
+      emitMenu(menu.children, scope, 0);
+      if (items === 0) fail(menu, "context-menu requires at least one menu-item");
+      props.push(`contextMenu: ${menuName}`);
     }
     if (paragraph) {
       if (node.attrs.has("wrap") || node.attrs.has("overflow")) fail(node, "span paragraphs always word-wrap; drop wrap and overflow");
@@ -466,6 +526,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!visible) { if (/[ \t\r\n]/.test(raw)) separator = true; continue; }
         if (runs.length && separator) runs.push('{ text: " " }');
         const fields = [`text: ${text(visible, node, scope)}`];
+        const rawSpan = byteText(visible, node, scope);
+        if (rawSpan !== null) fields.push(`textBytes: ${rawSpan}`);
         if (isSpan) for (const [name, value] of part.attrs) {
           if (["mono", "italic", "underline"].includes(name)) fields.push(`${name === "mono" ? "monospace" : name}: ${bound(value, "boolean", part, scope)}`);
           else if (name === "scale") {
@@ -558,7 +620,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`resizeEasing: ${JSON.stringify(value)}`);
         }
       }
-      else if (["checked", "disabled", "selected", "window-drag", "wrap", "expanded", "submit-on-enter"].includes(name)) {
+      else if (["checked", "disabled", "selected", "window-drag", "wrap", "expanded", "submit-on-enter", "autofocus"].includes(name)) {
+        if (name === "autofocus" && !["input", "text-field", "search-field", "textarea"].includes(node.name)) fail(node, "autofocus requires a text-entry widget");
         if (name === "checked" && !["checkbox", "switch", "toggle", "radio"].includes(node.name)) fail(node, "checked requires checkbox, switch, toggle or radio");
         if (name === "submit-on-enter" && node.name !== "textarea") fail(node, "submit-on-enter requires textarea");
         if (name === "wrap" && node.name !== "text") fail(node, "wrap requires text");
@@ -578,6 +641,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!["bytes", "string", "enum"].includes(expr.type.kind)) fail(node, `${name} requires text`);
         if (name === "text") props[1] = `text: ${textValue(expr, node)}`;
         else props.push(`${name}: ${textValue(expr, node)}`);
+        const rawBytes = byteText(value, node, scope);
+        if (rawBytes !== null) props.push(`${name}Bytes: ${rawBytes}`);
+      }
+      else if (name === "name" && node.name === "icon") {
+        if (!value || /[{}]/.test(value)) fail(node, "icon name requires a literal name");
       }
       else if (name === "icon") {
         if (value.startsWith("{")) {
@@ -608,8 +676,8 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`${name === "anchor" ? "anchor" : "anchorAlignment"}: ${JSON.stringify(value)}`);
         }
       }
-      else if (["main", "cross", "size", "variant", "role", "background", "foreground", "border-color", "radius"].includes(name)) {
-        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface"], foreground: ["text", "text_muted", "destructive"], "border-color": ["background", "surface", "border", "accent", "focus_ring", "destructive"], radius: ["sm", "md", "lg"] };
+      else if (["main", "cross", "size", "variant", "role", "background", "foreground", "border-color", "focus-ring", "radius"].includes(name)) {
+        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["listitem", "tree", "treeitem"], background: ["background", "surface", "scrim"], foreground: ["text", "text_muted", "destructive"], "border-color": ["background", "surface", "border", "accent", "focus_ring", "destructive"], "focus-ring": ["background", "surface", "border", "accent", "focus_ring", "destructive"], radius: ["sm", "md", "lg"] };
         if (name === "variant" && value.startsWith("{")) {
           const expr = binding(value, node, scope);
           const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
@@ -619,11 +687,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         }
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
         if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
-        props.push(`${name === "border-color" ? "borderColor" : name}: ${JSON.stringify(value)}`);
+        props.push(`${name === "border-color" ? "borderColor" : name === "focus-ring" ? "focusRing" : name}: ${JSON.stringify(value)}`);
       } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
-        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select", "card", "alert"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select", "card", "alert", "panel"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (["input", "submit"].includes(channel) && !["input", "text-field", "search-field", "textarea", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");
         if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {

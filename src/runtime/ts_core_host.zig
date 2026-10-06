@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 8) onto the real effect engine
+//! emits (`cmd_format_version` 9) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -526,6 +526,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the engine's shared effect slots.
         const EffectEntry = struct {
             used: bool = false,
+            full_result: bool = false,
             dropped: bool = false,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
@@ -542,6 +543,8 @@ pub fn TsCoreHost(comptime core: type) type {
         /// timer replaces in place under the same engine key).
         const DelayEntry = struct {
             used: bool = false,
+            full_result: bool = false,
+            mode: runtime_effects.TimerMode = .one_shot,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             tag: u8 = 0,
@@ -762,6 +765,7 @@ pub fn TsCoreHost(comptime core: type) type {
 
         const PendingNow = union(enum) {
             clock: struct { tag: u8, ms: i64 },
+            decimal_clock: struct { tag: u8, ms: i64 },
             video: struct { tag: u8, snapshot: Fx.VideoSnapshot, key: [max_wire_key_bytes]u8, key_len: usize },
         };
 
@@ -988,6 +992,7 @@ pub fn TsCoreHost(comptime core: type) type {
             for (nows[0..now_count]) |*pending| {
                 const reply = switch (pending.*) {
                     .clock => |clock| msgFromTagNumber(clock.tag, @floatFromInt(clock.ms)),
+                    .decimal_clock => |clock| msgFromTagBytes(clock.tag, decimalFrame(clock.ms)),
                     .video => |*video| msgFromVideoSnapshot(video.tag, video.snapshot, video.key[0..video.key_len]),
                 };
                 dispatchDepth(fx, reply, depth + 1);
@@ -1054,6 +1059,30 @@ pub fn TsCoreHost(comptime core: type) type {
                     0x06 => {
                         const key = takeShortBytes(cmd, &at);
                         cancelWireKey(fx, key);
+                    },
+                    // Complete file terminals and exact journaled clocks.
+                    0x37, 0x38 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        const bytes = if (op == 0x38) takeLongBytes(cmd, &at) else "";
+                        const file_op: runtime_effects.EffectFileOp = if (op == 0x38) .write else .read;
+                        const index = allocEffectEntryWithFileResult(fx, .{ .key = key, .ok_tag = tag, .err_tag = tag }, file_op) orelse continue;
+                        if (file_op == .read) fx.readFile(.{ .key = effect_key_base + index, .path = file_path, .on_result = completeFileResultMsg }) else fx.writeFile(.{ .key = effect_key_base + index, .path = file_path, .bytes = bytes, .on_result = completeFileResultMsg });
+                    },
+                    0x39 => {
+                        const tag = takeByte(cmd, &at);
+                        if (now_count.* >= max_nows_per_cmd) @panic("ts core host: too many clock replies");
+                        nows[now_count.*] = .{ .decimal_clock = .{ .tag = tag, .ms = fx.wallMs() } };
+                        now_count.* += 1;
+                    },
+                    0x3A => {
+                        const key = takeShortBytes(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid timer mode");
+                        const ms: f64 = @bitCast(std.mem.readInt(u64, takeBytes(cmd, &at, 8)[0..8], .little));
+                        const tag = takeByte(cmd, &at);
+                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot);
                     },
                     // read_file [op][key_len][key][ok][err][path_len u32 LE][path]
                     0x07 => {
@@ -1775,8 +1804,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// flight either (a dropped entry holds its slot only until
         /// its `.cancelled` terminal drains).
         fn allocEffectEntry(fx: *Fx, head: RoutedHead) ?u64 {
-            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head) else blk: {
-                const blocked = head.key.len > 0 and reservedWireKeyOccupied(head.key);
+            return allocEffectEntryWithFileResult(fx, head, null);
+        }
+        fn allocEffectEntryWithFileResult(fx: *Fx, head: RoutedHead, file_op: ?runtime_effects.EffectFileOp) ?u64 {
+            const blocked = head.key.len > 0 and (reservedWireKeyOccupiedExcept(head.key, .effect) or (file_op != null and (findRequest(head.key) != null or findStream(head.key) != null or findDelay(head.key) != null or findPty(head.key) != null or findDb(head.key) != null)));
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head, blocked) else blk: {
                 break :blk EffectPlan{
                     .admitted = !blocked,
                     .slot = if (blocked) null else freeEffectIndex(),
@@ -1786,17 +1818,23 @@ pub fn TsCoreHost(comptime core: type) type {
                 };
             };
             if (!plan.admitted) {
-                fx.stageLoopMsg(msgFromTagStaticBytes(plan.err_tag, "rejected"));
+                if (file_op) |operation| stageFileRejected(fx, head, operation) else fx.stageLoopMsg(msgFromTagStaticBytes(plan.err_tag, "rejected"));
                 return null;
             }
             // A dropped predecessor remains occupied until its terminal drains.
             // Preserve the reference order even when no free slot is available.
             if (plan.drop) |existing| dropEffectEntry(fx, existing);
-            const index = plan.slot orelse
+            const index = plan.slot orelse {
+                if (file_op) |operation| {
+                    stageFileRejected(fx, head, operation);
+                    return null;
+                }
                 @panic("ts core host: more than 16 named engine ops in flight - the op table mirrors the engine's max_effects slots");
+            };
             const entry = &effects_table[index];
             entry.used = true;
             entry.dropped = false;
+            entry.full_result = file_op != null;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
             entry.ok_tag = plan.ok_tag;
@@ -1848,13 +1886,13 @@ pub fn TsCoreHost(comptime core: type) type {
             return at;
         }
 
-        fn compiledEffectDeclaration(head: RoutedHead) EffectPlan {
+        fn compiledEffectDeclaration(head: RoutedHead, blocked: bool) EffectPlan {
             var request: [max_effect_policy_bytes]u8 = undefined;
             request[0] = 0;
             request[1] = @intCast(head.key.len);
             @memcpy(request[2..][0..head.key.len], head.key);
             const at = 2 + head.key.len;
-            request[at] = @intFromBool(head.key.len > 0 and reservedWireKeyOccupied(head.key));
+            request[at] = @intFromBool(blocked);
             request[at + 1] = head.ok_tag;
             request[at + 2] = head.err_tag;
             const end = writeEffectTable(&request, at + 3);
@@ -1898,8 +1936,8 @@ pub fn TsCoreHost(comptime core: type) type {
             // A delay has no err arm. Preserve an incumbent file stream and
             // fail closed instead of creating a second owner that Cmd.cancel
             // could not address unambiguously.
-            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, reservedWireKeyOccupied(key)) orelse return else blk: {
-                if (reservedWireKeyOccupied(key)) return;
+            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, reservedWireKeyOccupiedExcept(key, .delay), false) orelse return else blk: {
+                if (reservedWireKeyOccupiedExcept(key, .delay)) return;
                 const index = if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex();
                 break :blk .{
                     .slot = index orelse @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers"),
@@ -1913,6 +1951,8 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
             entry.tag = plan.tag;
+            entry.full_result = false;
+            entry.mode = .one_shot;
             fx.startTimer(.{
                 .key = delay_key_base + index,
                 .interval_ms = plan.interval_ms,
@@ -2113,7 +2153,17 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn reservedWireKeyOccupied(key: []const u8) bool {
-            return key.len > 0 and (findFileStream(key) != null or findClipboardWrite(key) != null);
+            return reservedWireKeyOccupiedExcept(key, .none);
+        }
+
+        /// Complete results reserve one owner across every command family.
+        /// Same-family replacements retain the existing silent-drop contract.
+        fn reservedWireKeyOccupiedExcept(key: []const u8, family: enum { none, effect, delay }) bool {
+            if (key.len == 0) return false;
+            if (findFileStream(key) != null or findClipboardWrite(key) != null) return true;
+            if (family != .effect) if (findEffect(key)) |index| if (effects_table[index].full_result) return true;
+            if (family != .delay) if (findDelay(key)) |index| if (delays[index].full_result) return true;
+            return false;
         }
 
         /// Every string-keyed command family shares one authored key surface.
@@ -3444,6 +3494,52 @@ pub fn TsCoreHost(comptime core: type) type {
         /// arm; every non-ok outcome routes the err arm with the
         /// outcome's name as bytes. A dropped entry's terminal routes
         /// nothing — the silent drop.
+        fn armResultTimer(fx: *Fx, key: []const u8, ms: f64, tag: u8, mode: runtime_effects.TimerMode) void {
+            const blocked = key.len > 0 and (reservedWireKeyOccupiedExcept(key, .delay) or findRequest(key) != null or findEffect(key) != null or findStream(key) != null or findPty(key) != null or findDb(key) != null);
+            const plan: ?DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, ms, tag, blocked, true) else blk: {
+                if (blocked or !std.math.isFinite(ms) or ms < 1 or ms > 31_536_000_000) break :blk null;
+                const slot = (if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex()) orelse break :blk null;
+                break :blk .{ .slot = slot, .tag = tag, .interval_ms = intervalMs(ms) };
+            };
+            const admitted = plan orelse {
+                fx.stageLoopMsg(msgFromTimerResult(tag, .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                return;
+            };
+            const entry = &delays[admitted.slot];
+            entry.used = true;
+            entry.full_result = true;
+            entry.mode = mode;
+            entry.key_len = key.len;
+            @memcpy(entry.key[0..key.len], key);
+            entry.tag = admitted.tag;
+            fx.startTimer(.{ .key = delay_key_base + admitted.slot, .interval_ms = admitted.interval_ms, .mode = mode, .on_fire = delayFireMsg });
+        }
+        fn decimalFrame(value: anytype) []const u8 {
+            var buffer: [21]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable;
+            if (value == 0) return "0";
+            const owned = core.rt.frameAlloc(u8, text.len);
+            @memcpy(owned, text);
+            return owned;
+        }
+        fn msgFromTimerResult(tag: u8, timer: runtime_effects.EffectTimer, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .timestampNs = decimalFrame(timer.timestamp_ns), .outcome = timer.outcome });
+        }
+        fn stageFileRejected(fx: *Fx, head: RoutedHead, operation: runtime_effects.EffectFileOp) void {
+            fx.stageLoopMsg(msgFromFileResult(head.ok_tag, .{ .key = 0, .op = operation, .outcome = .rejected }, fx.stageLoopKey(head.key)));
+        }
+        fn msgFromFileResult(tag: u8, result: runtime_effects.EffectFileResult, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .operation = result.op, .event = result.event, .outcome = result.outcome, .bytes = result.bytes, .totalBytes = decimalFrame(result.total), .mtimeMs = decimalFrame(result.mtime_ms), .exists = result.exists, .droppedBefore = result.dropped_before });
+        }
+        fn completeFileResultMsg(result: runtime_effects.EffectFileResult) Msg {
+            const index = result.key - effect_key_base;
+            if (index >= effects_table.len or !effects_table[index].used) @panic("ts core host: untracked file completion");
+            const entry = &effects_table[index];
+            const route = takeEffectEntry(result.key, .void_msg, true, false);
+            if (route.payload == .swallow) swallow_next_dispatch = true;
+            return msgFromFileResult(route.tag, result, entry.wireKey());
+        }
+
         fn fileResultMsg(result: runtime_effects.EffectFileResult) Msg {
             const success: EffectSuccess = if (result.op == .read) .bytes else if (result.op == .stat) .stat else .void_msg;
             const route = takeEffectEntry(result.key, success, result.outcome == .ok, false);
@@ -3586,9 +3682,6 @@ pub fn TsCoreHost(comptime core: type) type {
         /// (platform one-shots self-stop) and the named arm dispatches
         /// with the fire time in fractional milliseconds.
         fn delayFireMsg(timer: runtime_effects.EffectTimer) Msg {
-            if (timer.outcome == .rejected) {
-                @panic("ts core host: the platform rejected a Cmd.delay timer (no timer service, or the fx timer table is full)");
-            }
             if (timer.key < delay_key_base) {
                 @panic("ts core host: a delay fired outside the bridge's delay key namespace");
             }
@@ -3598,7 +3691,13 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (!delays[index].used) @panic("ts core host: a delay fired for a slot the bridge is not tracking");
                 break :blk .{ .slot = @as(usize, @intCast(index)), .tag = delays[index].tag };
             };
-            delays[completion.slot].used = false;
+            const entry = &delays[completion.slot];
+            if (entry.full_result) {
+                if (entry.mode == .one_shot or timer.outcome == .rejected) entry.used = false;
+                return msgFromTimerResult(completion.tag, timer, entry.wireKey());
+            }
+            if (timer.outcome == .rejected) @panic("ts core host: the platform rejected a Cmd.delay timer");
+            entry.used = false;
             const ms = @as(f64, @floatFromInt(timer.timestamp_ns)) / std.time.ns_per_ms;
             return msgFromTagNumber(completion.tag, ms);
         }
@@ -3826,9 +3925,9 @@ pub fn TsCoreHost(comptime core: type) type {
             return at;
         }
 
-        fn compiledDelayDeclaration(key: []const u8, after_ms: f64, tag: u8, blocked: bool) ?DelayPlan {
+        fn compiledDelayDeclaration(key: []const u8, after_ms: f64, tag: u8, blocked: bool, rejectable: bool) ?DelayPlan {
             var request: [max_delay_policy_bytes]u8 = undefined;
-            request[0] = 2;
+            request[0] = if (rejectable) 6 else 2;
             request[1] = @intCast(key.len);
             @memcpy(request[2..][0..key.len], key);
             const value_at = 2 + key.len;

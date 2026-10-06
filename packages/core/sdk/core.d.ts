@@ -242,6 +242,33 @@ export interface SpawnEventsRoute<M extends Msgish> {
     readonly line?: CapabilityKind<M, SpawnLineEventArm>;
     readonly exit: CapabilityKind<M, SpawnExitEventArm>;
 }
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+    readonly key: Uint8Array;
+    readonly operation: FileOperation;
+    readonly event: FileEvent;
+    readonly outcome: FileOutcome;
+    readonly bytes: Uint8Array;
+    readonly totalBytes: Uint8Array;
+    readonly mtimeMs: Uint8Array;
+    readonly exists: boolean;
+    readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm {
+    readonly key: Uint8Array;
+    readonly timestampNs: Uint8Array;
+    readonly outcome: TimerOutcome;
+}
+export interface FileResultRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly result: CapabilityKind<M, FileResultArm>;
+}
+export interface TimerResultRoute<M extends Msgish> {
+    readonly result: CapabilityKind<M, TimerResultArm>;
+}
 export interface ClipboardResultRoute<M extends Msgish> {
     readonly key?: string;
     readonly result: CapabilityKind<M, ClipboardEventArm>;
@@ -480,6 +507,26 @@ export type Cmd<M extends Msgish> = {
     readonly op: "clip_write";
     readonly bytes: Uint8Array;
 } | {
+    readonly op: "wall_time";
+    readonly msgKind: string;
+} | {
+    readonly op: "read_file_result";
+    readonly key: string;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_result";
+    readonly key: string;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "timer_result";
+    readonly key: string;
+    readonly afterMs: number;
+    readonly mode: "one_shot" | "repeating";
+    readonly msgKind: string;
+} | {
     readonly op: "clip_write_result";
     readonly key: string;
     readonly resultKind: string;
@@ -635,6 +682,10 @@ export declare const Cmd: {
     none: Cmd<never>;
     persist(): Cmd<never>;
     now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M>;
+    wallTime<M extends Msgish>(msgKind: BytesKind<M>): Cmd<M>;
+    readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M>;
     host: typeof hostCmd;
     request<M extends Msgish>(name: string, payload: Uint8Array | HostRecord, route: RequestRoute<M>): Cmd<M>;
     serviceRequest<M extends Msgish, P>(name: string, payload: Uint8Array, route: ServiceRoute<M, P>): Cmd<M>;

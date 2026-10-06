@@ -62,7 +62,7 @@ export function update(model: Model, msg: Msg): Model {
 test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
-  assert.equal(doc.wire_version, 8);
+  assert.equal(doc.wire_version, 9);
   assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");
@@ -416,4 +416,16 @@ test("complete capability routes require every metadata field and every enum sta
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("command channels distinguish strings from byte input and refuse ambiguous parameters", () => {
+  for (const type of ["string", "Uint8Array"]) {
+    const doc = contractOf(smallCore + `\nexport function commandMsg(name: ${type}): Msg | null { return { kind: "bump" }; }\n`);
+    const channels = doc.channels as { command_msg: boolean; command_bytes?: boolean };
+    assert.equal(channels.command_msg, true);
+    assert.equal(channels.command_bytes === true, type === "Uint8Array");
+    assert.ok((doc.abi as { exports: string[] }).exports.includes("command_msg"));
+  }
+  assert.throws(() => contractOf(smallCore + '\nexport function commandMsg(name: number): Msg | null { return null; }\n'), /commandMsg requires one string or Uint8Array/i);
+  assert.throws(() => contractOf(smallCore + '\nexport function commandMsg(name: Uint8Array, extra: number): Msg | null { return null; }\n'), /commandMsg requires one string or Uint8Array/i);
 });

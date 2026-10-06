@@ -2399,6 +2399,8 @@ fn runnerZig() []const u8 {
     \\    relational_store: ?native_sdk.RelationalStoreBinding = null,
     \\    file_access: ?native_sdk.FileAccessBinding = null,
     \\    file_access_enforce: bool = true,
+    \\    /// Explicit compatibility capability for an app's former data identity.
+    \\    legacy_data_directory: bool = false,
     \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -2893,7 +2895,8 @@ fn runnerZig() []const u8 {
     \\    var record_store_open = false;
     \\    var resolved_options = options;
     \\    var file_root_buffers: [6][1024]u8 = undefined;
-    \\    var file_roots: [6][]const u8 = undefined;
+    \\    var file_roots: [7][]const u8 = undefined;
+    \\    var legacy_data_buffer: [1024]u8 = undefined;
     \\    const resolved_file_dirs = native_sdk.app_dirs.resolve(
     \\        .{ .name = options.bundle_id },
     \\        native_sdk.app_dirs.currentPlatform(),
@@ -2902,8 +2905,17 @@ fn runnerZig() []const u8 {
     \\    ) catch null;
     \\    var file_root_count: usize = 0;
     \\    if (resolved_file_dirs) |dirs| {
-    \\        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
-    \\        file_root_count = file_roots.len;
+    \\        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+    \\        file_root_count = 6;
+    \\    }
+    \\    if (options.legacy_data_directory) {
+    \\        if (native_sdk.app_dirs.resolveOne(
+    \\            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
+    \\            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
+    \\        )) |directory| {
+    \\            file_roots[file_root_count] = directory;
+    \\            file_root_count += 1;
+    \\        } else |_| {}
     \\    }
     \\    resolved_options.file_access = .{
     \\        .roots = file_roots[0..file_root_count],

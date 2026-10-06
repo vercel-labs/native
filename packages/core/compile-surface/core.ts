@@ -176,6 +176,19 @@ export interface FileReadStreamRoute<M extends Msgish> {
   readonly err: M["kind"];
 }
 
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+  readonly key: Uint8Array; readonly operation: "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete"; readonly event: "terminal" | "chunk" | "done";
+  readonly outcome: "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full"; readonly bytes: Uint8Array; readonly totalBytes: Uint8Array;
+  readonly mtimeMs: Uint8Array; readonly exists: boolean; readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm { readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" | "rejected"; }
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly result: M["kind"]; }
+export interface TimerResultRoute<M extends Msgish> { readonly result: M["kind"]; }
+
 export interface FileStatArm { readonly exists: boolean; readonly size: number; readonly mtimeMs: number; }
 export interface FileStatRoute<M extends Msgish> { readonly key?: string; readonly ok: M["kind"]; readonly err: M["kind"]; }
 
@@ -473,6 +486,10 @@ export type CmdData =
       readonly body: Uint8Array;
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "wall_time"; readonly msgKind: string }
+  | { readonly op: "read_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
   | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
   | { readonly op: "video_snapshot"; readonly snapshotKind: string }
@@ -685,6 +702,24 @@ export const Cmd = {
 
   now(msgKind: string): CmdData {
     return { op: "now", msgKind };
+  },
+
+  /// Journaled signed-i64 milliseconds as canonical decimal bytes.
+  wallTime<M extends Msgish>(msgKind: string): CmdData { return { op: "wall_time", msgKind }; },
+
+  /// Read a whole file with every terminal field, including loss metadata.
+  readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): CmdData {
+    return { op: "read_file_result", key: route.key ?? "", resultKind: route.result, path };
+  },
+  /// Write with the complete terminal. Named keys follow readFile's replace
+  /// and silent-cancel policy; unrelated live capabilities refuse the request.
+  writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): CmdData {
+    return { op: "write_file_result", key: route.key ?? "", resultKind: route.result, path, bytes };
+  },
+  /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
+  /// the same key; cancellation remains silent, like Cmd.delay.
+  timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): CmdData {
+    return { op: "timer_result", key, afterMs, mode, msgKind: route.result };
   },
 
   host: hostCmd,

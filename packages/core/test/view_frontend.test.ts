@@ -567,7 +567,7 @@ test("tree rows preserve disclosure, logical levels and canonical row handlers",
   for (const invalid of [-1, 65536, 0.5]) { model.count = invalid; assert.throws(view, /tree-level requires an integer/); }
   assert.throws(() => compileView('<panel expanded="true"/>', contract), /requires role=treeitem/);
   assert.throws(() => compileView('<panel tree-level="1"/>', contract), /requires role=treeitem/);
-  assert.throws(() => compileView('<radio role="treeitem"/>', contract), /treeitem requires column, row or panel/);
+  assert.throws(() => compileView('<radio role="treeitem"/>', contract), /treeitem requires column, row, panel or list-item/);
   assert.throws(() => compileView('<button role="tree"/>', contract), /tree role requires a generic container/);
   assert.throws(() => compileView('<radio-group role="tree" label="Invalid"/>', contract), /tree role requires a generic container/);
 });
@@ -588,7 +588,9 @@ test("list rows preserve leaf text, composed children, selection and press envel
   assert.throws(() => compileView('<list-item>Mixed<text>child</text></list-item>', contract), /mixed content/);
   assert.throws(() => compileView('<list>Mixed</list>', contract), /mixed content/);
   assert.throws(() => compileView('<list-item on-toggle="reset"/>', contract), /unsupported on list-item/);
-  assert.throws(() => compileView('<list-item role="treeitem"/>', contract), /compiled treeitem requires/);
+  const treeitem = evaluate('<list-item role="treeitem" expanded="false" tree-level="2" on-toggle="reset">Work</list-item>').view().nodes[0];
+  assert.equal(treeitem.role, "treeitem"); assert.equal(treeitem.expanded, false);
+  assert.equal(treeitem.treeLevel, 2); assert.deepEqual(treeitem.toggle, [1, 5]);
   assert.throws(() => compileView('<list role="tree"/>', contract), /tree role requires/);
 });
 
@@ -1880,4 +1882,49 @@ test("bare media surfaces and closed dynamic icons preserve their binding types"
   assert.equal(nodes[1].kind, "media_surface"); assert.equal(nodes[1].image, 0x7601); assert.equal(nodes[2].icon, "pause");
   assert.throws(() => compileView('<button surface="{surface}"/>', input), /requires media-surface/);
   assert.throws(() => compileView('<button icon="{count}"/>', contract), /closed union/);
+});
+
+test("compiled empty-list branches preserve keyed rows and outer scope across transitions", () => {
+  const c: ViewContract = { ...contract, types: { ...contract.types, structs: [{ name: "Model", fields: [...contract.types.structs[0]!.fields, { name: "rows", type: { kind: "slice", elem: { kind: "node", name: "Row" } } }] }, { name: "Row", fields: [{ name: "id", type: { kind: "i64" } }, { name: "title", type: { kind: "bytes" } }] }] } };
+  const model = { rows: [] as { id: number; title: Uint8Array }[], status: new TextEncoder().encode("No notes") };
+  const exports: { native_view?: () => Uint8Array } = {};
+  const markup = '<column><for each="rows" key="id" as="row"><list-item>{row.title}</list-item></for><else><text>{status}</text></else></column>';
+  runInNewContext(ts.transpile(compileView(markup, c), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  const view = () => JSON.parse(new TextDecoder().decode(exports.native_view!()));
+  assert.equal(view().nodes[1].text, "No notes");
+  model.rows.push({ id: 7, title: new TextEncoder().encode("Café") });
+  const occupied = view(); assert.equal(occupied.nodes.length, 2); assert.equal(occupied.nodes[1].text, "Café"); assert.equal(occupied.nodes[1].keyInt, 7);
+  model.rows.length = 0; assert.equal(view().nodes[1].text, "No notes");
+  assert.throws(() => compileView(markup.replace('<else>', '<else label="bad">'), c), /else accepts/);
+  assert.throws(() => compileView('<column><text/><else/></column>', c), /immediately follow/);
+});
+
+test("compiled Notes conditions and context menus retain native text truthiness and owned dispatch", () => {
+  const markup = '<panel on-press="reset" background="scrim"><if test="{status}"><text-field autofocus="true" focus-ring="background"/></if><else><icon name="folder"/></else><context-menu><if test="{status}"><menu-item on-press="reset">Copy</menu-item></if><else><menu-item on-press="increment">Restore</menu-item></else></context-menu></panel>';
+  const { model, view } = evaluate(markup);
+  let current = view(); assert.equal(current.nodes[0].background, "scrim");
+  assert.equal(current.nodes[1].kind, "text_field"); assert.equal(current.nodes[1].autofocus, true); assert.equal(current.nodes[1].focusRing, "background");
+  assert.equal(current.nodes[0].contextMenu[0].label, "Copy"); assert.deepEqual(current.nodes[0].contextMenu[0].press, [1, 5]);
+  model.status = new Uint8Array(); const empty = view();
+  assert.equal(empty.nodes[1].kind, "icon"); assert.equal(empty.nodes[1].text, "folder"); assert.equal(empty.nodes[1].icon, undefined);
+  assert.equal(empty.nodes[0].contextMenu[0].label, "Restore"); assert.deepEqual(empty.nodes[0].contextMenu[0].press, [1, 3]);
+  assert.equal(current.nodes[0].contextMenu[0].label, "Copy");
+  assert.throws(() => compileView('<button autofocus="true"/>', contract), /text-entry/);
+  assert.throws(() => compileView('<text-field focus-ring="unknown"/>', contract), /unsupported focus-ring/);
+});
+
+test("compiled byte text retains malformed UTF-8 NUL labels placeholders menus and span bytes", () => {
+  const markup = '<column><text>{status}</text><text><span>{status}</span></text><text-field text="{status}" label="{status}" placeholder="{status}"/><list-item label="{status}"><text>{status}</text><context-menu><menu-item on-press="reset">{status}</menu-item></context-menu></list-item></column>';
+  const { model, view } = evaluate(markup);
+  const input = new Uint8Array([0xff, 0xc3, 0x00, 0x78]); model.status = input;
+  const nodes = view().nodes;
+  assert.deepEqual(nodes[1].textBytes, [...input]);
+  assert.deepEqual(nodes[2].spans[0].textBytes, [...input]);
+  assert.deepEqual(nodes[3].textBytes, [...input]);
+  assert.deepEqual(nodes[3].labelBytes, [...input]);
+  assert.deepEqual(nodes[3].placeholderBytes, [...input]);
+  assert.deepEqual(nodes[4].labelBytes, [...input]);
+  assert.deepEqual(nodes[4].contextMenu[0].labelBytes, [...input]);
+  input.fill(0); view();
+  assert.deepEqual(nodes[1].textBytes, [0xff, 0xc3, 0x00, 0x78]);
 });

@@ -22,7 +22,7 @@ export interface CoreContract {
   model: string; msg: { name: string; arms: MsgArm[]; unbound: string[] };
   model_helpers: Helper[]; model_unbound: string[];
   init_returns_cmd: boolean; update_returns_cmd: boolean;
-  channels: { command_msg: boolean; frame_msg: boolean; key_msg: boolean; pinch_msg: boolean; drop_msg: boolean;
+  channels: { command_msg: boolean; command_bytes?: boolean; frame_msg: boolean; key_msg: boolean; pinch_msg: boolean; drop_msg: boolean;
     appearance_msg: string | null; chrome_msg: string | null; env_msgs: { env: string; msg: string }[] };
   abi: { exports: string[]; snapshot_format: number };
   integer_slots: { slot: string; class: string }[];
@@ -254,6 +254,7 @@ function unbound(s: CoreContract, out: Diagnostic[]): void {
   for (let i = 0; i < s.msg.unbound.length; i++) if (findArm(s, s.msg.unbound[i]) === null) flag(out, `msg.unbound[${i}]`, `"${s.msg.unbound[i]}" is not an arm of the message union (V8)`);
 }
 function channels(s: CoreContract, out: Diagnostic[]): void {
+  if (s.channels.command_bytes && !s.channels.command_msg) flag(out, "channels.command_bytes", "byte command input requires a wired command_msg channel (V9)");
   for (const channel of [{ name: "appearance_msg", arm: s.channels.appearance_msg }, { name: "chrome_msg", arm: s.channels.chrome_msg }]) {
     const name = channel.arm;
     if (name === null) continue;
@@ -390,7 +391,7 @@ function integerSlots(s: CoreContract, out: Diagnostic[]): void {
 }
 export function validateCore(input: CoreInput): Diagnostic[] {
   const s = input.sidecar, out: Diagnostic[] = [];
-  if (s.wire_version !== 8) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 8, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
+  if (s.wire_version !== 9) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 9, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi_version !== 2) flag(out, "abi_version", `this generator binds core ABI version 2, the sidecar declares ${input.abi_text} — upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi.snapshot_format !== 1) flag(out, "abi.snapshot_format", `this generator decodes snapshot format 1, the sidecar declares ${input.snapshot_text} — upgrade the SDK or pin the compiler release that matches it`);
   names(s, out);
