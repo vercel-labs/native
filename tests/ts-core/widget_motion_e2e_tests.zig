@@ -267,6 +267,19 @@ test "compiled widget motion segmented phases preserve complete exact native int
             try std.testing.expectEqualSlices(u8, &frozen, &output);
         }
     };
+    for ([_]u32{ 0, 0x80000000, 0x7fc00037, 0xff800000, 0x7f800000 }) |bits| {
+        var request: [48]u8 = @splat(0);
+        request[0..4].* = .{ 18, 7, 31, 1 };
+        std.mem.writeInt(u32, request[4..8], 1200, .little);
+        std.mem.writeInt(u32, request[8..12], 12, .little);
+        std.mem.writeInt(u32, request[16..20], 64, .little);
+        std.mem.writeInt(u32, request[20..24], bits, .little);
+        var value: f32 = @bitCast(bits);
+        std.mem.doNotOptimizeAway(&value);
+        var output: [32]u8 = undefined;
+        try std.testing.expectEqual(output.len, core.nativeWindowPolicy(&request, &output));
+        try std.testing.expectEqual(@as(u32, @bitCast(std.math.clamp(value, 0, 1))), std.mem.readInt(u32, output[20..24], .little));
+    }
 }
 fn packetFloat(bytes: []u8, v: f32) void {
     std.mem.writeInt(u32, bytes[0..4], @bitCast(v), .little);

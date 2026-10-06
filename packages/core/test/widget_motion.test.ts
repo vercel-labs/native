@@ -70,6 +70,12 @@ test("loop retirement preserves declaration order and distinguishes adjacent wid
   const out = policy(r); assert.equal(view(out).getUint32(0, true), 1); assert.equal(view(out).getUint32(4, true), 1);
   const frozen = out.slice(); r.fill(255); assert.deepEqual(out, frozen);
 });
+test("spinner tails preserve native max-number clamping for NaN infinity and signed zero", () => {
+  const r = packet(7, 48, 31, 1), w = view(r); w.setUint32(4, 1200, true); w.setUint32(8, 12, true); w.setUint32(16, 64, true);
+  for (const [bits, expected] of [[0, 0], [0x80000000, 0], [0x7fc00037, 0x3f800000], [0xff800000, 0], [0x7f800000, 0x3f800000]]) {
+    w.setUint32(20, bits!, true); assert.equal(view(policy(r)).getUint32(20, true), expected);
+  }
+});
 test("all operations refuse every truncation, extra byte, reserved word and excessive capacity", () => {
   const loop = packet(7, 48); const retirement = packet(8, 16);
   for (const r of [packet(0, 24), packet(1, 16), disclosure(), packet(3, 24), packet(4, 32), packet(5, 24), packet(6, 40), loop, retirement]) {

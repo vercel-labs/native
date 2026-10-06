@@ -149,7 +149,9 @@ function nscvWidgetMotion(request: Uint8Array): Uint8Array {
     }
     v.setUint32(8, lo, true); v.setUint32(12, hi, true);
     v.setFloat32(16, mode === 0 ? 0 : 1, true);
-    v.setFloat32(20, mode === 0 ? 360 : mode === 2 ? 0.5 : Math.min(1, Math.max(0, w.getFloat32(20, true))), true);
+    // The native max-number clamp chooses the finite upper bound for NaN.
+    const tail = w.getFloat32(20, true);
+    v.setFloat32(20, mode === 0 ? 360 : mode === 2 ? 0.5 : Number.isNaN(tail) ? 1 : Math.min(1, Math.max(0, tail)), true);
     return out;
   }
   if (op === 8) {
