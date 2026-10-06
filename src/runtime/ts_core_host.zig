@@ -2075,7 +2075,40 @@ pub fn TsCoreHost(comptime core: type) type {
             return .{ .tag = result[0], .shape = @enumFromInt(result[1]), .damaged = result[2] != 0, .retire = result[3] != 0, .truncated = result[4] != 0 };
         }
 
+        /// Copied portable plans borrow native-owned slot facts and key bytes.
+        /// OS operations and engine namespace checks stay in this host.
+        fn compiledFileStreamPlan(action: u8, key: []const u8, blocked: bool, slot: u8, op: u8, event: u8, outcome: u8, chunk_tag: u8, done_tag: u8, err_tag: u8) [8]u8 {
+            var request: [12 + max_wire_key_bytes + file_streams.len * (8 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..12].* = .{ 15, action, @intCast(key.len), @intFromBool(blocked), slot, op, event, outcome, chunk_tag, done_tag, err_tag, 0 };
+            @memcpy(request[12..][0..key.len], key);
+            var at: usize = 12 + key.len;
+            for (&file_streams) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at..][0..8].* = .{ @intFromBool(entry.used), @intFromBool(entry.sink), @intFromBool(entry.busy), @intFromBool(entry.cancelling), entry.chunk_tag, entry.done_tag, entry.err_tag, @intCast(name.len) };
+                @memcpy(request[at + 8 ..][0..name.len], name);
+                at += 8 + name.len;
+            }
+            var result: [8]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[1] > 3 or result[3] > 3 or result[4] > 1 or result[5] > 1 or result[6] != 0 or result[7] != 0 or (result[0] != 255 and result[0] >= file_streams.len))
+                @panic("ts core host: invalid compiled file stream plan");
+            if (action == 5) {
+                if (result[0] != slot or result[1] != 0) @panic("ts core host: invalid compiled file completion owner");
+            } else if (result[0] != 255) {
+                const entry = &file_streams[result[0]];
+                if ((action == 0 or action >= 3) and (!entry.used or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: invalid compiled file lookup owner");
+                if ((action == 1 or action == 2) and entry.used and (action == 2 or key.len == 0 or entry.sink or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: compiled file admission overwrites another owner");
+                if (result[1] != 0) @panic("ts core host: compiled file plan admits a refused command");
+            }
+            return result;
+        }
+
         fn findFileStream(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(0, key, false, 0, 0, 0, 0, 0, 0, 0);
+                return if (plan[0] == 255) null else plan[0];
+            }
             for (&file_streams, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -2120,6 +2153,18 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueReadFileStream(fx: *Fx, key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(1, key, wireKeyOccupiedOutsideFileStreams(key), 0, 0, 0, 0, chunk_tag, done_tag, err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(plan[2], "rejected"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.* = .{ .used = true, .key_len = key.len, .chunk_tag = chunk_tag, .done_tag = plan[2], .err_tag = err_tag };
+                @memcpy(entry.key[0..key.len], key);
+                fx.readFileStream(.{ .key = file_stream_key_base + plan[0], .path = path, .on_result = fileStreamResultMsg });
+                return;
+            }
             if (wireKeyOccupiedOutsideFileStreams(key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                 return;
@@ -2145,6 +2190,18 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileStream(fx: *Fx, head: RoutedHead, path: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(2, head.key, wireKeyOccupiedOutsideFileStreams(head.key), 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(plan[2], "rejected"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.* = .{ .used = true, .sink = true, .busy = true, .key_len = head.key.len, .done_tag = plan[2], .err_tag = head.err_tag };
+                @memcpy(entry.key[0..head.key.len], head.key);
+                fx.writeFileStream(.{ .key = file_stream_key_base + plan[0], .path = path, .on_result = fileStreamResultMsg });
+                return;
+            }
             if (head.key.len == 0 or findFileStream(head.key) != null or wireKeyOccupiedOutsideFileStreams(head.key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
@@ -2160,6 +2217,19 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileChunk(fx: *Fx, head: RoutedHead, bytes: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(3, head.key, false, 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(if (plan[1] == 3) msgFromTagStaticBytes(plan[2], "out_of_order") else msgFromTagStaticBytes(plan[2], "sink_missing"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.busy = true;
+                entry.done_tag = plan[2];
+                entry.err_tag = head.err_tag;
+                fx.writeFileChunk(.{ .key = file_stream_key_base + plan[0], .bytes = bytes, .on_result = fileStreamResultMsg });
+                return;
+            }
             const index = findFileStream(head.key) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
@@ -2183,6 +2253,19 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileClose(fx: *Fx, head: RoutedHead) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(4, head.key, false, 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(if (plan[1] == 3) msgFromTagStaticBytes(plan[2], "out_of_order") else msgFromTagStaticBytes(plan[2], "sink_missing"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.busy = true;
+                entry.done_tag = plan[2];
+                entry.err_tag = head.err_tag;
+                fx.writeFileClose(.{ .key = file_stream_key_base + plan[0], .on_result = fileStreamResultMsg });
+                return;
+            }
             const index = findFileStream(head.key) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
@@ -2210,6 +2293,18 @@ pub fn TsCoreHost(comptime core: type) type {
             const index = result.key - file_stream_key_base;
             if (index >= file_streams.len or !file_streams[index].used) @panic("ts core host: untracked file stream result");
             const entry = &file_streams[index];
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(5, "", false, @intCast(index), @intFromEnum(result.op), @intFromEnum(result.event), @intFromEnum(result.outcome), 0, 0, 0);
+                if (plan[4] == 1) entry.used = false;
+                if (plan[5] == 1) entry.busy = false;
+                return switch (plan[3]) {
+                    0 => msgFromTagVoid(plan[2]),
+                    1 => msgFromTagBytes(plan[2], result.bytes),
+                    3 => msgFromTagBytes(plan[2], @tagName(result.outcome)),
+                    2 => msgFromTagNumber(plan[2], @floatFromInt(result.total)),
+                    else => unreachable,
+                };
+            }
             if (entry.cancelling and result.outcome == .cancelled) {
                 entry.used = false;
                 return msgFromTagBytes(entry.err_tag, "cancelled");
@@ -4139,12 +4234,52 @@ pub fn TsCoreHost(comptime core: type) type {
         /// and never route): ok routes the text bytes, everything else
         /// the outcome name. A dropped entry's terminal routes nothing
         /// — the silent drop.
+        fn compiledClipboardWritePlan(action: u8, key: []const u8, blocked: bool, slot: u8, tag: u8) [4]u8 {
+            var request: [8 + max_wire_key_bytes + clipboard_writes.len * (3 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..8].* = .{ 16, action, @intCast(key.len), @intFromBool(blocked), slot, tag, 0, 0 };
+            @memcpy(request[8..][0..key.len], key);
+            var at: usize = 8 + key.len;
+            for (&clipboard_writes) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at..][0..3].* = .{ @intFromBool(entry.used), entry.tag, @intCast(name.len) };
+                @memcpy(request[at + 3 ..][0..name.len], name);
+                at += 3 + name.len;
+            }
+            var result: [4]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[2] > 1 or result[3] != 0 or (result[0] != 255 and result[0] >= clipboard_writes.len))
+                @panic("ts core host: invalid compiled clipboard write plan");
+            if (action == 2) {
+                if (result[0] != slot) @panic("ts core host: invalid compiled clipboard completion owner");
+            } else if (result[0] != 255) {
+                const entry = &clipboard_writes[result[0]];
+                if (action == 0 and (key.len == 0 or !entry.used or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: invalid compiled clipboard lookup owner");
+                if (action == 1 and entry.used) @panic("ts core host: compiled clipboard overwrites another owner");
+            }
+            return result;
+        }
+
         fn findClipboardWrite(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(0, key, false, 0, 0);
+                return if (plan[0] == 255) null else plan[0];
+            }
             if (key.len == 0) return null;
             for (&clipboard_writes, 0..) |*entry, index| if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             return null;
         }
         fn issueClipboardWrite(fx: *Fx, key: []const u8, tag: u8, bytes: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(1, key, reservedWireKeyOccupied(key) or wireKeyOccupiedOutsideFileStreams(key), 0, tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromClipboard(plan[1], .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                    return;
+                }
+                clipboard_writes[plan[0]] = .{ .used = true, .key = undefined, .key_len = key.len, .tag = plan[1] };
+                @memcpy(clipboard_writes[plan[0]].key[0..key.len], key);
+                fx.writeClipboard(.{ .key = clipboard_result_key_base + plan[0], .text = bytes, .on_result = clipboardWriteResultMsg });
+                return;
+            }
             var slot: ?usize = null;
             if (!reservedWireKeyOccupied(key) and !wireKeyOccupiedOutsideFileStreams(key)) {
                 for (&clipboard_writes, 0..) |*entry, index| if (!entry.used) {
@@ -4161,9 +4296,15 @@ pub fn TsCoreHost(comptime core: type) type {
             fx.writeClipboard(.{ .key = clipboard_result_key_base + index, .text = bytes, .on_result = clipboardWriteResultMsg });
         }
         fn clipboardWriteResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
+            if (result.key < clipboard_result_key_base) @panic("ts core host: clipboard result outside its namespace");
             const index = result.key - clipboard_result_key_base;
             if (index >= clipboard_writes.len or !clipboard_writes[index].used) @panic("ts core host: untracked clipboard completion");
             const entry = &clipboard_writes[index];
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(2, "", false, @intCast(index), 0);
+                if (plan[2] == 1) entry.used = false;
+                return msgFromClipboard(plan[1], result, entry.wireKey());
+            }
             entry.used = false;
             return msgFromClipboard(entry.tag, result, entry.wireKey());
         }

@@ -385,7 +385,9 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 14) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 16) throw new Error("invalid effect policy request");
+  if (request[0] === 15) return fileStreamPolicy(request);
+  if (request[0] === 16) return clipboardWritePolicy(request);
   if (request[0] === 11) return requestCoordinationPolicy(request);
   if (request[0] === 12) return cancellationPolicy(request);
   if (request[0] === 13) return credentialRecordPolicy(request);
@@ -2458,5 +2460,102 @@ function dbCommandPolicy(request: Uint8Array): Uint8Array {
   result[4] = request[entry + (kind === 0 ? 3 : 4)]!;
   result[5] = kind === 0 ? 0 : 1;
   result[6] = kind === 2 || kind === 1 && request[entry + 2] === 0 ? 1 : 0;
+  return result;
+}
+
+/** File-stream lifecycle (15). Header: action (lookup/read/open/chunk/close/
+ * completion), key length, foreign-owner fact, result slot/op/event/outcome,
+ * chunk/done/error tags, reserved. Four slots carry used/sink/busy/cancelling,
+ * three routes, key length and exact key bytes. Native retains buffers and
+ * engine identities. Owned result: slot, refusal, route, shape (void/bytes/
+ * number/outcome), retirement, clear-busy, two reserved bytes.
+ */
+function fileStreamPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 12 || request[1]! > 5 || request[3]! > 1 || request[11] !== 0)
+    throw new Error("invalid file stream header");
+  const action = request[1]!, length = request[2]!;
+  let at = 12 + length;
+  if (at > request.length) throw new Error("truncated file stream key");
+  const positions: number[] = [];
+  let matching = -1, free = -1;
+  for (let slot = 0; slot < 4; slot++) {
+    if (at + 8 > request.length) throw new Error("truncated file stream slot");
+    for (let i = 0; i < 4; i++) if (request[at + i]! > 1) throw new Error("invalid file stream fact");
+    const size = request[at + 7]!;
+    if (at + 8 + size > request.length) throw new Error("truncated file stream owner");
+    positions.push(at);
+    let equal = request[at] === 1 && size === length;
+    if (equal) for (let i = 0; i < length; i++) if (request[at + 8 + i] !== request[12 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (request[at] === 0 && free < 0) free = slot;
+    at += 8 + size;
+  }
+  if (at !== request.length) throw new Error("trailing file stream bytes");
+  const result = new Uint8Array(8); result[0] = 255;
+  if (action === 0) { result[0] = matching < 0 ? 255 : matching; return result; }
+  result[2] = request[10]!;
+  if (action === 1 || action === 2) {
+    const replace = action === 1 && length > 0 && matching >= 0;
+    const slot = replace ? matching : free;
+    const refused = request[3] === 1 || action === 2 && (length === 0 || matching >= 0)
+      || replace && request[positions[matching]! + 1] === 1 || slot < 0;
+    if (refused) result[1] = 1;
+    else { result[0] = slot; result[2] = request[9]!; }
+    return result;
+  }
+  if (action === 3 || action === 4) {
+    if (matching < 0 || request[positions[matching]! + 1] !== 1 || request[positions[matching]! + 3] === 1) result[1] = 2;
+    else if (request[positions[matching]! + 2] === 1) result[1] = 3;
+    else { result[0] = matching; result[2] = request[9]!; }
+    return result;
+  }
+  const slot = request[4]!;
+  if (slot >= 4 || request[positions[slot]!] !== 1 || request[5]! > 8 || request[6]! > 2 || request[7]! > 8)
+    throw new Error("invalid file stream completion owner or enum");
+  const owner = positions[slot]!, op = request[5]!, event = request[6]!, outcome = request[7]!;
+  result[0] = slot; result[2] = request[owner + 6]!; result[3] = 3;
+  if (request[owner + 3] === 1 && outcome === 5) result[4] = 1;
+  else if (op === 4 && event === 1 && outcome === 0) { result[2] = request[owner + 4]!; result[3] = 1; }
+  else if (op === 4 && event === 2 && outcome === 0) { result[2] = request[owner + 5]!; result[3] = 2; result[4] = 1; }
+  else if (outcome === 0) { result[2] = request[owner + 5]!; result[3] = 0; result[4] = op === 7 ? 1 : 0; result[5] = 1; }
+  else if (op === 6 && (outcome === 4 || outcome === 7)) result[5] = 1;
+  else result[4] = 1;
+  return result;
+}
+
+/** Clipboard-write coordination (16). Header: lookup/admit/complete, key
+ * length, collision fact, completion slot, authored route, two reserved bytes.
+ * Sixteen slots carry used/route/key length/exact bytes. Empty names never
+ * match but can occupy independent slots. Complete records borrow the native
+ * owner key until dispatch; the policy owns slot, route and retirement only.
+ */
+function clipboardWritePolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 8 || request[1]! > 2 || request[3]! > 1 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid clipboard write header");
+  const action = request[1]!, length = request[2]!;
+  let at = 8 + length;
+  if (at > request.length) throw new Error("truncated clipboard key");
+  const positions: number[] = [];
+  let matching = -1, free = -1;
+  for (let slot = 0; slot < 16; slot++) {
+    if (at + 3 > request.length || request[at]! > 1) throw new Error("invalid clipboard slot");
+    const size = request[at + 2]!;
+    if (at + 3 + size > request.length) throw new Error("truncated clipboard owner");
+    positions.push(at);
+    let equal = length > 0 && request[at] === 1 && size === length;
+    if (equal) for (let i = 0; i < length; i++) if (request[at + 3 + i] !== request[8 + i]) equal = false;
+    if (equal && matching < 0) matching = slot;
+    if (request[at] === 0 && free < 0) free = slot;
+    at += 3 + size;
+  }
+  if (at !== request.length) throw new Error("trailing clipboard bytes");
+  const result = new Uint8Array(4); result[0] = 255; result[1] = request[5]!;
+  if (action === 0) result[0] = matching < 0 ? 255 : matching;
+  else if (action === 1) result[0] = request[3] === 1 || matching >= 0 || free < 0 ? 255 : free;
+  else {
+    const slot = request[4]!;
+    if (slot >= 16 || request[positions[slot]!] !== 1) throw new Error("untracked clipboard completion");
+    result[0] = slot; result[1] = request[positions[slot]! + 1]!; result[2] = 1;
+  }
   return result;
 }

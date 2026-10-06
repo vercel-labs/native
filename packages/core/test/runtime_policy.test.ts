@@ -669,3 +669,94 @@ test("credential policy rejects arbitrary malformed lengths and exposes offsets 
   const bad = bytes.slice(); new DataView(bad.buffer).setUint32(2 + name.length, 0xffffffff, true);
   assert.deepEqual(native_effect_policy(bad), new Uint8Array(20));
 });
+
+interface FileOwner { used: boolean; sink: boolean; busy: boolean; cancelling: boolean; key: Uint8Array; chunk: number; done: number; err: number }
+function filePacket(slots: FileOwner[], action: number, name: Uint8Array, blocked = 0, owner = 0, op = 4, event = 0, outcome = 0): Uint8Array {
+  const bytes = new Uint8Array(12 + name.length + slots.reduce((n, s) => n + 8 + s.key.length, 0));
+  bytes.set([15, action, name.length, blocked, owner, op, event, outcome, 41, 42, 43, 0]); bytes.set(name, 12);
+  let at = 12 + name.length;
+  for (const s of slots) { bytes.set([+s.used, +s.sink, +s.busy, +s.cancelling, s.chunk, s.done, s.err, s.key.length], at); bytes.set(s.key, at + 8); at += 8 + s.key.length; }
+  return bytes;
+}
+function fileReference(slots: FileOwner[], action: number, name: Uint8Array, blocked = 0, owner = 0, op = 4, event = 0, outcome = 0): Uint8Array {
+  const result = new Uint8Array(8); result[0] = 255;
+  const matching = slots.findIndex(s => s.used && Buffer.from(s.key).equals(name)), free = slots.findIndex(s => !s.used);
+  if (action === 0) { result[0] = matching < 0 ? 255 : matching; return result; }
+  result[2] = 43;
+  if (action === 1 || action === 2) {
+    if (blocked || action === 2 && (name.length === 0 || matching >= 0)) { result[1] = 1; return result; }
+    let slot = free;
+    if (action === 1 && name.length > 0 && matching >= 0) {
+      if (slots[matching]!.sink) { result[1] = 1; return result; }
+      slot = matching;
+    }
+    if (slot < 0) result[1] = 1;
+    else { result[0] = slot; result[2] = 42; }
+    return result;
+  }
+  if (action === 3 || action === 4) {
+    if (matching < 0 || !slots[matching]!.sink || slots[matching]!.cancelling) result[1] = 2;
+    else if (slots[matching]!.busy) result[1] = 3;
+    else { result[0] = matching; result[2] = 42; }
+    return result;
+  }
+  const s = slots[owner]!; result[0] = owner; result[2] = s.err; result[3] = 3;
+  if (s.cancelling && outcome === 5) result[4] = 1;
+  else if (op === 4 && event === 1 && outcome === 0) { result[2] = s.chunk; result[3] = 1; }
+  else if (op === 4 && event === 2 && outcome === 0) { result[2] = s.done; result[3] = 2; result[4] = 1; }
+  else if (outcome === 0) { result[2] = s.done; result[3] = 0; result[4] = +(op === 7); result[5] = 1; }
+  else if (op === 6 && (outcome === 4 || outcome === 7)) result[5] = 1;
+  else result[4] = 1;
+  return result;
+}
+
+test("file lifecycle preserves complete plans anonymous lookup replacement ordering and every terminal", () => {
+  const names = [key(""), key("read"), new Uint8Array([0, 255]), new Uint8Array(255).fill(255)];
+  for (const name of names) for (const stored of names) for (let mask = 0; mask < 16; mask++) for (let flags = 0; flags < 8; flags++) {
+    const slots = Array.from({ length: 4 }, (_, i) => ({ used: !!(mask & (1 << i)), sink: !!(flags & 1), busy: !!(flags & 2), cancelling: !!(flags & 4), key: stored, chunk: i * 63, done: 255 - i, err: i + 4 }));
+    for (let action = 0; action < 5; action++) for (const blocked of [0, 1]) assert.deepEqual(native_effect_policy(filePacket(slots, action, name, blocked)), fileReference(slots, action, name, blocked));
+  }
+  const slots = names.map((name, i) => ({ used: true, sink: false, busy: true, cancelling: false, key: name, chunk: i * 63, done: 255 - i, err: i + 4 }));
+  for (const cancelling of [false, true]) for (let owner = 0; owner < 4; owner++) for (let op = 0; op < 9; op++) for (let event = 0; event < 3; event++) for (let outcome = 0; outcome < 9; outcome++) {
+    slots[owner]!.cancelling = cancelling;
+    assert.deepEqual(native_effect_policy(filePacket(slots, 5, key(""), 0, owner, op, event, outcome)), fileReference(slots, 5, key(""), 0, owner, op, event, outcome));
+  }
+});
+
+function clipboardPacket(action: number, name: Uint8Array, used: number, stored: Uint8Array, blocked = 0, owner = 0): Uint8Array {
+  const bytes = new Uint8Array(8 + name.length + 16 * (3 + stored.length));
+  bytes.set([16, action, name.length, blocked, owner, 255, 0, 0]); bytes.set(name, 8);
+  let at = 8 + name.length;
+  for (let i = 0; i < 16; i++) { bytes.set([+(i < used), i * 16, stored.length], at); bytes.set(stored, at + 3); at += 3 + stored.length; }
+  return bytes;
+}
+
+test("clipboard plans preserve full capacity complete routing empty names and first-match priority", () => {
+  const names = [key(""), key("copy"), new Uint8Array([0, 255]), new Uint8Array(255).fill(255)];
+  for (const name of names) for (const stored of names) for (let used = 0; used <= 16; used++) for (const blocked of [0, 1]) {
+    const matching = name.length > 0 && used > 0 && Buffer.from(name).equals(stored);
+    assert.deepEqual(native_effect_policy(clipboardPacket(0, name, used, stored, blocked)), Uint8Array.from([matching ? 0 : 255, 255, 0, 0]));
+    assert.deepEqual(native_effect_policy(clipboardPacket(1, name, used, stored, blocked)), Uint8Array.from([blocked || matching || used === 16 ? 255 : used, 255, 0, 0]));
+    for (let owner = 0; owner < used; owner++) assert.deepEqual(native_effect_policy(clipboardPacket(2, name, used, stored, blocked, owner)), Uint8Array.from([owner, owner * 16, 1, 0]));
+  }
+});
+
+test("file and clipboard packets reject malformed ownership and produce independent copied plans", () => {
+  const slots = Array.from({ length: 4 }, () => ({ used: true, sink: true, busy: false, cancelling: false, key: key("r"), chunk: 0, done: 254, err: 255 }));
+  const packets = [filePacket(slots, 5, key("r")), clipboardPacket(2, key("r"), 16, key("r"))];
+  for (const packet of packets) {
+    for (let i = 0; i < packet.length; i++) assert.throws(() => native_effect_policy(packet.subarray(0, i)));
+    assert.throws(() => native_effect_policy(new Uint8Array([...packet, 0])));
+    const backing = new Uint8Array(packet.length + 9); backing.set(packet, 5);
+    const before = backing.slice(), output = native_effect_policy(backing.subarray(5, 5 + packet.length)), frozen = output.slice();
+    assert.deepEqual(backing, before); backing.fill(0); native_effect_policy(packet); assert.deepEqual(output, frozen);
+  }
+  for (const [at, value] of [[1, 6], [3, 2], [4, 4], [5, 9], [6, 3], [7, 9], [11, 1], [13, 2], [14, 2], [15, 2], [16, 2]]) {
+    const bad = packets[0]!.slice(); bad[at!] = value!; assert.throws(() => native_effect_policy(bad));
+  }
+  for (const [at, value] of [[1, 3], [3, 2], [4, 16], [6, 1], [7, 1], [9, 2]]) {
+    const bad = packets[1]!.slice(); bad[at!] = value!; assert.throws(() => native_effect_policy(bad));
+  }
+  const file = packets[0]!.slice(); file[13] = 0; assert.throws(() => native_effect_policy(file));
+  const clipboard = packets[1]!.slice(); clipboard[9] = 0; assert.throws(() => native_effect_policy(clipboard));
+});

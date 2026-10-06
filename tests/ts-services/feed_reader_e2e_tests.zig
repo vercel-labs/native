@@ -9894,3 +9894,97 @@ test "compiled request DB commands preserve complete page done exec errors and s
     };
     try std.testing.expectEqual(@as(usize, 47872), comparisons);
 }
+
+fn checkCompiledFilePlan(request: []const u8) !void {
+    var actual: [8]u8 = undefined;
+    var expected: [8]u8 = undefined;
+    const size = @import("file_policy_reference").plan(request, &expected);
+    const before = try std.testing.allocator.dupe(u8, request);
+    defer std.testing.allocator.free(before);
+    try std.testing.expectEqual(size, core.nativeEffectPolicy(request, &actual));
+    try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..size]);
+    try std.testing.expectEqualSlices(u8, before, request);
+}
+
+fn fileCoordinationPacket(buffer: []u8, name: []const u8, stored: []const u8, mask: u8, flags: u8) []u8 {
+    @memset(buffer, 0);
+    buffer[0] = 15;
+    buffer[2] = @intCast(name.len);
+    buffer[8..11].* = .{ 41, 42, 43 };
+    @memcpy(buffer[12..][0..name.len], name);
+    var at: usize = 12 + name.len;
+    for (0..4) |slot| {
+        buffer[at..][0..8].* = .{ @intFromBool(mask & (@as(u8, 1) << @intCast(slot)) != 0), flags & 1, (flags >> 1) & 1, (flags >> 2) & 1, @intCast(slot * 63), @intCast(255 - slot), @intCast(slot + 4), @intCast(stored.len) };
+        @memcpy(buffer[at + 8 ..][0..stored.len], stored);
+        at += 8 + stored.len;
+    }
+    return buffer[0..at];
+}
+
+test "compiled file coordination preserves read replacement sink ordering every completion and owned plans" {
+    var buffer: [1600]u8 = undefined;
+    const long = [_]u8{255} ** 255;
+    const names = [_][]const u8{ "", "read", "\x00\xff", &long };
+    var comparisons: usize = 0;
+    for (names) |name| for (names) |stored| for (0..16) |mask| for (0..8) |flags| {
+        const packet = fileCoordinationPacket(&buffer, name, stored, @intCast(mask), @intCast(flags));
+        for (0..5) |action| for (0..2) |blocked| {
+            packet[1] = @intCast(action);
+            packet[3] = @intCast(blocked);
+            try checkCompiledFilePlan(packet);
+            comparisons += 1;
+        };
+    };
+    for (0..8) |flags| for (0..4) |owner| for (0..9) |op| for (0..3) |event| for (0..9) |outcome| {
+        const packet = fileCoordinationPacket(&buffer, "", &long, 15, @intCast(flags));
+        packet[1] = 5;
+        packet[4..8].* = .{ @intCast(owner), @intCast(op), @intCast(event), @intCast(outcome) };
+        try checkCompiledFilePlan(packet);
+        comparisons += 1;
+    };
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    const packet = fileCoordinationPacket(&buffer, "\x00\xff", "\x00\xff", 15, 7);
+    packet[1] = 5;
+    packet[4..8].* = .{ 3, 6, 0, 7 };
+    var output: [8]u8 = undefined;
+    try std.testing.expectEqual(output.len, core.nativeEffectPolicy(packet, &output));
+    const frozen = output;
+    @memset(packet, 0);
+    try checkCompiledFilePlan(fileCoordinationPacket(&buffer, "", "", 0, 0));
+    try std.testing.expectEqualSlices(u8, &frozen, &output);
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    try std.testing.expectEqual(@as(usize, 28256), comparisons);
+}
+
+test "compiled file coordination clipboard complete routes capacity collisions and anonymous ownership" {
+    var buffer: [4400]u8 = undefined;
+    const long = [_]u8{255} ** 255;
+    const names = [_][]const u8{ "", "copy", "\x00\xff", &long };
+    var comparisons: usize = 0;
+    for (names) |name| for (names) |stored| for (0..17) |used| for (0..2) |blocked| {
+        @memset(&buffer, 0);
+        buffer[0..8].* = .{ 16, 0, @intCast(name.len), @intCast(blocked), 0, 255, 0, 0 };
+        @memcpy(buffer[8..][0..name.len], name);
+        var at: usize = 8 + name.len;
+        for (0..16) |slot| {
+            buffer[at..][0..3].* = .{ @intFromBool(slot < used), @intCast(slot * 16), @intCast(stored.len) };
+            @memcpy(buffer[at + 3 ..][0..stored.len], stored);
+            at += 3 + stored.len;
+        }
+        for (0..2) |action| {
+            buffer[1] = @intCast(action);
+            try checkCompiledFilePlan(buffer[0..at]);
+            comparisons += 1;
+        }
+        for (0..used) |owner| {
+            buffer[1] = 2;
+            buffer[4] = @intCast(owner);
+            try checkCompiledFilePlan(buffer[0..at]);
+            comparisons += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 5440), comparisons);
+}
