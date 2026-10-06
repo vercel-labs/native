@@ -496,6 +496,7 @@ pub fn Ui(comptime Msg: type) type {
         /// Null outside an app loop (bare builders, tests that stamp
         /// grids by hand), where terminals render unbound.
         terminal_lookup: ?TerminalGridLookup = null,
+        pty_key_resolver: ?*const fn ([]const u8) u64 = null,
         /// The `<video src>` declaration this build recorded (see
         /// `video`): last-wins, mirroring `loadVideo`'s replace
         /// semantics — one player is the whole playback surface. The
@@ -784,6 +785,8 @@ pub fn Ui(comptime Msg: type) type {
             /// paints the honest empty surface. Meaningless on every
             /// other element.
             pty: u64 = 0,
+            /// Byte-named PTY capability. Resolution stays in the native host.
+            pty_name: []const u8 = "",
             /// The `.terminal` element's scrollback offset in rows
             /// above the live screen (markup `scrollback=`), following
             /// the scroll `value` source-wins reconcile rule: echo the
@@ -1586,6 +1589,9 @@ pub fn Ui(comptime Msg: type) type {
             if (options.on_dismiss != null) warnDismissHandlerKind(kind);
             if (options.on_resize != null) warnResizeHandlerKind(kind);
             var widget = widgetFromOptions(kind, options);
+            if (kind == .terminal and options.pty_name.len > 0) {
+                widget.terminal.pty = if (self.pty_key_resolver) |resolve| resolve(options.pty_name) else 0;
+            }
             if (kind == .media_surface) self.stampVideoSurfaceFit(&widget);
             return .{
                 .widget = widget,

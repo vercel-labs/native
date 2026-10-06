@@ -1288,7 +1288,7 @@ const Checker = struct {
                 continue;
             }
             if (std.mem.eql(u8, attribute.name, "pty")) {
-                // Terminal pty keys are model integers (engine parity —
+                // Terminal bindings carry native integer keys or byte names —
                 // the surface/image binding shape exactly): resolve the
                 // binding so an undefined field is caught here and a
                 // valid one is marked used (never a false dead-state
@@ -1296,7 +1296,7 @@ const Checker = struct {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const resolved = try self.resolveBinding(node, expression.binding, true);
-                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.terminal_pty_message);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{ .integer, .string }, markup.terminal_pty_message);
                 continue;
             }
             if (std.mem.eql(u8, attribute.name, "icon") or

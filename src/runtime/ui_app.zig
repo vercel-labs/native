@@ -481,6 +481,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         };
 
         pub const Options = struct {
+            /// Resolve authored PTY names without exposing engine identities.
+            pty_key_resolver: ?*const fn ([]const u8) u64 = null,
             name: []const u8,
             scene: app_manifest.ShellConfig,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2452,6 +2454,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // driving the palette's theme mapping.
                 self.terminal_sessions.beginBuild(tokens);
                 ui.terminal_lookup = self.terminal_sessions.lookup();
+                ui.pty_key_resolver = self.options.pty_key_resolver;
                 ui.virtual_window_context = @ptrCast(&window_source);
                 ui.virtual_window_source = VirtualWindowResolver.resolve;
                 ui.virtual_extent_context = @ptrCast(self);
@@ -3397,6 +3400,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // key, whichever tree binds it.
             self.terminal_sessions.beginBuild(tokens);
             ui.terminal_lookup = self.terminal_sessions.lookup();
+            ui.pty_key_resolver = self.options.pty_key_resolver;
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
             if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
             self.armUiFragmentHost(&ui);

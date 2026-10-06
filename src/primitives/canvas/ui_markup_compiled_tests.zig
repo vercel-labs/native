@@ -2520,3 +2520,31 @@ test "compiled and interpreted command strings remain widget data beside message
         try testing.expectEqualStrings("ignored", compiled.root.children[2].command);
     }
 }
+
+test "named terminal bindings resolve in the host identically through both markup engines" {
+    const Model = struct { shell: []const u8 = "sh\xff\x00", offset: u32 = 12 };
+    const Msg = union(enum) { state: canvas.TerminalState };
+    const Ui = canvas.Ui(Msg);
+    const source = "<terminal pty=\"{shell}\" scrollback=\"{offset}\" on-terminal=\"state\" label=\"Shell\"/>";
+    const Resolver = struct {
+        fn resolve(name: []const u8) u64 {
+            return if (std.mem.eql(u8, name, "sh\xff\x00")) 0xFFFFFFFFFFFFFFFF else 0;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const model: Model = .{};
+    var interpreter = try markup_view.MarkupView(Model, Msg).init(arena.allocator(), source);
+    var a = Ui.init(arena.allocator());
+    a.pty_key_resolver = Resolver.resolve;
+    const interpreted = try a.finalize(try interpreter.build(&a, &model));
+    var b = Ui.init(arena.allocator());
+    b.pty_key_resolver = Resolver.resolve;
+    const compiled = try b.finalize(canvas.CompiledMarkupView(Model, Msg, source).build(&b, &model));
+    try expectSameTree(Msg, interpreted, compiled);
+    try testing.expectEqual(std.math.maxInt(u64), compiled.root.terminal.pty);
+    try testing.expectEqual(@as(u32, 12), compiled.root.terminal.scrollback);
+    var unbound = Ui.init(arena.allocator());
+    const tree = try unbound.finalize(canvas.CompiledMarkupView(Model, Msg, source).build(&unbound, &model));
+    try testing.expectEqual(@as(u64, 0), tree.root.terminal.pty);
+}

@@ -1991,13 +1991,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             // Range-checked before the u64 cast: expression values are
             // i64, so a signed model field can deliver a negative — the
             // teaching failure, never a trap.
-            options.pty = switch (value) {
-                .integer => |int| if (int < 0)
-                    return self.failVoid(node, markup.terminal_pty_message)
-                else
-                    @intCast(int),
+            switch (value) {
+                .integer => |int| options.pty = if (int < 0) return self.failVoid(node, markup.terminal_pty_message) else @intCast(int),
+                .string => |name| options.pty_name = name,
                 else => return self.failVoid(node, markup.terminal_pty_message),
-            };
+            }
         }
 
         /// `icon="save"` on button, toggle-button, list-item, or

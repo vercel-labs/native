@@ -96,6 +96,12 @@ With both set (dev), the compiled view renders until the watched file first chan
 
 For TypeScript apps, export `webPanes(model: Model): readonly WebViewPane[]` from `core.ts`. Import the descriptor from `@native-sdk/core/events`; return `label`, nullable `anchor`, `url`, `x`, `y`, `width`, `height`, and `reloadToken`. The label identifies an existing manifest WebView; the anchor identifies a widget label such as `<panel label="preview-pane" grow="1"/>`. See `examples/canvas-preview` for pane, frame, and tray coordination in one compiled core. The native adapter copies bytes and validates finite geometry and safe integer tokens; the OS owns WebView hosting and navigation policy.
 
+For all u64 reload states, return `readonly ExactWebViewPane[]` instead. Its `reloadToken` is decimal ASCII bytes; the host validates the full u64 range without rounding. `WebViewPane` retains its existing safe-number token.
+
+### TypeScript terminal panes
+
+Bind `<terminal pty="{shellKey}" scrollback="{scrollback}" on-terminal="terminalChanged" label="Shell" autofocus="true" grow="1"/>` to a `Uint8Array` helper or field naming the same key as `Cmd.ptySpawn`. Import `TerminalState` from `@native-sdk/core/events` for the message payload. The native host resolves the name to its PTY capability; engine identities never cross through a JavaScript number. Both view backends preserve the complete four-field state report. A bound slot remains reserved through exit until app teardown, keeping the ended screen stable across rebuilds. Restarting the same name reuses its slot; the existing four-slot budget applies. Keep `.terminal_sessions = true` and the lazy Ghostty pin in the app's owned build, as in `examples/workbench`. Native integer PTY bindings remain supported.
+
 For Zig cores and extensions:
 
 Declare the webview in the scene next to the gpu_surface (parent it to the canvas view), reserve its region with an empty panel carrying a semantics label, and let `Options.web_panes` snap the webview to that widget's layout frame while the model drives navigation:

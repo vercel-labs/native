@@ -9,6 +9,22 @@ export interface WebViewPane {
     readonly url: Uint8Array;
     readonly reloadToken: number;
 }
+export interface ExactWebViewPane {
+    readonly label: Uint8Array;
+    readonly anchor: Uint8Array | null;
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly url: Uint8Array;
+    readonly reloadToken: Uint8Array;
+}
+export interface TerminalState {
+    readonly scrollback: number;
+    readonly history: number;
+    readonly cols: number;
+    readonly rows: number;
+}
 export type ThemeStatePack = "house" | "geist";
 export type ThemeStateColorScheme = "light" | "dark" | "system";
 export type ThemeState = {

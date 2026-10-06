@@ -1928,3 +1928,26 @@ test("compiled byte text retains malformed UTF-8 NUL labels placeholders menus a
   input.fill(0); view();
   assert.deepEqual(nodes[1].textBytes, [0xff, 0xc3, 0x00, 0x78]);
 });
+
+test("terminal records preserve byte-named PTY ownership and full state dispatch", () => {
+  const input: ViewContract = { ...contract,
+    types: { structs: [...contract.types.structs,
+      { name: "TerminalState", fields: ["scrollback", "history", "cols", "rows"].map(name => ({ name, type: { kind: "i64" as const } })) }] },
+    msg: { arms: [{ name: "terminal_changed", member: "state", payload: { kind: "record", name: "TerminalState" } }] } };
+  const generated = compileView('<terminal pty="{status}" scrollback="{count}" on-terminal="terminal_changed" autofocus="true" label="Shell"/>', input);
+  const exports: { native_view?: () => Uint8Array } = {};
+  const key = new Uint8Array([115, 104, 255, 0]);
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), {
+    exports, TextEncoder, TextDecoder, nscfCommitted: { status: key, count: 4294967295 },
+  });
+  const node = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  assert.deepEqual(node.ptyBytes, [...key]);
+  assert.equal(node.scrollback, 4294967295);
+  assert.equal(node.terminal, 0);
+  assert.equal(node.autofocus, true);
+  for (const markup of [
+    '<text pty="{status}">Wrong</text>', '<terminal pty="literal"/>',
+    '<terminal pty="{ticking}"/>', '<text scrollback="2">Wrong</text>',
+    '<text on-terminal="terminal_changed">Wrong</text>', '<terminal on-terminal="load"/>',
+  ]) assert.throws(() => compileView(markup, input));
+});

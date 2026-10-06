@@ -16,6 +16,7 @@ type NscViewNode = {
   value?: number; valueX?: number; axis?: string; overscroll?: string;
   videoSrc?: string; videoControls?: boolean; videoAutoplay?: boolean; videoLoop?: boolean; videoMuted?: boolean;
   videoControl?: string; zeroIntrinsic?: boolean; clipContent?: boolean; overflow?: string;
+  pty?: number; ptyBytes?: readonly number[]; scrollback?: number; terminal?: number;
   image?: number; icon?: string; label?: string; role?: string;
   background?: string; foreground?: string; borderColor?: string; focusRing?: string; radius?: string; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
@@ -2266,4 +2267,13 @@ function nscvVideoElement(nodes: NscViewNode[], root: NscViewNode, state: NscVid
   nscvPush(nodes, { end: 0, kind: "slider", text: "", grow: 1, value: state.durationMs === 0 ? 0 : Math.fround(state.positionMs / state.durationMs), disabled: !state.active || state.completed, label: "Seek", videoControl: "scrub" });
   nscvPush(nodes, { end: 0, kind: "text", text: nscvVideoClock(state.durationMs), size: "sm", width: 46, wrap: false, overflow: "clip", foreground: "text_muted" });
   row.end = nodes.length; root.end = nodes.length;
+}
+
+function nscvPtyKey(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid PTY key");
+  return value;
+}
+function nscvScrollback(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > 4294967295) throw new Error("invalid terminal scrollback");
+  return value;
 }

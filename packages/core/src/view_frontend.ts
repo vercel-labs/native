@@ -330,6 +330,12 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       if (payload || !textInputUnion(arm.payload)) fail(node, "on-input requires a bare TextInputEvent Msg arm");
       return String(contract.msg.arms.indexOf(arm));
     }
+    if (channel === "terminal") {
+      const record = arm.payload.kind === "record" ? contract.types.structs.find(item => item.name === arm.payload.name) : null;
+      const names = ["scrollback", "history", "cols", "rows"];
+      if (payload || !record || record.fields.length !== 4 || !names.every(name => record.fields.some(field => field.name === name && category(field.type) === "number"))) fail(node, "on-terminal requires a bare TerminalState Msg arm");
+      return String(contract.msg.arms.indexOf(arm));
+    }
     if (channel === "scroll") {
       const record = arm.payload.kind === "record" ? contract.types.structs.find(item => item.name === arm.payload.name) : null;
       const names = ["offsetX", "offsetY", "velocityX", "velocityY", "viewportExtentX", "viewportExtentY", "contentExtentX", "contentExtentY"];
@@ -451,8 +457,9 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvVideoElement(nscvNodes, { ${props.join(", ")} }, nscvVideo, ${stringAttr("src")}, ${flag("controls", "false")}, ${flag("autoplay", "true")}, ${flag("loop", "false")}, ${flag("muted", "false")});`);
       return;
     }
-    const kinds: Record<string, string> = { icon: "icon", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
+    const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
+    if (node.name === "terminal" && (!node.attrs.has("pty") || node.text.trim() || node.children.length || node.attrs.has("text"))) fail(node, "terminal requires pty and no authored content");
     if (node.name === "icon" && (!node.attrs.has("name") || node.text.trim() || node.children.length)) fail(node, "icon requires name and no content");
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
     const menus = node.children.filter(child => child.name === "context-menu");
@@ -620,8 +627,18 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`resizeEasing: ${JSON.stringify(value)}`);
         }
       }
+      else if (name === "pty") {
+        if (node.name !== "terminal" || !value.startsWith("{")) fail(node, "pty requires a terminal binding");
+        const expr = binding(value, node, scope);
+        if (expr.type.kind === "bytes") props.push(`ptyBytes: Array.from(${expr.code})`);
+        else if (expr.type.kind === "i64") props.push(`pty: nscvPtyKey(${expr.code})`);
+        else fail(node, "pty requires a byte name or integer key");
+      } else if (name === "scrollback") {
+        if (node.name !== "terminal") fail(node, "scrollback requires terminal");
+        props.push(`scrollback: nscvScrollback(${bound(value, "number", node, scope)})`);
+      }
       else if (["checked", "disabled", "selected", "window-drag", "wrap", "expanded", "submit-on-enter", "autofocus"].includes(name)) {
-        if (name === "autofocus" && !["input", "text-field", "search-field", "textarea"].includes(node.name)) fail(node, "autofocus requires a text-entry widget");
+        if (name === "autofocus" && !["input", "text-field", "search-field", "textarea", "terminal"].includes(node.name)) fail(node, "autofocus requires a text-entry widget");
         if (name === "checked" && !["checkbox", "switch", "toggle", "radio"].includes(node.name)) fail(node, "checked requires checkbox, switch, toggle or radio");
         if (name === "submit-on-enter" && node.name !== "textarea") fail(node, "submit-on-enter requires textarea");
         if (name === "wrap" && node.name !== "text") fail(node, "wrap requires text");
@@ -688,11 +705,12 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
         if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
         props.push(`${name === "border-color" ? "borderColor" : name === "focus-ring" ? "focusRing" : name}: ${JSON.stringify(value)}`);
-      } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
+      } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-terminal", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
         if (channel === "press" && !treeRow && !["button", "radio", "segmented-control", "list-item", "menu-item", "select", "card", "alert", "panel"].includes(node.name) || channel === "toggle" && !treeRow && !["checkbox", "switch", "toggle", "radio", "toggle-button", "accordion"].includes(node.name) || channel === "change" && !["radio", "slider"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (["input", "submit"].includes(channel) && !["input", "text-field", "search-field", "textarea", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "terminal" && node.name !== "terminal") fail(node, "on-terminal requires terminal");
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");
         if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {
           props.push(`valueChange: ${event(value, "value", node, scope)}`);

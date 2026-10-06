@@ -1283,7 +1283,7 @@ pub const media_surface_surface_message = "surface takes one {binding} to the u6
 pub const media_surface_surface_element_message = "surface is only supported on media-surface - it names the producer rendezvous of the media surface's texture channel; anywhere else it would be silently inert";
 pub const media_surface_missing_surface_message = "media-surface requires surface={binding} naming the u64 surface id its producer targets - without one the surface can never show anything (dead markup, same policy as icon without name)";
 
-pub const terminal_pty_message = "pty on terminal takes the model-owned pty effect key - one {binding} resolving to the u64 key the app's ptySpawn named (pty keys are model data, never markup literals; 0 leaves the terminal unbound and it renders the empty surface)";
+pub const terminal_pty_message = "pty on terminal takes one {binding} resolving to the app's byte-named PTY capability or native integer effect key (never markup literals; empty names or 0 leave the terminal unbound)";
 pub const terminal_pty_element_message = "pty is only supported on terminal - it binds the pty effect key whose session the terminal renders; anywhere else it would be silently inert";
 pub const terminal_missing_pty_message = "terminal requires pty={binding} naming the model-owned u64 pty effect key its session rides - without one the terminal can never attach a session (dead markup, same policy as media-surface without surface)";
 pub const terminal_children_message = "terminal is a leaf - it takes no children";

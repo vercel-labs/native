@@ -58,7 +58,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -89,6 +89,10 @@ const Record = struct {
     axis: ?sdk.canvas.ScrollAxes = null,
     overscroll: ?sdk.canvas.WidgetOverscroll = null,
     image: u64 = 0,
+    pty: ?u64 = null,
+    ptyBytes: ?ByteText = null,
+    scrollback: ?u32 = null,
+    terminal: ?u8 = null,
     icon: []const u8 = "",
     label: []const u8 = "",
     labelBytes: ?ByteText = null,
@@ -228,7 +232,11 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
     const text_entry = value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea;
-    if (value.autofocus and !text_entry) return error.InvalidView;
+    if ((value.pty != null or value.ptyBytes != null or value.scrollback != null or value.terminal != null) and value.kind != .terminal) return error.InvalidView;
+    if (value.pty != null and value.ptyBytes != null) return error.InvalidView;
+    if (value.pty) |key| if (key > 9007199254740991) return error.InvalidView;
+    if (value.kind == .terminal and (value.text.len != 0 or value.textBytes != null)) return error.InvalidView;
+    if (value.autofocus and !text_entry and value.kind != .terminal) return error.InvalidView;
     if (value.submitOnEnter and value.kind != .textarea) return error.InvalidView;
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
@@ -311,6 +319,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .axis = value.axis orelse .vertical,
         .overscroll = value.overscroll orelse .default,
         .image = value.image,
+        .pty = value.pty orelse 0,
+        .pty_name = if (value.ptyBytes) |key| key.bytes else "",
+        .scrollback = value.scrollback orelse 0,
+        .on_terminal = if (value.terminal) |tag| try terminalEvent(tag) else null,
         .icon = value.icon,
         .window_drag = value.windowDrag,
         .semantics = .{ .role = value.role, .label = value.label, .focusable = value.focusable, .list_item_index = value.listItemIndex, .list_item_count = value.listItemCount },
@@ -467,6 +479,15 @@ fn scrollEvent(tag: u8) !Ui.ScrollMsgFn {
     inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
         if (comptime sdk.canvas.ui_markup_reflect.declaredScrollStateRecord(field.type)) {
             if (tag == index) return Ui.translatedScrollMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
+        }
+    }
+    return error.InvalidView;
+}
+
+fn terminalEvent(tag: u8) !Ui.TerminalMsgFn {
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
+        if (comptime sdk.canvas.ui_markup_reflect.declaredTerminalStateRecord(field.type)) {
+            if (tag == index) return Ui.translatedTerminalMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
         }
     }
     return error.InvalidView;
@@ -998,4 +1019,28 @@ pub fn testByteTextRecords() !void {
             try std.testing.expectError(error.InvalidView, decode(&ui, malformed));
         }
     } else return error.SkipZigTest;
+}
+
+pub fn testTerminalRecords() !void {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        for ([_][]const u8{
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"ptyBytes\":[115]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"authored\"}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"\",\"terminal\":255}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"\",\"pty\":9007199254740992}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"\",\"pty\":1,\"ptyBytes\":[115]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"\",\"ptyBytes\":[256]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"terminal\",\"text\":\"\",\"scrollback\":4294967296}]}",
+        }) |source| try std.testing.expectError(error.InvalidView, decode(&ui, source));
+        inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
+            if (comptime !sdk.canvas.ui_markup_reflect.declaredTerminalStateRecord(field.type)) try std.testing.expectError(error.InvalidView, terminalEvent(tag));
+        }
+    } else return error.SkipZigTest;
+}
+
+test "compiled terminal records reject misplaced malformed and incompatible ownership channels" {
+    try testTerminalRecords();
 }

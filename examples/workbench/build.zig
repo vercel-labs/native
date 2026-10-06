@@ -14,6 +14,16 @@ pub fn build(b: *std.Build) void {
         .terminal_sessions = true,
     });
 
+    const reference_mod = b.createModule(.{
+        .root_source_file = dep.path("tests/ts-core/workbench_reference.zig"),
+        .target = artifacts.tests.root_module.resolved_target,
+        .optimize = artifacts.tests.root_module.optimize orelse .Debug,
+    });
+    reference_mod.addImport("native_sdk", artifacts.tests.root_module.import_table.get("native_sdk").?);
+    reference_mod.addImport("runner", artifacts.tests.root_module.import_table.get("runner").?);
+    const reference_tests = b.addTest(.{ .root_module = reference_mod, .use_llvm = if (artifacts.tests.root_module.resolved_target.?.result.cpu.arch == .x86_64) true else null });
+    b.top_level_steps.get("test").?.step.dependOn(&b.addRunArtifact(reference_tests).step);
+
     // The toolkit's own terminal-session store tests run HERE, because
     // this is a build that WIRES the emulator: the toolkit package pins
     // none, so under its own `zig build test` those cases skip. Zig only

@@ -63,6 +63,27 @@ export interface WebViewPane {
   readonly reloadToken: number;
 }
 
+/// Exact decimal reload token for applications retaining all u64 states.
+/// The host accepts ASCII digits in 0..18446744073709551615, without rounding.
+export interface ExactWebViewPane {
+  readonly label: Uint8Array;
+  readonly anchor: Uint8Array | null;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly url: Uint8Array;
+  readonly reloadToken: Uint8Array;
+}
+
+/// Runtime-owned terminal view state, echoed by on-terminal.
+export interface TerminalState {
+  readonly scrollback: number;
+  readonly history: number;
+  readonly cols: number;
+  readonly rows: number;
+}
+
 /// The stock theme axes a TypeScript core may derive from committed model
 /// state. Omit `pack`/`accent` to inherit app.zon; omit `colorScheme` (or
 /// return `"system"`) to follow the OS. High contrast and reduced motion

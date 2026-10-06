@@ -1538,8 +1538,8 @@ export class SubsetChecker {
     if (helper === undefined || fields.map(candidate => candidate.tsName).sort().join(",") !== "anchor,height,label,reloadToken,url,width,x,y" ||
         field("label")?.k !== "bytes" || field("url")?.k !== "bytes" ||
         anchor?.k !== "optional" || anchor.inner.k !== "bytes" ||
-        !["x", "y", "width", "height", "reloadToken"].every(numeric)) {
-      this.report("NS1033", "`webPanes` must be a single-Model helper returning `readonly WebViewPane[]`; import WebViewPane from `@native-sdk/core/events`.", decl.type ?? decl);
+        !["x", "y", "width", "height"].every(numeric) || !(numeric("reloadToken") || field("reloadToken")?.k === "bytes")) {
+      this.report("NS1033", "`webPanes` must be a single-Model helper returning `readonly WebViewPane[]` or `readonly ExactWebViewPane[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
     }
   }
 

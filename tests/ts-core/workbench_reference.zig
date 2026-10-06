@@ -221,7 +221,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
 
 // ------------------------------------------------------------------- view
 
-pub const workbench_markup = @embedFile("workbench.native");
+pub const workbench_markup = @embedFile("workbench_reference.native");
 pub const CompiledWorkbenchView = canvas.CompiledMarkupView(Model, Msg, workbench_markup);
 
 /// The web pane: snapped to the markup's anchor column every presented
@@ -302,5 +302,5 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    _ = @import("tests.zig");
+    _ = @import("workbench_reference_tests.zig");
 }

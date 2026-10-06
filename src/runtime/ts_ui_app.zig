@@ -405,6 +405,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            if (options.pty_key_resolver != null) @panic("TsUiApp owns pty_key_resolver - remove custom PTY identity wiring");
+            stamped.pty_key_resolver = Host.resolvePtyKey;
             if (comptime @hasDecl(core, "nativeWindowPolicy")) {
                 if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
                 stamped.surface_layout_policy = core.nativeWindowPolicy;
@@ -861,6 +863,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         }
 
         fn paneReloadToken(value: anytype) error{InvalidWebPane}!u64 {
+            if (comptime @TypeOf(value) == []const u8) {
+                if (value.len == 0 or value.len > 20) return error.InvalidWebPane;
+                for (value) |byte| if (byte < '0' or byte > '9') return error.InvalidWebPane;
+                return std.fmt.parseInt(u64, value, 10) catch error.InvalidWebPane;
+            }
             const number = paneNumber(value);
             if (!std.math.isFinite(number) or number < 0 or number > 9007199254740991 or @floor(number) != number) return error.InvalidWebPane;
             return @intFromFloat(number);
@@ -873,7 +880,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (raw.len > pane_strings.len) ts_ui_app_log.warn("webPanes declared {d} panes; the budget is {d}; excess panes are ignored", .{ raw.len, count });
             for (raw[0..count], 0..) |raw_pane, index| {
                 const pane = if (comptime @typeInfo(@TypeOf(raw_pane)) == .pointer) raw_pane.* else raw_pane;
-                const token = paneReloadToken(pane.reloadToken) catch @panic("TsUiApp: webPanes reloadToken must be a nonnegative safe integer");
+                const token = paneReloadToken(pane.reloadToken) catch @panic("TsUiApp: webPanes reloadToken must be a nonnegative safe integer or decimal u64 bytes");
                 const width = paneDimension(pane.width) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
                 const height = paneDimension(pane.height) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
                 out[index] = .{
@@ -888,7 +895,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         }
 
         fn validateWebPanesHelper() void {
-            const teaching = "TsUiApp: export webPanes(model: Model): readonly WebViewPane[]; import WebViewPane from @native-sdk/core/events";
+            const teaching = "TsUiApp: export webPanes(model: Model): readonly WebViewPane[] or readonly ExactWebViewPane[]; import the descriptor from @native-sdk/core/events";
             const info = @typeInfo(@TypeOf(Model.webPanes));
             if (info != .@"fn") @compileError(teaching);
             const function = info.@"fn";
@@ -901,8 +908,9 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             inline for (.{ "label", "url" }) |name| {
                 if (!@hasField(Pane, name) or @FieldType(Pane, name) != []const u8) @compileError(teaching);
             }
+            if (!@hasField(Pane, "reloadToken") or (!statusItemNumericType(@FieldType(Pane, "reloadToken")) and @FieldType(Pane, "reloadToken") != []const u8)) @compileError(teaching);
             if (!@hasField(Pane, "anchor") or @FieldType(Pane, "anchor") != ?[]const u8) @compileError(teaching);
-            inline for (.{ "x", "y", "width", "height", "reloadToken" }) |name| {
+            inline for (.{ "x", "y", "width", "height" }) |name| {
                 if (!@hasField(Pane, name) or !statusItemNumericType(@FieldType(Pane, name))) @compileError(teaching);
             }
         }
@@ -2153,4 +2161,13 @@ test "TypeScript pane boundary rejects invalid coordinates dimensions and reload
     for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -1, 0.125, 9007199254740992 }) |value|
         try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(value));
     try std.testing.expectEqual(@as(f32, 0), try Adapter.paneDimension(@as(f64, 0)));
+}
+
+test "web pane exact decimal reload tokens retain every u64 and refuse alternate spellings" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    try std.testing.expectEqual(@as(u64, 0), try Adapter.paneReloadToken(@as([]const u8, "0")));
+    try std.testing.expectEqual(@as(u64, 9007199254740992), try Adapter.paneReloadToken(@as([]const u8, "9007199254740992")));
+    try std.testing.expectEqual(std.math.maxInt(u64), try Adapter.paneReloadToken(@as([]const u8, "18446744073709551615")));
+    for ([_][]const u8{ "", "+1", "-0", "1.0", "1e2", " 1", "1\x00", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(text));
 }

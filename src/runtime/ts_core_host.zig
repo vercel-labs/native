@@ -677,6 +677,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// table.
         const PtyEntry = struct {
             used: bool = false,
+            bound: bool = false,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             event_tag: u8 = 0,
@@ -2914,7 +2915,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             }
-            const index = freePtyIndex() orelse {
+            const index = reusableBoundPty(key) orelse freePtyIndex() orelse {
                 // The bridge table mirrors the engine's pty table, whose
                 // own exhaustion answer is the same rejected exit — one
                 // vocabulary for every refusal, never a crash. Staged, so
@@ -2982,9 +2983,29 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        /// Named terminal bindings reserve their identity until this host resets.
+        /// An ended grid remains addressable; another name cannot inherit it.
+        pub fn resolvePtyKey(key: []const u8) u64 {
+            if (key.len == 0) return 0;
+            for (&ptys, 0..) |*entry, index| {
+                if ((entry.used or entry.bound) and std.mem.eql(u8, entry.wireKey(), key)) {
+                    entry.bound = true;
+                    return pty_key_base + index;
+                }
+            }
+            return 0;
+        }
+
+        fn reusableBoundPty(key: []const u8) ?usize {
+            for (&ptys, 0..) |*entry, index| {
+                if (entry.bound and !entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
         fn freePtyIndex() ?usize {
             for (&ptys, 0..) |*entry, index| {
-                if (!entry.used) return index;
+                if (!entry.used and !entry.bound) return index;
             }
             return null;
         }
@@ -4806,4 +4827,93 @@ pub fn TsCoreHost(comptime core: type) type {
             return takeBytes(bytes, at, len);
         }
     };
+}
+
+const PtyBindingTestCore = struct {
+    pub const Model = struct {};
+    const PtyState = enum { output, exit };
+    const Reason = enum { exited, signaled, cancelled, rejected, spawn_failed };
+    pub const Msg = union(enum) { event: struct { key: []const u8, state: PtyState, bytes: []const u8, code: f64, reason: Reason, signal: f64, droppedWrites: f64 } };
+    var value: Model = .{};
+    pub fn initialModel() *const Model {
+        return &value;
+    }
+    pub fn update(model: *const Model, _: Msg) *const Model {
+        return model;
+    }
+    pub fn commitModelRoot(model: *const Model) *const Model {
+        return model;
+    }
+    pub const rt = struct {
+        var arena: std.heap.ArenaAllocator = undefined;
+        pub fn frameAlloc(comptime T: type, len: usize) []T {
+            return arena.allocator().alloc(T, len) catch unreachable;
+        }
+        pub fn frameReset() void {
+            _ = arena.reset(.retain_capacity);
+        }
+        pub fn resetAll() void {
+            frameReset();
+        }
+    };
+};
+
+test "PTY name bindings own bytes and retain ended identities without restricting unbound reuse" {
+    const Core = PtyBindingTestCore;
+    const Host = TsCoreHost(Core);
+    Core.rt.arena = .init(std.testing.allocator);
+    defer Core.rt.arena.deinit();
+    var fx = Host.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    Host.boot();
+    var name = [_]u8{ 's', 'h', 255, 0 };
+    Host.issuePtySpawn(&fx, &name, 0, 80, 24, "", &.{"/bin/sh"});
+    const original = Host.resolvePtyKey(&name);
+    try std.testing.expect(original != 0);
+    @memset(&name, 'x');
+    try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey(&name));
+    try fx.feedPtyOutput(original, "owned screen");
+    const output = fx.takeMsg().?.event;
+    try std.testing.expectEqualStrings("sh\xff\x00", output.key);
+    try std.testing.expectEqualStrings("owned screen", output.bytes);
+    try fx.feedPtyExit(original, 0, 0, .exited, 0);
+    _ = fx.takeMsg();
+    try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    // Distinct unbound names repeatedly reuse an available effect slot, while
+    // the named terminal's ended screen keeps its identity through every exit.
+    for (0..8) |i| {
+        var buffer: [30]u8 = undefined;
+        const other = try std.fmt.bufPrint(&buffer, "unbound-{d}", .{i});
+        Host.issuePtySpawn(&fx, other, 0, 80, 24, "", &.{"/bin/sh"});
+        const key = fx.pendingPtyAt(0).?.key;
+        try std.testing.expect(key != original);
+        try fx.feedPtyExit(key, 0, 0, .exited, 0);
+        _ = fx.takeMsg();
+        try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    }
+    Host.issuePtySpawn(&fx, "sh\xff\x00", 0, 80, 24, "", &.{"/bin/sh"});
+    try std.testing.expectEqual(original, fx.pendingPtyAt(0).?.key);
+    Host.issuePtySpawn(&fx, "sh\xff\x00", 0, 80, 24, "", &.{"/bin/sh"});
+    const refused = fx.takeMsg().?.event;
+    try std.testing.expectEqual(Core.Reason.rejected, refused.reason);
+    try std.testing.expectEqualStrings("sh\xff\x00", refused.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+    // Bound ended grids occupy the documented budget. Exhaustion still
+    // delivers the normal one rejected terminal instead of aliasing a screen.
+    for ([_][]const u8{ "second", "third", "fourth" }) |name_key| {
+        Host.issuePtySpawn(&fx, name_key, 0, 80, 24, "", &.{"/bin/sh"});
+        const key = Host.resolvePtyKey(name_key);
+        try std.testing.expect(key != 0 and key != original);
+        try fx.feedPtyExit(key, 0, 0, .exited, 0);
+        _ = fx.takeMsg();
+    }
+    Host.issuePtySpawn(&fx, "fifth", 0, 80, 24, "", &.{"/bin/sh"});
+    const full = fx.takeMsg().?.event;
+    try std.testing.expectEqual(Core.Reason.rejected, full.reason);
+    try std.testing.expectEqualStrings("fifth", full.key);
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("fifth"));
+    Host.boot();
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("sh\xff\x00"));
 }

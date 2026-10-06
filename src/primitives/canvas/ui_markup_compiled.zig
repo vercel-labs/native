@@ -2065,14 +2065,15 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 if (expression != .binding) fail(node, markup.terminal_pty_message);
             }
             const path = comptime markup.parseAttrExpression(raw).?.binding;
-            comptime requireVariant(pathVariant(node, entries, path, true), &.{.integer}, node, markup.terminal_pty_message);
+            comptime requireVariant(pathVariant(node, entries, path, true), &.{ .integer, .string }, node, markup.terminal_pty_message);
             // Range-checked before the u64 cast (the interpreter fails
             // the same way): a signed model field can deliver a negative
             // — fail the build, never trap.
-            options.pty = switch (bindingValue(node, entries, path, ui, model, scope, true)) {
-                .integer => |int| if (int < 0) runtimeFail(u64, ui) else @intCast(int),
-                else => runtimeFail(u64, ui),
-            };
+            switch (bindingValue(node, entries, path, ui, model, scope, true)) {
+                .integer => |int| options.pty = if (int < 0) runtimeFail(u64, ui) else @intCast(int),
+                .string => |name| options.pty_name = name,
+                else => options.pty = runtimeFail(u64, ui),
+            }
         }
 
         fn colorStyleField(comptime attr_name: []const u8) ?[]const u8 {

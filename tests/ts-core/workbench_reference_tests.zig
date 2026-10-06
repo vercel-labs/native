@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const native_sdk = @import("native_sdk");
-const app = @import("main.zig");
+const app = @import("workbench_reference.zig");
 
 const canvas = native_sdk.canvas;
 const geometry = native_sdk.geometry;
