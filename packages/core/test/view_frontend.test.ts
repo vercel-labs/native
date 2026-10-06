@@ -136,11 +136,21 @@ test("hold coordination preserves cancellation, release suppression and missing-
     assert.throws(() => policy(new Uint8Array(bytes)), /press hold/);
 });
 
-test("the view frontend and portable components typecheck", () => {
-  const program = ts.createProgram(["view_frontend.ts", "view_components.ts", "runtime_policy.ts", "stream_policy.ts"].map(name => new URL(`../src/${name}`, import.meta.url).pathname), {
+test("the view frontend and compiled portable component bundle typecheck", () => {
+  const options: ts.CompilerOptions = {
     noEmit: true, strict: true, target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.NodeNext,
     types: ["node"], typeRoots: [new URL("../node_modules/@types", import.meta.url).pathname],
-  });
+  };
+  // Production joins these policies in one module before compiling the view.
+  const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "stream_policy.ts"]
+    .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
+  const host = ts.createCompilerHost(options);
+  const readSource = host.getSourceFile.bind(host);
+  host.getSourceFile = (name, languageVersion, onError, fresh) => name === bundlePath
+    ? ts.createSourceFile(name, bundle, languageVersion, true)
+    : readSource(name, languageVersion, onError, fresh);
+  const program = ts.createProgram([new URL("../src/view_frontend.ts", import.meta.url).pathname, bundlePath], options, host);
   assert.deepEqual(ts.getPreEmitDiagnostics(program).map(d => ts.flattenDiagnosticMessageText(d.messageText, "\n")), []);
 });
 
