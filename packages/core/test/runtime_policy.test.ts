@@ -760,3 +760,74 @@ test("file and clipboard packets reject malformed ownership and produce independ
   const file = packets[0]!.slice(); file[13] = 0; assert.throws(() => native_effect_policy(file));
   const clipboard = packets[1]!.slice(); clipboard[9] = 0; assert.throws(() => native_effect_policy(clipboard));
 });
+
+const bufferedBase = 0x5453465800000000n;
+function bufferedCompletion(family: number, operation: number, outcome: number, truncated: number, slot: number, dropped = 0): Uint8Array {
+  const r = new Uint8Array(88), w = new DataView(r.buffer);
+  r.set([17, family, operation, outcome, truncated]);
+  w.setBigUint64(8, bufferedBase + BigInt(slot), true); w.setBigUint64(16, bufferedBase, true);
+  for (let i = 0; i < 16; i++) r.set([1, i === slot ? dropped : 0, i * 17, 255 - i * 17], 24 + i * 4);
+  return r;
+}
+function timerCompletion(family: number, slot: number, full: number, mode: number, outcome: number, timestamp: bigint): Uint8Array {
+  const r = new Uint8Array(96), w = new DataView(r.buffer), base = family === 1 ? 0x5453544900000000n : 0x5453444c00000000n;
+  r.set([7, family, outcome]); w.setBigUint64(4, base + BigInt(slot), true);
+  w.setBigUint64(12, timestamp, true); w.setBigUint64(20, base, true);
+  for (let i = 0; i < 16; i++) r.set([1, full, mode, i * 17], 32 + i * 4);
+  return r;
+}
+
+test("buffered callback plans own every complete file fetch clipboard route and retirement", () => {
+  for (let family = 0; family < 4; family++) for (let operation = 0; operation < (family < 2 ? 9 : 1); operation++) {
+    for (let outcome = 0; outcome < (family < 2 ? 9 : family === 2 ? 7 : 4); outcome++) {
+      for (let slot = 0; slot < 16; slot++) for (const dropped of [0, 1]) for (const truncated of [0, 1]) {
+        const r = bufferedCompletion(family, operation, outcome, truncated, slot, dropped), frozen = r.slice();
+        const cut = family === 2 && truncated === 1, success = family === 1 || outcome === 0 && !cut;
+        const payload = family === 1 ? 6 : dropped ? 0 : !success ? 5 : family === 2 ? 4 : family === 3 || operation === 0 ? 2 : operation === 3 ? 3 : 1;
+        const tag = dropped || !success ? 255 - slot * 17 : slot * 17;
+        const reason = family === 1 || dropped || success ? 0 : outcome === 0 && cut ? 2 : 1;
+        assert.deepEqual([...native_effect_policy(r)], [slot, tag, payload, reason, 1, dropped, 0, 0]);
+        assert.deepEqual(r, frozen);
+      }
+    }
+  }
+});
+
+test("timer callback plans preserve every timestamp word exact decimal and completion lifecycle", () => {
+  const timestamps = [0n, 1n, 999999n, 1000001n, 4294967295n, 4294967296n, 9007199254740991n, 9007199254740992n, 9007199254740993n, 18446744073709549567n, 18446744073709551615n];
+  for (const timestamp of timestamps) for (let family = 0; family < 2; family++) for (let slot = 0; slot < 16; slot++) {
+    for (const full of [0, 1]) for (const mode of [0, 1]) for (const outcome of [0, 1]) {
+      const r = timerCompletion(family, slot, full, mode, outcome, timestamp);
+      if (outcome === 1 && (family === 1 || full === 0)) { assert.throws(() => native_timer_policy(r), /rejected/); continue; }
+      // Queued subscription callbacks historically route after retirement.
+      if (family === 1) r[32 + slot * 4] = 0;
+      const expected = new Uint8Array(40), w = new DataView(expected.buffer);
+      expected.set([slot, slot * 17, family === 0 ? full : 0, family === 0 && (full === 0 || mode === 0 || outcome === 1) ? 1 : 0, timestamp.toString().length]);
+      w.setFloat64(8, Number(timestamp) / 1000000, true); expected.set(key(timestamp.toString()), 16);
+      const frozen = r.slice(); assert.deepEqual(native_timer_policy(r), expected); assert.deepEqual(r, frozen);
+    }
+  }
+});
+
+test("callback plans reject malformed frames and exact adjacent namespaces without aliasing", () => {
+  const buffered = bufferedCompletion(0, 0, 0, 0, 0), timer = timerCompletion(0, 0, 1, 1, 0, 1n);
+  for (const [r, policy, keyAt, baseAt] of [[buffered, native_effect_policy, 8, 16], [timer, native_timer_policy, 4, 20]] as const) {
+    for (let length = 0; length < r.length; length++) assert.throws(() => policy(r.subarray(0, length)));
+    assert.throws(() => policy(new Uint8Array([...r, 0])));
+    const w = new DataView(r.buffer), base = w.getBigUint64(baseAt, true);
+    for (const value of [0n, base - 1n, base + 16n, base + 0x100000000n, 0xffffffffffffffffn]) {
+      w.setBigUint64(keyAt, value, true); assert.throws(() => policy(r), /namespace|table/);
+    }
+    w.setBigUint64(keyAt, base, true);
+    const envelope = new Uint8Array(r.length + 10); envelope.set(r, 5);
+    assert.deepEqual(policy(envelope.subarray(5, 5 + r.length)), policy(r));
+  }
+  for (const at of [1, 2, 3, 4, 5, 6, 7, 24, 25]) {
+    const r = buffered.slice(); r[at] = 255; assert.throws(() => native_effect_policy(r));
+  }
+  for (const at of [1, 2, 3, 28, 29, 30, 31, 32, 33, 34]) {
+    const r = timer.slice(); r[at] = 255; assert.throws(() => native_timer_policy(r));
+  }
+  buffered[24] = 0; assert.throws(() => native_effect_policy(buffered), /tracked/);
+  timer[32] = 0; assert.throws(() => native_timer_policy(timer), /armed/);
+});

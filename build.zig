@@ -1373,6 +1373,9 @@ pub fn build(b: *std.Build) void {
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
         const file_reference_files = b.addWriteFiles();
+        const callback_reference_files = b.addWriteFiles();
+        ts_core_artifacts.feed_reader.root_module.addImport("callback_policy_reference", b.createModule(.{ .root_source_file = callback_reference_files.addCopyFile(b.path("src/runtime/callback_policy_test_reference.zig"), "callback_policy_reference.zig"), .target = target, .optimize = optimize }));
+        b.step("test-ts-callback-policy", "Compare compiled buffered and timer completion policy with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-callback-policy-tests", &.{"compiled callback coordination"})).step);
         ts_core_artifacts.feed_reader.root_module.addImport("file_policy_reference", b.createModule(.{ .root_source_file = file_reference_files.addCopyFile(b.path("src/runtime/file_policy_test_reference.zig"), "file_policy_reference.zig"), .target = target, .optimize = optimize }));
         b.step("test-ts-file-policy", "Compare compiled file stream and clipboard coordination with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-file-policy-tests", &.{"compiled file coordination"})).step);
         const request_reference_files = b.addWriteFiles();
@@ -2420,6 +2423,7 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host_tests.test.media host consumes",
         "runtime.ts_core_host_tests.test.request host consumes",
         "runtime.ts_core_host_tests.test.file host consumes",
+        "runtime.ts_core_host_tests.test.callback host consumes",
     }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",

@@ -100,6 +100,92 @@ function themeHexNibble(byte: number): number {
   return -1;
 }
 
+/** An engine identity remains two exact words. Only a bounded table offset
+ * becomes a number; adjacent namespaces and max-u64 must never alias a slot.
+ */
+function completionSlot(request: Uint8Array, keyAt: number, baseAt: number): number {
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const keyLower = wire.getUint32(keyAt, true), keyUpper = wire.getUint32(keyAt + 4, true);
+  const baseLower = wire.getUint32(baseAt, true), baseUpper = wire.getUint32(baseAt + 4, true);
+  if (keyUpper < baseUpper || keyUpper === baseUpper && keyLower < baseLower)
+    throw new Error("completion outside key namespace");
+  const difference = keyLower - baseLower;
+  const upper = keyUpper - baseUpper - (difference < 0 ? 1 : 0);
+  const slot = difference < 0 ? difference + 4294967296 : difference;
+  if (upper !== 0 || slot >= 16) throw new Error("completion outside owner table");
+  return slot;
+}
+
+/** Buffered callbacks (17): legacy file, complete file, buffered fetch and
+ * clipboard read. A 24-byte header carries family, operation, outcome,
+ * truncation and exact key/base words; sixteen records hold used/dropped and
+ * the two routes. The eight-byte plan owns slot, route, payload, reason,
+ * retirement and silent-drop decisions. Native copies borrowed payloads.
+ */
+function bufferedCompletionPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 88 || request[1]! > 3 || request[4]! > 1 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    throw new Error("invalid buffered completion header");
+  const family = request[1]!, operation = request[2]!, outcome = request[3]!;
+  if (family <= 1 ? operation > 8 || outcome > 8 : operation !== 0 || outcome > (family === 2 ? 6 : 3))
+    throw new Error("invalid buffered completion enum");
+  for (let at = 24; at < 88; at += 4)
+    if (request[at]! > 1 || request[at + 1]! > 1) throw new Error("invalid buffered completion slot");
+  const slot = completionSlot(request, 8, 16), owner = 24 + slot * 4;
+  if (request[owner] !== 1) throw new Error("buffered completion owner is not tracked");
+  const result = new Uint8Array(8);
+  result[0] = slot; result[4] = 1;
+  const dropped = request[owner + 1] === 1;
+  if (family === 1) {
+    result[1] = request[owner + (dropped ? 3 : 2)]!;
+    result[2] = 6; result[5] = dropped ? 1 : 0;
+    return result;
+  }
+  if (dropped) { result[1] = request[owner + 3]!; result[5] = 1; return result; }
+  const cut = family === 2 && request[4] === 1;
+  const success = outcome === 0 && !cut;
+  result[1] = request[owner + (success ? 2 : 3)]!;
+  result[2] = success ? family === 2 ? 4 : family === 3 || operation === 0 ? 2 : operation === 3 ? 3 : 1 : 5;
+  result[3] = success ? 0 : outcome === 0 && cut ? 2 : 1;
+  return result;
+}
+
+/** Timer callbacks (7): delay or subscription, outcome, exact key/timestamp/
+ * base words, then sixteen used/full-result/mode/route records. The complete
+ * 40-byte plan returns slot, route, payload, retirement, exact decimal
+ * timestamp and the legacy fractional-millisecond value. Subscription fires
+ * intentionally retain the old queued-fire behavior for an unused slot.
+ */
+function timerCompletionPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 96 || request[1]! > 1 || request[2]! > 1 || request[3] !== 0)
+    throw new Error("invalid timer completion header");
+  for (let i = 28; i < 32; i++) if (request[i] !== 0) throw new Error("invalid timer completion reserved byte");
+  for (let at = 32; at < 96; at += 4)
+    if (request[at]! > 1 || request[at + 1]! > 1 || request[at + 2]! > 1) throw new Error("invalid timer completion slot");
+  const subscription = request[1] === 1, rejected = request[2] === 1;
+  if (subscription && rejected) throw new Error("platform rejected subscription timer");
+  const slot = completionSlot(request, 4, 20), owner = 32 + slot * 4;
+  if (!subscription && request[owner] !== 1) throw new Error("delay completion owner is not armed");
+  const full = !subscription && request[owner + 1] === 1;
+  if (!subscription && !full && rejected) throw new Error("platform rejected legacy delay");
+  const result = new Uint8Array(40), wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  result[0] = slot; result[1] = request[owner + 3]!; result[2] = full ? 1 : 0;
+  result[3] = !subscription && (!full || request[owner + 2] === 0 || rejected) ? 1 : 0;
+  let lower = wire.getUint32(12, true), upper = wire.getUint32(16, true);
+  new DataView(result.buffer).setFloat64(8, (upper * 4294967296 + lower) / 1000000, true);
+  const reversed = new Uint8Array(20);
+  let length = 0;
+  do {
+    const quotientUpper = Math.floor(upper / 10);
+    const combined = (upper - quotientUpper * 10) * 4294967296 + lower;
+    const quotientLower = Math.floor(combined / 10);
+    reversed[length++] = 48 + combined - quotientLower * 10;
+    upper = quotientUpper; lower = quotientLower;
+  } while (upper !== 0 || lower !== 0);
+  result[4] = length;
+  for (let i = 0; i < length; i++) result[16 + i] = reversed[length - i - 1]!;
+  return result;
+}
+
 /** Window set reconciliation over ordered native-owned slots. Operation 0
  * selects the first stale slot; the caller removes it (swapping the last slot)
  * and asks again before creating anything. Operation 1 handles one descriptor
@@ -184,6 +270,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
  */
 
 export function native_timer_policy(request: Uint8Array): Uint8Array {
+  if (request[0] === 7) return timerCompletionPolicy(request);
   if (request[0] === 2 || request[0] === 3 || request[0] === 6) return delayDeclaration(request);
   if (request[0] === 4) {
     if (request.length !== 20 || request[1]! >= 16) throw new Error("invalid delay completion request");
@@ -385,7 +472,8 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 16) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 17) throw new Error("invalid effect policy request");
+  if (request[0] === 17) return bufferedCompletionPolicy(request);
   if (request[0] === 15) return fileStreamPolicy(request);
   if (request[0] === 16) return clipboardWritePolicy(request);
   if (request[0] === 11) return requestCoordinationPolicy(request);

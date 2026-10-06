@@ -9988,3 +9988,82 @@ test "compiled file coordination clipboard complete routes capacity collisions a
     };
     try std.testing.expectEqual(@as(usize, 5440), comparisons);
 }
+
+test "compiled callback coordination matches complete buffered native routes and owned plans" {
+    const reference = @import("callback_policy_reference");
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var count: usize = 0;
+    for (0..4) |family| {
+        const operations: usize = if (family < 2) 9 else 1;
+        const outcomes: usize = if (family < 2) 9 else if (family == 2) 7 else 4;
+        for (0..operations) |operation| for (0..outcomes) |outcome| for (0..16) |slot| for (0..2) |dropped| for (0..2) |truncated| {
+            var request: [88]u8 = @splat(0);
+            request[0..5].* = .{ 17, @intCast(family), @intCast(operation), @intCast(outcome), @intCast(truncated) };
+            std.mem.writeInt(u64, request[8..16], 0x5453_4658_0000_0000 + slot, .little);
+            std.mem.writeInt(u64, request[16..24], 0x5453_4658_0000_0000, .little);
+            for (0..16) |owner| request[24 + owner * 4 ..][0..4].* = .{ 1, if (owner == slot) @intCast(dropped) else 0, @intCast(owner * 17), @intCast(255 - owner * 17) };
+            const frozen = request;
+            var actual: [8]u8 = undefined;
+            var expected: [8]u8 = undefined;
+            try std.testing.expectEqual(expected.len, reference.plan(&request, &expected));
+            try std.testing.expectEqual(actual.len, core.nativeEffectPolicy(&request, &actual));
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+            try std.testing.expectEqualSlices(u8, &frozen, &request);
+            if (count == 0) try std.testing.expectEqualSlices(u8, saved, borrowed);
+            const owned = actual;
+            core.rt.frameReset();
+            try std.testing.expectEqualSlices(u8, &owned, &actual);
+            count += 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 11072), count);
+}
+
+test "compiled callback coordination preserves complete timer timestamps and retirement against native" {
+    const reference = @import("callback_policy_reference");
+    var timestamps: std.ArrayList(u64) = .empty;
+    defer timestamps.deinit(std.testing.allocator);
+    try timestamps.appendSlice(std.testing.allocator, &.{ 0, 1, 999_999, 1_000_001, 0xffff_ffff, 0x1_0000_0000, 9_007_199_254_740_991, 9_007_199_254_740_992, 9_007_199_254_740_993, 18_446_744_073_709_549_567, std.math.maxInt(u64) });
+    for (0..64) |bit| {
+        const value = @as(u64, 1) << @intCast(bit);
+        try timestamps.appendSlice(std.testing.allocator, &.{ value - 1, value, value + 1 });
+    }
+    var state: u64 = 0x9e37_79b9_7f4a_7c15;
+    for (0..64) |_| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        try timestamps.append(std.testing.allocator, state);
+    }
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var count: usize = 0;
+    for (timestamps.items) |timestamp| for (0..2) |family| for (0..16) |slot| for (0..2) |full| for (0..2) |mode| for (0..2) |outcome| {
+        if (outcome == 1 and (family == 1 or full == 0)) continue;
+        const base: u64 = if (family == 1) 0x5453_5449_0000_0000 else 0x5453_444c_0000_0000;
+        var request: [96]u8 = @splat(0);
+        request[0..3].* = .{ 7, @intCast(family), @intCast(outcome) };
+        std.mem.writeInt(u64, request[4..12], base + slot, .little);
+        std.mem.writeInt(u64, request[12..20], timestamp, .little);
+        std.mem.writeInt(u64, request[20..28], base, .little);
+        for (0..16) |owner| request[32 + owner * 4 ..][0..4].* = .{ @intFromBool(family == 0 or owner != slot), @intCast(full), @intCast(mode), @intCast(owner * 17) };
+        const frozen = request;
+        var actual: [40]u8 = undefined;
+        var expected: [40]u8 = undefined;
+        try std.testing.expectEqual(expected.len, reference.plan(&request, &expected));
+        try std.testing.expectEqual(actual.len, core.nativeTimerPolicy(&request, &actual));
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+        try std.testing.expectEqualSlices(u8, &frozen, &request);
+        if (count == 0) try std.testing.expectEqualSlices(u8, saved, borrowed);
+        const owned = actual;
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &owned, &actual);
+        count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 42720), count);
+}

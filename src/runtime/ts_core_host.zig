@@ -4084,6 +4084,35 @@ pub fn TsCoreHost(comptime core: type) type {
         const EffectPayload = enum(u8) { swallow, void_msg, bytes, stat, response, reason };
         const EffectCompletion = struct { tag: u8, payload: EffectPayload, reason: u8 };
 
+        const BufferedFamily = enum(u8) { file, complete_file, fetch, clipboard };
+        const BufferedCompletion = struct { slot: usize, tag: u8, payload: u8, reason: u8, swallow: bool };
+
+        fn bufferedCompletion(key: u64, family: BufferedFamily, operation: u8, outcome: u8, truncated: bool) BufferedCompletion {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var request: [88]u8 = @splat(0);
+                request[0..5].* = .{ 17, @intFromEnum(family), operation, outcome, @intFromBool(truncated) };
+                std.mem.writeInt(u64, request[8..16], key, .little);
+                std.mem.writeInt(u64, request[16..24], effect_key_base, .little);
+                for (&effects_table, 0..) |*entry, slot| {
+                    request[24 + slot * 4 ..][0..4].* = .{ @intFromBool(entry.used), @intFromBool(entry.dropped), entry.ok_tag, entry.err_tag };
+                }
+                var result: [8]u8 = undefined;
+                if (core.nativeEffectPolicy(&request, &result) != result.len or result[0] >= effects_table.len or
+                    !effects_table[result[0]].used or result[2] > 6 or result[3] > 2 or result[4] > 1 or result[5] > 1 or result[6] != 0 or result[7] != 0)
+                    @panic("ts core host: invalid compiled buffered completion plan");
+                if (result[4] == 1) effects_table[result[0]].used = false;
+                return .{ .slot = result[0], .tag = result[1], .payload = result[2], .reason = result[3], .swallow = result[5] == 1 };
+            }
+            const success: EffectSuccess = switch (family) {
+                .file => if (operation == @intFromEnum(runtime_effects.EffectFileOp.read)) .bytes else if (operation == @intFromEnum(runtime_effects.EffectFileOp.stat)) .stat else .void_msg,
+                .complete_file => .void_msg,
+                .fetch => .response,
+                .clipboard => .bytes,
+            };
+            const route = takeEffectEntry(key, success, family == .complete_file or outcome == 0, truncated);
+            return .{ .slot = @intCast(key - effect_key_base), .tag = route.tag, .payload = if (family == .complete_file) 6 else @intFromEnum(route.payload), .reason = route.reason, .swallow = route.payload == .swallow };
+        }
+
         fn takeEffectEntry(key: u64, success: EffectSuccess, ok: bool, truncated: bool) EffectCompletion {
             if (key < effect_key_base)
                 @panic("ts core host: an effect terminal arrived outside the bridge's named-op key namespace");
@@ -4172,18 +4201,16 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromCapability(tag, .{ .key = key, .operation = result.op, .event = result.event, .outcome = result.outcome, .bytes = result.bytes, .totalBytes = decimalFrame(result.total), .mtimeMs = decimalFrame(result.mtime_ms), .exists = result.exists, .droppedBefore = result.dropped_before });
         }
         fn completeFileResultMsg(result: runtime_effects.EffectFileResult) Msg {
-            const index = result.key - effect_key_base;
-            if (index >= effects_table.len or !effects_table[index].used) @panic("ts core host: untracked file completion");
-            const entry = &effects_table[index];
-            const route = takeEffectEntry(result.key, .void_msg, true, false);
-            if (route.payload == .swallow) swallow_next_dispatch = true;
-            return msgFromFileResult(route.tag, result, entry.wireKey());
+            const route = bufferedCompletion(result.key, .complete_file, @intFromEnum(result.op), @intFromEnum(result.outcome), false);
+            if (route.payload != 6) @panic("ts core host: complete file received an incompatible payload plan");
+            if (route.swallow) swallow_next_dispatch = true;
+            return msgFromFileResult(route.tag, result, effects_table[route.slot].wireKey());
         }
 
         fn fileResultMsg(result: runtime_effects.EffectFileResult) Msg {
-            const success: EffectSuccess = if (result.op == .read) .bytes else if (result.op == .stat) .stat else .void_msg;
-            const route = takeEffectEntry(result.key, success, result.outcome == .ok, false);
-            return switch (route.payload) {
+            const route = bufferedCompletion(result.key, .file, @intFromEnum(result.op), @intFromEnum(result.outcome), false);
+            if (route.payload > 5) @panic("ts core host: file completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
                 .swallow => swallowedMsg(route.tag),
                 .void_msg => msgFromTagVoid(route.tag),
                 .bytes => msgFromTagBytes(route.tag, result.bytes),
@@ -4222,8 +4249,9 @@ pub fn TsCoreHost(comptime core: type) type {
         /// routes the err arm with the reason as bytes. A dropped
         /// entry's terminal routes nothing — the silent drop.
         fn fetchResultMsg(response: runtime_effects.EffectResponse) Msg {
-            const route = takeEffectEntry(response.key, .response, response.outcome == .ok, response.truncated);
-            return switch (route.payload) {
+            const route = bufferedCompletion(response.key, .fetch, 0, @intFromEnum(response.outcome), response.truncated);
+            if (route.payload > 5) @panic("ts core host: fetch completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
                 .swallow => swallowedMsg(route.tag),
                 .response => msgFromTagNumberBytes("fetch response", "{ status, body }", route.tag, response.status, response.body),
                 .reason => msgFromTagBytes(route.tag, if (route.reason == 2) "truncated" else @tagName(response.outcome)),
@@ -4355,8 +4383,9 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn clipboardResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
-            const route = takeEffectEntry(result.key, .bytes, result.outcome == .ok, false);
-            return switch (route.payload) {
+            const route = bufferedCompletion(result.key, .clipboard, 0, @intFromEnum(result.outcome), false);
+            if (route.payload > 5) @panic("ts core host: clipboard completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
                 .swallow => swallowedMsg(route.tag),
                 .bytes => msgFromTagBytes(route.tag, result.text),
                 .reason => msgFromTagBytes(route.tag, @tagName(result.outcome)),
@@ -4368,12 +4397,18 @@ pub fn TsCoreHost(comptime core: type) type {
         /// (platform one-shots self-stop) and the named arm dispatches
         /// with the fire time in fractional milliseconds.
         fn delayFireMsg(timer: runtime_effects.EffectTimer) Msg {
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                const plan = compiledTimerCompletion(timer, false);
+                const entry = &delays[plan[0]];
+                if (plan[3] == 1) entry.used = false;
+                return timerCompletionMsg(plan, timer, entry.wireKey());
+            }
             if (timer.key < delay_key_base) {
                 @panic("ts core host: a delay fired outside the bridge's delay key namespace");
             }
             const index = timer.key - delay_key_base;
             if (index >= delays.len) @panic("ts core host: a delay fired outside the bridge's delay table");
-            const completion = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayCompletion(@intCast(index)) else blk: {
+            const completion = blk: {
                 if (!delays[index].used) @panic("ts core host: a delay fired for a slot the bridge is not tracking");
                 break :blk .{ .slot = @as(usize, @intCast(index)), .tag = delays[index].tag };
             };
@@ -4647,20 +4682,33 @@ pub fn TsCoreHost(comptime core: type) type {
             return result[0];
         }
 
-        fn compiledDelayCompletion(slot: u8) struct { slot: usize, tag: u8 } {
-            var request: [20]u8 = undefined;
-            request[0] = 4;
-            request[1] = slot;
-            var used: u16 = 0;
-            for (&delays, 0..) |*entry, index| {
-                if (entry.used) used |= @as(u16, 1) << @intCast(index);
-                request[4 + index] = entry.tag;
+        fn compiledTimerCompletion(timer: runtime_effects.EffectTimer, subscription: bool) [40]u8 {
+            var request: [96]u8 = @splat(0);
+            request[0..3].* = .{ 7, @intFromBool(subscription), @intFromEnum(timer.outcome) };
+            std.mem.writeInt(u64, request[4..12], timer.key, .little);
+            std.mem.writeInt(u64, request[12..20], timer.timestamp_ns, .little);
+            std.mem.writeInt(u64, request[20..28], if (subscription) timer_key_base else delay_key_base, .little);
+            for (0..16) |slot| {
+                request[32 + slot * 4 ..][0..4].* = if (subscription)
+                    .{ @intFromBool(timers[slot].used), 0, 0, timers[slot].tag }
+                else
+                    .{ @intFromBool(delays[slot].used), @intFromBool(delays[slot].full_result), @intFromEnum(delays[slot].mode), delays[slot].tag };
             }
-            std.mem.writeInt(u16, request[2..4], used, .little);
-            var result: [2]u8 = undefined;
-            if (core.nativeTimerPolicy(&request, &result) != result.len or result[0] >= delays.len or !delays[result[0]].used)
-                @panic("ts core host: invalid compiled delay completion result");
-            return .{ .slot = result[0], .tag = result[1] };
+            var result: [40]u8 = undefined;
+            if (core.nativeTimerPolicy(&request, &result) != result.len or result[0] >= 16 or result[2] > 1 or result[3] > 1 or result[4] < 1 or result[4] > 20 or
+                result[5] != 0 or result[6] != 0 or result[7] != 0 or !std.math.isFinite(@as(f64, @bitCast(std.mem.readInt(u64, result[8..16], .little)))))
+                @panic("ts core host: invalid compiled timer completion plan");
+            for (result[16..][0..result[4]]) |digit| if (digit < '0' or digit > '9') @panic("ts core host: invalid compiled timer timestamp");
+            return result;
+        }
+
+        fn timerCompletionMsg(plan: [40]u8, timer: runtime_effects.EffectTimer, key: []const u8) Msg {
+            if (plan[2] == 0) return msgFromTagNumber(plan[1], @bitCast(std.mem.readInt(u64, plan[8..16], .little)));
+            // The copied plan is stack-owned. Its decimal bytes must survive
+            // in the dispatch frame until the app consumes the complete Msg.
+            const timestamp = core.rt.frameAlloc(u8, plan[4]);
+            @memcpy(timestamp, plan[16..][0..plan[4]]);
+            return msgFromCapability(plan[1], .{ .key = key, .timestampNs = @as([]const u8, timestamp), .outcome = timer.outcome });
         }
 
         fn timerSeenMask(seen: [runtime_effects.max_effect_timers]bool) u16 {
@@ -4809,6 +4857,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `TimerMsgFn` for every bridge timer: dispatch the slot's arm
         /// with the fire time in fractional milliseconds.
         fn timerFireMsg(timer: runtime_effects.EffectTimer) Msg {
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                const plan = compiledTimerCompletion(timer, true);
+                if (plan[3] == 1) timers[plan[0]].used = false;
+                return timerCompletionMsg(plan, timer, timers[plan[0]].wireKey());
+            }
             if (timer.outcome == .rejected) {
                 @panic("ts core host: the platform rejected a subscription timer (no timer service, or the fx timer table is full)");
             }

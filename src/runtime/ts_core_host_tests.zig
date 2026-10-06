@@ -3290,6 +3290,12 @@ const timer_policy_probe_core = struct {
 
     pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
         calls += 1;
+        if (request[0] == 7) {
+            const size = @import("callback_policy_test_reference.zig").plan(request, output);
+            output[1] = 10;
+            std.mem.writeInt(u64, output[8..16], @bitCast(@as(f64, 1234.5)), .little);
+            return size;
+        }
         if (request[0] == 1) {
             std.mem.writeInt(u16, output[0..2], if (retire) std.mem.readInt(u16, request[1..3], .little) else 0, .little);
             return 2;
@@ -3322,7 +3328,7 @@ test "timer host applies policy slot interval route and retirement without reset
     try fx.fireTimer(redirected);
     Probe.drain(fx);
     try std.testing.expectEqual(@as(i64, 0), Probe.model().ticks);
-    try std.testing.expect(Probe.model().stamp_ms >= 0);
+    try std.testing.expectEqual(@as(f64, 1234.5), Probe.model().stamp_ms);
     Probe.dispatch(fx, .toggle);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
     timer_policy_probe_core.retire = true;
@@ -3346,7 +3352,7 @@ const delay_policy_probe_core = struct {
     }
     pub const commitModelRoot = mini_core.commitModelRoot;
     var lookup_enabled: bool = false;
-    var calls = [_]usize{0} ** 5;
+    var calls = [_]usize{0} ** 8;
 
     pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
         calls[request[0]] += 1;
@@ -3365,6 +3371,11 @@ const delay_policy_probe_core = struct {
                     at += 3 + @as(usize, request[at + 1]);
                 }
                 return 1;
+            },
+            7 => {
+                const size = @import("callback_policy_test_reference.zig").plan(request, output);
+                output[1] = 9;
+                return size;
             },
             4 => {
                 output[0] = request[1];
@@ -3403,7 +3414,7 @@ test "delay host consumes compiled allocation lookup fire route and retirement" 
     try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
     try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[2]);
     try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[3]);
-    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[4]);
+    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[7]);
 }
 
 test "delay admission supplies file stream occupancy and preserves cancellation priority" {
@@ -3542,6 +3553,7 @@ test "database key lookup is owned by the compiled policy and preserves live com
 // Independent native behavior for unrelated forced-policy probes. New probes
 // override these bytes explicitly to prove that the consumer applies the plan.
 fn referenceCoordinationPolicy(request: []const u8, output: []u8) usize {
+    if (request[0] == 17) return @import("callback_policy_test_reference.zig").plan(request, output);
     if (request[0] >= 15) return @import("file_policy_test_reference.zig").plan(request, output);
     if (request[0] >= 11) return @import("request_policy_test_reference.zig").plan(request, output);
     if (request[0] == 10) {
@@ -3627,10 +3639,16 @@ const effect_policy_probe_core = struct {
     pub const subscriptions = mini_core.subscriptions;
     pub const commitModelRoot = mini_core.commitModelRoot;
     var lookup_enabled: bool = true;
-    var calls = [_]usize{0} ** 17;
+    var calls = [_]usize{0} ** 18;
 
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
         calls[request[0]] += 1;
+        if (request[0] == 17) {
+            const size = referenceCoordinationPolicy(request, output);
+            output[1] = 7; // Redirect the complete buffered route to loaded.
+            if (output[2] != 0 and output[2] != 5) output[2] = 2;
+            return size;
+        }
         if (request[0] >= 8) {
             const size = referenceCoordinationPolicy(request, output);
             if (request[0] == 12 and !lookup_enabled and output[0] == 1) {
@@ -3710,7 +3728,7 @@ test "named effect host applies policy admission slots cancellation routes and d
     try std.testing.expect(effect_policy_probe_core.calls[0] >= 5);
     try std.testing.expectEqual(@as(usize, 1), effect_policy_probe_core.calls[1]);
     try std.testing.expectEqual(@as(usize, 2), effect_policy_probe_core.calls[12]);
-    try std.testing.expectEqual(@as(usize, 4), effect_policy_probe_core.calls[2]);
+    try std.testing.expectEqual(@as(usize, 4), effect_policy_probe_core.calls[17]);
 }
 
 test "named effect admission consumes native file stream occupancy and keeps cancel priority" {
@@ -3883,7 +3901,7 @@ test "compiled named and streaming policies share key occupancy and preserve can
     try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
     try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
     try std.testing.expectEqualSlices(bool, &.{ true, false }, &mixed_effect_stream_probe_core.buffered_blocked);
-    try std.testing.expect(effect_policy_probe_core.calls[0] == 1 and effect_policy_probe_core.calls[1] >= 3 and effect_policy_probe_core.calls[2] == 1);
+    try std.testing.expect(effect_policy_probe_core.calls[0] == 1 and effect_policy_probe_core.calls[1] >= 3 and effect_policy_probe_core.calls[17] == 1);
     try std.testing.expect(stream_policy_probe_core.calls[1] > 0 and stream_policy_probe_core.calls[4] == 1);
 }
 
@@ -5019,4 +5037,111 @@ test "file host consumes fresh bridge ownership after effects teardown and reini
         try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base);
         fx.deinit();
     }
+}
+
+const callback_complete_probe = struct {
+    pub const rt = complete_storage_core.rt;
+    pub const Model = complete_storage_core.Model;
+    pub const Msg = complete_storage_core.Msg;
+    pub const UpdateResult = complete_storage_core.UpdateResult;
+    pub const initialModel = complete_storage_core.initialModel;
+    pub const commitModelRoot = complete_storage_core.commitModelRoot;
+    pub const update = complete_storage_core.update;
+    var retain: bool = false;
+    var complete_calls: usize = 0;
+    var completion_saw_live: bool = false;
+    var suppress_file: bool = false;
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 8 and request[0] != 17) return referenceCoordinationPolicy(request, output);
+        const size = @import("callback_policy_test_reference.zig").plan(request, output);
+        if (request[0] == 17) {
+            output[4] = @intFromBool(!retain);
+            output[5] = @intFromBool(suppress_file);
+        }
+        return size;
+    }
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] == 7) {
+            complete_calls += 1;
+            const size = @import("callback_policy_test_reference.zig").plan(request, output);
+            completion_saw_live = request[32 + @as(usize, output[0]) * 4] == 1;
+            output[3] = @intFromBool(!retain);
+            const timestamp = "18446744073709551615";
+            output[4] = timestamp.len;
+            @memcpy(output[16..36], timestamp);
+            return size;
+        }
+        if (request[0] == 3) {
+            // The forced owner is visible only while the copied retirement
+            // decision has left it live, regardless of the engine timer.
+            var at: usize = 2 + request[1];
+            output[0] = 255;
+            for (0..16) |slot| {
+                if (slot == 4 and request[at] == 1) output[0] = 4;
+                at += 3 + request[at + 1];
+            }
+            return 1;
+        }
+        std.debug.assert(request[0] == 6);
+        @memset(output[0..10], 0);
+        output[0] = 4;
+        output[1] = @intFromEnum(std.meta.Tag(Msg).timer);
+        std.mem.writeInt(u64, output[2..10], @bitCast(@as(f64, 1)), .little);
+        return 10;
+    }
+};
+
+test "callback host consumes complete timer decimal bytes retirement and retained owner before dispatch reset" {
+    const Probe = ts_core_host.TsCoreHost(callback_complete_probe);
+    var timer_channel = Probe.Fx.init(std.testing.allocator);
+    timer_channel.executor = .fake;
+    defer timer_channel.deinit();
+    callback_complete_probe.retain = true;
+    callback_complete_probe.complete_calls = 0;
+    callback_complete_probe.completion_saw_live = false;
+    Probe.init(&timer_channel);
+    const name = "clock\x00\xff";
+    Probe.dispatch(&timer_channel, .{ .commands = complete_storage_core.timerCommand(name, true, 1) });
+    const key = ts_core_host.delay_key_base + 4;
+    try timer_channel.fireTimer(key);
+    Probe.drain(&timer_channel);
+    try std.testing.expect(callback_complete_probe.completion_saw_live);
+    try std.testing.expectEqualDeep(complete_storage_core.Timer{ .key = name, .timestampNs = "18446744073709551615", .outcome = .fired }, Probe.model().timer.?);
+    // The policy keeps the repeating bridge entry alive for another fire.
+    callback_complete_probe.retain = false;
+    try timer_channel.fireTimer(key);
+    Probe.drain(&timer_channel);
+    try std.testing.expectEqual(@as(usize, 2), callback_complete_probe.complete_calls);
+    try std.testing.expectEqualStrings("18446744073709551615", Probe.model().timer.?.timestampNs);
+    // The engine still owns a repeating timer; the copied plan retired only
+    // the bridge. Cancel cannot rediscover that retired owner.
+    Probe.dispatch(&timer_channel, .{ .commands = mini_core.cmdCancel(name) });
+    try std.testing.expectEqual(@as(usize, 1), timer_channel.pendingTimerCount());
+}
+
+test "callback host consumes full file retirement and silent delivery while retaining complete owned metadata" {
+    const Probe = ts_core_host.TsCoreHost(callback_complete_probe);
+    var file_channel = Probe.Fx.init(std.testing.allocator);
+    file_channel.executor = .fake;
+    defer file_channel.deinit();
+    callback_complete_probe.retain = true;
+    callback_complete_probe.suppress_file = false;
+    Probe.init(&file_channel);
+    const name = "file\x00\xff";
+    Probe.dispatch(&file_channel, .{ .commands = complete_storage_core.fileCommand(name, false) });
+    const first = file_channel.pendingFileAt(0).?.key;
+    try file_channel.feedFileResultDetailed(.{ .key = first, .op = .read, .outcome = .ok, .bytes = "body\x00\xff", .total = std.math.maxInt(u64), .mtime_ms = -12345, .exists = true });
+    Probe.drain(&file_channel);
+    try std.testing.expectEqualDeep(complete_storage_core.File{ .key = name, .operation = .read, .event = .terminal, .outcome = .ok, .bytes = "body\x00\xff", .totalBytes = "18446744073709551615", .mtimeMs = "-12345", .exists = true, .droppedBefore = 0 }, Probe.model().file.?);
+    Probe.dispatch(&file_channel, .{ .commands = complete_storage_core.fileCommand(name, false) });
+    try std.testing.expectEqual(first + 1, file_channel.pendingFileAt(0).?.key);
+    callback_complete_probe.retain = false;
+    callback_complete_probe.suppress_file = true;
+    const replies = Probe.model().replies;
+    try file_channel.feedFileResultDetailed(.{ .key = first + 1, .op = .read, .outcome = .disk_full });
+    Probe.drain(&file_channel);
+    try std.testing.expectEqual(replies, Probe.model().replies);
+    try std.testing.expectEqualStrings("body\x00\xff", Probe.model().file.?.bytes);
+    try std.testing.expectEqualStrings("18446744073709551615", Probe.model().file.?.totalBytes);
+    callback_complete_probe.suppress_file = false;
 }
