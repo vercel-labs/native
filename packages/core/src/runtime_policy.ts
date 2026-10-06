@@ -385,7 +385,10 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 7) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 10) throw new Error("invalid effect policy request");
+  if (request[0] === 8) return playbackLoadPolicy(request);
+  if (request[0] === 9) return ptyCoordinationPolicy(request);
+  if (request[0] === 10) return playbackEventPolicy(request);
   if (request[0] === 6) return mediaTransportPolicy(request);
   if (request[0]! >= 3) return mediaSlotPolicy(request);
   if (request[0] === 2) {
@@ -533,6 +536,147 @@ function mediaTransportPolicy(request: Uint8Array): Uint8Array {
     out.setFloat64(4, seek === 0 ? 0 : seek, true);
   }
   else if (video && (verb === 5 || verb === 6)) out.setFloat64(4, value !== 0 ? 1 : 0, true);
+  return result;
+}
+
+/** Playback load preparation (8): family, route, flags, four reserved bytes,
+ * f64 size/surface, u32 path length, u32 URL length, then at most 1024 URL bytes.
+ * Audio intentionally truncates sizes and admits 2^53. Video preserves the
+ * native URI grammar, including opaque paths and permissive authorities.
+ * Results own admission, route, flags and exact u64 surface/size words.
+ */
+function playbackLoadPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 24 || request[1]! > 1) throw new Error("invalid playback load request");
+  for (let i = 4; i < 8; i++) if (request[i] !== 0) throw new Error("invalid playback load reserved byte");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const pathLength = wire.getUint32(16, true), urlLength = wire.getUint32(20, true);
+  if (request.length !== 24 + Math.min(urlLength, 1024)) throw new Error("invalid playback URL length");
+  const result = new Uint8Array(24), out = new DataView(result.buffer);
+  result[1] = request[2]!; result[2] = request[3]! & 7;
+  const value = wire.getFloat64(8, true);
+  if (request[1] === 0) {
+    result[0] = 1;
+    if (value >= 1 && value <= 9007199254740992) {
+      const size = Math.trunc(value);
+      out.setUint32(16, size % 4294967296, true); out.setUint32(20, Math.floor(size / 4294967296), true);
+    }
+  } else {
+    if (value >= 1 && value < 9007199254740992 && Math.floor(value) === value) {
+      out.setUint32(8, value % 4294967296, true); out.setUint32(12, Math.floor(value / 4294967296), true);
+      if ((pathLength !== 0 || urlLength !== 0) && pathLength <= 1024 && urlLength <= 1024 &&
+          (urlLength === 0 || playbackHttpUri(request.subarray(24)))) result[0] = 1;
+    }
+  }
+  return result;
+}
+
+// Match std.Uri.parse's HTTP(S) acceptance over bytes, without URL canonicalization.
+function playbackHttpUri(url: Uint8Array): boolean {
+  let colon = -1;
+  for (let i = 0; i < url.length; i++) if (url[i] === 58) { colon = i; break; }
+  if (colon !== 4 && colon !== 5) return false;
+  const scheme = [104, 116, 116, 112, 115];
+  for (let i = 0; i < colon; i++) {
+    const byte = url[i]!;
+    if ((byte >= 65 && byte <= 90 ? byte + 32 : byte) !== scheme[i]) return false;
+  }
+  const start = colon + 1;
+  if (start + 1 >= url.length || url[start] !== 47 || url[start + 1] !== 47) return true;
+  const authorityStart = start + 2;
+  let end = authorityStart;
+  while (end < url.length && url[end] !== 47 && url[end] !== 63 && url[end] !== 35) end++;
+  if (end === authorityStart) return authorityStart < url.length && url[authorityStart] === 47;
+  let host = authorityStart;
+  for (let i = authorityStart; i < end; i++) if (url[i] === 64) { host = i + 1; break; }
+  if (host === end) return true;
+  if (url[host] === 93) return false;
+  let hostEnd = end, port = -1;
+  if (url[host] === 91) {
+    let bracket = -1;
+    for (let i = authorityStart; i < end; i++) if (url[i] === 93) bracket = i;
+    if (bracket < 0) return false;
+    hostEnd = bracket + 1;
+    for (let i = authorityStart; i < end; i++) if (url[i] === 58) port = i;
+    if (port < hostEnd) port = -1;
+  } else {
+    for (let i = authorityStart; i < end; i++) if (url[i] === 58) port = i;
+    if (port < host) port = -1;
+  }
+  if (port >= 0) {
+    hostEnd = Math.min(hostEnd, port);
+    let i = port + 1, negative = false, value = 0;
+    if (i < end && (url[i] === 43 || url[i] === 45)) { negative = url[i] === 45; i++; }
+    if (i >= end || url[i] === 95 || url[end - 1] === 95) return false;
+    for (; i < end; i++) {
+      const byte = url[i]!;
+      if (byte === 95) continue;
+      if (byte < 48 || byte > 57) return false;
+      value = value * 10 + byte - 48;
+      if (value > 65535 || negative && value !== 0) return false;
+    }
+  }
+  return host < hostEnd;
+}
+
+/** PTY operation 9 plans spawn, lookup, resize, named binding and event routing
+ * (actions 0..4). Header: action/count/blocked/kind/tag/key length/reserved,
+ * opaque event u64, f64 cols/rows, then key and [used,bound,tag,key length,key]
+ * slots. Ended bound identities remain reserved. Native owns key storage,
+ * staged refusal lifetimes and the OS transport; all result bytes are owned.
+ */
+function ptyCoordinationPolicy(request: Uint8Array): Uint8Array {
+  if (request.length < 32 || request[1]! > 4 || request[2] !== 4 || request[3]! > 1 || request[7] !== 0 ||
+      (request[1] === 4 && request[4]! > 1)) throw new Error("invalid PTY coordination request");
+  const action = request[1]!, length = request[6]!;
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const result = new Uint8Array(16), out = new DataView(result.buffer); result[0] = 255; result[1] = request[5]!;
+  const cols = wire.getFloat64(16, true), rows = wire.getFloat64(24, true);
+  out.setUint16(4, cols >= 1 && cols <= 65535 && Math.floor(cols) === cols ? cols : 0, true);
+  out.setUint16(6, rows >= 1 && rows <= 65535 && Math.floor(rows) === rows ? rows : 0, true);
+  let at = 32 + length, live = -1, bound = -1, free = -1, binding = -1;
+  if (at > request.length) throw new Error("truncated PTY key");
+  const positions: number[] = [];
+  for (let slot = 0; slot < 4; slot++) {
+    if (at + 4 > request.length || request[at]! > 1 || request[at + 1]! > 1) throw new Error("invalid PTY slot");
+    const size = request[at + 3]!; positions.push(at);
+    if (at + 4 + size > request.length) throw new Error("truncated PTY slot key");
+    let equal = size === length;
+    for (let i = 0; i < size; i++) if (request[at + 4 + i] !== request[32 + i]) equal = false;
+    const used = request[at] === 1, retained = request[at + 1] === 1;
+    if (equal && length > 0 && used && live < 0) live = slot;
+    if (equal && !used && retained && bound < 0) bound = slot;
+    if (!used && !retained && free < 0) free = slot;
+    if (equal && length > 0 && (used || retained) && binding < 0) binding = slot;
+    at += 4 + size;
+  }
+  if (at !== request.length) throw new Error("trailing PTY coordination bytes");
+  let selected = -1;
+  if (action === 0) {
+    if (!(length > 0 && (live >= 0 || request[3] === 1))) selected = bound >= 0 ? bound : free;
+  } else if (action === 1) selected = live;
+  else if (action === 2) { if (out.getUint16(4, true) !== 0 && out.getUint16(6, true) !== 0) selected = live; }
+  else if (action === 3) { selected = binding; if (selected >= 0) result[3] = 1; }
+  else {
+    const slot = wire.getUint32(8, true);
+    if (wire.getUint32(12, true) !== 0x54535054 || slot >= 4 || request[positions[slot]!] !== 1)
+      throw new Error("PTY event has no tracked owner");
+    selected = slot; result[2] = request[4] === 1 ? 1 : 0;
+  }
+  if (selected >= 0) {
+    result[0] = selected;
+    if (action !== 0) result[1] = request[positions[selected]! + 2]!;
+    out.setUint32(8, selected, true); out.setUint32(12, 0x54535054, true);
+  }
+  return result;
+}
+
+/** Playback events (10) retain audio's active-entry route and video's original
+ * low-byte route even across replacement. Terminal events do not retire either.
+ */
+function playbackEventPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 12 || request[1]! > 1 || request[2]! > 1) throw new Error("invalid playback event request");
+  if (request[1] === 0 && request[2] === 0) throw new Error("audio event has no tracked owner");
+  const result = new Uint8Array(1); result[0] = request[1] === 1 ? request[4]! : request[3]!;
   return result;
 }
 

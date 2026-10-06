@@ -1293,27 +1293,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const cache_path = takeLongBytes(cmd, &at);
                         const expected_bits = takeBytes(cmd, &at, 8);
                         const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
-                        // One player is the whole surface: a new play
-                        // re-keys and re-routes the single entry in place,
-                        // exactly as the engine replaces its channel.
-                        audio_entry.used = true;
-                        audio_entry.key_len = key.len;
-                        @memcpy(audio_entry.key[0..key.len], key);
-                        audio_entry.event_tag = event_tag;
-                        fx.playAudio(.{
-                            .key = audio_key_base,
-                            .path = audio_path,
-                            .url = url,
-                            .cache_path = effectiveAudioCachePath(cache_path, url),
-                            // The wire carries the app's number; anything
-                            // that is not a representable byte count means
-                            // "unknown size" (0), the engine's own default.
-                            .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0)
-                                @intFromFloat(expected)
-                            else
-                                0,
-                            .on_event = audioEventMsg,
-                        });
+                        issueAudioPlay(fx, key, event_tag, audio_path, url, cache_path, expected);
                     },
                     // audio_ctl [op][key_len][key][verb u8][value f64 LE]
                     0x0F => {
@@ -1381,58 +1361,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const video_path = takeLongBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         const flags = takeByte(cmd, &at);
-                        const options: Fx.LoadVideoOptions = .{
-                            // The tag rides the key's low byte so every
-                            // event routes the arm of the load that
-                            // produced it (see `videoKeyForTag`).
-                            .key = videoKeyForTag(event_tag),
-                            // The wire carries the app's number; a surface
-                            // that is not an exactly-carried positive
-                            // integer (0, negatives, fractions, 2^53 and
-                            // past — the image id bound) reaches the engine
-                            // as 0, which the validation refuses with one
-                            // `.rejected` event — never silent.
-                            .surface = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface)
-                                @intFromFloat(surface)
-                            else
-                                0,
-                            .path = video_path,
-                            .url = url,
-                            .autoplay = (flags & 0x01) != 0,
-                            .loop = (flags & 0x02) != 0,
-                            .muted = (flags & 0x04) != 0,
-                            .on_event = videoEventMsg,
-                        };
-                        // A load the engine's own deterministic gates
-                        // would refuse must not commit the routing
-                        // entry: the engine keeps the CURRENT playback
-                        // on a rejected load, so re-keying first would
-                        // route the surviving stream's events and verbs
-                        // through the refused load's key and arm. Stage
-                        // the rejection to the refused arm directly
-                        // (the channel-admission precedent) and leave
-                        // the entry — and the engine — untouched.
-                        if (Fx.videoLoadRejected(options)) {
-                            fx.stageLoopMsg(msgFromTagVideo(event_tag, .{
-                                .key = videoKeyForTag(event_tag),
-                                .kind = .rejected,
-                            }));
-                        } else {
-                            // One player is the whole surface: an
-                            // accepted load re-keys and re-routes the
-                            // single entry in place, exactly as the
-                            // engine replaces its channel.
-                            video_entry.used = true;
-                            video_entry.key_len = key.len;
-                            @memcpy(video_entry.key[0..key.len], key);
-                            video_entry.event_tag = event_tag;
-                            fx.loadVideo(options);
-                            // The identity this load minted (valid even
-                            // when a synchronous refusal already reset
-                            // the channel): the entry's verbs prove
-                            // ownership against it.
-                            video_entry.token = fx.videoMintedToken();
-                        }
+                        issueVideoLoad(fx, key, event_tag, surface, video_path, url, flags);
                     },
                     // video_ctl [op][key_len][key][verb u8][value f64 LE]
                     0x18 => {
@@ -2498,6 +2427,73 @@ pub fn TsCoreHost(comptime core: type) type {
             return .{ .action = result[0], .retire = result[1] == 1, .rekey = result[2] == 1, .value = @bitCast(std.mem.readInt(u64, result[4..12], .little)) };
         }
 
+        const PlaybackLoadPlan = struct { accepted: bool, tag: u8, flags: u8, surface: u64, expected_bytes: u64 };
+
+        fn compiledPlaybackLoad(video: bool, tag: u8, flags: u8, value: f64, path: []const u8, url: []const u8) PlaybackLoadPlan {
+            var request: [24 + runtime_effects.max_effect_video_path_bytes]u8 = @splat(0);
+            request[0] = 8;
+            request[1] = @intFromBool(video);
+            request[2] = tag;
+            request[3] = flags;
+            std.mem.writeInt(u64, request[8..16], @bitCast(value), .little);
+            std.mem.writeInt(u32, request[16..20], @intCast(path.len), .little);
+            std.mem.writeInt(u32, request[20..24], @intCast(url.len), .little);
+            const size = @min(url.len, runtime_effects.max_effect_video_path_bytes);
+            @memcpy(request[24..][0..size], url[0..size]);
+            var result: [24]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 24 + size], &result) != result.len or result[0] > 1 or result[2] > 7 or
+                !std.mem.allEqual(u8, result[3..8], 0)) @panic("ts core host: invalid compiled playback load plan");
+            return .{ .accepted = result[0] == 1, .tag = result[1], .flags = result[2], .surface = std.mem.readInt(u64, result[8..16], .little), .expected_bytes = std.mem.readInt(u64, result[16..24], .little) };
+        }
+
+        fn issueAudioPlay(fx: *Fx, key: []const u8, tag: u8, path: []const u8, url: []const u8, cache: []const u8, expected: f64) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(false, tag, 0, expected, path, url)
+            else
+                .{ .accepted = true, .tag = tag, .flags = 0, .surface = 0, .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0) @intFromFloat(expected) else 0 };
+            if (!plan.accepted) @panic("ts core host: audio load cannot refuse bridge admission");
+            // Audio always commits before the capability, including failed sources.
+            audio_entry.used = true;
+            audio_entry.key_len = key.len;
+            @memcpy(audio_entry.key[0..key.len], key);
+            audio_entry.event_tag = plan.tag;
+            fx.playAudio(.{ .key = audio_key_base, .path = path, .url = url, .cache_path = effectiveAudioCachePath(cache, url), .expected_bytes = plan.expected_bytes, .on_event = audioEventMsg });
+        }
+
+        fn issueVideoLoad(fx: *Fx, key: []const u8, tag: u8, surface: f64, path: []const u8, url: []const u8, flags: u8) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(true, tag, flags, surface, path, url)
+            else blk: {
+                const id: u64 = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface) @intFromFloat(surface) else 0;
+                const options: Fx.LoadVideoOptions = .{ .key = videoKeyForTag(tag), .surface = id, .path = path, .url = url, .on_event = videoEventMsg };
+                break :blk .{ .accepted = !Fx.videoLoadRejected(options), .tag = tag, .flags = flags & 7, .surface = id, .expected_bytes = 0 };
+            };
+            const options: Fx.LoadVideoOptions = .{ .key = videoKeyForTag(plan.tag), .surface = plan.surface, .path = path, .url = url, .autoplay = (plan.flags & 1) != 0, .loop = (plan.flags & 2) != 0, .muted = (plan.flags & 4) != 0, .on_event = videoEventMsg };
+            if (!plan.accepted) {
+                // Refusal leaves the surviving player's key, route and exact token intact.
+                fx.stageLoopMsg(msgFromTagVideo(plan.tag, .{ .key = options.key, .kind = .rejected }));
+                return;
+            }
+            video_entry.used = true;
+            video_entry.key_len = key.len;
+            @memcpy(video_entry.key[0..key.len], key);
+            video_entry.event_tag = plan.tag;
+            fx.loadVideo(options);
+            video_entry.token = fx.videoMintedToken();
+        }
+
+        fn compiledPlaybackEvent(video: bool, used: bool, tag: u8, key: u64) u8 {
+            var request: [12]u8 = @splat(0);
+            request[0] = 10;
+            request[1] = @intFromBool(video);
+            request[2] = @intFromBool(used);
+            request[3] = tag;
+            std.mem.writeInt(u64, request[4..12], key, .little);
+            var result: [1]u8 = undefined;
+            if (core.nativeEffectPolicy(&request, &result) != result.len) @panic("ts core host: invalid compiled playback event route");
+            return result[0];
+        }
+
         // ------------------------------------------------- audio stream
 
         /// The audio_ctl record: drive the single playback channel,
@@ -2541,10 +2537,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// starts the next track from `completed`), and audio_ctl
         /// `stop` is the explicit close.
         fn audioEventMsg(event: runtime_effects.EffectAudio) Msg {
-            if (!audio_entry.used) {
-                @panic("ts core host: an audio event arrived with no open bridge stream");
-            }
-            return msgFromTagAudio(audio_entry.event_tag, event);
+            const tag = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackEvent(false, audio_entry.used, audio_entry.event_tag, event.key)
+            else blk: {
+                if (!audio_entry.used) @panic("ts core host: an audio event arrived with no open bridge stream");
+                break :blk audio_entry.event_tag;
+            };
+            return msgFromTagAudio(tag, event);
         }
 
         // ------------------------------------------------- video stream
@@ -2656,7 +2655,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// starts the next clip from `completed`), and video_ctl
         /// `stop` is the explicit close.
         fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
-            return msgFromTagVideo(@intCast(event.key & 0xFF), event);
+            const tag = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackEvent(true, video_entry.used, video_entry.event_tag, event.key)
+            else
+                @as(u8, @intCast(event.key & 0xFF));
+            return msgFromTagVideo(tag, event);
         }
 
         /// Issue one image load. The keyed-effect discipline here is
@@ -3118,6 +3121,44 @@ pub fn TsCoreHost(comptime core: type) type {
         /// "rejected" exit through the entry's own event arm — never
         /// silent — and a transport that could not start as one
         /// "spawn_failed".
+        const PtyPlan = struct { slot: ?usize, tag: u8, retire: bool, bind: bool, cols: u16, rows: u16, engine_key: u64 };
+
+        fn compiledPtyPlan(action: u8, key: []const u8, tag: u8, cols: f64, rows: f64, blocked: bool, event_key: u64, event_kind: u8) PtyPlan {
+            var request: [32 + max_wire_key_bytes + runtime_effects.max_effect_ptys * (4 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0] = 9;
+            request[1] = action;
+            request[2] = @intCast(ptys.len);
+            request[3] = @intFromBool(blocked);
+            request[4] = event_kind;
+            request[5] = tag;
+            request[6] = @intCast(key.len);
+            std.mem.writeInt(u64, request[8..16], event_key, .little);
+            std.mem.writeInt(u64, request[16..24], @bitCast(cols), .little);
+            std.mem.writeInt(u64, request[24..32], @bitCast(rows), .little);
+            @memcpy(request[32..][0..key.len], key);
+            var at: usize = 32 + key.len;
+            for (&ptys) |*entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.bound);
+                request[at + 2] = entry.event_tag;
+                request[at + 3] = @intCast(entry.key_len);
+                @memcpy(request[at + 4 ..][0..entry.key_len], entry.wireKey());
+                at += 4 + entry.key_len;
+            }
+            var result: [16]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[2] > 1 or result[3] > 1)
+                @panic("ts core host: invalid compiled PTY plan");
+            const slot: ?usize = if (result[0] == 255) null else result[0];
+            const engine_key = std.mem.readInt(u64, result[8..16], .little);
+            if (slot) |index| {
+                if (index >= ptys.len or engine_key != pty_key_base + index)
+                    @panic("ts core host: invalid compiled PTY identity");
+                if ((action == 0 and ptys[index].used) or ((action == 1 or action == 2 or action == 4) and !ptys[index].used))
+                    @panic("ts core host: compiled PTY plan names an invalid owner");
+            } else if (engine_key != 0) @panic("ts core host: absent compiled PTY identity is nonzero");
+            return .{ .slot = slot, .tag = result[1], .retire = result[2] == 1, .bind = result[3] == 1, .cols = std.mem.readInt(u16, result[4..6], .little), .rows = std.mem.readInt(u16, result[6..8], .little), .engine_key = engine_key };
+        }
+
         fn issuePtySpawn(
             fx: *Fx,
             key: []const u8,
@@ -3127,47 +3168,38 @@ pub fn TsCoreHost(comptime core: type) type {
             term: []const u8,
             argv: []const []const u8,
         ) void {
-            if (key.len > 0 and (findPty(key) != null or reservedWireKeyOccupied(key))) {
-                // The rejection is STAGED (delivered a later frame), so its
-                // key must be self-contained: the wire key points into this
-                // dispatch's command buffer, gone by delivery, so intern
-                // it in the engine's instance-lived staged-key store and
-                // reference that. The app's key rides the refusal,
-                // correlating it with its command — and the interned
-                // slice stays valid even committed into the model.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
-                return;
-            }
-            const index = reusableBoundPty(key) orelse freePtyIndex() orelse {
-                // The bridge table mirrors the engine's pty table, whose
-                // own exhaustion answer is the same rejected exit — one
-                // vocabulary for every refusal, never a crash. Staged, so
-                // the requested key rides the engine's interned
-                // instance-lived staged-key store, not the frame arena.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+            const plan: PtyPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPtyPlan(0, key, event_tag, cols, rows, reservedWireKeyOccupied(key), 0, 0)
+            else blk: {
+                const index = if (key.len > 0 and (findPty(key) != null or reservedWireKeyOccupied(key))) null else reusableBoundPty(key) orelse freePtyIndex();
+                break :blk .{ .slot = index, .tag = event_tag, .retire = false, .bind = false, .cols = ptyDimension(cols), .rows = ptyDimension(rows), .engine_key = if (index) |i| pty_key_base + i else 0 };
+            };
+            const index = plan.slot orelse {
+                // Refusals outlive the borrowed command frame; intern their key.
+                fx.stageLoopMsg(msgFromTagPty(plan.tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];
             entry.used = true;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.event_tag = event_tag;
+            entry.event_tag = plan.tag;
             if (term.len == 0) {
                 // Wire "" = "the engine's default TERM" — the record
                 // never bakes the default in (the fetch-timeout rule).
                 fx.ptySpawn(.{
-                    .key = pty_key_base + index,
+                    .key = plan.engine_key,
                     .argv = argv,
-                    .cols = ptyDimension(cols),
-                    .rows = ptyDimension(rows),
+                    .cols = plan.cols,
+                    .rows = plan.rows,
                     .on_event = ptyEventMsg,
                 });
             } else {
                 fx.ptySpawn(.{
-                    .key = pty_key_base + index,
+                    .key = plan.engine_key,
                     .argv = argv,
-                    .cols = ptyDimension(cols),
-                    .rows = ptyDimension(rows),
+                    .cols = plan.cols,
+                    .rows = plan.rows,
                     .term = term,
                     .on_event = ptyEventMsg,
                 });
@@ -3191,6 +3223,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the engine's clamp would otherwise shrink the child to a
         /// 1x1 the app never asked for).
         fn runPtyResize(fx: *Fx, key: []const u8, cols: f64, rows: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(2, key, 0, cols, rows, false, 0, 0);
+                if (plan.slot != null) fx.ptyResize(plan.engine_key, plan.cols, plan.rows);
+                return;
+            }
             const index = findPty(key) orelse return;
             const c = ptyDimension(cols);
             const r = ptyDimension(rows);
@@ -3199,6 +3236,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findPty(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledPtyPlan(1, key, 0, 0, 0, false, 0, 0).slot;
             if (key.len == 0) return null;
             for (&ptys, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
@@ -3209,6 +3247,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Named terminal bindings reserve their identity until this host resets.
         /// An ended grid remains addressable; another name cannot inherit it.
         pub fn resolvePtyKey(key: []const u8) u64 {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(3, key, 0, 0, 0, false, 0, 0);
+                if (plan.slot) |index| if (plan.bind) {
+                    ptys[index].bound = true;
+                };
+                return plan.engine_key;
+            }
             if (key.len == 0) return 0;
             for (&ptys, 0..) |*entry, index| {
                 if ((entry.used or entry.bound) and std.mem.eql(u8, entry.wireKey(), key)) {
@@ -3238,6 +3283,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// (freeing the wire key for a fresh session), "output"
         /// batches keep it live — the spawn stream shape.
         fn ptyEventMsg(event: runtime_effects.EffectPtyEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(4, "", 0, 0, 0, false, event.key, @intFromEnum(event.kind));
+                const entry = &ptys[plan.slot orelse @panic("ts core host: compiled PTY event has no slot")];
+                if (plan.retire) entry.used = false;
+                return msgFromTagPty(plan.tag, entry.wireKey(), false, event);
+            }
             if (event.key < pty_key_base) {
                 @panic("ts core host: a pty event arrived outside the bridge's pty key namespace");
             }

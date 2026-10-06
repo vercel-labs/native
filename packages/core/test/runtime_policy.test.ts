@@ -528,3 +528,92 @@ test("media policy rejects damaged packets before a plan and keeps input and out
 test("numeric media owners enforce the native family capacities", () => {
   for (const family of [1, 2]) assert.throws(() => native_effect_policy(mediaRequest(3, family, mediaSlots(9), 99)));
 });
+
+function playbackLoadRequest(video: boolean, value: number, pathLength: number, url: Uint8Array, tag = 255, flags = 255): Uint8Array {
+  const bytes = new Uint8Array(24 + Math.min(url.length, 1024)), data = new DataView(bytes.buffer);
+  bytes[0] = 8; bytes[1] = +video; bytes[2] = tag; bytes[3] = flags;
+  data.setFloat64(8, value, true); data.setUint32(16, pathLength, true); data.setUint32(20, url.length, true);
+  bytes.set(url.subarray(0, 1024), 24); return bytes;
+}
+
+test("playback preparation preserves distinct audio and video numeric contracts and owns all result words", () => {
+  for (const value of [NaN, -Infinity, Infinity, -1, -0, 0, 0.5, 1, 1.75, 65535, 4294967295.75, 4294967296, 9007199254740991, 9007199254740992, 9007199254740994]) {
+    for (const video of [false, true]) {
+      const req = playbackLoadRequest(video, value, 1, key(""));
+      const copy = req.slice(), result = native_effect_policy(req), data = new DataView(result.buffer);
+      assert.deepEqual(req, copy);
+      const valid = video ? value >= 1 && value < 2 ** 53 && Math.floor(value) === value : true;
+      const size = !video && value >= 1 && value <= 2 ** 53 ? Math.trunc(value) : 0;
+      assert.equal(result[0], +valid); assert.equal(result[1], 255); assert.equal(result[2], 7);
+      assert.equal(data.getBigUint64(8, true), BigInt(video && valid ? value : 0));
+      assert.equal(data.getBigUint64(16, true), BigInt(size));
+      req.fill(0); native_effect_policy(playbackLoadRequest(false, 0, 0, key("")));
+      assert.equal(data.getBigUint64(16, true), BigInt(size));
+    }
+  }
+});
+
+test("video URI admission preserves byte grammar path limits permissive authority and decimal port syntax", () => {
+  const accepted = ["http:", "HTTPS:opaque", "http://host", "http:///", "http://user@", "http://@", "http://h:+65535", "http://h:-00", "http://h:1__2", "http://[anything]junk", "http://[x]:+0", "http://h/\0\ufffd?#", "http://h?bad port"];
+  const rejected = ["", "ftp://host", "http", " http:", "http://", "http://?", "http://#", "http://]x", "http://[x", "http://h:", "http://h:-1", "http://h:65536", "http://h:_1", "http://h:1_", "http://h: 1", "http://:1"];
+  for (const url of accepted) assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 0, key(url)))[0], 1, url);
+  for (const url of rejected) assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 0, key(url)))[0], 0, url);
+  assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 1024, key("")))[0], 1);
+  assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 1025, key("")))[0], 0);
+  const url = new Uint8Array(1025).fill(255); url.set(key("http:/"));
+  assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 1, url.subarray(0, 1024)))[0], 1);
+  assert.equal(native_effect_policy(playbackLoadRequest(true, 1, 1, url))[0], 0);
+});
+
+interface PtySlot { used: boolean; bound: boolean; key: Uint8Array; tag: number }
+function ptyRequest(slots: PtySlot[], action: number, name: Uint8Array, cols = 80, rows = 24, blocked = 0, event = 0, engine = 0x5453505400000000n): Uint8Array {
+  const bytes = new Uint8Array(32 + name.length + slots.reduce((n, slot) => n + 4 + slot.key.length, 0)), wire = new DataView(bytes.buffer);
+  bytes.set([9, action, 4, blocked, event, 231, name.length, 0]); wire.setBigUint64(8, engine, true);
+  wire.setFloat64(16, cols, true); wire.setFloat64(24, rows, true); bytes.set(name, 32);
+  let at = 32 + name.length;
+  for (const slot of slots) { bytes.set([+slot.used, +slot.bound, slot.tag, slot.key.length], at); bytes.set(slot.key, at + 4); at += 4 + slot.key.length; }
+  return bytes;
+}
+
+test("PTY plans preserve all live and bound states first-match ordering opaque names and ended identities", () => {
+  const names = [key(""), key("sh"), new Uint8Array([115, 104, 0, 255]), new Uint8Array(255).fill(255)];
+  for (let state = 0; state < 256; state++) {
+    const slots = names.map((name, i) => ({ used: !!(state & (1 << (i * 2))), bound: !!(state & (2 << (i * 2))), key: name, tag: i * 63 }));
+    for (const name of [...names, key("missing")]) for (const blocked of [0, 1]) for (const action of [0, 1, 2, 3]) {
+      const equal = (s: PtySlot) => Buffer.from(s.key).equals(name);
+      const live = name.length === 0 ? -1 : slots.findIndex(s => s.used && equal(s));
+      const retained = slots.findIndex(s => s.bound && !s.used && equal(s));
+      const free = slots.findIndex(s => !s.used && !s.bound);
+      const binding = name.length === 0 ? -1 : slots.findIndex(s => (s.used || s.bound) && equal(s));
+      const expected = action === 0 ? name.length > 0 && (live >= 0 || blocked) ? -1 : retained >= 0 ? retained : free : action === 3 ? binding : live;
+      const req = ptyRequest(slots, action, name, 65535, 1, blocked), copy = req.slice(), result = native_effect_policy(req), wire = new DataView(result.buffer);
+      assert.deepEqual(req, copy); assert.equal(result[0], expected < 0 ? 255 : expected);
+      assert.equal(result[1], expected < 0 || action === 0 ? 231 : slots[expected]!.tag);
+      assert.equal(result[2], 0); assert.equal(result[3], +(action === 3 && expected >= 0));
+      assert.equal(wire.getBigUint64(8, true), expected < 0 ? 0n : 0x5453505400000000n + BigInt(expected));
+    }
+    for (let i = 0; i < 4; i++) for (const kind of [0, 1]) {
+      const req = ptyRequest(slots, 4, key(""), 0, 0, 0, kind, 0x5453505400000000n + BigInt(i));
+      if (!slots[i]!.used) assert.throws(() => native_effect_policy(req), /owner/);
+      else { const result = native_effect_policy(req); assert.deepEqual([...result.subarray(0, 4)], [i, slots[i]!.tag, kind, 0]); req.fill(0); assert.equal(result[1], slots[i]!.tag); }
+    }
+  }
+});
+
+test("PTY resize rejects inexact grids and malformed protocols fail before publishing owned plans", () => {
+  const slots = Array.from({ length: 4 }, (_, i) => ({ used: i === 0, bound: false, key: key("sh"), tag: 255 }));
+  const invalid = [NaN, Infinity, -Infinity, -0, 0, 0.99, 1.5, 65535.5, 65536];
+  for (const value of invalid) for (const cols of [true, false]) {
+    const result = native_effect_policy(ptyRequest(slots, 2, key("sh"), cols ? value : 80, cols ? 24 : value));
+    assert.equal(result[0], 255);
+  }
+  const packets = [ptyRequest(slots, 0, key("sh")), playbackLoadRequest(true, 1, 1, key("http://h")), Uint8Array.from([10, 1, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0])];
+  for (const packet of packets) {
+    for (let i = 0; i < packet.length; i++) assert.throws(() => native_effect_policy(packet.subarray(0, i)));
+    assert.throws(() => native_effect_policy(Uint8Array.from([...packet, 0])));
+  }
+  for (const engine of [0n, 0x54535053ffffffffn, 0x5453505400000004n, 0xffffffffffffffffn]) assert.throws(() => native_effect_policy(ptyRequest(slots, 4, key(""), 0, 0, 0, 0, engine)), /owner/);
+  assert.deepEqual([...native_effect_policy(packets[2]!)], [255]);
+  const audio = packets[2]!.slice(); audio[1] = 0; assert.throws(() => native_effect_policy(audio), /owner/); audio[2] = 1; audio[3] = 254;
+  assert.deepEqual([...native_effect_policy(audio)], [254]);
+});

@@ -3539,6 +3539,82 @@ test "database key lookup is owned by the compiled policy and preserves live com
 
 // Redirected slots and routes demonstrate that the native consumer applies the
 // policy's copied decisions rather than independently recomputing them.
+// Independent native behavior for unrelated forced-policy probes. New probes
+// override these bytes explicitly to prove that the consumer applies the plan.
+fn referenceCoordinationPolicy(request: []const u8, output: []u8) usize {
+    if (request[0] == 10) {
+        output[0] = if (request[1] == 1) request[4] else request[3];
+        return 1;
+    }
+    if (request[0] == 8) {
+        @memset(output[0..24], 0);
+        output[1] = request[2];
+        output[2] = request[3] & 7;
+        const value: f64 = @bitCast(std.mem.readInt(u64, request[8..16], .little));
+        if (request[1] == 0) {
+            output[0] = 1;
+            std.mem.writeInt(u64, output[16..24], if (value >= 1 and value <= 9007199254740992.0) @intFromFloat(value) else 0, .little);
+        } else {
+            const surface: u64 = if (value >= 1 and value < 9007199254740992.0 and @floor(value) == value) @intFromFloat(value) else 0;
+            std.mem.writeInt(u64, output[8..16], surface, .little);
+            const path_len = std.mem.readInt(u32, request[16..20], .little);
+            const url_len = std.mem.readInt(u32, request[20..24], .little);
+            // These probes only issue short paths. Full size/URI parity is
+            // compared directly against videoLoadRejected in the compiled suite.
+            const path = "fixture.mp4"[0..@min(path_len, "fixture.mp4".len)];
+            output[0] = @intFromBool(url_len <= 1024 and path_len <= 1024 and !Fx.videoLoadRejected(.{
+                .key = 0,
+                .surface = surface,
+                .path = path,
+                .url = request[24..],
+            }));
+        }
+        return 24;
+    }
+    std.debug.assert(request[0] == 9);
+    @memset(output[0..16], 0);
+    output[0] = 255;
+    output[1] = request[5];
+    const cols: f64 = @bitCast(std.mem.readInt(u64, request[16..24], .little));
+    const rows: f64 = @bitCast(std.mem.readInt(u64, request[24..32], .little));
+    std.mem.writeInt(u16, output[4..6], if (cols >= 1 and cols <= 65535 and @floor(cols) == cols) @intFromFloat(cols) else 0, .little);
+    std.mem.writeInt(u16, output[6..8], if (rows >= 1 and rows <= 65535 and @floor(rows) == rows) @intFromFloat(rows) else 0, .little);
+    const name = request[32..][0..request[6]];
+    var at: usize = 32 + name.len;
+    var positions: [4]usize = undefined;
+    var live: ?usize = null;
+    var bound: ?usize = null;
+    var free: ?usize = null;
+    var binding: ?usize = null;
+    for (0..4) |slot| {
+        positions[slot] = at;
+        const used = request[at] == 1;
+        const retained = request[at + 1] == 1;
+        const equal = std.mem.eql(u8, name, request[at + 4 ..][0..request[at + 3]]);
+        if (name.len > 0 and equal and used and live == null) live = slot;
+        if (equal and retained and !used and bound == null) bound = slot;
+        if (!used and !retained and free == null) free = slot;
+        if (name.len > 0 and equal and (used or retained) and binding == null) binding = slot;
+        at += 4 + request[at + 3];
+    }
+    const selected: ?usize = switch (request[1]) {
+        0 => if (name.len > 0 and (live != null or request[3] == 1)) null else bound orelse free,
+        1 => live,
+        2 => if (std.mem.readInt(u16, output[4..6], .little) != 0 and std.mem.readInt(u16, output[6..8], .little) != 0) live else null,
+        3 => binding,
+        4 => @intCast(std.mem.readInt(u64, request[8..16], .little) - ts_core_host.pty_key_base),
+        else => unreachable,
+    };
+    if (selected) |slot| {
+        output[0] = @intCast(slot);
+        if (request[1] != 0) output[1] = request[positions[slot] + 2];
+        output[2] = @intFromBool(request[1] == 4 and request[4] == 1);
+        output[3] = @intFromBool(request[1] == 3);
+        std.mem.writeInt(u64, output[8..16], ts_core_host.pty_key_base + slot, .little);
+    }
+    return 16;
+}
+
 const effect_policy_probe_core = struct {
     pub const rt = mini_core.rt;
     pub const Model = mini_core.Model;
@@ -3552,6 +3628,7 @@ const effect_policy_probe_core = struct {
     var calls = [_]usize{0} ** 3;
 
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 8) return referenceCoordinationPolicy(request, output);
         calls[request[0]] += 1;
         if (request[0] == 2) {
             const at = 5 + @as(usize, request[1]) * 4;
@@ -4267,8 +4344,12 @@ const media_policy_probe_core = struct {
     var owned_after_restart = false;
 
     pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 8) return referenceCoordinationPolicy(request, output);
         calls[request[0]] += 1;
-        if (request[0] == 1) { output[0] = 255; return 1; }
+        if (request[0] == 1) {
+            output[0] = 255;
+            return 1;
+        }
         // Allocate without resetting the borrowed command or event arena.
         @memset(rt.frameAlloc(u8, 37), 255);
         if (request[0] == 6) {
@@ -4417,4 +4498,151 @@ test "media host consumes transport suppression scalar restart rekey and scoped 
     MediaProbe.dispatch(fx, .vstop_it);
     try std.testing.expectEqualDeep(foreign, fx.videoSnapshot());
     try std.testing.expect(media_policy_probe_core.calls[6] >= 6);
+}
+
+const coordination_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var admit = true;
+    var lookup = true;
+    var bind = true;
+    var retire = true;
+    var calls = [_]usize{0} ** 11;
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 19), 173);
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        const size = referenceCoordinationPolicy(request, output);
+        if (request[0] == 8) {
+            if (request[1] == 0) std.mem.writeInt(u64, output[16..24], 1234, .little) else {
+                output[0] = @intFromBool(admit);
+                output[1] = 69;
+                output[2] = 6;
+                std.mem.writeInt(u64, output[8..16], 17, .little);
+            }
+        } else if (request[0] == 10) {
+            if (request[1] == 1) output[0] = 58;
+        } else {
+            switch (request[1]) {
+                0 => {
+                    output[0] = if (admit) 3 else 255;
+                    std.mem.writeInt(u64, output[8..16], if (admit) ts_core_host.pty_key_base + 3 else 0, .little);
+                },
+                1 => if (!lookup) {
+                    output[0] = 255;
+                    @memset(output[8..16], 0);
+                },
+                2 => {
+                    std.mem.writeInt(u16, output[4..6], 31, .little);
+                    std.mem.writeInt(u16, output[6..8], 9, .little);
+                },
+                3 => output[3] = @intFromBool(bind),
+                4 => output[2] = @intFromBool(retire and request[4] == 1),
+                else => unreachable,
+            }
+        }
+        return size;
+    }
+};
+const CoordinationProbe = ts_core_host.TsCoreHost(coordination_policy_probe_core);
+fn freshCoordinationProbe() *CoordinationProbe.Fx {
+    coordination_policy_probe_core.admit = true;
+    coordination_policy_probe_core.lookup = true;
+    coordination_policy_probe_core.bind = true;
+    coordination_policy_probe_core.retire = true;
+    coordination_policy_probe_core.calls = @splat(0);
+    const fx = freshMediaProbe();
+    CoordinationProbe.init(fx);
+    return fx;
+}
+
+test "media host consumes playback preparation route flags refusal and borrowed complete events" {
+    const fx = freshCoordinationProbe();
+    defer fx.deinit();
+    CoordinationProbe.dispatch(fx, .play_stream);
+    try std.testing.expectEqual(@as(u64, 1234), fx.pendingAudio().?.expected_bytes);
+    CoordinationProbe.dispatch(fx, .vload);
+    const original = fx.videoSnapshot();
+    try std.testing.expectEqual(@as(u64, 17), original.surface);
+    try std.testing.expect(!original.playing and original.looping and original.muted);
+    const token = fx.videoOwnerToken();
+    coordination_policy_probe_core.admit = false;
+    CoordinationProbe.dispatch(fx, .vload2);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqualDeep(original, fx.videoSnapshot());
+    try std.testing.expectEqual(token, fx.videoOwnerToken());
+    try std.testing.expectEqual(@as(i64, 1), CoordinationProbe.model().video2_events);
+    try fx.feedVideoEvent(.position, 123, 456, true, true, 1920, 1080);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqual(@as(f64, 123), CoordinationProbe.model().v_pos);
+    try std.testing.expectEqual(@as(f64, 456), CoordinationProbe.model().v_dur);
+    try std.testing.expectEqual(@as(f64, 1920), CoordinationProbe.model().v_w);
+    try std.testing.expectEqual(@as(f64, 1080), CoordinationProbe.model().v_h);
+    try std.testing.expect(CoordinationProbe.model().v_playing and CoordinationProbe.model().v_buffering);
+    try std.testing.expect(coordination_policy_probe_core.calls[8] >= 3);
+    try std.testing.expect(coordination_policy_probe_core.calls[10] >= 1);
+}
+
+test "media host consumes PTY slots dimensions lookup bindings complete payload and retirement" {
+    const fx = freshCoordinationProbe();
+    defer fx.deinit();
+    const engine = ts_core_host.pty_key_base + 3;
+    CoordinationProbe.dispatch(fx, .open_pty_default);
+    try std.testing.expectEqual(engine, fx.pendingPtyAt(0).?.key);
+    try std.testing.expectEqualStrings(@import("pty.zig").default_term, fx.pendingPtyAt(0).?.term);
+    coordination_policy_probe_core.lookup = false;
+    CoordinationProbe.dispatch(fx, .write_pty);
+    try std.testing.expectEqualStrings("", fx.ptyWrittenBytes(engine));
+    coordination_policy_probe_core.lookup = true;
+    CoordinationProbe.dispatch(fx, .write_pty);
+    try std.testing.expectEqualStrings("ls\n", fx.ptyWrittenBytes(engine));
+    CoordinationProbe.dispatch(fx, .resize_pty);
+    try std.testing.expectEqual(@as(u16, 31), fx.ptySize(engine).?.cols);
+    try std.testing.expectEqual(@as(u16, 9), fx.ptySize(engine).?.rows);
+    try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+    var bytes = [_]u8{ 255, 0, 27, 91, 109 };
+    try fx.feedPtyOutput(engine, &bytes);
+    CoordinationProbe.drain(fx);
+    @memset(&bytes, 0);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 27, 91, 109 }, CoordinationProbe.model().pty_bytes);
+    try std.testing.expectEqualStrings("shell", CoordinationProbe.model().pty_key);
+    coordination_policy_probe_core.retire = false;
+    try fx.feedPtyExit(engine, 7, 0, .exited, 13);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 7), CoordinationProbe.model().pty_code);
+    try std.testing.expectEqual(@as(f64, 13), CoordinationProbe.model().pty_dropped);
+    try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+    // A live retained entry blocks another authored spawn; forced refusal is staged.
+    coordination_policy_probe_core.admit = false;
+    CoordinationProbe.dispatch(fx, .open_pty_default);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqualStrings("shell", CoordinationProbe.model().pty_key);
+    try std.testing.expectEqual(mini_core.PtyReason.rejected, CoordinationProbe.model().pty_reason);
+    try std.testing.expect(coordination_policy_probe_core.calls[9] >= 8);
+}
+
+test "media host consumes PTY retirement while named bindings retain ended grids" {
+    for ([_]bool{ false, true }) |bound| {
+        const fx = freshCoordinationProbe();
+        defer fx.deinit();
+        const engine = ts_core_host.pty_key_base + 3;
+        CoordinationProbe.dispatch(fx, .open_pty_default);
+        coordination_policy_probe_core.bind = bound;
+        try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+        try fx.feedPtyExit(engine, 0, 0, .exited, 0);
+        CoordinationProbe.drain(fx);
+        try std.testing.expectEqual(if (bound) engine else @as(u64, 0), CoordinationProbe.resolvePtyKey("shell"));
+        CoordinationProbe.dispatch(fx, .write_pty);
+        try std.testing.expectEqualStrings("", fx.ptyWrittenBytes(engine));
+        CoordinationProbe.dispatch(fx, .open_pty_default);
+        try std.testing.expectEqual(engine, fx.pendingPtyAt(0).?.key);
+        CoordinationProbe.dispatch(fx, .kill_pty);
+        try std.testing.expect(fx.ptyKillRequested(engine));
+    }
 }

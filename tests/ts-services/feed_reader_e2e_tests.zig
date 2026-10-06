@@ -9537,3 +9537,178 @@ test "compiled media transport preserves complete actions exact key bytes owners
     };
     try std.testing.expectEqual(@as(usize, 14976), comparisons);
 }
+
+fn checkCompiledPlaybackLoad(video: bool, value: f64, path: []const u8, url: []const u8, flags: u8, tag: u8) !void {
+    var request: [1048]u8 = @splat(0);
+    request[0] = 8;
+    request[1] = @intFromBool(video);
+    request[2] = tag;
+    request[3] = flags;
+    std.mem.writeInt(u64, request[8..16], @bitCast(value), .little);
+    std.mem.writeInt(u32, request[16..20], @intCast(path.len), .little);
+    std.mem.writeInt(u32, request[20..24], @intCast(url.len), .little);
+    const size = @min(url.len, 1024);
+    @memcpy(request[24..][0..size], url[0..size]);
+    var expected: [24]u8 = @splat(0);
+    expected[1] = tag;
+    expected[2] = flags & 7;
+    if (video) {
+        const surface: u64 = if (value >= 1 and value < 9007199254740992.0 and @floor(value) == value) @intFromFloat(value) else 0;
+        const Fx = runtime_ns.Effects(u8);
+        expected[0] = @intFromBool(!Fx.videoLoadRejected(.{ .key = 0, .surface = surface, .path = path, .url = url }));
+        std.mem.writeInt(u64, expected[8..16], surface, .little);
+    } else {
+        expected[0] = 1;
+        std.mem.writeInt(u64, expected[16..24], if (value >= 1 and value <= 9007199254740992.0) @intFromFloat(value) else 0, .little);
+    }
+    const saved = request;
+    var result: [24]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeEffectPolicy(request[0 .. 24 + size], &result));
+    try std.testing.expectEqualSlices(u8, &saved, &request);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &expected, &result);
+}
+
+test "compiled media playback loads match actual native URI admission complete words flags and borrowed commands" {
+    const numbers = [_]f64{ std.math.nan(f64), -std.math.inf(f64), std.math.inf(f64), -1, -0.0, 0, 0.5, 1, 1.75, 4294967295.75, 4294967296, 9007199254740991, 9007199254740992, 9007199254740994 };
+    const urls = [_][]const u8{ "", "http:", "HTTPS:opaque", "http://host", "http:///", "http://user@", "http://@", "http://h:+65535", "http://h:-00", "http://h:1__2", "http://[anything]junk", "http://[x]:+0", "http://h/\x00\xff?#", "http://h?bad port", "ftp://host", "http", " http:", "http://", "http://?", "http://#", "http://]x", "http://[x", "http://h:", "http://h:-1", "http://h:65536", "http://h:_1", "http://h:1_", "http://h: 1", "http://:1", "http://[x]:1:2", "http://a:b@host", "http://a@b@c:123", "http://[x]]:123", "http://h:0x10", "http://h:+", "http://h:-", "http://h:00000000000000000000000001" };
+    var long: [1025]u8 = @splat(255);
+    @memcpy(long[0..6], "http:/");
+    var comparisons: usize = 0;
+    for ([_]bool{ false, true }) |video| for (numbers) |value| for (urls) |url| for ([_]u8{ 0, 7, 248, 255 }) |flags| {
+        try checkCompiledPlaybackLoad(video, value, "", url, flags, 253);
+        comparisons += 1;
+    };
+    for ([_]usize{ 0, 1, 1023, 1024, 1025 }) |length| {
+        try checkCompiledPlaybackLoad(true, 1, long[0..length], "", 7, 0);
+        comparisons += 1;
+        try checkCompiledPlaybackLoad(true, 1, "", long[0..length], 255, 255);
+        comparisons += 1;
+    }
+    // Sweep raw authority bytes through the native parser, including every
+    // non-UTF8 octet and delimiter at bracket, userinfo and port boundaries.
+    for (0..256) |byte| for ([_][]const u8{ "http://h:00", "http://[x]", "http://a@h" }) |seed| {
+        var raw: [11]u8 = undefined;
+        @memcpy(raw[0..seed.len], seed);
+        for (7..seed.len) |at| {
+            raw[at] = @intCast(byte);
+            try checkCompiledPlaybackLoad(true, 1, "path", raw[0..seed.len], 0, 127);
+            comparisons += 1;
+            raw[at] = seed[at];
+        }
+    };
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    var event: [12]u8 = @splat(0);
+    event[0] = 10;
+    event[1] = 1;
+    event[3] = 7;
+    std.mem.writeInt(u64, event[4..12], 0xffffffffffffffff, .little);
+    var route: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), core.nativeEffectPolicy(&event, &route));
+    try std.testing.expectEqual(@as(u8, 255), route[0]);
+    event[1] = 0;
+    event[2] = 1;
+    event[3] = 254;
+    try std.testing.expectEqual(@as(usize, 1), core.nativeEffectPolicy(&event, &route));
+    try std.testing.expectEqual(@as(u8, 254), route[0]);
+    try std.testing.expectEqualSlices(u8, saved, borrowed);
+    core.rt.frameReset();
+    std.debug.print("compiled playback load comparisons: {d}\n", .{comparisons});
+}
+
+const ReferencePtySlot = struct { used: bool, bound: bool, tag: u8, key: []const u8 };
+fn checkCompiledPty(slots: [4]ReferencePtySlot, action: u8, name: []const u8, cols: f64, rows: f64, blocked: bool, event_slot: ?usize, exit: bool) !void {
+    var request: [1323]u8 = @splat(0);
+    request[0] = 9;
+    request[1] = action;
+    request[2] = 4;
+    request[3] = @intFromBool(blocked);
+    request[4] = @intFromBool(exit);
+    request[5] = 231;
+    request[6] = @intCast(name.len);
+    const base: u64 = 0x5453505400000000;
+    if (event_slot) |slot| std.mem.writeInt(u64, request[8..16], base + slot, .little);
+    std.mem.writeInt(u64, request[16..24], @bitCast(cols), .little);
+    std.mem.writeInt(u64, request[24..32], @bitCast(rows), .little);
+    @memcpy(request[32..][0..name.len], name);
+    var at: usize = 32 + name.len;
+    for (slots) |entry| {
+        request[at] = @intFromBool(entry.used);
+        request[at + 1] = @intFromBool(entry.bound);
+        request[at + 2] = entry.tag;
+        request[at + 3] = @intCast(entry.key.len);
+        @memcpy(request[at + 4 ..][0..entry.key.len], entry.key);
+        at += 4 + entry.key.len;
+    }
+    const c: u16 = if (std.math.isFinite(cols) and cols >= 1 and cols <= 65535 and @floor(cols) == cols) @intFromFloat(cols) else 0;
+    const r: u16 = if (std.math.isFinite(rows) and rows >= 1 and rows <= 65535 and @floor(rows) == rows) @intFromFloat(rows) else 0;
+    var selected: ?usize = null;
+    if (action == 0) {
+        var duplicate = false;
+        if (name.len > 0) for (slots) |entry| {
+            if (entry.used and std.mem.eql(u8, entry.key, name)) duplicate = true;
+        };
+        if (!(name.len > 0 and (duplicate or blocked))) {
+            for (slots, 0..) |entry, slot| if (entry.bound and !entry.used and std.mem.eql(u8, entry.key, name)) {
+                selected = slot;
+                break;
+            };
+            if (selected == null) for (slots, 0..) |entry, slot| if (!entry.used and !entry.bound) {
+                selected = slot;
+                break;
+            };
+        }
+    } else if (action == 4) selected = event_slot else if (name.len > 0 and (action != 2 or (c != 0 and r != 0))) {
+        for (slots, 0..) |entry, slot| if ((entry.used or (action == 3 and entry.bound)) and std.mem.eql(u8, entry.key, name)) {
+            selected = slot;
+            break;
+        };
+    }
+    var expected: [16]u8 = @splat(0);
+    expected[0] = 255;
+    expected[1] = 231;
+    std.mem.writeInt(u16, expected[4..6], c, .little);
+    std.mem.writeInt(u16, expected[6..8], r, .little);
+    if (selected) |slot| {
+        expected[0] = @intCast(slot);
+        if (action != 0) expected[1] = slots[slot].tag;
+        expected[2] = @intFromBool(action == 4 and exit);
+        expected[3] = @intFromBool(action == 3);
+        std.mem.writeInt(u64, expected[8..16], base + slot, .little);
+    }
+    const saved = request;
+    var result: [16]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeEffectPolicy(request[0..at], &result));
+    try std.testing.expectEqualSlices(u8, &saved, &request);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &expected, &result);
+}
+
+test "compiled media PTY coordination matches native bindings first slot routing dimensions and full opaque identities" {
+    const keys = [_][]const u8{ "", "sh", "sh\x00\xff", &(@as([255]u8, @splat(255))) };
+    const dimensions = [_]f64{ std.math.nan(f64), -std.math.inf(f64), std.math.inf(f64), -1, -0.0, 0, 0.5, 1, 1.5, 80, 65535, 65535.5, 65536 };
+    var comparisons: usize = 0;
+    for (0..3) |pattern| for (0..256) |state| {
+        var slots: [4]ReferencePtySlot = undefined;
+        for (&slots, 0..) |*entry, i| entry.* = .{ .used = (state & (@as(usize, 1) << @intCast(i * 2))) != 0, .bound = (state & (@as(usize, 2) << @intCast(i * 2))) != 0, .tag = @intCast(i * 63), .key = keys[if (pattern == 0) i else if (pattern == 1) 2 else 0] };
+        for (keys) |name| for (0..4) |action| for ([_]bool{ false, true }) |blocked| {
+            try checkCompiledPty(slots, @intCast(action), name, 65535, 1, blocked, null, false);
+            comparisons += 1;
+        };
+        for (slots, 0..) |entry, i| if (entry.used) {
+            for ([_]bool{ false, true }) |exit| {
+                try checkCompiledPty(slots, 4, "", 0, 0, false, i, exit);
+                comparisons += 1;
+            }
+        };
+    };
+    const slots: [4]ReferencePtySlot = .{ .{ .used = true, .bound = false, .tag = 255, .key = "sh" }, .{ .used = false, .bound = true, .tag = 254, .key = "other" }, .{ .used = false, .bound = false, .tag = 253, .key = "" }, .{ .used = false, .bound = false, .tag = 252, .key = "" } };
+    for (dimensions) |cols| for (dimensions) |rows| for ([_]u8{ 0, 2 }) |action| {
+        try checkCompiledPty(slots, action, "sh", cols, rows, false, null, false);
+        comparisons += 1;
+    };
+    std.debug.print("compiled PTY complete comparisons: {d}\n", .{comparisons});
+}
