@@ -472,7 +472,8 @@ function dbPolicyLookup(request: Uint8Array, positions: DataView, keyStart: numb
  * neither mutates its borrowed input nor resets the dispatch frame.
  */
 export function native_effect_policy(request: Uint8Array): Uint8Array {
-  if (request.length < 2 || request[0]! > 18) throw new Error("invalid effect policy request");
+  if (request.length < 2 || request[0]! > 19) throw new Error("invalid effect policy request");
+  if (request[0] === 19) return appDispatchPolicy(request);
   if (request[0] === 18) return appLifecyclePolicy(request);
   if (request[0] === 17) return bufferedCompletionPolicy(request);
   if (request[0] === 15) return fileStreamPolicy(request);
@@ -2755,4 +2756,31 @@ function clipboardWritePolicy(request: Uint8Array): Uint8Array {
     result[0] = slot; result[1] = request[positions[slot]! + 1]!; result[2] = 1;
   }
   return result;
+}
+
+/** Operation 19: staged app dispatch plans. Facts are sampled only after the
+ * preceding actions complete. Plans own their bytes; queues, causal boundaries,
+ * typed messages and errors remain native-owned. Zero terminates each plan.
+ * Actions: bind, sync, apply, audio, update-fx, update, relational-flush,
+ * main, pending-query, capture/drain, video-query, secondary, hover, take-error.
+ */
+function appDispatchPolicy(request: Uint8Array): Uint8Array {
+  if (request.length !== 6 || request[1]! > 10 || request[5] !== 0)
+    throw new Error("invalid app dispatch request");
+  const stage = request[1]!, a = request[2]!, b = request[3]!, c = request[4]!;
+  if (a > (stage === 9 ? 2 : 1) || b > 1 || c !== 0 ||
+      (stage !== 5 && stage !== 8 && stage !== 9 && stage !== 10 && b !== 0))
+    throw new Error("invalid app dispatch facts");
+  const plan = new Uint8Array(16);
+  if (stage === 0) { plan[0] = 1; plan[1] = 2; plan[2] = 3; plan[3] = 4; }
+  else if (stage === 1) { plan[0] = a === 1 ? 5 : 6; plan[1] = 7; }
+  else if (stage === 2 || stage === 6) { if (a === 1) plan[0] = 8; }
+  else if (stage === 3) { if (a === 1) plan[0] = 9; }
+  else if (stage === 4) { if (a === 1) { plan[0] = 1; plan[1] = 2; plan[2] = 10; plan[3] = 4; } }
+  else if (stage === 5) { plan[0] = a === 1 ? 8 : b === 1 ? 11 : 0; }
+  else if (stage === 7) { if (a === 0) plan[0] = 12; }
+  else if (stage === 8) { if (a === 1 && b === 0) plan[0] = 13; }
+  else if (stage === 9) { if (a === 0 || (a === 2 && b === 1)) plan[0] = 13; }
+  else if (a === 0 && b === 1) plan[0] = 14;
+  return plan;
 }

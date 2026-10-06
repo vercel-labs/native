@@ -41,6 +41,7 @@ const canvas_frame = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_events = @import("canvas_widget_events.zig");
 const drag_policy = @import("canvas_drag_policy.zig");
+const dispatch_policy = @import("app_dispatch_policy.zig");
 const hover_policy = @import("canvas_hover_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
@@ -485,6 +486,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             pty_key_resolver: ?*const fn ([]const u8) u64 = null,
             name: []const u8,
             scene: app_manifest.ShellConfig,
+            /// Portable dispatch/drain scheduling. Native owns messages,
+            /// queue boundaries, errors and capability execution; plans copy.
+            app_dispatch_policy: dispatch_policy.Policy = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
             render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -1800,120 +1804,109 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// widget state is synced into the model first so `update` sees
         /// current slider values and scroll offsets.
         pub fn dispatch(self: *Self, runtime: *Runtime, window_id: platform.WindowId, msg: MsgT) anyerror!void {
-            self.bindEffectsChannel(runtime);
-            self.syncModel(runtime, self.canvas_window_id);
-            self.applyMsg(msg);
-            self.publishAudioState(runtime);
-            // Before the installing frame there is nothing to render
-            // against: canvas size and scale arrive with the first frame
-            // event, and the installing rebuild renders whatever model
-            // state accumulated here. A pre-install rebuild is discarded
-            // work at a default surface size — and appearance/chrome
-            // events land before the first frame on every launch, so it
-            // used to cost a full view build on the launch path.
-            if (!self.installed) return;
-            // Hover edges the rebuilds produce (an unmounted hovered
-            // element's leave, an adoption re-hit-test's handoff)
-            // settle at this tail for DIRECT callers — command
-            // handlers, embedders, tests — without waiting for the
-            // next platform event, and on the REBUILD-ERROR path too:
-            // a failed secondary-window rebuild must not strand the
-            // leave the main rebuild already produced. Inside a runtime
-            // event the event's own tail drains instead, and the
-            // drain's own dispatches re-enter here guarded.
-            var rebuild_error: ?anyerror = null;
-            self.rebuild(runtime, self.canvas_window_id) catch |err| {
-                rebuild_error = err;
-            };
-            if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
-                rebuild_error = err;
-            };
-            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
-                self.drainHoverMsgs(runtime) catch |err| {
-                    if (rebuild_error == null) rebuild_error = err;
-                };
+            for (self.dispatchPlan(.dispatch_begin, false, false)) |byte| {
+                switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                    .end => break,
+                    .bind => self.bindEffectsChannel(runtime),
+                    .sync => self.syncModel(runtime, self.canvas_window_id),
+                    .apply => self.applyMsg(msg),
+                    .audio => self.publishAudioState(runtime),
+                    else => @panic("unexpected dispatch preparation action"),
+                }
             }
-            if (rebuild_error) |err| return err;
-            // A Msg dispatched FROM a secondary window still rebuilt the
-            // main canvas above (one model, every window's view derives
-            // from it); `window_id` names the dispatch origin for apps
-            // that inspect it, not the rebuild target.
+            // Installation is sampled after update, as in the native loop.
+            const render = self.dispatchPlan(.dispatch_render, self.installed, false);
+            if (render[0] == 0) return;
+            var first_error: ?anyerror = null;
+            try self.executeRebuildPlan(runtime, render, &first_error);
+            try self.settleDispatch(runtime, &first_error);
             _ = window_id;
         }
 
-        /// Run `update` through whichever form the app declared; the
-        /// effects channel rides along for the `update_fx` form.
-        fn applyMsg(self: *Self, msg: MsgT) void {
-            if (self.options.update_fx) |update_fx| {
-                update_fx(&self.model, msg, &self.effects);
-            } else {
-                self.options.update.?(&self.model, msg);
-            }
-            // One update call is one complete command batch. Re-run live
-            // relational reads only after the batch has walked so several
-            // writes touching the same table still coalesce into one result.
-            self.effects.flushDbSubscriptions();
+        fn dispatchPlan(self: *Self, stage: dispatch_policy.Stage, a: bool, b: bool) dispatch_policy.Plan {
+            return dispatch_policy.plan(self.options.app_dispatch_policy, stage, @intFromBool(a), @intFromBool(b));
         }
 
-        /// Drain the effect completion queue on the loop thread: every
-        /// queued line/exit becomes a Msg through its stored constructor
-        /// and runs through `update`; one rebuild follows. Called on
-        /// `.effects_wake` (the platform marshalled a worker's `wake_fn`
-        /// nudge) and each presented frame (host-pumped embeds have no
-        /// wake delivery; their frame pump drains naturally).
+        fn selectDispatchError(self: *Self, first: *?anyerror, next: ?anyerror) void {
+            const plan = self.dispatchPlan(.error_selection, first.* != null, next != null);
+            for (plan) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .take_error => first.* = next,
+                else => @panic("unexpected dispatch error action"),
+            };
+        }
+
+        fn executeRebuildPlan(self: *Self, runtime: *Runtime, plan: dispatch_policy.Plan, first: *?anyerror) anyerror!void {
+            for (plan) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .main => {
+                    self.rebuild(runtime, self.canvas_window_id) catch |err| self.selectDispatchError(first, err);
+                    const secondary = self.dispatchPlan(.secondary, first.* != null, false);
+                    for (secondary) |action| switch (@as(dispatch_policy.Action, @enumFromInt(action))) {
+                        .end => break,
+                        .secondary => self.rebuildWindowSlots(runtime) catch |err| self.selectDispatchError(first, err),
+                        else => @panic("unexpected secondary rebuild action"),
+                    };
+                },
+                .video_query => {
+                    const changed = !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot());
+                    try self.executeRebuildPlan(runtime, self.dispatchPlan(.video_rebuild, changed, false), first);
+                },
+                else => @panic("unexpected rebuild action"),
+            };
+        }
+
+        fn settleDispatch(self: *Self, runtime: *Runtime, first: *?anyerror) anyerror!void {
+            const tail = self.dispatchPlan(.direct_tail, self.hover_msg_event_depth == 0, self.hover_msg_draining);
+            for (tail) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .hover => self.drainHoverMsgs(runtime) catch |err| self.selectDispatchError(first, err),
+                else => @panic("unexpected dispatch tail action"),
+            };
+            if (first.*) |err| return err;
+        }
+
+        /// Execute a complete command batch before flushing relational reads.
+        fn applyMsg(self: *Self, msg: MsgT) void {
+            for (self.dispatchPlan(.update, self.options.update_fx != null, false)) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .update_fx => self.options.update_fx.?(&self.model, msg, &self.effects),
+                .update => self.options.update.?(&self.model, msg),
+                .relational_flush => self.effects.flushDbSubscriptions(),
+                else => @panic("unexpected update action"),
+            };
+        }
+
+        /// Consume a captured causal boundary. Completions created by these
+        /// updates remain queued for the next pass, with native-owned identities.
         pub fn drainEffects(self: *Self, runtime: *Runtime) anyerror!void {
-            if (!self.installed) return;
-            if (!self.effects.hasPending()) return;
-            self.bindEffectsChannel(runtime);
-            self.syncModel(runtime, self.canvas_window_id);
+            const admission = self.dispatchPlan(.drain_installed, self.installed, false);
+            var pending = false;
+            for (admission) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .pending_query => pending = self.effects.hasPending(),
+                else => @panic("unexpected effect admission action"),
+            };
+            const begin = self.dispatchPlan(.drain_pending, pending, false);
+            if (begin[0] == 0) return;
             var dispatched = false;
-            // One pass consumes only completions that existed when it
-            // began: a load started by an update handler in THIS pass
-            // that finishes while the pass still runs waits for the wake
-            // its producer already nudged. That keeps the session
-            // journal's event boundaries causal — every result recorded
-            // ahead of this wake's event record answers a request from
-            // an earlier dispatch, so replay's file-order feed always
-            // finds the parked request (see Effects.DrainBoundary).
-            var boundary = self.effects.drainBoundary();
-            while (self.effects.takeMsgWithin(&boundary)) |msg| {
-                self.applyMsg(msg);
-                dispatched = true;
-            }
-            self.publishAudioState(runtime);
-            var rebuild_error: ?anyerror = null;
-            if (dispatched) {
-                self.rebuild(runtime, self.canvas_window_id) catch |err| {
-                    rebuild_error = err;
-                };
-                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
-                    rebuild_error = err;
-                };
-            } else if (self.installed and
-                !std.meta.eql(self.video_rendered_snapshot, self.effects.videoSnapshot()))
-            {
-                // A drained Msg-less video terminal (a handler-less
-                // declarative playback's synchronous failure) moved
-                // the mirrors after the last build rendered them:
-                // re-render the chrome so its controls never keep
-                // advertising a playback that is gone.
-                self.rebuild(runtime, self.canvas_window_id) catch |err| {
-                    rebuild_error = err;
-                };
-                if (rebuild_error == null) self.rebuildWindowSlots(runtime) catch |err| {
-                    rebuild_error = err;
-                };
-            }
-            // Same tail as `dispatch`, same error-path duty: effect-
-            // driven rebuilds settle the hover edges they produced
-            // (this path is also public — host-pumped embeds call it
-            // directly).
-            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) {
-                self.drainHoverMsgs(runtime) catch |err| {
-                    if (rebuild_error == null) rebuild_error = err;
-                };
-            }
-            if (rebuild_error) |err| return err;
+            for (begin) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .bind => self.bindEffectsChannel(runtime),
+                .sync => self.syncModel(runtime, self.canvas_window_id),
+                .capture_drain => {
+                    var boundary = self.effects.drainBoundary();
+                    while (self.effects.takeMsgWithin(&boundary)) |msg| {
+                        self.applyMsg(msg);
+                        dispatched = true;
+                    }
+                },
+                .audio => self.publishAudioState(runtime),
+                else => @panic("unexpected effect drain action"),
+            };
+            var first_error: ?anyerror = null;
+            try self.executeRebuildPlan(runtime, self.dispatchPlan(.drain_rebuild, dispatched, self.installed), &first_error);
+            try self.settleDispatch(runtime, &first_error);
         }
 
         /// Mirror the effects channel's audio playback state into the
@@ -4516,63 +4509,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const self: *Self = @ptrCast(@alignCast(context));
             self.hover_msg_event_depth += 1;
             defer self.hover_msg_event_depth -= 1;
-            // Hover enter/leave delivery rides the tail of runtime
-            // events: the standing chain moves during pointer routing,
-            // scroll reconciles (wheel, kinetic, drivers, keyboard),
-            // dismissals, and any rebuild the dispatches above
-            // performed — the drain seam catches them all, and replay
-            // re-runs the same events through the same seam. The drain
-            // runs on the handler's ERROR path too (the degraded-error
-            // doctrine): a failing handler must not strand edges the
-            // event already produced — a closed window's leave, a
-            // failed rebuild's prune — until some later event happens
-            // by. Mid-cycle DERIVED widget events skip the drain (see
-            // `hoverDrainsAfterEvent`): their input cycle's terminal
-            // `gpu_surface_input` dispatch drains after the cycle's
-            // pending scroll/resize/change observations were delivered,
-            // so a hover Msg's rebuild can never unmount a view whose
-            // promised observation is still queued.
+            var first_error: ?anyerror = null;
             handleRuntimeEvent(self, runtime, event_value) catch |err| {
-                if (hoverDrainsAfterEvent(event_value)) self.drainHoverMsgs(runtime) catch {};
-                return err;
+                first_error = err;
             };
-            if (hoverDrainsAfterEvent(event_value)) try self.drainHoverMsgs(runtime);
-        }
-
-        /// Whether the hover drain runs at this event's tail. Derived
-        /// widget events that only occur INSIDE a gpu-surface input
-        /// cycle defer to the cycle's terminal `gpu_surface_input`
-        /// dispatch — which always follows them, after the pending
-        /// scroll/resize/change drains. Scroll/resize/change events also
-        /// arrive standalone from the native-driver and kinetic paths;
-        /// those defer at most one frame (both paths run under an
-        /// actively pumping frame channel), which is the price of never
-        /// rebuilding mid-cycle. Dismiss events DO drain: the
-        /// automation/accessibility dismiss verb dispatches one
-        /// standalone, and a dismissal's own Msg rebuild already runs
-        /// before the cycle's pending drains, so draining here adds no
-        /// new hazard class. Everything else — commands, timers, wakes,
-        /// frames, the terminal input dispatch, native menu selections —
-        /// drains immediately.
-        fn hoverDrainsAfterEvent(event_value: Event) bool {
-            return switch (event_value) {
-                // Keyboard events usually ride an input cycle (their
-                // terminal dispatch drains); the standalone ones —
-                // accessibility selection edits, context-menu
-                // cut/paste/select-all — have no cycle and drain here.
-                .canvas_widget_keyboard => |keyboard_event| keyboard_event.standalone,
-                .canvas_widget_pointer,
-                .canvas_widget_drag,
-                .canvas_widget_file_drop,
-                .canvas_widget_context_press,
-                .canvas_widget_context_menu_request,
-                .canvas_widget_context_menu_shown,
-                .canvas_widget_scroll,
-                .canvas_widget_resize,
-                .canvas_widget_change,
-                => false,
-                else => true,
+            // Event classification describes the native input envelope; the
+            // portable policy chooses settlement, including error paths.
+            const kind: u8 = switch (event_value) {
+                .canvas_widget_keyboard => 2,
+                .canvas_widget_pointer, .canvas_widget_drag, .canvas_widget_file_drop, .canvas_widget_context_press, .canvas_widget_context_menu_request, .canvas_widget_context_menu_shown, .canvas_widget_scroll, .canvas_widget_resize, .canvas_widget_change => 1,
+                else => 0,
             };
+            const standalone = switch (event_value) {
+                .canvas_widget_keyboard => |keyboard| keyboard.standalone,
+                else => false,
+            };
+            const tail = dispatch_policy.plan(self.options.app_dispatch_policy, .event_tail, kind, @intFromBool(standalone));
+            for (tail) |byte| switch (@as(dispatch_policy.Action, @enumFromInt(byte))) {
+                .end => break,
+                .hover => self.drainHoverMsgs(runtime) catch |err| self.selectDispatchError(&first_error, err),
+                else => @panic("unexpected event tail action"),
+            };
+            if (first_error) |err| return err;
         }
 
         fn handleRuntimeEvent(self: *Self, runtime: *Runtime, event_value: Event) anyerror!void {

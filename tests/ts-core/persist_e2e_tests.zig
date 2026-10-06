@@ -460,3 +460,34 @@ test "compiled restore dispatches every complete outcome and stop flushes withou
         try std.testing.expectEqual(@as(usize, 1), host.flush_count);
     }
 }
+
+test "compiled dispatch coordination preserves complete plans and frame ownership" {
+    const reference = @import("dispatch_policy_reference");
+    defer core.rt.frameReset();
+    _ = core.initialModel();
+    const borrowed = core.bootCommand();
+    const saved = try std.testing.allocator.dupe(u8, borrowed);
+    defer std.testing.allocator.free(saved);
+    for (0..11) |stage| {
+        const count: usize = if (stage == 9) 3 else 2;
+        const second_count: usize = if (stage == 5 or stage >= 8) 2 else 1;
+        for (0..count) |a| for (0..second_count) |b| {
+            const request = [_]u8{ 19, @intCast(stage), @intCast(a), @intCast(b), 0, 0 };
+            const frozen = request;
+            const expected = reference.reference(@enumFromInt(stage), @intCast(a), @intCast(b));
+            var actual: [16]u8 = undefined;
+            try std.testing.expectEqual(actual.len, core.nativeEffectPolicy(&request, &actual));
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+            try std.testing.expectEqualSlices(u8, &frozen, &request);
+            try std.testing.expectEqualSlices(u8, saved, borrowed);
+            var unrelated: [16]u8 = undefined;
+            _ = core.nativeEffectPolicy(&.{ 19, 1, 1, 0, 0, 0 }, &unrelated);
+            try std.testing.expectEqualSlices(u8, &expected, &actual);
+        };
+    }
+    var copied: [16]u8 = undefined;
+    _ = core.nativeEffectPolicy(&.{ 19, 0, 0, 0, 0, 0 }, &copied);
+    const owned = copied;
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &owned, &copied);
+}

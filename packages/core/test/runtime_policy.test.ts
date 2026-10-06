@@ -924,3 +924,43 @@ test("callback plans reject malformed frames and exact adjacent namespaces witho
   buffered[24] = 0; assert.throws(() => native_effect_policy(buffered), /tracked/);
   timer[32] = 0; assert.throws(() => native_timer_policy(timer), /armed/);
 });
+
+const dispatch = (stage: number, a = 0, b = 0) => native_effect_policy(new Uint8Array([19, stage, a, b, 0, 0]));
+test("dispatch plans preserve causal admission, complete batch order and error precedence", () => {
+  const check = (stage: number, a: number, b: number, actions: number[]) =>
+    assert.deepEqual([...dispatch(stage, a, b)], [...actions, ...Array(16 - actions.length).fill(0)]);
+  check(0, 0, 0, [1, 2, 3, 4]);
+  for (let a = 0; a <= 1; a++) {
+    check(1, a, 0, [a ? 5 : 6, 7]);
+    check(2, a, 0, a ? [8] : []);
+    check(3, a, 0, a ? [9] : []);
+    check(4, a, 0, a ? [1, 2, 10, 4] : []);
+    check(6, a, 0, a ? [8] : []);
+    check(7, a, 0, a ? [] : [12]);
+    for (let b = 0; b <= 1; b++) {
+      check(5, a, b, a ? [8] : b ? [11] : []);
+      check(8, a, b, a && !b ? [13] : []);
+      check(10, a, b, !a && b ? [14] : []);
+    }
+  }
+  for (let kind = 0; kind <= 2; kind++) for (let standalone = 0; standalone <= 1; standalone++)
+    check(9, kind, standalone, kind === 0 || kind === 2 && standalone ? [13] : []);
+});
+test("dispatch rejects malformed packets and preserves input, output and independent calls", () => {
+  const request = new Uint8Array([19, 0, 0, 0, 0, 0]);
+  const frozen = request.slice(), first = native_effect_policy(request);
+  request[1] = 1; request[2] = 1;
+  const second = native_effect_policy(request);
+  assert.deepEqual([...first], [1, 2, 3, 4, ...Array(12).fill(0)]);
+  second.fill(99);
+  assert.deepEqual(native_effect_policy(frozen), first);
+  assert.deepEqual([...frozen], [19, 0, 0, 0, 0, 0]);
+  for (let length = 0; length < 6; length++) assert.throws(() => native_effect_policy(frozen.subarray(0, length)));
+  assert.throws(() => native_effect_policy(new Uint8Array([...frozen, 0])));
+  for (const [at, value] of [[1, 11], [2, 2], [3, 1], [4, 1], [5, 1]]) {
+    const bad = frozen.slice(); bad[at!] = value!;
+    assert.throws(() => native_effect_policy(bad));
+  }
+  assert.throws(() => dispatch(9, 3, 0));
+  assert.throws(() => dispatch(8, 0, 2));
+});

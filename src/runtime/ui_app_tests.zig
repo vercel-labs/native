@@ -8143,3 +8143,286 @@ test "status capability failures retain slots retry creates and preserve sticky 
     try state.dispatch(&harness.runtime, 1, .restore);
     try std.testing.expect(!state.applied_status_items[0].shell_unsupported and !state.applied_status_items[0].presentation_unsupported);
 }
+
+const dispatch_reference = @import("app_dispatch_policy.zig");
+const DispatchProbe = struct {
+    var stages: [128]u8 = @splat(0);
+    var count: usize = 0;
+    var suppress_render: bool = false;
+    var suppress_apply: bool = false;
+    var suppress_pending: bool = false;
+    var suppress_event: bool = false;
+    var suppress_tail: bool = false;
+    var suppress_secondary: bool = false;
+    var suppress_capture: bool = false;
+    fn reset() void {
+        count = 0;
+        suppress_render = false;
+        suppress_apply = false;
+        suppress_pending = false;
+        suppress_event = false;
+        suppress_tail = false;
+        suppress_secondary = false;
+        suppress_capture = false;
+    }
+    fn policy(request: []const u8, output: []u8) usize {
+        std.debug.assert(request.len == 6 and request[0] == 19);
+        if (count < stages.len) {
+            stages[count] = request[1];
+            count += 1;
+        }
+        var plan = dispatch_reference.reference(@enumFromInt(request[1]), request[2], request[3]);
+        if ((suppress_render and request[1] == 2) or
+            (suppress_apply and request[1] == 1) or
+            (suppress_pending and request[1] == 3) or
+            (suppress_event and request[1] == 9) or
+            (suppress_tail and request[1] == 8) or
+            (suppress_secondary and request[1] == 7)) plan = @splat(0);
+        if (suppress_capture and request[1] == 4) plan = @splat(0);
+        @memcpy(output, &plan);
+        return plan.len;
+    }
+};
+
+test "dispatch coordination consumes preparation update rendering and event plans" {
+    DispatchProbe.reset();
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(state);
+    var options = counterOptions();
+    options.app_dispatch_policy = DispatchProbe.policy;
+    state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer state.deinit();
+    // A pre-install update executes, but refuses a view build.
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try std.testing.expect(!state.installed);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2 }, DispatchProbe.stages[0..DispatchProbe.count]);
+    const app = state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_render = true;
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_apply = true;
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 2"));
+    DispatchProbe.reset();
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .window_id = 1, .name = "counter.reset" } });
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(std.mem.indexOfScalar(u8, DispatchProbe.stages[0..DispatchProbe.count], 9) != null);
+    try harness.stop(app);
+}
+
+const DrainModel = struct { count: u32 = 0, handle: effects_mod.ChannelHandle = .{} };
+const DrainMsg = union(enum) { event: effects_mod.EffectChannelEvent, unused };
+const DrainApp = ui_app_model.UiApp(DrainModel, DrainMsg);
+fn drainUpdate(model: *DrainModel, msg: DrainMsg, _: *DrainApp.Effects) void {
+    if (msg == .event and msg.event.kind == .data) {
+        model.count += 1;
+        if (model.count == 1) _ = model.handle.post("next-boundary");
+    }
+}
+fn drainView(ui: *DrainApp.Ui, model: *const DrainModel) DrainApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Drain {d}", .{model.count}));
+}
+test "dispatch coordination consumes drain admission and retains the captured causal boundary" {
+    DispatchProbe.reset();
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(DrainApp);
+    defer std.testing.allocator.destroy(state);
+    state.* = DrainApp.init(std.heap.page_allocator, .{}, .{
+        .name = "dispatch-drain",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update_fx = drainUpdate,
+        .view = drainView,
+        .app_dispatch_policy = DispatchProbe.policy,
+    });
+    defer state.deinit();
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4 }, DispatchProbe.stages[0..DispatchProbe.count]);
+    const app = state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    state.model.handle = state.effects.openChannel(.{ .key = std.math.maxInt(u64), .on_event = DrainApp.Effects.channelMsg(.event) });
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, state.model.handle.post("first"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_pending = true;
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    DispatchProbe.reset();
+    DispatchProbe.suppress_capture = true;
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    DispatchProbe.reset();
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Drain 1"));
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(!state.effects.hasPending());
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Drain 2"));
+    try harness.stop(app);
+}
+
+test "dispatch coordination consumes direct and standalone event settlement plans" {
+    for ([_]bool{ false, true }) |standalone| {
+        DispatchProbe.reset();
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const state = try std.testing.allocator.create(CaptureApp);
+        defer std.testing.allocator.destroy(state);
+        var options = captureOptions();
+        options.app_dispatch_policy = DispatchProbe.policy;
+        state.* = CaptureApp.init(std.heap.page_allocator, .{}, options);
+        defer state.deinit();
+        const app = state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        try hoverMove(harness, app, 50, 20);
+        DispatchProbe.reset();
+        if (standalone) {
+            DispatchProbe.suppress_event = true;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
+        } else {
+            DispatchProbe.suppress_tail = true;
+            try state.dispatch(&harness.runtime, 1, .hide_row);
+        }
+        try std.testing.expectEqualStrings("", state.model.leftText());
+        DispatchProbe.reset();
+        // A subsequent event completes the captured edge with its owned bytes.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "unmapped", .window_id = 1 } });
+        try std.testing.expectEqualStrings("left-after-0-churns", state.model.leftText());
+        try harness.stop(app);
+    }
+}
+
+const DispatchWindowModel = struct { count: u32 = 0, open: bool = true, fail_main: bool = false, fail_secondary: bool = false };
+const DispatchWindowMsg = union(enum) { bump, idle };
+const DispatchWindowApp = ui_app_model.UiApp(DispatchWindowModel, DispatchWindowMsg);
+var dispatch_main_builds: usize = 0;
+var dispatch_secondary_builds: usize = 0;
+fn dispatchWindowUpdate(model: *DispatchWindowModel, msg: DispatchWindowMsg) void {
+    if (msg == .bump) model.count += 1;
+}
+fn dispatchWindowView(ui: *DispatchWindowApp.Ui, model: *const DispatchWindowModel) DispatchWindowApp.Ui.Node {
+    dispatch_main_builds += 1;
+    return ui.text(.{}, ui.fmt("Main {d}", .{model.count}));
+}
+fn dispatchWindowTheme(model: *const DispatchWindowModel) DispatchWindowApp.ThemeState {
+    return if (model.fail_main) .{ .invalid_accent = "bad" } else .{};
+}
+fn dispatchWindows(model: *const DispatchWindowModel, scratch: *DispatchWindowApp.WindowsScratch) []const DispatchWindowApp.WindowDescriptor {
+    if (!model.open) return &.{};
+    scratch.windows[0] = .{ .label = "panel", .canvas_label = "panel-canvas", .title = "Panel", .width = 320, .height = 240 };
+    return scratch.windows[0..1];
+}
+fn dispatchPanelView(ui: *DispatchWindowApp.Ui, model: *const DispatchWindowModel, _: []const u8) DispatchWindowApp.Ui.Node {
+    dispatch_secondary_builds += 1;
+    if (model.fail_secondary) {
+        const nodes = ui.arena.alloc(DispatchWindowApp.Ui.Node, core.max_canvas_widget_nodes_per_view + 40) catch @panic("fixture allocation");
+        for (nodes) |*node| node.* = ui.text(.{}, "overflow");
+        return ui.column(.{}, nodes);
+    }
+    return ui.text(.{}, ui.fmt("Panel {d}", .{model.count}));
+}
+test "dispatch coordination preserves main secondary failure ordering and independent reinitialization" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    for (0..2) |_| {
+        DispatchProbe.reset();
+        dispatch_main_builds = 0;
+        dispatch_secondary_builds = 0;
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const state = try std.testing.allocator.create(DispatchWindowApp);
+        defer std.testing.allocator.destroy(state);
+        state.* = DispatchWindowApp.init(std.heap.page_allocator, .{}, .{
+            .name = "dispatch-windows",
+            .scene = counter_scene,
+            .canvas_label = canvas_label,
+            .update = dispatchWindowUpdate,
+            .view = dispatchWindowView,
+            .theme_state_fn = dispatchWindowTheme,
+            .windows_fn = dispatchWindows,
+            .window_view = dispatchPanelView,
+            .app_dispatch_policy = DispatchProbe.policy,
+        });
+        defer state.deinit();
+        const app = state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = 2,
+            .label = "panel-canvas",
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 2_000_000,
+            .nonblank = true,
+        } });
+        try state.dispatch(&harness.runtime, 2, .bump);
+        try std.testing.expect(dispatch_secondary_builds > 0);
+        const secondary_before = dispatch_secondary_builds;
+        state.model.fail_main = true;
+        try std.testing.expectError(error.InvalidThemeAccent, state.dispatch(&harness.runtime, 2, .bump));
+        try std.testing.expectEqual(secondary_before, dispatch_secondary_builds);
+        state.model.fail_main = false;
+        state.model.fail_secondary = true;
+        try std.testing.expectError(error.WidgetLayoutListFull, state.dispatch(&harness.runtime, 2, .bump));
+        try std.testing.expectEqual(secondary_before + 1, dispatch_secondary_builds);
+        DispatchProbe.suppress_secondary = true;
+        try state.dispatch(&harness.runtime, 2, .idle);
+        try std.testing.expectEqual(secondary_before + 1, dispatch_secondary_builds);
+        DispatchProbe.suppress_secondary = false;
+        state.model.fail_secondary = false;
+        try state.dispatch(&harness.runtime, 2, .bump);
+        try std.testing.expectEqual(@as(u32, 4), state.model.count);
+        try std.testing.expect(try retainedTextExists(&harness.runtime, "Main 4"));
+        try harness.stop(app);
+    }
+}

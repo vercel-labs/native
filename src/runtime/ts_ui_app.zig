@@ -451,6 +451,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 if (options.intrinsic_layout_policy != null) @panic("TsUiApp owns intrinsic_layout_policy - remove custom intrinsic layout wiring");
                 stamped.intrinsic_layout_policy = core.nativeWindowPolicy;
             }
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");
+                stamped.app_dispatch_policy = core.nativeEffectPolicy;
+            }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;
             lifecycle_flush_after_update = false;

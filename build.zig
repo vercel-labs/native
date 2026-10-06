@@ -1328,6 +1328,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&native_driver_run.step);
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
         b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
         const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
@@ -2413,6 +2414,7 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host.test.PTY name bindings",
         "runtime.ts_ui_app.test.web pane exact decimal",
         "runtime.ts_ui_app.test.lifecycle host consumes",
+        "runtime.ui_app_tests.test.dispatch coordination",
         "runtime.ts_core_host_tests.test.complete subprocess records",
         "runtime.ts_core_host_tests.test.routed clipboard duplicates",
         "runtime.ts_core_host_tests.test.routed clipboard keys",
@@ -4248,6 +4250,11 @@ fn tsCoreE2eArtifact(
     const lifecycle_reference_files = b.addWriteFiles();
     persist_mod.addImport("lifecycle_policy_reference", b.createModule(.{
         .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/lifecycle_policy_test_reference.zig"), "lifecycle_policy_reference.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    persist_mod.addImport("dispatch_policy_reference", b.createModule(.{
+        .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/app_dispatch_policy.zig"), "dispatch_policy_reference.zig"),
         .target = target,
         .optimize = optimize,
     }));
