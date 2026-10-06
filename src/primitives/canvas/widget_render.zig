@@ -5,6 +5,7 @@ const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
 const code_model = @import("code.zig");
+const code_content = @import("code_content_policy.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -1968,7 +1969,8 @@ fn emitVisibleWrappedEditableCodeLines(
                 .color = .syntax_plain,
             };
             break :blk span_storage[0..1];
-        } else code_model.highlightWithState(
+        } else code_content.highlight(
+            tokens.code_content_policy,
             line_source,
             widget.code_language,
             &span_storage,
@@ -2115,7 +2117,8 @@ fn emitVisibleEditableCodeLines(
     var state: code_model.HighlightState = .{};
     var span_storage: [text_spans_model.max_text_spans_per_paragraph]text_spans_model.TextSpan = undefined;
     if (line_start > 0) {
-        _ = code_model.highlightWithState(
+        _ = code_content.highlight(
+            tokens.code_content_policy,
             widget.text[0..line_start],
             widget.code_language,
             &span_storage,
@@ -2151,7 +2154,8 @@ fn emitVisibleEditableCodeLines(
                 .color = .syntax_plain,
             };
             break :blk span_storage[0..1];
-        } else code_model.highlightWithState(
+        } else code_content.highlight(
+            tokens.code_content_policy,
             line_source,
             widget.code_language,
             &span_storage,

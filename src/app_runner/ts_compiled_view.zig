@@ -58,7 +58,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -124,6 +124,8 @@ const Record = struct {
     spanScale: ?f32 = null,
     codeLanguage: ?sdk.canvas.code.Language = null,
     codeLineDigits: ?u8 = null,
+    codeEditable: ?bool = null,
+    codeNumbered: ?bool = null,
     codeAddedLines: ?[]const u8 = null,
     codeRemovedLines: ?[]const u8 = null,
     contextMenu: []const ContextMenuRecord = &.{},
@@ -241,6 +243,7 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
     if (comptime @hasDecl(core, "nativeWindowPolicy")) {
         ui.construction_policy = core.nativeWindowPolicy;
         ui.composition_policy = core.nativeWindowPolicy;
+        ui.code_content_policy = core.nativeWindowPolicy;
     }
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
@@ -303,7 +306,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.change != null and value.kind != .radio and value.kind != .slider) return error.InvalidView;
     if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
-    const text_entry = value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea;
+    const text_entry = value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea or (value.kind == .code and value.codeEditable == true);
     if ((value.pty != null or value.ptyBytes != null or value.scrollback != null or value.terminal != null) and value.kind != .terminal) return error.InvalidView;
     if (value.pty != null and value.ptyBytes != null) return error.InvalidView;
     if (value.pty) |key| if (key > 9007199254740991) return error.InvalidView;
@@ -312,7 +315,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.submitOnEnter and value.kind != .textarea) return error.InvalidView;
     if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
-    if (value.wrap != null and value.kind != .text) return error.InvalidView;
+    if (value.wrap != null and value.kind != .text and value.kind != .code) return error.InvalidView;
     const legacy_paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
     const paragraph = value.spans != null or legacy_paragraph;
     if (value.spans) |spans| {
@@ -321,7 +324,16 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (paragraph and value.kind != .text) return error.InvalidView;
     if (value.spanScale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
-    if (value.codeLanguage != null or value.codeLineDigits != null) {
+    if (value.kind == .code) {
+        if (value.codeLanguage == null or value.codeEditable == null or value.codeNumbered == null or value.wrap == null or value.codeLineDigits != null or
+            paragraph or value.placeholder.len != 0 or value.submitOnEnter or value.submit != null or value.contextMenu.len != 0 or value.autofocus or
+            value.disabled or value.selected or value.checked or value.padding != null or value.gap != 0 or value.maxWidth != 0 or
+            value.role != .none or value.focusable or value.windowDrag or value.image != 0 or value.icon.len != 0 or value.command.len != 0 or
+            value.press != null or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or
+            value.background != null or value.foreground != null or value.borderColor != null or value.focusRing != null or value.radius != null)
+            return error.InvalidView;
+    } else if (value.codeEditable != null or value.codeNumbered != null) return error.InvalidView;
+    if (value.kind != .code and (value.codeLanguage != null or value.codeLineDigits != null)) {
         if (value.codeLanguage == null or value.codeLineDigits == null or value.kind != .textarea or
             value.codeLineDigits.? > 5 or value.placeholder.len != 0 or value.submitOnEnter or paragraph)
             return error.InvalidView;
@@ -342,6 +354,32 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         child_index = records[child_index].end;
     }
     if (value.kind == .split and children.items.len != 2) return error.InvalidView;
+    if (value.kind == .code) {
+        const added = try ui.arena.alloc(usize, if (value.codeAddedLines) |lines| lines.len else 0);
+        const removed = try ui.arena.alloc(usize, if (value.codeRemovedLines) |lines| lines.len else 0);
+        if (value.codeAddedLines) |lines| for (lines, added) |line, *slot| {
+            slot.* = line;
+        };
+        if (value.codeRemovedLines) |lines| for (lines, removed) |line, *slot| {
+            slot.* = line;
+        };
+        return stampCompound(ui.code(.{
+            .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
+            .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
+            .width = value.width,
+            .height = value.height,
+            .min_width = value.minWidth,
+            .grow = value.grow,
+            .semantics = .{ .label = value.label },
+            .language = value.codeLanguage.?,
+            .wrap = value.wrap.?,
+            .editable = value.codeEditable.?,
+            .line_numbers = value.codeNumbered.?,
+            .added_lines = added,
+            .removed_lines = removed,
+            .on_input = if (value.input) |tag| try inputEvent(tag) else null,
+        }, value.text));
+    }
     if (value.kind == .input_group_actions) {
         if (parent_kind != .input_group) return error.InvalidView;
         return stampCompound(ui.inputGroupActions(.{
@@ -364,7 +402,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         }, children.items[0], if (children.items.len == 2) children.items[1] else null));
     }
     const kind: sdk.canvas.WidgetKind = switch (value.kind) {
-        .input_group_actions => return error.InvalidView,
+        .input_group_actions, .code => return error.InvalidView,
         .spacer => .stack,
         .scroll => .scroll_view,
         inline else => |tag| @field(sdk.canvas.WidgetKind, @tagName(tag)),
@@ -551,6 +589,29 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         result.widget.layout.clip_content = true;
     }
     return result;
+}
+
+test "compiled app code rejects incomplete modes and unrelated renderer metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "\"codeNumbered\":false,\"wrap\":true",
+        "\"codeEditable\":false,\"wrap\":true",
+        "\"codeEditable\":false,\"codeNumbered\":false",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"codeLineDigits\":1",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"input\":0",
+        "\"codeEditable\":true,\"codeNumbered\":false,\"wrap\":true,\"submitOnEnter\":true",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"role\":\"group\"",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"focusable\":true",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"padding\":0",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"image\":1",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"codeAddedLines\":[1]",
+        "\"codeEditable\":false,\"codeNumbered\":false,\"wrap\":true,\"codeAddedLines\":[1],\"codeRemovedLines\":[1]",
+    }) |fields| {
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"code\",\"text\":\"\",\"codeLanguage\":\"plain\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
 }
 
 // Compound records create their root after decoding the child primitives.

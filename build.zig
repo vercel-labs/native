@@ -1392,6 +1392,16 @@ pub fn build(b: *std.Build) void {
         // no build inputs/outputs to hash, so always run it.
         scaffold_ide_e2e_run.has_side_effects = true;
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        b.step("test-ts-code-content", "Compare complete compiled code spans and carried state with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-code-content-tests", &.{"compiled code content"})).step);
+        const code_app_run = b.addRunArtifact(ts_core_artifacts.code_app);
+        const code_view_run = b.addRunArtifact(ts_core_artifacts.code_view);
+        const code_app_step = b.step("test-ts-code-app", "Verify complete generated code views and owned typed input");
+        code_app_step.dependOn(&code_app_run.step);
+        code_app_step.dependOn(&code_view_run.step);
+        ts_core_e2e_step.dependOn(&code_app_run.step);
+        test_step.dependOn(&code_app_run.step);
+        ts_core_e2e_step.dependOn(&code_view_run.step);
+        test_step.dependOn(&code_view_run.step);
         const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
         const file_reference_files = b.addWriteFiles();
         const callback_reference_files = b.addWriteFiles();
@@ -4149,6 +4159,8 @@ const TsCoreE2eArtifacts = struct {
     composition: *std.Build.Step.Compile,
     composition_view: *std.Build.Step.Compile,
     composition_app: *std.Build.Step.Compile,
+    code_app: *std.Build.Step.Compile,
+    code_view: *std.Build.Step.Compile,
     /// The markup battery is its own binary: the compiled-core symbol
     /// set is a fixed-prefix C ABI, so one process carries ONE archive
     /// — every fixture battery links exactly its own core.
@@ -4321,6 +4333,23 @@ fn tsCoreE2eArtifact(
     composition_app_decoder.addImport("native_sdk", desktop_mod);
     composition_app_decoder.addImport("core.zig", composition_fixture.module);
     composition_app_mod.addImport("composition_decoder", composition_app_decoder);
+    const code_src = b.addWriteFiles();
+    _ = code_src.addCopyFile(b.path("tests/ts-core/code_fixture.ts"), "code_fixture.ts");
+    const code_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/code_fixture.ts",
+        .src_dir = code_src.getDirectory(),
+        .name = "code_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/code_fixture.native",
+    });
+    const code_app_mod = module(b, target, optimize, "tests/ts-core/code_app_e2e_tests.zig");
+    code_app_mod.addImport("native_sdk", desktop_mod);
+    code_app_mod.addImport("code_core", code_fixture.module);
+    const code_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    code_decoder.addImport("native_sdk", desktop_mod);
+    code_decoder.addImport("core.zig", code_fixture.module);
+    code_app_mod.addImport("code_decoder", code_decoder);
     const lifecycle_reference_files = b.addWriteFiles();
     persist_mod.addImport("lifecycle_policy_reference", b.createModule(.{
         .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/lifecycle_policy_test_reference.zig"), "lifecycle_policy_reference.zig"),
@@ -4905,6 +4934,8 @@ fn tsCoreE2eArtifact(
         .construction = filteredTestArtifact(b, persist_mod, "ts-construction-e2e-tests", &.{"compiled construction"}),
         .composition_view = filteredTestArtifact(b, composition_decoder_mod, "ts-composition-view-tests", &.{"compiled grouped input"}),
         .composition_app = filteredTestArtifact(b, composition_app_mod, "ts-composition-app-tests", &.{"compiled app composition"}),
+        .code_app = filteredTestArtifact(b, code_app_mod, "ts-code-app-tests", &.{"compiled app code"}),
+        .code_view = filteredTestArtifact(b, code_decoder, "ts-code-view-tests", &.{"compiled app code"}),
         .composition = filteredTestArtifact(b, persist_mod, "ts-composition-e2e-tests", &.{"compiled composition"}),
         .motion = filteredTestArtifact(b, persist_mod, "ts-motion-e2e-tests", &.{"compiled widget motion"}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
@@ -5275,6 +5306,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_composition.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/code_content.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);

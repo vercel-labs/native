@@ -654,8 +654,14 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       props.push(`spans: [${runs.join(", ")}]`);
     }
     if (node.name === "code") {
-      if (node.attrs.get("editable") !== "true" || node.attrs.get("wrap") !== "false")
-        fail(node, 'compiled code requires editable="true" and wrap="false"');
+      const editable = node.attrs.get("editable") ?? "false", wrap = node.attrs.get("wrap") ?? "true";
+      for (const [name, value] of [["editable", editable], ["wrap", wrap]])
+        if (value !== "true" && value !== "false") fail(node, `code ${name} requires a literal boolean`);
+      if (editable === "false" && node.attrs.has("on-input")) fail(node, "read-only code cannot declare on-input");
+      if (editable !== "true" || wrap !== "false") {
+        props[0] = 'kind: "code"';
+        props.push(`codeEditable: ${editable}`, `wrap: ${wrap}`);
+      }
       if (!node.attrs.has("source") || node.text.trim()) fail(node, "code requires a source binding and no element text");
       const expr = binding(node.attrs.get("source")!, node, scope);
       if (expr.type.kind !== "bytes") fail(node, "code source requires UTF-8 bytes");
@@ -840,4 +846,5 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./component_construction.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_motion.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./component_composition.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./code_content.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

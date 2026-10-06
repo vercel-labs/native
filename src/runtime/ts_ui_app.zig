@@ -446,6 +446,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.construction_policy = core.nativeWindowPolicy;
                 if (options.composition_policy != null) @panic("TsUiApp owns composition_policy - remove custom composition wiring");
                 stamped.composition_policy = core.nativeWindowPolicy;
+                if (options.code_content_policy != null) @panic("TsUiApp owns code_content_policy - remove custom code content wiring");
+                stamped.code_content_policy = core.nativeWindowPolicy;
                 if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
                 stamped.surface_layout_policy = core.nativeWindowPolicy;
                 if (options.grid_layout_policy != null) @panic("TsUiApp owns grid_layout_policy - remove custom grid layout wiring");

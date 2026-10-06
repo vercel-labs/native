@@ -25,7 +25,7 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spans?: readonly NscViewSpan[]; textAlignment?: string;
   spanWeight?: string; spanColor?: string; spanScale?: number;
-  codeLanguage?: string; codeLineDigits?: number;
+  codeLanguage?: string; codeLineDigits?: number; codeEditable?: boolean; codeNumbered?: boolean;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
   contextMenu?: readonly NscContextMenuItem[];
   press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
@@ -1248,24 +1248,25 @@ function nscvCodeIndentation(request: Uint8Array): Uint8Array {
  * lines, matching the retained native code component's line budget.
  */
 function nscvCodeEditor(node: NscViewNode, numbered: boolean, addedSpec: Uint8Array, removedSpec: Uint8Array): void {
-  let lines = 1;
   const bytes = node.textBytes;
-  const length = bytes === undefined ? node.text.length : bytes.length;
-  for (let i = 0; i < length; i += 1) if ((bytes === undefined ? node.text.charCodeAt(i) : bytes[i]) === 10) lines += 1;
-  const terminal = length > 0 && (bytes === undefined ? node.text.charCodeAt(length - 1) : bytes[length - 1]) === 10;
+  const source = bytes === undefined ? new TextEncoder().encode(node.text) : new Uint8Array(bytes);
+  const editable = node.kind === "textarea" || node.codeEditable === true;
+  const lines = nscCodeLineCount(source, editable);
+  const terminal = editable && source.length > 0 && source[source.length - 1] === 10;
   let digits = 0;
-  if (numbered && lines - (terminal ? 1 : 0) <= 10000) {
+  if (numbered && lines - (terminal ? 1 : 0) <= (editable ? 10000 : 128)) {
     digits = 1;
     let remaining = lines;
     while (remaining >= 10) { remaining = Math.floor(remaining / 10); digits += 1; }
   }
-  node.codeLineDigits = digits;
+  if (node.kind === "code") node.codeNumbered = numbered;
+  else node.codeLineDigits = digits;
   const added = nscvCodeLines(addedSpec), removed = nscvCodeLines(removedSpec);
   if (added === null || removed === null) throw new Error("invalid code diff line specification");
   for (const line of added) {
     if (removed.includes(line)) throw new Error("code diff added and removed lines overlap");
   }
-  if (added.length !== 0 || removed.length !== 0) {
+  if ((editable || lines <= 128) && (added.length !== 0 || removed.length !== 0)) {
     node.codeAddedLines = added; node.codeRemovedLines = removed;
   }
 }

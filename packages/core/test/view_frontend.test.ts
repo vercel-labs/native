@@ -143,7 +143,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);
@@ -168,14 +168,29 @@ test("editable no-wrap code lowers to owned textarea metadata and bounded line n
   model.ticking = false; model.status = new TextEncoder().encode("x");
   assert.equal(view().nodes[0].codeLineDigits, 0);
   for (const markup of [
-    '<code source="{status}"/>',
     '<code source="{status}" editable="{ticking}" wrap="false"/>',
-    '<code source="{status}" editable="true" wrap="true"/>',
+    '<code source="{status}" wrap="{ticking}"/>',
     '<code source="{count}" editable="true" wrap="false"/>',
     '<code source="{status}" language="unknown" editable="true" wrap="false"/>',
     '<code source="{status}" editable="true" wrap="false" disabled="true"/>',
     '<code source="{status}" editable="true" wrap="false"><text>child</text></code>',
   ]) assert.throws(() => compileView(markup, contract), /compiled TypeScript view/);
+});
+
+test("compiled code accepts read-only and wrapped presentation with exact source bytes", () => {
+  for (const editable of [false, true]) for (const wrap of [false, true]) {
+    const { model, wire } = evaluate(`<code source="{status}" language="tsx" editable="${editable}" wrap="${wrap}" line-numbers="true" added-lines="1,128" height="120" width="320"/>`);
+    model.status = new Uint8Array([0, 255, 192, 175, 10]);
+    const node = wire().nodes[0];
+    assert.deepEqual(node.textBytes, [...model.status]);
+    assert.equal(node.codeLanguage, "tsx");
+    if (editable && !wrap) { assert.equal(node.kind, "textarea"); assert.equal(node.codeLineDigits, 1); }
+    else { assert.equal(node.kind, "code"); assert.equal(node.codeEditable, editable); assert.equal(node.codeNumbered, true); assert.equal(node.wrap, wrap); assert.equal(node.codeLineDigits, undefined); }
+    assert.deepEqual(node.codeAddedLines, [1, 128]);
+    model.status = new TextEncoder().encode("x\n".repeat(129));
+    assert.equal(wire().nodes[0].codeAddedLines === undefined, !editable);
+  }
+  assert.throws(() => compileView('<code source="{status}" on-input="increment"/>', contract), /read-only/);
 });
 
 test("compiled indentation requests preserve the shared text library's file convention", () => {

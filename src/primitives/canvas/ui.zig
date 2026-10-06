@@ -436,6 +436,7 @@ pub fn Ui(comptime Msg: type) type {
         /// Compiled apps own portable recipes and construction. Native
         /// extensions retain the reference when the corresponding owner is absent.
         composition_policy: ?composition_recipes.Policy = null,
+        code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
         construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
@@ -2494,6 +2495,10 @@ pub fn Ui(comptime Msg: type) type {
         /// in a panel or card when those presentation choices are wanted.
         /// Markdown fences lower through this same component.
         pub fn code(self: *Self, options: CodeOptions, source: []const u8) Node {
+            if (self.code_content_policy) |policy| return self.codeOwned(policy, options, source) catch {
+                self.failed = true;
+                return self.column(.{}, .{});
+            };
             const line_count = codeLineCount(source, options.editable);
             const terminal_editor_line = options.editable and source.len > 0 and source[source.len - 1] == '\n';
             const numbered = options.line_numbers and line_count - @intFromBool(terminal_editor_line) <=
@@ -2608,6 +2613,66 @@ pub fn Ui(comptime Msg: type) type {
                 .grow = options.grow,
                 .semantics = options.semantics,
             }, .{body});
+            root.widget.layout.clip_content = true;
+            return root;
+        }
+
+        // Assemble the copied portable recipe in the host arena. Identity,
+        // owned text/spans and typed input routes remain native capabilities.
+        fn codeOwned(self: *Self, policy: canvas.CodeContentPolicy.Policy, options: CodeOptions, source: []const u8) !Node {
+            const plan = try canvas.CodeContentPolicy.recipe(policy, self.arena, source, @as(u8, @intFromBool(options.editable)) | (@as(u8, @intFromBool(options.wrap)) << 1) |
+                (@as(u8, @intFromBool(options.line_numbers)) << 2) | (@as(u8, @intFromBool(options.height > 0)) << 3), options.added_lines, options.removed_lines);
+            if (plan.flags & 4 != 0) self.failed = true;
+            const diff: ?canvas.CodeDiffLines = if (plan.flags & 2 != 0) .{ .added = plan.added, .removed = plan.removed } else null;
+            if (plan.content == 2) {
+                const retained = if (options.wrap) blk: {
+                    var state: code_model.HighlightState = .{};
+                    break :blk self.codeParagraphWithState(source, options.language, true, options.grow, &state, null);
+                } else blk: {
+                    const span = [_]canvas.TextSpan{.{ .text = source, .monospace = true, .color = .syntax_plain }};
+                    break :blk self.paragraph(.{ .wrap = false, .grow = options.grow }, &span);
+                };
+                var editor = self.el(.textarea, .{ .key = options.key, .global_key = options.global_key, .width = options.width, .height = options.height, .min_width = options.min_width, .grow = options.grow, .semantics = options.semantics, .on_input = options.on_input }, .{});
+                editor.widget.text = retained.widget.text;
+                editor.widget.spans = retained.widget.spans;
+                editor.widget.text_no_wrap = !options.wrap;
+                editor.widget.code_line_number_digits = plan.digits;
+                if (diff) |lines| editor.widget.setCodeDiffLines(lines);
+                editor.widget.runtime_flags.code_editor = true;
+                editor.widget.code_language = options.language;
+                editor.widget.layout.clip_content = true;
+                return editor;
+            }
+            const content = if (plan.content == 1)
+                self.decoratedCodeParagraph(source, options.language, options.wrap, plan.digits, diff)
+            else blk: {
+                const ends = try canvas.CodeContentPolicy.chunks(policy, self.arena, source, options.wrap, plan.chunk_count);
+                var state: code_model.HighlightState = .{};
+                var budget: CodeSpanBudget = .{ .remaining_chunks = ends.len };
+                const grow: f32 = if (options.wrap) 1 else 0;
+                if (ends.len == 1) break :blk self.codeParagraphWithState(source, options.language, options.wrap, grow, &state, &budget);
+                const nodes = try self.arena.alloc(Node, ends.len);
+                const fingerprint = std.hash.Wyhash.hash(0, source) | 1;
+                var start: usize = 0;
+                for (ends, nodes) |end, *item| {
+                    item.* = self.codeParagraphWithState(source[start..end], options.language, options.wrap, 0, &state, &budget);
+                    item.static_text_group_fingerprint = fingerprint;
+                    item.widget.static_text_group_offset = @intCast(start);
+                    start = end;
+                }
+                break :blk self.column(.{ .grow = grow }, .{nodes});
+            };
+            const body = switch (plan.axes) {
+                0 => content,
+                1 => blk: {
+                    var tracked = content;
+                    tracked.widget.layout.grow = 0;
+                    break :blk self.scroll(.{ .axis = .vertical, .grow = 1 }, .{self.column(.{}, .{tracked})});
+                },
+                2, 3 => self.scroll(.{ .axis = if (plan.axes == 2) .horizontal else .both, .grow = 1 }, .{self.column(.{}, .{ content, self.el(.stack, .{ .height = 8 }, .{}) })}),
+                else => unreachable,
+            };
+            var root = self.el(.column, .{ .key = options.key, .global_key = options.global_key, .width = options.width, .height = options.height, .min_width = options.min_width, .grow = options.grow, .semantics = options.semantics }, .{body});
             root.widget.layout.clip_content = true;
             return root;
         }
@@ -2732,8 +2797,18 @@ pub fn Ui(comptime Msg: type) type {
             var highlighted = if (source.len == 0) blk: {
                 storage[0] = .{ .text = source, .monospace = true, .color = .syntax_plain };
                 break :blk storage[0..1];
-            } else code_model.highlightWithState(source, language, &storage, state);
+            } else canvas.CodeContentPolicy.highlight(self.code_content_policy, source, language, &storage, state);
             if (budget) |span_budget| {
+                if (self.code_content_policy) |policy| {
+                    const plan = canvas.CodeContentPolicy.spanBudget(policy, span_budget.used, span_budget.remaining_chunks, highlighted.len);
+                    span_budget.used = plan.used;
+                    span_budget.remaining_chunks = plan.remaining;
+                    if (plan.plain) {
+                        storage[0] = .{ .text = source, .monospace = true, .color = .syntax_plain };
+                        highlighted = storage[0..1];
+                    }
+                    return self.paragraph(.{ .wrap = wrap, .grow = grow }, highlighted);
+                }
                 std.debug.assert(span_budget.remaining_chunks > 0);
                 span_budget.remaining_chunks -= 1;
                 const highlighted_total = span_budget.used +
