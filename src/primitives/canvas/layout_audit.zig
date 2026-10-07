@@ -34,7 +34,8 @@
 //! The audit is geometry-only and deterministic: it re-uses the exact
 //! measurement seam layout and paint use (`tokens.text_measure`, falling
 //! back to the deterministic estimator), so what it predicts is what the
-//! reference renderer inks. It allocates nothing and reads no globals —
+//! reference renderer inks. The native reference is allocation-free; a
+//! selected compiled owner uses copied native-owned request/result buffers —
 //! fast enough to run inside every example test suite across a sweep
 //! matrix of window sizes, densities, and text expansions.
 
@@ -136,6 +137,7 @@ pub fn auditWidgetLayout(
     tokens: DesignTokens,
     storage: []LayoutAuditFinding,
 ) LayoutAuditIssues {
+    if (layout.audit_policy orelse tokens.widget_audit_policy) |policy| return @import("widget_audit_policy.zig").auditLayout(std.heap.page_allocator, policy, layout, window, tokens, storage) catch @panic("compiled layout audit failed");
     var sink = FindingSink{ .storage = storage };
     const node_count = @min(layout.nodes.len, max_layout_audit_nodes);
 

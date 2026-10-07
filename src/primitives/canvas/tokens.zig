@@ -1912,6 +1912,8 @@ pub const DesignTokens = struct {
     intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
     /// Widget motion plans supplied by the compiled app, outside theme overrides.
     widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable accessibility/layout audit rules over native measurement facts.
+    widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
     code_content_policy: ?*const fn ([]const u8, []u8) usize = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {

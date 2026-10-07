@@ -100,6 +100,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count],
                 .root_bounds = self.widget_layout_root_bounds,
                 .semantic_policy = self.widget_tokens.intrinsic_layout_policy,
+                .audit_policy = self.widget_tokens.widget_audit_policy,
             };
         }
 

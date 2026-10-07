@@ -1320,6 +1320,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/control_appearance.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_construction.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_motion.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_audits.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -1333,6 +1334,7 @@ pub fn build(b: *std.Build) void {
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
         b.step("test-ts-control-appearance", "Compare complete compiled control appearance with native behavior").dependOn(&persist_e2e_run.step);
+        b.step("test-ts-widget-audits", "Compare compiled accessibility and layout audits with native rules").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_audits).step);
         b.step("test-ts-markdown-content", "Compare complete compiled Markdown with native behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.markdown_content).step);
         b.step("test-ts-component-construction", "Compare complete compiled construction with native behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.construction).step);
         const composition_view_run = b.addRunArtifact(ts_core_artifacts.composition_view);
@@ -4166,6 +4168,7 @@ const TsCoreE2eArtifacts = struct {
     persist: *std.Build.Step.Compile,
     construction: *std.Build.Step.Compile,
     markdown_content: *std.Build.Step.Compile,
+    widget_audits: *std.Build.Step.Compile,
     motion: *std.Build.Step.Compile,
     composition: *std.Build.Step.Compile,
     composition_view: *std.Build.Step.Compile,
@@ -4963,6 +4966,7 @@ fn tsCoreE2eArtifact(
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
         .markdown_content = filteredTestArtifact(b, persist_mod, "ts-markdown-content-tests", &.{"compiled Markdown"}),
+        .widget_audits = filteredTestArtifact(b, persist_mod, "ts-widget-audits-tests", &.{"compiled widget audits"}),
         .construction = filteredTestArtifact(b, persist_mod, "ts-construction-e2e-tests", &.{"compiled construction"}),
         .composition_view = filteredTestArtifact(b, composition_decoder_mod, "ts-composition-view-tests", &.{"compiled grouped input"}),
         .composition_app = filteredTestArtifact(b, composition_app_mod, "ts-composition-app-tests", &.{"compiled app composition"}),
@@ -5342,6 +5346,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/component_composition.ts"));
     stage_run.addFileInput(b.path("packages/core/src/code_content.ts"));
     stage_run.addFileInput(b.path("packages/core/src/markdown_content.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);

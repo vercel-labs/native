@@ -40,6 +40,13 @@ const contract: ViewContract = {
   model_helpers: [{ name: "total", params: [], returns: { kind: "i64" } }],
   msg: { arms: ["load", "loaded", "failed", "increment", "decrement", "reset", "toggle_ticking", "stamp", "stamped", "tick"].map(name => ({ name, payload: { kind: ["loaded", "failed"].includes(name) ? "bytes" : ["stamped", "tick"].includes(name) ? "number" : "void" } })) },
 };
+
+test("compiled audit type names receive the wiring collision diagnostic", () => {
+  for (const name of ["NscAuditNode", "NscAuditDescendant", "NscAuditFinding", "nscvWidgetAudits"]) {
+    const conflicting = { ...contract, types: { ...contract.types, structs: [...contract.types.structs, { name, fields: [] }] } };
+    assert.throws(() => compileView("<column />", conflicting), /collides with compiled view wiring/);
+  }
+});
 const source = readFileSync(new URL("../../../tests/native-driver/src/app.native", import.meta.url), "utf8");
 const evaluate = (markup: string) => {
   const generated = compileView(markup, contract);
@@ -187,7 +194,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "markdown_content.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "markdown_content.ts", "widget_audits.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);
