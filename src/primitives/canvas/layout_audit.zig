@@ -274,7 +274,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
     // there is nothing to report on the horizontal axis. Only explicit
     // newlines can still overrun (vertically), checked below.
     const text_size = widget_metrics.widgetBodyTextSize(widget, tokens);
-    const line_height = widget_metrics.widgetLineHeight(text_size);
+    const line_height = widget_metrics.widgetLineHeightWithTokens(text_size, tokens);
 
     // Replay the paint-time single-line breaker (`wrap = .none`: lines
     // split only at explicit newlines) without a line buffer: the audit

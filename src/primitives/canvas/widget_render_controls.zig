@@ -52,7 +52,7 @@ const widgetTabTriggerTextSize = widget_metrics.widgetTabTriggerTextSize;
 const widgetTabTriggerInset = widget_metrics.widgetTabTriggerInset;
 const widgetTabTriggerIconExtent = widget_metrics.widgetTabTriggerIconExtent;
 const widgetTabTriggerIconGap = widget_metrics.widgetTabTriggerIconGap;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
 const widgetButtonInset = widget_metrics.widgetButtonInset;
 const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
@@ -1573,11 +1573,11 @@ pub fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
         var request = control_content.Request.init(.glyph_size, widget.frame, tokens);
         request.bytes[8] = @intFromEnum(widget.size);
         request.float(72, min_size);
-        request.float(76, widgetTypographySize(widget, tokens.typography.title_size));
+        request.float(76, widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens));
         request.float(80, widgetButtonTextSize(widget, tokens));
         return request.run(tokens).scalar;
     }
-    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySize(widget, tokens.typography.title_size)));
+    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens)));
     return widgetButtonTextSize(widget, tokens);
 }
 

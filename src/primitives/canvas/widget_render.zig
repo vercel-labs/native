@@ -58,8 +58,8 @@ const widgetTextInputInset = widget_text_input.widgetTextInputInset;
 const widgetButtonTextSize = widget_metrics.widgetButtonTextSize;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
-const widgetLineHeight = widget_metrics.widgetLineHeight;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetLineHeightWithTokens = widget_metrics.widgetLineHeightWithTokens;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
 const widgetButtonInset = widget_metrics.widgetButtonInset;
 const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
@@ -4411,7 +4411,7 @@ fn alignedTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, inset: 
 
 fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
     const min_size = widgetSizedDensityValue(widget, tokens, 12);
-    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySize(widget, tokens.typography.title_size)));
+    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens)));
     return widgetButtonTextSize(widget, tokens);
 }
 

@@ -40,8 +40,8 @@ const widgetTabTriggerInset = widget_metrics.widgetTabTriggerInset;
 const widgetTabTriggerIconExtent = widget_metrics.widgetTabTriggerIconExtent;
 const widgetTabTriggerIconGap = widget_metrics.widgetTabTriggerIconGap;
 const underlineTabsListInset = widget_metrics.underlineTabsListInset;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
-const widgetLineHeight = widget_metrics.widgetLineHeight;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
+const widgetLineHeightWithTokens = widget_metrics.widgetLineHeightWithTokens;
 const widgetDefaultRowHeight = widget_metrics.widgetDefaultRowHeight;
 const widgetButtonInset = widget_metrics.widgetButtonInset;
 const widgetControlInset = widget_metrics.widgetControlInset;
@@ -1128,11 +1128,11 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             var content = max_height;
             if (widget.text.len > 0) {
                 const title_gap = densityValue(tokens, tokens.spacing.xs);
-                content = widgetLineHeight(text_size) + (if (max_height > 0) title_gap + max_height else 0);
+                content = widgetLineHeightWithTokens(text_size, tokens) + (if (max_height > 0) title_gap + max_height else 0);
             }
             // The same floor `intrinsicAlertWidgetSize` keeps, so wrapped
             // and intrinsic measurements agree for short alerts.
-            const chrome_floor = @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + inset * 2);
+            const chrome_floor = @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeightWithTokens(text_size, tokens) + inset * 2);
             break :blk @max(content, chrome_floor - padding.top - padding.bottom);
         },
         // Accordion content sits below the header band; wrapped content
@@ -2137,7 +2137,7 @@ fn compiledWrappedExtent(widget: Widget, width: f32, tokens: DesignTokens, depth
     const wrapped = @import("wrapped_layout_policy.zig");
     const padding = if (variable_row) widget.layout.padding else widgetLayoutPadding(widget, tokens);
     const text_size = widgetBodyTextSize(widget, tokens);
-    const title_height = if (widget.kind == .accordion) accordionHeaderHeight(widget, tokens) else widgetLineHeight(text_size);
+    const title_height = if (widget.kind == .accordion) accordionHeaderHeight(widget, tokens) else widgetLineHeightWithTokens(text_size, tokens);
     var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
     const plan = wrapped.Plan.init(scratch.get(), tokens.intrinsic_layout_policy.?, widget.children.len, .{
         .kind = widget.kind,
@@ -2202,7 +2202,7 @@ pub fn accordionHeaderHeight(widget: Widget, tokens: DesignTokens) f32 {
     // inset above and below it (density/size scaled).
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
-    return @max(widgetControlHeight(widget, tokens), widgetLineHeight(text_size) + inset * 2);
+    return @max(widgetControlHeight(widget, tokens), widgetLineHeightWithTokens(text_size, tokens) + inset * 2);
 }
 
 /// Alert children start under the chrome-drawn title line and hang past
@@ -2216,7 +2216,7 @@ fn alertContentFrame(widget: Widget, content: geometry.RectF, tokens: DesignToke
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
     const title_gap = densityValue(tokens, tokens.spacing.xs);
     const indent = @min(content.width, icon_size + text_gap);
-    const y = @min(content.maxY(), content.y + widgetLineHeight(text_size) + title_gap);
+    const y = @min(content.maxY(), content.y + widgetLineHeightWithTokens(text_size, tokens) + title_gap);
     return geometry.RectF.init(
         content.x + indent,
         y,
@@ -2230,6 +2230,9 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
 }
 
 fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (tokens.control_geometry_policy != null) {
+        if (@import("widget_metric_policy.zig").intrinsic(widget, tokens)) |size| return size;
+    }
     // The composed-media contract (`WidgetLayoutStyle.zero_intrinsic`):
     // the container measures like the media-surface leaf regardless of
     // what chrome it composes. Declared width/height still apply — they
@@ -2532,12 +2535,12 @@ fn intrinsicTextWidgetSize(widget: Widget, tokens: DesignTokens, text_size: f32)
         return geometry.SizeF.init(
             text_spans_model.textSpansIntrinsicWidth(widget.spans, options) +
                 widgetCodeLineNumberGutterWidth(widget, tokens),
-            widgetLineHeight(text_size * text_spans_model.textSpansMaxScale(widget.spans)),
+            widgetLineHeightWithTokens(text_size * text_spans_model.textSpansMaxScale(widget.spans), tokens),
         );
     }
     return geometry.SizeF.init(
         measuredTextWidth(tokens, widget.text, text_size),
-        widgetLineHeight(text_size),
+        widgetLineHeightWithTokens(text_size, tokens),
     );
 }
 
@@ -2566,17 +2569,17 @@ fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) 
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
     const text = intrinsicTextWidgetSize(widget, tokens, text_size);
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 10, .{ .title = .init(text.width, widgetLineHeight(text_size)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 52)), .padding = padding, .icon = icon_size, .text_gap = text_gap, .title_gap = densityValue(tokens, tokens.spacing.xs) });
+    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 10, .{ .title = .init(text.width, widgetLineHeightWithTokens(text_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 52)), .padding = padding, .icon = icon_size, .text_gap = text_gap, .title_gap = densityValue(tokens, tokens.spacing.xs) });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + padding.left + padding.right + icon_size + text_gap),
-        @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeight(text_size) + padding.top + padding.bottom),
+        @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeightWithTokens(text_size, tokens) + padding.top + padding.bottom),
     );
     // A description column under the title (`alertContentFrame`) grows
     // the alert instead of overflowing it.
     const children = intrinsicStackedChildrenSize(widget, tokens, depth);
     if (children.height > 0 and widget.text.len > 0) {
         const title_gap = densityValue(tokens, tokens.spacing.xs);
-        size.height = @max(size.height, widgetLineHeight(text_size) + title_gap + children.height + padding.top + padding.bottom);
+        size.height = @max(size.height, widgetLineHeightWithTokens(text_size, tokens) + title_gap + children.height + padding.top + padding.bottom);
         size.width = @max(size.width, children.width + icon_size + text_gap + padding.left + padding.right);
     } else if (children.height > 0) {
         size.height = @max(size.height, children.height + padding.top + padding.bottom);
@@ -2620,13 +2623,13 @@ fn intrinsicAccordionWidgetSize(widget: Widget, tokens: DesignTokens, depth: usi
 }
 
 fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.body_size + 1, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
     const text = intrinsicTextWidgetSize(widget, tokens, title_size);
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 8, .{ .title = .init(text.width, widgetLineHeight(title_size)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 120)), .inset = inset, .padding = widget.layout.padding });
+    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 8, .{ .title = .init(text.width, widgetLineHeightWithTokens(title_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 120)), .inset = inset, .padding = widget.layout.padding });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2),
-        @max(widgetSizedDensityValue(widget, tokens, 120), if (widget.text.len > 0) widgetLineHeight(title_size) + inset * 2 else 0),
+        @max(widgetSizedDensityValue(widget, tokens, 120), if (widget.text.len > 0) widgetLineHeightWithTokens(title_size, tokens) + inset * 2 else 0),
     );
     // Content-bearing cards grow around their children plus the card's
     // own padding (the default 24px house inset) instead of clipping
@@ -2641,7 +2644,7 @@ fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) g
 }
 
 fn intrinsicModalSurfaceWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    const title_size = widgetTypographySize(widget, tokens.typography.title_size);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.xl);
     const text = intrinsicTextWidgetSize(widget, tokens, title_size);
     const default_size = switch (widget.kind) {
@@ -2649,10 +2652,10 @@ fn intrinsicModalSurfaceWidgetSize(widget: Widget, tokens: DesignTokens, depth: 
         .sheet => geometry.SizeF.init(320, 420),
         else => geometry.SizeF.init(420, 220),
     };
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 9, .{ .title = .init(text.width, widgetLineHeight(title_size)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, default_size.width), widgetSizedDensityValue(widget, tokens, default_size.height)), .inset = inset, .padding = widget.layout.padding });
+    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 9, .{ .title = .init(text.width, widgetLineHeightWithTokens(title_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, default_size.width), widgetSizedDensityValue(widget, tokens, default_size.height)), .inset = inset, .padding = widget.layout.padding });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, default_size.width), text.width + inset * 2),
-        @max(widgetSizedDensityValue(widget, tokens, default_size.height), if (widget.text.len > 0) widgetLineHeight(title_size) + inset * 2 else 0),
+        @max(widgetSizedDensityValue(widget, tokens, default_size.height), if (widget.text.len > 0) widgetLineHeightWithTokens(title_size, tokens) + inset * 2 else 0),
     );
     // Content-bearing modal surfaces hug their children plus their own
     // padding, like cards. The fixed default height is a placeholder for
@@ -2664,7 +2667,7 @@ fn intrinsicModalSurfaceWidgetSize(widget: Widget, tokens: DesignTokens, depth: 
     if (children.height > 0) {
         const padding = widget.layout.padding;
         size.height = children.height + padding.top + padding.bottom;
-        if (widget.text.len > 0) size.height = @max(size.height, widgetLineHeight(title_size) + inset * 2);
+        if (widget.text.len > 0) size.height = @max(size.height, widgetLineHeightWithTokens(title_size, tokens) + inset * 2);
         size.width = @max(size.width, children.width + padding.left + padding.right);
     }
     return size;
@@ -2813,7 +2816,7 @@ fn intrinsicCheckboxWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Si
     // Ceil to the snap grid (`pixelSnapCeil`): the label tail after the
     // box is measured exactly, and render-time edge snapping must not
     // shave it into eliding.
-    return geometry.SizeF.init(pixelSnapCeil(tokens, box_size + gap + label_width), @max(box_size, widgetLineHeight(label_size)));
+    return geometry.SizeF.init(pixelSnapCeil(tokens, box_size + gap + label_width), @max(box_size, widgetLineHeightWithTokens(label_size, tokens)));
 }
 
 fn intrinsicRadioWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -2823,7 +2826,7 @@ fn intrinsicRadioWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF
     const gap = if (widget.text.len > 0) widgetControlInset(widget, tokens, tokens.spacing.sm) else 0;
     // Same label-exact tail as the checkbox: ceil so snapping cannot
     // elide the label (`pixelSnapCeil`).
-    return geometry.SizeF.init(pixelSnapCeil(tokens, circle_size + gap + label_width), @max(circle_size, widgetLineHeight(label_size)));
+    return geometry.SizeF.init(pixelSnapCeil(tokens, circle_size + gap + label_width), @max(circle_size, widgetLineHeightWithTokens(label_size, tokens)));
 }
 
 fn intrinsicToggleWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -2833,7 +2836,7 @@ fn intrinsicToggleWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
     const label_size = widgetLabelTextSize(widget, tokens);
     const label_width = measuredTextWidth(tokens, widget.text, label_size);
     const gap = if (widget.text.len > 0) widgetControlInset(widget, tokens, tokens.spacing.sm) else 0;
-    const height = @max(track_height, widgetLineHeight(label_size));
+    const height = @max(track_height, widgetLineHeightWithTokens(label_size, tokens));
     // The renderer widens the track to 1.75x a tall row's height and
     // snaps the track RECT itself to the pixel grid, where nearest-
     // rounding can grow it past a fractional reserve (a 38.5px sm track

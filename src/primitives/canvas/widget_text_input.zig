@@ -172,7 +172,7 @@ pub fn widgetTextInputSize(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32) TextLayoutOptions {
-    const line_height = widgetTextInputLineHeight(text_size);
+    const line_height = widgetTextInputLineHeight(text_size, tokens);
     const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset, tokens);
     if (tokens.control_geometry_policy != null) {
         var request = control_content.Request.init(.input_layout, widget.frame, tokens);
@@ -198,8 +198,8 @@ pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_s
     };
 }
 
-fn widgetTextInputLineHeight(text_size: f32) f32 {
-    return widget_metrics.widgetLineHeight(text_size);
+fn widgetTextInputLineHeight(text_size: f32, tokens: DesignTokens) f32 {
+    return widget_metrics.widgetLineHeightWithTokens(text_size, tokens);
 }
 
 fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
@@ -212,7 +212,7 @@ fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
 fn widgetTextInputVerticalInset(widget: Widget, tokens: DesignTokens, text_size: f32, options: TextLayoutOptions) f32 {
     if (widget.runtime_flags.code_editor) return 0;
     if (options.wrap != .none) return widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.sm);
-    return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size)) * 0.5);
+    return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size, tokens)) * 0.5);
 }
 
 fn widgetTextInputScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
@@ -325,7 +325,7 @@ pub fn textInputContentExtentForWidget(widget: Widget, tokens: DesignTokens) f32
     const text_size = widgetTextInputSize(widget, tokens);
     const text_inset = widgetTextInputInset(widget, tokens);
     const options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
-    const line_height = widgetTextInputLineHeight(text_size);
+    const line_height = widgetTextInputLineHeight(text_size, tokens);
     return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, widgetTextInputFontId(widget, tokens), text_size, options))) * line_height;
 }
 
@@ -444,11 +444,11 @@ pub fn widgetTextInputClipsText(widget: Widget, tokens: DesignTokens, text_size:
 
 fn widgetTextInputMaxScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
     const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-    return @max(0, textInputContentExtentForWidgetWithOptions(widget, widgetTextInputFontId(widget, tokens), text_size, options) - viewport.height);
+    return @max(0, textInputContentExtentForWidgetWithOptions(widget, widgetTextInputFontId(widget, tokens), text_size, options, tokens) - viewport.height);
 }
 
-fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) f32 {
-    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, font_id, text_size, options))) * widgetTextInputLineHeight(text_size);
+fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions, tokens: DesignTokens) f32 {
+    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, font_id, text_size, options))) * widgetTextInputLineHeight(text_size, tokens);
 }
 
 fn widgetTextInputLineCount(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) usize {

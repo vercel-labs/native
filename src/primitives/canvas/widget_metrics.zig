@@ -1,3 +1,4 @@
+const policy = @import("widget_metric_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const token_model = @import("tokens.zig");
@@ -20,6 +21,7 @@ const Widget = widget_model.Widget;
 /// approximation. Packs with a large-button type rung state a positive
 /// lg step.
 pub fn widgetButtonTextSize(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.button, widget, tokens, 0);
     return switch (widget.size) {
         .sm => @max(8, tokens.typography.button_size - tokens.metrics.button_label_sm_step),
         .lg => @max(8, tokens.typography.button_size + tokens.metrics.button_label_lg_step),
@@ -28,6 +30,7 @@ pub fn widgetButtonTextSize(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.body, widget, tokens, 0);
     // heading/display are typography-token rungs, honored on text leaves
     // only: they REPLACE the body base with the named token instead of
     // stepping it, so the whole type scale stays themable through
@@ -43,17 +46,19 @@ pub fn widgetBodyTextSize(widget: Widget, tokens: DesignTokens) f32 {
             else => {},
         }
     }
-    return widgetTypographySize(widget, tokens.typography.body_size);
+    return widgetTypographySizeWithTokens(widget, tokens.typography.body_size, tokens);
 }
 
 pub fn widgetLabelTextSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetTypographySize(widget, tokens.typography.label_size);
+    if (tokens.control_geometry_policy != null) return policy.scalar(.label, widget, tokens, 0);
+    return widgetTypographySizeWithTokens(widget, tokens.typography.label_size, tokens);
 }
 
 /// Badge text sits one rung below the label size (12 on the default
 /// scale) — the compact chip register.
 pub fn widgetBadgeTextSize(widget: Widget, tokens: DesignTokens) f32 {
-    return widgetTypographySize(widget, @max(8, tokens.typography.label_size - 1));
+    if (tokens.control_geometry_policy != null) return policy.scalar(.badge, widget, tokens, 0);
+    return widgetTypographySizeWithTokens(widget, @max(8, tokens.typography.label_size - 1), tokens);
 }
 
 pub fn widgetTypographySize(widget: Widget, base: f32) f32 {
@@ -88,6 +93,7 @@ pub fn widgetLineHeight(text_size: f32) f32 {
 /// the smallest real overflow (a glyph), so genuinely overflowing text
 /// still elides and any admitted overhang stays sub-pixel-scale.
 pub fn textWrapMaxWidth(tokens: DesignTokens, width: f32) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.wrap, .{ .kind = .text }, tokens, width);
     if (!tokens.pixel_snap.geometry) return width;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return width;
@@ -119,6 +125,7 @@ const min_code_line_number_digits: usize = 3;
 /// keeps one +/- column. Marker bytes never live in `Widget.text`; paint
 /// selects them from a compile-time table.
 pub fn widgetCodeLineNumberGutterWidth(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.gutter, widget, tokens, 0);
     const has_diff = widget.hasCodeDiff();
     const line_number_digits = widget.codeLineNumberDigits();
     if (line_number_digits == 0 and !has_diff) return 0;
@@ -143,6 +150,7 @@ pub fn widgetCodeLineNumberGutterWidth(widget: Widget, tokens: DesignTokens) f32
 /// keeps a short text-only cell aligned with image-bearing or wrapped peers.
 /// Other paragraph kinds keep their normal top-aligned document flow.
 pub fn widgetTextSpanAlignedContentFrame(widget: Widget, content_in: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return policy.frame(.aligned_frame, widget, tokens, content_in);
     if (widget.kind != .data_cell or widget.spans.len == 0 or content_in.height <= 0) return content_in;
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
@@ -160,6 +168,7 @@ pub fn widgetTextSpanAlignedContentFrame(widget: Widget, content_in: geometry.Re
 /// and selection all use this exact frame so numbered source and cell links
 /// stay one coherent text model.
 pub fn widgetTextSpanContentFrame(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return policy.frame(.content_frame, widget, tokens, widget.frame);
     var content = widget.frame.inset(widget.layout.padding);
     const gutter = @min(content.width, widgetCodeLineNumberGutterWidth(widget, tokens));
     content.x += gutter;
@@ -178,6 +187,7 @@ pub fn widgetTextSpanContentFrame(widget: Widget, tokens: DesignTokens) geometry
 /// one-toolbar-row invariant this ladder exists for. The `icon` size is
 /// the default square.
 pub fn widgetControlHeight(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.height, widget, tokens, 0);
     const base: f32 = switch (widget.size) {
         .sm => tokens.metrics.control_height_sm,
         .default, .icon, .heading, .display => tokens.metrics.control_height,
@@ -192,6 +202,7 @@ pub fn widgetControlHeight(widget: Widget, tokens: DesignTokens) f32 {
 /// Shared by intrinsic layout and render so measured widths and painted
 /// pixels agree.
 pub fn widgetButtonIconExtent(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.button_icon, widget, tokens, 0);
     return widgetButtonTextSize(widget, tokens) + tokens.metrics.icon_text_step;
 }
 
@@ -201,18 +212,20 @@ pub fn widgetButtonIconExtent(widget: Widget, tokens: DesignTokens) f32 {
 /// widens with the size ladder; a bigger button earns more air at its
 /// edges (the inset), not inside its own label.
 pub fn widgetButtonIconGap(widget: Widget, tokens: DesignTokens) f32 {
-    _ = widget;
+    if (tokens.control_geometry_policy != null) return policy.scalar(.button_gap, widget, tokens, 0);
     return densityValue(tokens, tokens.metrics.button_icon_gap);
 }
 
 /// Extent of a vector icon inside a badge (`widget.icon`): sized just
 /// above the badge's label text. Shared by intrinsic layout and render.
 pub fn widgetBadgeIconExtent(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.badge_icon, widget, tokens, 0);
     return widgetLabelTextSize(widget, tokens) + tokens.metrics.icon_text_step;
 }
 
 /// Gap between a badge's inline icon and its label.
 pub fn widgetBadgeIconGap(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.badge_gap, widget, tokens, 0);
     return widgetControlInset(widget, tokens, tokens.spacing.sm);
 }
 
@@ -221,15 +234,18 @@ pub fn widgetBadgeIconGap(widget: Widget, tokens: DesignTokens) f32 {
 /// icon and label read as one line. Shared by intrinsic layout and
 /// render so measured widths and painted pixels agree.
 pub fn widgetRowIconExtent(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.row_icon, widget, tokens, 0);
     return widgetBodyTextSize(widget, tokens) + tokens.metrics.icon_text_step;
 }
 
 /// Gap between a row's leading icon and its label.
 pub fn widgetRowIconGap(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.row_gap, widget, tokens, 0);
     return widgetControlInset(widget, tokens, tokens.spacing.sm);
 }
 
 pub fn widgetDefaultRowHeight(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.row_height, widget, tokens, 0);
     return widgetSizedDensityValue(widget, tokens, tokens.metrics.row_extent);
 }
 
@@ -244,6 +260,7 @@ pub fn widgetDefaultRowHeight(widget: Widget, tokens: DesignTokens) f32 {
 /// `icon`-sized buttons center their glyph in the square and need no
 /// inset.
 pub fn widgetButtonInset(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.button_inset, widget, tokens, 0);
     if (widget.size == .icon) return 0;
     const base: f32 = switch (widget.size) {
         .sm => tokens.metrics.button_inset_sm,
@@ -254,12 +271,14 @@ pub fn widgetButtonInset(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn widgetControlInset(widget: Widget, tokens: DesignTokens, base: f32) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.inset, widget, tokens, base);
     return densityValue(tokens, widgetSizedTokenValue(widget, tokens, base));
 }
 
 /// Alert chrome/content inset: one token-backed metric for rendering,
 /// effective default layout padding, and intrinsic/wrapped measurement.
 pub fn widgetAlertInset(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.alert_inset, widget, tokens, 0);
     return widgetControlInset(widget, tokens, tokens.spacing.lg);
 }
 
@@ -268,37 +287,45 @@ pub fn widgetAlertInset(widget: Widget, tokens: DesignTokens) f32 {
 /// underline register owns the taller, label-hugging geometry measured
 /// from the Geist primary Tabs component.
 pub fn widgetTabTriggerTextSize(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_text, widget, tokens, 0);
     if (tokens.controls.tabs_indicator == .pill) return widgetLabelTextSize(widget, tokens);
-    return widgetTypographySize(widget, @max(8, tokens.typography.label_size + tokens.metrics.tabs_label_size_step));
+    return widgetTypographySizeWithTokens(widget, @max(8, tokens.typography.label_size + tokens.metrics.tabs_label_size_step), tokens);
 }
 
 pub fn widgetTabTriggerHeight(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_height, widget, tokens, 0);
     if (tokens.controls.tabs_indicator == .pill) return widgetControlHeight(widget, tokens);
     return widgetSizedDensityValue(widget, tokens, @max(0, tokens.metrics.tabs_trigger_height));
 }
 
 pub fn widgetTabTriggerInset(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_inset, widget, tokens, 0);
     if (tokens.controls.tabs_indicator == .pill) return widgetControlInset(widget, tokens, tokens.spacing.md);
     return widgetControlInset(widget, tokens, @max(0, tokens.metrics.tabs_trigger_inset));
 }
 
 pub fn widgetTabTriggerIconExtent(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_icon, widget, tokens, 0);
     return widgetTabTriggerTextSize(widget, tokens) + tokens.metrics.icon_text_step;
 }
 
 pub fn widgetTabTriggerIconGap(tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_gap, .{ .kind = .text }, tokens, 0);
     return densityValue(tokens, tokens.metrics.button_icon_gap);
 }
 
 pub fn underlineTabsListInset(tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.tab_list, .{ .kind = .text }, tokens, 0);
     return densityValue(tokens, @max(0, tokens.metrics.tabs_list_inset));
 }
 
 pub fn widgetSizedDensityValue(widget: Widget, tokens: DesignTokens, value: f32) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.sized_density, widget, tokens, value);
     return densityValue(tokens, value) * widgetSizeScale(widget);
 }
 
 pub fn widgetSizedTokenValue(widget: Widget, tokens: DesignTokens, value: f32) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.sized_token, widget, tokens, value);
     return widget_model.widgetSizeSteppedValue(widget.size, value, tokens.metrics.size_inset_step);
 }
 
@@ -311,6 +338,7 @@ pub fn widgetSizeScale(widget: Widget) f32 {
 }
 
 pub fn densityValue(tokens: DesignTokens, value: f32) f32 {
+    if (tokens.control_geometry_policy != null) return policy.scalar(.density, .{ .kind = .text }, tokens, value);
     return value * densityScale(tokens.density);
 }
 
@@ -320,4 +348,12 @@ pub fn densityScale(density: Density) f32 {
         .regular => 1,
         .spacious => 1.125,
     };
+}
+
+/// Token-aware SDK entry points preserve the legacy pure helper signatures.
+pub fn widgetTypographySizeWithTokens(widget: Widget, base: f32, tokens: DesignTokens) f32 {
+    return if (tokens.control_geometry_policy != null) policy.scalar(.typography, widget, tokens, base) else widgetTypographySize(widget, base);
+}
+pub fn widgetLineHeightWithTokens(text_size: f32, tokens: DesignTokens) f32 {
+    return if (tokens.control_geometry_policy != null) policy.scalar(.line, .{ .kind = .text }, tokens, text_size) else widgetLineHeight(text_size);
 }

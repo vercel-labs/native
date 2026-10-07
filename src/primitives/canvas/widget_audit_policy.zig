@@ -92,7 +92,7 @@ fn measure(widget: widgets.Widget, raw_frame: geometry.RectF, tokens: tokens_mod
     if (widget.text.len == 0) return .{};
     if (widget.kind != .text) return .{ .width = layout_model.intrinsicWidgetSize(widget, tokens).width, .lines = 1 };
     const text_size = metrics.widgetBodyTextSize(widget, tokens);
-    const line_height = metrics.widgetLineHeight(text_size);
+    const line_height = metrics.widgetLineHeightWithTokens(text_size, tokens);
     var measured = Measurement{};
     var start: usize = 0;
     while (start <= widget.text.len) {

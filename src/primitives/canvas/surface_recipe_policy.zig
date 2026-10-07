@@ -109,8 +109,8 @@ pub const Request = struct {
         inline for (.{ "x", "y", "width", "height" }, 0..) |name, i| self.putFloat(16 + i * 4, @field(widget.frame, name));
         self.putRadius(32, style.controlRadius(widget, visual, fallback_radius));
         self.putFloat(48, switch (op) {
-            .card => metrics.widgetTypographySize(widget, tokens.typography.body_size + 1),
-            .modal => metrics.widgetTypographySize(widget, tokens.typography.title_size),
+            .card => metrics.widgetTypographySizeWithTokens(widget, tokens.typography.body_size + 1, tokens),
+            .modal => metrics.widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens),
             .pill_rect, .reactions => metrics.widgetLabelTextSize(widget, tokens),
             else => metrics.widgetBodyTextSize(widget, tokens),
         });

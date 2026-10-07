@@ -21,6 +21,7 @@ test {
     _ = @import("control_geometry_e2e_tests.zig");
     _ = @import("control_content_e2e_tests.zig");
     _ = @import("surface_recipe_e2e_tests.zig");
+    _ = @import("widget_metric_e2e_tests.zig");
 }
 
 const Adapter = native_sdk.TsUiApp(core);

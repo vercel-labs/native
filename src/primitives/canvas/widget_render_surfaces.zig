@@ -27,8 +27,8 @@ const Widget = widget_model.Widget;
 const booleanControlSelected = widget_access.booleanControlSelected;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
-const widgetLineHeight = widget_metrics.widgetLineHeight;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetLineHeightWithTokens = widget_metrics.widgetLineHeightWithTokens;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
 const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetAlertInset = widget_metrics.widgetAlertInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
@@ -74,7 +74,7 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
     // the icon column (`alertContentFrame` indents children the same
     // way, so a description column lines up under the title).
     const text_size = widgetBodyTextSize(widget, tokens);
-    const line_height = widgetLineHeight(text_size);
+    const line_height = widgetLineHeightWithTokens(text_size, tokens);
     const inset = widgetAlertInset(widget, tokens);
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const icon_frame = geometry.RectF.init(
@@ -170,7 +170,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
     }));
     if (widget.text.len == 0) return;
 
-    const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.body_size + 1, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 3),
@@ -181,7 +181,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
         .text = widget.text,
         .text_layout = .{
             .max_width = @max(1, widget.frame.width - inset * 2),
-            .line_height = widgetLineHeight(title_size),
+            .line_height = widgetLineHeightWithTokens(title_size, tokens),
             .wrap = .word,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
@@ -234,7 +234,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
     }));
     if (widget.text.len == 0) return;
 
-    const title_size = widgetTypographySize(widget, tokens.typography.title_size);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.xl);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 4),
@@ -245,7 +245,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
         .text = widget.text,
         .text_layout = .{
             .max_width = @max(1, widget.frame.width - inset * 2),
-            .line_height = widgetLineHeight(title_size),
+            .line_height = widgetLineHeightWithTokens(title_size, tokens),
             .wrap = .word,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
@@ -450,7 +450,7 @@ pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geom
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return null;
     const text_size = widgetLabelTextSize(widget, tokens);
-    const height = widgetLineHeight(text_size) + bubble_reactions_pad_v * 2;
+    const height = widgetLineHeightWithTokens(text_size, tokens) + bubble_reactions_pad_v * 2;
     const text_width = text_model.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
     // The capsule floor: a one-glyph pill stays a circle-ish chip
     // instead of collapsing narrower than it is tall.
@@ -487,7 +487,7 @@ pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: Desi
         .fill = colorFill(tokens.colors.surface_subtle),
     });
     const text_size = widgetLabelTextSize(widget, tokens);
-    const line_height = widgetLineHeight(text_size);
+    const line_height = widgetLineHeightWithTokens(text_size, tokens);
     // Baseline centered in the pill, the single-line label convention.
     const baseline = snapped.y + @max(text_size, (snapped.height - line_height) * 0.5 + text_size);
     try builder.drawText(.{
@@ -554,7 +554,7 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
             .text = widget.text,
             .text_layout = .{
                 .max_width = @max(1, content.width - chevron_size - chevron_gap),
-                .line_height = widgetLineHeight(text_size),
+                .line_height = widgetLineHeightWithTokens(text_size, tokens),
                 .wrap = .none,
                 .alignment = widget.text_alignment,
                 .overflow = widget.text_overflow,
