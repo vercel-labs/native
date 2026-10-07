@@ -32,6 +32,7 @@ test "compiled model themes copy the complete register across frame and commit o
         reference.container_layout_policy = snapshot.container_layout_policy;
         reference.intrinsic_layout_policy = snapshot.intrinsic_layout_policy;
         reference.measurement_coordination_policy = snapshot.measurement_coordination_policy;
+        reference.flow_measurement_policy = snapshot.flow_measurement_policy;
         reference.widget_motion_policy = core.nativeWindowPolicy;
         reference.widget_audit_policy = core.nativeWindowPolicy;
         reference.widget_routing_policy = core.nativeWindowPolicy;
@@ -91,6 +92,7 @@ fn restamp(reference: *canvas.DesignTokens, actual: canvas.DesignTokens) void {
     reference.container_layout_policy = actual.container_layout_policy;
     reference.intrinsic_layout_policy = actual.intrinsic_layout_policy;
     reference.measurement_coordination_policy = actual.measurement_coordination_policy;
+    reference.flow_measurement_policy = actual.flow_measurement_policy;
     reference.widget_motion_policy = core.nativeWindowPolicy;
     reference.widget_audit_policy = core.nativeWindowPolicy;
     reference.widget_routing_policy = core.nativeWindowPolicy;

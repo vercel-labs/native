@@ -910,6 +910,7 @@ pub const surface_recipe_policy = @import("surface_recipe_policy.zig");
 pub const widget_metric_policy = @import("widget_metric_policy.zig");
 pub const intrinsic_measure_policy = @import("intrinsic_measure_policy.zig");
 pub const measurement_coordination_policy = @import("measurement_coordination_policy.zig");
+pub const flow_measurement_policy = @import("flow_measurement_policy.zig");
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;

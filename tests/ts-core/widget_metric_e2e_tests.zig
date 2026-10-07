@@ -423,6 +423,190 @@ fn coordinated(tokens: c.DesignTokens) c.DesignTokens {
     t.measurement_coordination_policy = core.nativeWindowPolicy;
     return t;
 }
+
+fn flowOwned(tokens: c.DesignTokens) c.DesignTokens {
+    var t = coordinated(tokens);
+    t.flow_measurement_policy = core.nativeWindowPolicy;
+    return t;
+}
+fn flowTree(widget: c.Widget, tokens: c.DesignTokens, trace: *Measures) !void {
+    var native_nodes: [128]c.WidgetLayoutNode = undefined;
+    var compiled_nodes: [128]c.WidgetLayoutNode = undefined;
+    const bounds: sdk.geometry.RectF = .init(0.125, -0.0, 220.25, 137.5);
+    const reference_tokens = coordinated(tokens);
+    c.bumpTextMeasureGeneration();
+    trace.count = 0;
+    const expected = try c.layoutWidgetTreeWithTokens(widget, bounds, reference_tokens, &native_nodes);
+    var expected_semantics: [128]c.WidgetSemanticsNode = undefined;
+    const semantics = try expected.collectSemantics(&expected_semantics);
+    var expected_commands: [4096]c.CanvasCommand = undefined;
+    var expected_builder = c.Builder.init(&expected_commands);
+    try expected.emitDisplayList(&expected_builder, reference_tokens);
+    const observations = trace.observations;
+    const count = trace.count;
+    c.bumpTextMeasureGeneration();
+    trace.count = 0;
+    const t = flowOwned(tokens);
+    const actual = try c.layoutWidgetTreeWithTokens(widget, bounds, t, &compiled_nodes);
+    var actual_semantics: [128]c.WidgetSemanticsNode = undefined;
+    var actual_commands: [4096]c.CanvasCommand = undefined;
+    var actual_builder = c.Builder.init(&actual_commands);
+    try actual.emitDisplayList(&actual_builder, t);
+    try exact(expected.nodes, actual.nodes);
+    try exact(semantics, try actual.collectSemantics(&actual_semantics));
+    try exact(expected_builder.displayList().commands, actual_builder.displayList().commands);
+    try std.testing.expectEqual(count, trace.count);
+    try exact(observations[0..count], trace.observations[0..trace.count]);
+    core.rt.frameReset();
+}
+test "compiled widget metric flow coordination preserves grids complete trees and first-row measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const paragraph = [_]c.Widget{.{ .id = 30, .kind = .text, .text = "Grid paragraph\xff\x00", .spans = &.{.{ .text = "Measured\xff\x00 paragraph\nwith wrapping", .scale = 1.125 }} }};
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .card, .text = "First", .children = &paragraph, .layout = .{ .min_size = .init(17.25, 23.125), .max_size = .init(180.5, 71.25) } },
+        .{ .id = 3, .kind = .popover, .text = "Out of flow", .children = &paragraph },
+        .{ .id = 4, .kind = .separator },
+        .{ .id = 5, .kind = .tabs, .text = "Ruled", .frame = .init(3.125, 5.25, 19.5, 31.125), .layout = .{ .min_size = .init(7.25, 11.5) } },
+        .{ .id = 6, .kind = .column, .children = &paragraph, .layout = .{ .min_size = .init(0, 13.5), .max_size = .init(0, 51.25) } },
+    };
+    for ([_]c.ThemePack{ .house, .geist }) |pack| for ([_]usize{ 0, 1, 2, 3, std.math.maxInt(usize) }) |columns| for ([_]bool{ false, true }) |windowed| for ([_]f32{ 0, 37.25 }) |extent| for ([_]f32{ -200, 0, 33.25, 2000 }) |offset| {
+        var t = c.DesignTokens.theme(.{ .pack = pack });
+        t.text_measure = &provider;
+        const root: c.Widget = .{ .id = 1, .kind = .grid, .value = offset, .children = &children, .layout = .{ .columns = columns, .virtualized = windowed, .virtual_item_extent = extent, .virtual_overscan = 1, .gap = 2.125, .padding = .all(3.25) } };
+        flowTree(root, t, &trace) catch |err| {
+            std.debug.print("grid flow pack {t} columns {d} virtual {} extent {d} offset {d}\n", .{ pack, columns, windowed, extent, offset });
+            return err;
+        };
+    };
+}
+test "compiled widget metric flow coordination preserves scrolling axes sizing and measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const paragraph = [_]c.Widget{.{ .id = 30, .kind = .text, .text = "Long no-wrap shelf and\xff\x00 bytes", .spans = &.{.{ .text = "Width-aware styled shelf\nSecond row" }} }};
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .column, .children = &paragraph, .layout = .{ .min_size = .init(19.25, 23.5), .max_size = .init(180.125, 60.25) } },
+        .{ .id = 3, .kind = .popover, .children = &paragraph },
+        .{ .id = 4, .kind = .tabs, .text = "Rule", .frame = .init(3.125, 5.5, 19.25, 31.5) },
+        .{ .id = 5, .kind = .row, .children = &paragraph, .frame = .init(0, 0, 0, 21.25) },
+    };
+    for ([_]c.ThemePack{ .house, .geist }) |pack| for ([_]c.ScrollAxes{ .vertical, .horizontal, .both }) |axes| for ([_]f32{ -37.25, 0, 51.125, 2000 }) |offset| {
+        var t = c.DesignTokens.theme(.{ .pack = pack });
+        t.text_measure = &provider;
+        const root: c.Widget = .{ .id = 1, .kind = .scroll_view, .scroll_axes = axes, .value = offset, .value_x = -offset, .children = &children, .layout = .{ .padding = .all(3.25) } };
+        flowTree(root, t, &trace) catch |err| {
+            std.debug.print("scroll flow pack {t} axes {t} offset {d}\n", .{ pack, axes, offset });
+            return err;
+        };
+    };
+}
+test "compiled widget metric flow coordination preserves virtual uniform and variable anchored windows" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const paragraph = [_]c.Widget{.{ .id = 30, .kind = .text, .spans = &.{.{ .text = "Windowed paragraph\xff\x00\nSecond line", .scale = 1.25 }} }};
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .list_item, .children = &paragraph, .layout = .{ .min_size = .init(7.25, 11.125), .max_size = .init(0, 80.5) } },
+        .{ .id = 3, .kind = .popover, .children = &paragraph },
+        .{ .id = 4, .kind = .list_item, .children = &paragraph, .frame = .init(3.25, 5.5, 0, 31.125) },
+        .{ .id = 5, .kind = .column, .children = &paragraph },
+    };
+    for ([_]bool{ false, true }) |variable| for ([_]usize{ 0, 7, 0xfffffff0 }) |first| for ([_]usize{ 0, 1, 20 }) |anchor| for ([_]f32{ 0, 40.5 }) |extent| for ([_]f32{ -137.5, 0, 93.125, 5000 }) |offset| {
+        const root: c.Widget = .{ .id = 1, .kind = .column, .value = offset, .children = &children, .layout = .{ .virtualized = true, .virtual_first_index = first, .virtual_item_count = first + 100, .virtual_anchor_index = first + anchor, .virtual_anchor_extent = 71.25, .virtual_total_extent = if (variable) 1024.5 else 0, .virtual_item_extent = extent, .virtual_overscan = 2, .gap = 2.125, .padding = .all(3.25) } };
+        flowTree(root, .{ .text_measure = &provider }, &trace) catch |err| {
+            std.debug.print("virtual flow variable {} first {d} anchor {d} extent {d} offset {d}\n", .{ variable, first, anchor, extent, offset });
+            return err;
+        };
+    };
+}
+test "compiled widget metric flow admission preserves empty parents and skipped children" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const excluded: c.Widget = .{ .kind = .popover, .text = "No flow" };
+    for ([_]c.WidgetKind{ .grid, .column, .scroll_view }) |kind| for ([_]bool{ false, true }) |empty| for ([_]bool{ false, true }) |windowed| {
+        const root: c.Widget = .{ .kind = kind, .children = if (empty) &.{} else &.{excluded}, .semantics = .{ .list_item_count = 93 }, .layout = .{ .virtualized = windowed, .virtual_item_count = 100, .virtual_item_extent = 31.25, .virtual_overscan = 2 } };
+        try flowTree(root, .{ .text_measure = &provider }, &trace);
+    };
+}
+test "compiled widget metric flow coordination preserves exceptional numeric words and measurement depth" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const paragraph: c.Widget = .{ .kind = .text, .spans = &.{.{ .text = "Depth-aware paragraph\xff\x00\nSecond line" }} };
+    for ([_]c.WidgetKind{ .grid, .column, .scroll_view }) |kind| for ([_]u32{ 0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 }) |word_| {
+        const value_: f32 = @bitCast(word_);
+        const child: c.Widget = .{ .kind = .column, .children = &.{paragraph}, .layout = .{ .min_size = .init(0, value_), .max_size = .init(0, 71.25) } };
+        const root: c.Widget = .{ .kind = kind, .scroll_axes = .both, .children = &.{child}, .layout = .{ .virtualized = kind != .scroll_view, .columns = 1, .virtual_item_count = 100, .virtual_item_extent = value_, .virtual_overscan = 2, .gap = value_ } };
+        flowTree(root, .{ .text_measure = &provider }, &trace) catch |err| {
+            std.debug.print("flow exceptional kind {t} word {x}\n", .{ kind, word_ });
+            return err;
+        };
+    };
+    var chain: [35]c.Widget = undefined;
+    for ([_]usize{ 30, 31, 32, 33 }) |depth| {
+        chain[depth] = paragraph;
+        var i = depth;
+        while (i > 0) {
+            i -= 1;
+            chain[i] = .{ .kind = if (i == 0) .scroll_view else .column, .scroll_axes = .horizontal, .children = chain[i + 1 .. i + 2] };
+        }
+        if (depth < 32) {
+            try flowTree(chain[0], .{ .text_measure = &provider }, &trace);
+        } else {
+            var expected: [35]c.WidgetLayoutNode = undefined;
+            var actual: [35]c.WidgetLayoutNode = undefined;
+            const bounds: sdk.geometry.RectF = .init(0, 0, 220.25, 137.5);
+            c.bumpTextMeasureGeneration();
+            trace.count = 0;
+            try std.testing.expectError(error.WidgetDepthExceeded, c.layoutWidgetTreeWithTokens(chain[0], bounds, coordinated(.{ .text_measure = &provider }), &expected));
+            const count = trace.count;
+            const observations = trace.observations;
+            c.bumpTextMeasureGeneration();
+            trace.count = 0;
+            try std.testing.expectError(error.WidgetDepthExceeded, c.layoutWidgetTreeWithTokens(chain[0], bounds, flowOwned(.{ .text_measure = &provider }), &actual));
+            try exact(@as([]const c.WidgetLayoutNode, expected[0..32]), @as([]const c.WidgetLayoutNode, actual[0..32]));
+            try std.testing.expectEqual(count, trace.count);
+            try exact(observations[0..count], trace.observations[0..trace.count]);
+            core.rt.frameReset();
+        }
+    }
+}
+test "compiled widget metric flow packets retain owned continuations results and caller tails" {
+    _ = core.initialModel();
+    const flow_policy = c.flow_measurement_policy;
+    const child: c.Widget = .{ .kind = .text, .text = "Owned height" };
+    const grid = try flow_policy.GridPlan.init(std.testing.allocator, core.nativeWindowPolicy, 1, 1, .init(0, 0, 120, 80), 1, 0, 2, 0, 0, true);
+    defer grid.deinit();
+    grid.setChild(0, child, true, false);
+    const pending = grid.run();
+    try std.testing.expect(pending.pending());
+    const saved = pending.bytes;
+    core.rt.frameReset();
+    grid.reply(pending, 23.125);
+    try std.testing.expect(!grid.run().pending());
+    try std.testing.expectEqualSlices(u8, &saved, &pending.bytes);
+    const plan = try flow_policy.FlowPlan.init(std.testing.allocator, core.nativeWindowPolicy, 1, 0, .{ .content = .init(0, 0, 120, 80), .flow_count = 1 });
+    defer plan.deinit();
+    plan.setChild(0, child, 0, true, false);
+    const extent = plan.run();
+    try std.testing.expectEqual(flow_policy.FlowAction.extent, extent.action());
+    const extent_bytes = extent.bytes;
+    core.rt.frameReset();
+    plan.reply(extent, 31.25);
+    try std.testing.expectEqual(flow_policy.FlowAction.done, plan.run().action());
+    try std.testing.expectEqualSlices(u8, &extent_bytes, &extent.bytes);
+    for ([_][]const u8{ grid.request, plan.request }) |request| {
+        var output: [256]u8 = @splat(0xa5);
+        const written = core.nativeWindowPolicy(request, &output);
+        const copy = output;
+        try std.testing.expect(std.mem.allEqual(u8, output[written..], 0xa5));
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &copy, &output);
+    }
+}
 fn coordinatedTree(widget: c.Widget, width: f32, tokens: c.DesignTokens, trace: *Measures) !void {
     var reference_nodes: [32]c.WidgetLayoutNode = undefined;
     var compiled_nodes: [32]c.WidgetLayoutNode = undefined;

@@ -1410,6 +1410,7 @@ fn layoutGridChildren(
     requested_columns: usize,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.flow_measurement_policy) |policy| return compiledGridChildren(children, content, parent_index, depth, output, len, .{ .gap = gap, .columns = requested_columns }, 0, false, policy, tokens);
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
 
@@ -1464,6 +1465,7 @@ fn layoutVirtualGridChildren(
     style: WidgetLayoutStyle,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.flow_measurement_policy) |policy| return compiledGridChildren(children, content, parent_index, depth, output, len, style, scroll_y, true, policy, tokens);
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
 
@@ -1540,6 +1542,32 @@ fn layoutVirtualGridChildren(
     }
 }
 
+fn compiledGridChildren(children: []const Widget, content: geometry.RectF, parent_index: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, style: WidgetLayoutStyle, scroll_y: f32, windowed: bool, policy: @import("flow_measurement_policy.zig").Policy, tokens: DesignTokens) Error!void {
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("flow_measurement_policy.zig").GridPlan.init(scratch.get(), policy, children.len, widgetFlowChildCount(children), content, style.columns, style.virtual_overscan, style.gap, style.virtual_item_extent, scroll_y, windowed) catch @panic("grid measurement allocation failed");
+    defer plan.deinit();
+    for (children, 0..) |child, index| plan.setChild(index, child, widgetTakesFlowSlot(child), primaryUnderlineTabsFillWidth(child, tokens));
+    while (true) {
+        const result = plan.run();
+        if (!result.pending()) break;
+        plan.reply(result, intrinsicWidgetSize(children[result.index()], tokens).height);
+    }
+    if (!plan.active()) return;
+    if (windowed) {
+        output[parent_index].widget.layout.virtual_item_extent = plan.extent();
+        output[parent_index].widget.semantics.list_item_count = plan.rows();
+    }
+    for (children, 0..) |source, index| {
+        if (!plan.enabled(index)) continue;
+        var child = source;
+        if (windowed) {
+            child.semantics.list_item_index = plan.itemIndex(index);
+            child.semantics.list_item_count = plan.itemCount(index);
+        }
+        _ = try layoutWidgetDepth(child, plan.frame(index), parent_index, depth + 1, output, len, tokens);
+    }
+}
+
 /// A grid cell is the containing width for Geist's primary ruled row.
 /// Translate the theme-agnostic house width to the remaining cell width,
 /// while keeping deliberate overflow and explicit max bounds intact.
@@ -1586,6 +1614,7 @@ fn layoutScrollChildren(
     scroll_offset: geometry.OffsetF,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.flow_measurement_policy) |policy| return compiledMeasuredFlow(children, parent_index, depth, output, len, 2, .{ .content = content, .horizontal = axes.scrollsHorizontally(), .vertical = axes.scrollsVertically(), .scroll_x = scroll_offset.dx, .scroll_y = scroll_offset.dy }, policy, tokens);
     if (tokens.intrinsic_layout_policy) |policy| {
         var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
         const plan = @import("virtual_flow_policy.zig").Plan.init(scratch.get(), policy, children.len, .{ .content = content, .horizontal = axes.scrollsHorizontally(), .vertical = axes.scrollsVertically(), .scroll_x = scroll_offset.dx, .scroll_y = scroll_offset.dy }) catch @panic("scroll flow allocation failed");
@@ -1631,6 +1660,7 @@ fn layoutVirtualVerticalChildren(
     style: WidgetLayoutStyle,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.flow_measurement_policy) |policy| return compiledMeasuredFlow(children, parent_index, depth, output, len, 0, .{ .content = content, .first = style.virtual_first_index, .declared = style.virtual_item_count, .anchor = style.virtual_anchor_index, .overscan = style.virtual_overscan, .flow_count = widgetFlowChildCount(children), .gap = style.gap, .item_extent = style.virtual_item_extent, .scroll_y = scroll_y, .anchor_extent = style.virtual_anchor_extent, .total_extent = style.virtual_total_extent }, policy, tokens);
     if (tokens.intrinsic_layout_policy != null) return compiledVirtualVerticalChildren(children, content, parent_index, depth, output, len, scroll_y, style, tokens);
     const flow_count = widgetFlowChildCount(children);
     if (flow_count == 0) return;
@@ -1755,6 +1785,42 @@ fn layoutVariableVirtualChildren(
         try layoutVariableVirtualChild(child, content, y, height, first_index + flow_offset, item_count, parent_index, depth, output, len, tokens);
         y += height + gap;
         flow_offset += 1;
+    }
+}
+
+fn compiledMeasuredFlow(children: []const Widget, parent_index: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, operation: u8, options: @import("virtual_flow_policy.zig").Options, policy: @import("flow_measurement_policy.zig").Policy, tokens: DesignTokens) Error!void {
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("flow_measurement_policy.zig").FlowPlan.init(scratch.get(), policy, children.len, operation, options) catch @panic("flow measurement allocation failed");
+    defer plan.deinit();
+    var flow: usize = 0;
+    for (children, 0..) |child, index| {
+        const takes_flow = widgetTakesFlowSlot(child);
+        plan.setChild(index, child, options.first +% flow, takes_flow, primaryUnderlineTabsFillWidth(child, tokens));
+        if (takes_flow) flow += 1;
+    }
+    while (true) {
+        const result = plan.run();
+        const measured = switch (result.action()) {
+            .done => break,
+            .extent => intrinsicWidgetSize(children[result.index()], tokens).height,
+            .height => variableVirtualRowExtent(children[result.index()], result.width(), tokens, depth + 1),
+            .width => intrinsicChildSize(children[result.index()], tokens, depth + 1).width,
+        };
+        plan.reply(result, measured);
+    }
+    if (!plan.active()) return;
+    if (operation == 0) {
+        if (plan.mode() == 0) output[parent_index].widget.layout.virtual_item_extent = plan.extent();
+        output[parent_index].widget.semantics.list_item_count = plan.itemCount();
+    }
+    for (children, 0..) |source, index| {
+        if (!plan.enabled(index)) continue;
+        var child = source;
+        if (operation == 0) {
+            child.semantics.list_item_index = plan.itemIndex(index);
+            child.semantics.list_item_count = plan.itemCount();
+        }
+        _ = try layoutWidgetDepth(child, plan.frame(index), parent_index, depth + 1, output, len, tokens);
     }
 }
 

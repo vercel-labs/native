@@ -1911,6 +1911,8 @@ pub const DesignTokens = struct {
     container_layout_policy: ?@import("container_layout_policy.zig").Policy = null,
     /// Portable measurement scheduling, separate from allocation arithmetic.
     measurement_coordination_policy: ?@import("measurement_coordination_policy.zig").Policy = null,
+    /// Portable grid and scrolling measurement/admission coordination.
+    flow_measurement_policy: ?@import("flow_measurement_policy.zig").Policy = null,
     intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
     /// Widget motion plans supplied by the compiled app, outside theme overrides.
     widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
