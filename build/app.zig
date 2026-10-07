@@ -1250,6 +1250,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/markdown_content.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_routing.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/widget_changes.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");

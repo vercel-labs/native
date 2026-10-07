@@ -14,6 +14,7 @@ const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
+const change_policy = @import("widget_change_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -95,6 +96,8 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
     const previous_root_bounds = widget_render.widgetLayoutRootBounds(previous);
     const next_root_bounds = widget_render.widgetLayoutRootBounds(next);
+    if (tokens.widget_change_policy orelse change_policy.owner(next) orelse change_policy.owner(previous)) |policy|
+        return diffWithPolicy(previous, next, tokens, output, policy, previous_root_bounds, next_root_bounds);
     const root_bounds_dirty = !optionalRectsEqual(previous_root_bounds, next_root_bounds);
     // Id lookups ride the probe-table index whenever the trees are big
     // enough to be worth a table reset and fit its half-full bound;
@@ -196,6 +199,52 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     }
 
     return output[0..len];
+}
+
+/// Renderer geometry remains native-owned. The selected portable owner sends
+/// complete change flags and ordered source references, never a native verdict.
+fn diffWithPolicy(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation, policy: change_policy.Policy, previous_root: ?geometry.RectF, next_root: ?geometry.RectF) Error![]const WidgetInvalidation {
+    const plan = change_policy.Plan.init(std.heap.page_allocator, policy, previous, next, previous_root, next_root, output.len) catch @panic("widget change allocation");
+    defer plan.deinit();
+    for (0..plan.length) |i| {
+        const entry = plan.entry(i);
+        const flags = entry.flags;
+        const bounds: ?geometry.RectF = switch (entry.kind) {
+            .removed => blk: {
+                const p = entry.previous.?;
+                break :blk widgetClippedDirtyBounds(previous, p, unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetModalScrimBounds(previous, previous.nodes[p].widget, tokens)));
+            },
+            .added => blk: {
+                const n = entry.next.?;
+                break :blk widgetClippedDirtyBounds(next, n, unionOptionalBounds(widgetFullPaintBounds(next.nodes[n], tokens), widgetModalScrimBounds(next, next.nodes[n].widget, tokens)));
+            },
+            .changed => blk: {
+                const p = entry.previous.?;
+                const n = entry.next.?;
+                if (flags.visibility or flags.subtree) break :blk unionOptionalBounds(
+                    unionOptionalBounds(widgetVisibleSubtreeFullPaintBounds(previous, p, tokens), widgetModalScrimBounds(previous, previous.nodes[p].widget, tokens)),
+                    unionOptionalBounds(widgetVisibleSubtreeFullPaintBounds(next, n, tokens), widgetModalScrimBounds(next, next.nodes[n].widget, tokens)),
+                );
+                const paint_bounds = if (flags.root)
+                    unionOptionalBounds(unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetFullPaintBounds(next.nodes[n], tokens)), unionOptionalBounds(previous_root, next_root))
+                else if (flags.layout or flags.visibility or flags.layer)
+                    unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetFullPaintBounds(next.nodes[n], tokens))
+                else if (flags.paint)
+                    widgetPaintChangeBounds(previous.nodes[p].widget, next.nodes[n].widget, tokens)
+                else
+                    null;
+                break :blk widgetChangedClippedDirtyBounds(previous, p, next, n, paint_bounds);
+            },
+        };
+        output[i] = .{ .kind = entry.kind, .id = if (entry.previous) |p| previous.nodes[p].widget.id else next.nodes[entry.next.?].widget.id, .previous_index = entry.previous, .next_index = entry.next, .dirty_bounds = bounds, .layout_dirty = flags.layout, .paint_dirty = flags.paint, .semantics_dirty = flags.semantics };
+    }
+    // The reference leaves the complete written prefix on capacity failure.
+    return switch (plan.status) {
+        0 => output[0..plan.length],
+        1 => error.DuplicateWidgetId,
+        2 => error.WidgetInvalidationListFull,
+        else => unreachable,
+    };
 }
 
 fn appendWidgetInvalidation(output: []WidgetInvalidation, len: *usize, invalidation: WidgetInvalidation) Error!void {
@@ -368,6 +417,8 @@ fn widgetChange(
 }
 
 pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens) ?geometry.RectF {
+    if (tokens.widget_change_policy orelse change_policy.owner(layout)) |policy|
+        return renderStateWithPolicy(layout, previous, next, tokens, policy);
     var ids: [8]?ObjectId = [_]?ObjectId{null} ** 8;
     var id_len: usize = 0;
     if (previous.focused_id != next.focused_id) {
@@ -461,6 +512,46 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
     {
         bounds = unionOptionalBounds(bounds, widget_render.widgetLayoutRootBounds(layout));
     }
+    return bounds;
+}
+
+fn widgetWithProjectedState(base: Widget, bits: u32) Widget {
+    var result = base;
+    result.state.hovered = bits & 1 != 0;
+    result.state.pressed = bits & 2 != 0;
+    result.state.focused = bits & 4 != 0;
+    return result;
+}
+fn renderStateWithPolicy(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens, policy: change_policy.Policy) ?geometry.RectF {
+    const plan = change_policy.RenderPlan.init(std.heap.page_allocator, policy, layout, previous, next) catch @panic("render change allocation");
+    defer plan.deinit();
+    var bounds: ?geometry.RectF = null;
+    for (0..plan.length) |i| {
+        const item = plan.entry(i);
+        const index = item.node_index;
+        const node = layout.nodes[index];
+        if (item.terminal) bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens)));
+        if (item.state) {
+            const base = widgetWithFrame(node.widget, node.frame);
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(widgetWithProjectedState(base, item.previous), widgetWithProjectedState(base, item.next), tokens)));
+        }
+    }
+    for (0..2) |g| {
+        var group_bounds: ?geometry.RectF = null;
+        for (0..plan.group_lengths[g]) |i| {
+            const index = plan.groupIndex(g, i);
+            const node = layout.nodes[index];
+            var focused = widgetWithFrame(node.widget, node.frame);
+            focused.state.focused = true;
+            group_bounds = unionOptionalBounds(group_bounds, widgetClippedDirtyBounds(layout, index, widgetFocusPaintBounds(focused, tokens)));
+        }
+        bounds = unionOptionalBounds(bounds, group_bounds);
+    }
+    if (plan.chart) {
+        bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, previous, tokens));
+        bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, next, tokens));
+    }
+    if (plan.drag) bounds = unionOptionalBounds(bounds, widget_render.widgetLayoutRootBounds(layout));
     return bounds;
 }
 

@@ -1172,7 +1172,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     }
     const reconciled = node_buffer[0..next.nodes.len];
     clampCanvasWidgetLayoutTextOffsets(reconciled, tokens);
-    return .{ .nodes = reconciled, .root_bounds = next.root_bounds };
+    return .{ .nodes = reconciled, .root_bounds = next.root_bounds, .change_policy = next.change_policy };
 }
 
 pub fn canvasWidgetLayoutNodeWithSourceSemantics(

@@ -102,6 +102,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 .semantic_policy = self.widget_tokens.intrinsic_layout_policy,
                 .audit_policy = self.widget_tokens.widget_audit_policy,
                 .routing_policy = self.widget_tokens.widget_routing_policy,
+                .change_policy = self.widget_tokens.widget_change_policy,
             };
         }
 
