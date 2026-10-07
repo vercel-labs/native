@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_content = @import("control_content_policy.zig");
 const appearance = @import("control_appearance_policy.zig");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
@@ -38,6 +39,7 @@ const WidgetState = widget_model.WidgetState;
 /// device scales snap in DEVICE space and unsnapped surfaces render
 /// untouched.
 pub fn snapHairlineStrokeRect(tokens: DesignTokens, value: StrokeRect) StrokeRect {
+    if (tokens.control_geometry_policy != null) return control_content.hairline(value, tokens);
     if (!tokens.pixel_snap.geometry) return value;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return value;
@@ -71,12 +73,18 @@ pub fn snapHairlineStrokeRect(tokens: DesignTokens, value: StrokeRect) StrokeRec
 /// own border and the ring floats that gap outside it, so focus never
 /// restyles the control.
 pub fn focusRingRect(rect: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_content.rect(.focus_rect, rect, tokens);
     return rect.normalized().inflate(geometry.InsetsF.all(nonNegative(tokens.stroke.focus_offset)));
 }
 
 /// The ring's corner radius: the control's own radius grown by the
 /// offset so the ring stays concentric with the border it wraps.
 pub fn focusRingRadius(radius: Radius, tokens: DesignTokens) Radius {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.focus_radius, .{}, tokens);
+        request.radius(radius);
+        return request.run(tokens).radius;
+    }
     const offset = nonNegative(tokens.stroke.focus_offset);
     return .{
         .top_left = radius.top_left + offset,

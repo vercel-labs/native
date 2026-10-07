@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_content = @import("control_content_policy.zig");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
@@ -172,7 +173,18 @@ pub fn widgetTextInputSize(widget: Widget, tokens: DesignTokens) f32 {
 
 pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32) TextLayoutOptions {
     const line_height = widgetTextInputLineHeight(text_size);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
+    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset, tokens);
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_layout, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        request.float(64, trailing_inset);
+        if (widget.runtime_flags.code_editor) request.flags(4);
+        if (widget.text_no_wrap) request.flags(8);
+        request.bytes[8] = if (widget.kind == .textarea) 2 else if (widget.kind == .text_field) 1 else 0;
+        const result = request.run(tokens);
+        return .{ .max_width = result.scalar, .line_height = result.auxiliary, .wrap = result.wrap, .overflow = .clip, .measure = tokens.text_measure };
+    }
     return .{
         .max_width = @max(1, widget.frame.width - inset - trailing_inset),
         .line_height = line_height,
@@ -243,6 +255,21 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
 }
 
 pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_origin, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        if (widget.runtime_flags.code_editor) {
+            request.flags(4);
+            request.float(64, widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options));
+            request.float(68, widgetTextInputScrollOffset(widget, tokens, text_size, inset, options));
+        } else if (options.wrap != .none) {
+            request.flags(8);
+            request.float(68, widgetTextInputScrollOffset(widget, tokens, text_size, inset, options));
+            request.float(60, widgetTextInputVerticalInset(widget, tokens, text_size, options));
+        } else request.float(64, widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options));
+        return request.run(tokens).point;
+    }
     if (widget.runtime_flags.code_editor) {
         return geometry.PointF.init(
             widget.frame.x + inset - widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options),
@@ -268,7 +295,14 @@ pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f3
 
 pub fn widgetTextInputClipRect(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.RectF {
     const vertical_inset = widgetTextInputVerticalInset(widget, tokens, text_size, options);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
+    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset, tokens);
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_clip, widget.frame, tokens);
+        request.float(56, inset);
+        request.float(60, vertical_inset);
+        request.float(64, trailing_inset);
+        return request.run(tokens).rects[0];
+    }
     return widget.frame.normalized().deflate(.{
         .top = vertical_inset,
         .right = trailing_inset,
@@ -573,7 +607,16 @@ fn widestLogicalLineWidthBatched(
     return widest;
 }
 
-fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32) f32 {
+fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.trailing_inset, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        if (widget.runtime_flags.code_editor) request.flags(4);
+        if (widget.kind == .combobox) request.flags(8);
+        if (widgetTextInputShowsClearButton(widget)) request.flags(16);
+        return request.run(tokens).scalar;
+    }
     // A code editor's leading inset is its line-number gutter, not symmetric
     // field padding. Its source viewport runs all the way to the trailing
     // edge; mirroring the gutter here invents horizontal overflow for lines
@@ -604,6 +647,7 @@ pub fn textInputClearButtonRect(widget: Widget, tokens: DesignTokens) ?geometry.
     const text_size = widgetTextInputSize(widget, tokens);
     const icon_size = widgetTextInputClearIconSize(text_size);
     const inset = widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.md);
+    if (tokens.control_geometry_policy != null) return control_content.text(.clear_icon, widget.frame, text_size, inset, 0, 0, tokens).rects[0];
     return geometry.RectF.init(
         widget.frame.x + widget.frame.width - inset - icon_size,
         widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5),
@@ -618,6 +662,12 @@ pub fn textInputClearButtonRect(widget: Widget, tokens: DesignTokens) ?geometry.
 pub fn textInputClearButtonHitRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     const icon = textInputClearButtonRect(widget, tokens) orelse return null;
     const pad = tokens.spacing.sm;
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.clear_hit, widget.frame, tokens);
+        request.float(60, icon.x);
+        request.float(64, pad);
+        return request.run(tokens).rects[0];
+    }
     const left = @max(widget.frame.x, icon.x - pad);
     return geometry.RectF.init(
         left,
@@ -715,6 +765,7 @@ fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
 }
 
 fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.point(.text_point, point, tokens);
     if (!tokens.pixel_snap.text) return point;
     const scale = pixelSnapScale(tokens) orelse return point;
     return geometry.PointF.init(

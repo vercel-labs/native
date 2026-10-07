@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_content = @import("control_content_policy.zig");
 const control_geometry = @import("control_geometry_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
@@ -111,7 +112,8 @@ fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
     return @round(value * scale) / scale;
 }
 
-fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
+pub fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_content.rect(.snap_rect, rect, tokens);
     if (!tokens.pixel_snap.geometry) return rect;
     const scale = pixelSnapScale(tokens) orelse return rect;
     const normalized = rect.normalized();
@@ -122,7 +124,8 @@ fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.Re
     return geometry.RectF.init(x0, y0, @max(0, x1 - x0), @max(0, y1 - y0));
 }
 
-fn pixelSnapGeometryPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+pub fn pixelSnapGeometryPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.point(.geometry_point, point, tokens);
     if (!tokens.pixel_snap.geometry) return point;
     const scale = pixelSnapScale(tokens) orelse return point;
     return geometry.PointF.init(
@@ -131,7 +134,8 @@ fn pixelSnapGeometryPoint(tokens: DesignTokens, point: geometry.PointF) geometry
     );
 }
 
-fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+pub fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.point(.text_point, point, tokens);
     if (!tokens.pixel_snap.text) return point;
     const scale = pixelSnapScale(tokens) orelse return point;
     return geometry.PointF.init(
@@ -161,52 +165,19 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         // enabled/disabled/variant state. A name that resolves nowhere
         // draws the missing-icon fallback (never a silent gap).
         const icon_extent = widgetButtonIconExtent(widget, tokens);
-        const icon_y = widget.frame.y + (widget.frame.height - icon_extent) * 0.5;
-        if (widget.text.len == 0) {
-            const icon_frame = geometry.RectF.init(
-                widget.frame.x + (widget.frame.width - icon_extent) * 0.5,
-                icon_y,
-                icon_extent,
-                icon_extent,
-            );
-            try emitVectorIcon(builder, widget.id, 5, icon_frame, content_color, resolved);
-            return;
-        }
         const gap = widgetButtonIconGap(widget, tokens);
-        const text_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, text_size);
-        const available = @max(0, widget.frame.width - text_inset * 2);
-        const content_width = @min(available, icon_extent + gap + text_width);
-        const start_x = widget.frame.x + text_inset + @max(0, (available - content_width) * 0.5);
-        // Icon slot side: leading puts the glyph before the label,
-        // trailing after it (the next-page chevron) — same centered
-        // icon+label block either way.
-        const icon_x = if (widget.icon_placement == .trailing)
-            start_x + (content_width - icon_extent)
-        else
-            start_x;
-        const text_x = if (widget.icon_placement == .trailing)
-            start_x
-        else
-            start_x + icon_extent + gap;
-        const text_max_x = if (widget.icon_placement == .trailing)
-            icon_x - gap
-        else
-            widget.frame.maxX() - text_inset;
-        const icon_frame = geometry.RectF.init(icon_x, icon_y, icon_extent, icon_extent);
-        try emitVectorIcon(builder, widget.id, 5, icon_frame, content_color, resolved);
-        const text_frame = geometry.RectF.init(
-            text_x,
-            widget.frame.y,
-            @max(1, text_max_x - text_x),
-            widget.frame.height,
-        );
+        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, text_size);
+        const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, true);
+        try emitVectorIcon(builder, widget.id, 5, content.icon, content_color, resolved);
+        if (widget.text.len == 0) return;
+        const text_frame = content.label;
         try builder.drawText(.{
             .id = widgetPartId(widget.id, 4),
             // The button-label face: medium ink so the label reads as a
             // command, not a caption (layout measured with the same id).
             .font_id = tokens.typography.buttonFontId(),
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
             .color = content_color,
             .text = widget.text,
             .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
@@ -219,7 +190,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         // command, not a caption (layout measured with the same id).
         .font_id = tokens.typography.buttonFontId(),
         .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
         .color = content_color,
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none, widget.text_overflow, tokens),
@@ -439,7 +410,7 @@ pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
             .color = text_color,
             .text = visible_text,
             .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
@@ -726,7 +697,7 @@ pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
             .color = widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
@@ -791,7 +762,7 @@ pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset, tokens)),
         .color = content_color,
         .text = widget.text,
         .text_layout = boundedTextLayout(text_frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
@@ -868,7 +839,7 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset, tokens)),
         .color = content_color,
         .text = widget.text,
         .text_layout = boundedTextLayout(text_frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
@@ -887,7 +858,7 @@ pub fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignToken
             .id = widgetPartId(widget.id, 4),
             .font_id = tokens.typography.font_id,
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
             .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
             .text = widget.text,
             .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, widget.text_alignment, .none, widget.text_overflow, tokens),
@@ -1063,31 +1034,17 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
     if (tokens.controls.tabs_indicator == .underline and widget.icon.len > 0) {
         const resolved = icon_model.resolveOrMissing(widget.icon).?;
         const icon_extent = widgetTabTriggerIconExtent(widget, tokens);
-        const icon_y = widget.frame.y + (widget.frame.height - icon_extent) * 0.5;
-        if (widget.text.len == 0) {
-            try emitVectorIcon(builder, widget.id, 5, geometry.RectF.init(
-                widget.frame.x + (widget.frame.width - icon_extent) * 0.5,
-                icon_y,
-                icon_extent,
-                icon_extent,
-            ), content_color, resolved);
-            return;
-        }
         const gap = widgetTabTriggerIconGap(tokens);
-        const text_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
-        const available = @max(0, widget.frame.width - text_inset * 2);
-        const content_width = @min(available, icon_extent + gap + text_width);
-        const start_x = widget.frame.x + text_inset + @max(0, (available - content_width) * 0.5);
-        const icon_x = if (widget.icon_placement == .trailing) start_x + content_width - icon_extent else start_x;
-        const text_x = if (widget.icon_placement == .trailing) start_x else start_x + icon_extent + gap;
-        const text_max_x = if (widget.icon_placement == .trailing) icon_x - gap else widget.frame.maxX() - text_inset;
-        try emitVectorIcon(builder, widget.id, 5, geometry.RectF.init(icon_x, icon_y, icon_extent, icon_extent), content_color, resolved);
-        const text_frame = geometry.RectF.init(text_x, widget.frame.y, @max(1, text_max_x - text_x), widget.frame.height);
+        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+        const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, false);
+        try emitVectorIcon(builder, widget.id, 5, content.icon, content_color, resolved);
+        if (widget.text.len == 0) return;
+        const text_frame = content.label;
         try builder.drawText(.{
             .id = widgetPartId(widget.id, 3),
             .font_id = tokens.typography.font_id,
             .size = text_size,
-            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0)),
+            .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
             .color = content_color,
             .text = widget.text,
             .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
@@ -1098,7 +1055,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
         .id = widgetPartId(widget.id, 3),
         .font_id = tokens.typography.font_id,
         .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
         .color = content_color,
         .text = widget.text,
         .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none, widget.text_overflow, tokens),
@@ -1537,12 +1494,12 @@ fn emitControlLabelWithColor(builder: *Builder, widget: Widget, tokens: DesignTo
         .id = widgetPartId(widget.id, slot),
         .font_id = tokens.typography.font_id,
         .size = text_size,
-        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(labelFrameForControl(widget.frame, x), text_size, 0)),
+        .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(labelFrameForControl(widget.frame, x, tokens), text_size, 0, tokens)),
         // Callers resolve the selection control's enabled/disabled
         // foreground channel before reaching this common text emitter.
         .color = color,
         .text = widget.text,
-        .text_layout = boundedTextLayout(labelFrameForControl(widget.frame, x), text_size, 0, .start, .none, widget.text_overflow, tokens),
+        .text_layout = boundedTextLayout(labelFrameForControl(widget.frame, x, tokens), text_size, 0, .start, .none, widget.text_overflow, tokens),
     });
 }
 
@@ -1553,7 +1510,8 @@ fn widgetPartId(id: ObjectId, slot: ObjectId) ObjectId {
     return if (part == 0) id else part;
 }
 
-fn textOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
+pub fn textOrigin(frame: geometry.RectF, size: f32, inset: f32, tokens: DesignTokens) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.text(.origin, frame, size, inset, 0, 0, tokens).point;
     const line_height = size * 1.25;
     return geometry.PointF.init(
         frame.x + inset,
@@ -1561,14 +1519,16 @@ fn textOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
     );
 }
 
-fn boundedTextOrigin(frame: geometry.RectF, size: f32, inset: f32) geometry.PointF {
-    return geometry.PointF.init(frame.x + inset, textOrigin(frame, size, 0).y);
+pub fn boundedTextOrigin(frame: geometry.RectF, size: f32, inset: f32, tokens: DesignTokens) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.text(.origin, frame, size, inset, 0, 0, tokens).point;
+    return geometry.PointF.init(frame.x + inset, textOrigin(frame, size, 0, tokens).y);
 }
 
-fn boundedTextLayout(frame: geometry.RectF, size: f32, inset: f32, alignment: TextAlign, wrap: TextWrap, overflow: TextOverflow, tokens: DesignTokens) TextLayoutOptions {
+pub fn boundedTextLayout(frame: geometry.RectF, size: f32, inset: f32, alignment: TextAlign, wrap: TextWrap, overflow: TextOverflow, tokens: DesignTokens) TextLayoutOptions {
+    const plan = if (tokens.control_geometry_policy != null) control_content.text(.layout, frame, size, inset, 0, @intFromEnum(alignment), tokens) else null;
     return .{
-        .max_width = @max(1, frame.width - inset * 2),
-        .line_height = size * 1.25,
+        .max_width = if (plan) |v| v.scalar else @max(1, frame.width - inset * 2),
+        .line_height = if (plan) |v| v.auxiliary else size * 1.25,
         .wrap = wrap,
         .alignment = alignment,
         // Single-line labels follow the widget's overflow policy:
@@ -1579,7 +1539,8 @@ fn boundedTextLayout(frame: geometry.RectF, size: f32, inset: f32, alignment: Te
     };
 }
 
-fn labelFrameForControl(frame: geometry.RectF, x: f32) geometry.RectF {
+pub fn labelFrameForControl(frame: geometry.RectF, x: f32, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_content.text(.label_frame, frame, 0, x, 0, 0, tokens).rects[0];
     return geometry.RectF.init(x, frame.y, @max(1, frame.x + frame.width - x), frame.height);
 }
 
@@ -1587,11 +1548,12 @@ fn centeredTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, tokens
     return alignedTextOrigin(frame, text, size, 0, .center, tokens);
 }
 
-fn alignedTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, inset: f32, alignment: TextAlign, tokens: DesignTokens) geometry.PointF {
+pub fn alignedTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, inset: f32, alignment: TextAlign, tokens: DesignTokens) geometry.PointF {
     const width = if (tokens.text_measure) |measure|
         measure.measureWidth(tokens.typography.font_id, size, text)
     else
         estimateTextWidth(text, size);
+    if (tokens.control_geometry_policy != null) return control_content.text(.aligned_origin, frame, size, inset, width, @intFromEnum(alignment), tokens).point;
     const available_width = @max(0, frame.width - inset * 2);
     const offset = switch (alignment) {
         .start => 0,
@@ -1605,8 +1567,16 @@ fn alignedTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, inset: 
     );
 }
 
-fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
+pub fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
     const min_size = widgetSizedDensityValue(widget, tokens, 12);
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.glyph_size, widget.frame, tokens);
+        request.bytes[8] = @intFromEnum(widget.size);
+        request.float(72, min_size);
+        request.float(76, widgetTypographySize(widget, tokens.typography.title_size));
+        request.float(80, widgetButtonTextSize(widget, tokens));
+        return request.run(tokens).scalar;
+    }
     if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySize(widget, tokens.typography.title_size)));
     return widgetButtonTextSize(widget, tokens);
 }
@@ -1710,15 +1680,9 @@ pub fn emitWidgetTextCompositionLines(
         // snapped coordinate covers half of each neighboring pixel row
         // at 1x and antialiases to a 50% ghost, while a snapped rect
         // covers whole device pixels and stays crisp at every scale.
-        const snapped = pixelSnapGeometryRect(tokens, selection.rect);
         try builder.fillRect(.{
             .id = widgetPartId(widget.id, widgetTextRangePart(first_part, overflow_first_part, index)),
-            .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-                snapped.x,
-                snapped.maxY() - tokens.stroke.regular,
-                snapped.width,
-                tokens.stroke.regular,
-            )),
+            .rect = compositionLineRect(selection.rect, tokens),
             .fill = .{ .color = textEditingInkColor(widget, tokens) },
         });
     }
@@ -1749,4 +1713,35 @@ pub fn emitWidgetTextCaret(
         .rect = pixelSnapGeometryRect(tokens, rect),
         .fill = .{ .color = textEditingInkColor(widget, tokens) },
     });
+}
+
+/// Measured icon/label placement shared by buttons and underline tabs.
+/// Their historic trailing expressions retain distinct f32 grouping.
+pub fn iconLabelFrames(widget: Widget, tokens: DesignTokens, extent: f32, gap: f32, measured: f32, inset: f32, grouped_trailing: bool) struct { icon: geometry.RectF, label: geometry.RectF } {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.icon_label, widget.frame, tokens);
+        request.float(56, inset);
+        request.float(60, measured);
+        request.float(64, extent);
+        request.float(68, gap);
+        if (widget.icon_placement == .trailing) request.flags(4);
+        if (widget.text.len > 0) request.flags(8);
+        if (grouped_trailing) request.flags(16);
+        const result = request.run(tokens);
+        return .{ .icon = result.rects[0], .label = result.rects[1] };
+    }
+    const y = widget.frame.y + (widget.frame.height - extent) * 0.5;
+    if (widget.text.len == 0) return .{ .icon = .init(widget.frame.x + (widget.frame.width - extent) * 0.5, y, extent, extent), .label = .{} };
+    const available = @max(0, widget.frame.width - inset * 2);
+    const width = @min(available, extent + gap + measured);
+    const start = widget.frame.x + inset + @max(0, (available - width) * 0.5);
+    const x = if (widget.icon_placement == .trailing) (if (grouped_trailing) start + (width - extent) else start + width - extent) else start;
+    const label_x = if (widget.icon_placement == .trailing) start else start + extent + gap;
+    const end = if (widget.icon_placement == .trailing) x - gap else widget.frame.maxX() - inset;
+    return .{ .icon = .init(x, y, extent, extent), .label = .init(label_x, widget.frame.y, @max(1, end - label_x), widget.frame.height) };
+}
+pub fn compositionLineRect(rect: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_content.rect(.composition, rect, tokens);
+    const snapped = pixelSnapGeometryRect(tokens, rect);
+    return pixelSnapGeometryRect(tokens, .init(snapped.x, snapped.maxY() - tokens.stroke.regular, snapped.width, tokens.stroke.regular));
 }

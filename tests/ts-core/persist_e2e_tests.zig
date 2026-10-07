@@ -19,6 +19,7 @@ test {
     _ = @import("widget_presentation_e2e_tests.zig");
     _ = @import("widget_paint_walk_e2e_tests.zig");
     _ = @import("control_geometry_e2e_tests.zig");
+    _ = @import("control_content_e2e_tests.zig");
 }
 
 const Adapter = native_sdk.TsUiApp(core);
