@@ -219,6 +219,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 24) return nscvWidgetRouting(request);
   if (request[0] === 25) return nscvWidgetChanges(request);
   if (request[0] === 26) return nscvWidgetPaint(request);
+  if (request[0] === 27) return nscvWidgetPresentation(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

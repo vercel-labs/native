@@ -23,6 +23,7 @@ const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const icon_model = @import("icons.zig");
 const chart_model = @import("chart.zig");
+const presentation_policy = @import("widget_presentation_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -140,6 +141,16 @@ const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratc
 /// the entry points record it here.
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
+// Results are copied out of the compiler arena and scoped to one retained
+// emission. Save/restore permits nested emissions on the same thread.
+threadlocal var presentation_plan: ?presentation_policy.Plan = null;
+fn activePresentation(layout: anytype) ?presentation_policy.Plan {
+    if (presentation_policy.owner(layout) == null) return null;
+    const plan = presentation_plan orelse @panic("missing compiled presentation plan");
+    if (!plan.matches(layout)) @panic("mismatched compiled presentation layout");
+    return plan;
+}
+
 /// Visible bounds for the direct widget-tree walk, in the coordinate
 /// space active at the current recursion depth. The layout walk derives
 /// the same value from retained parent links; the direct walk carries it
@@ -159,6 +170,18 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const saved_plan = presentation_plan;
+    const saved_viewport = scrim_viewport;
+    const plan = if (presentation_policy.owner(layout)) |policy|
+        presentation_policy.Plan.init(std.heap.page_allocator, policy, layout, tokens, state) catch @panic("presentation plan allocation failed")
+    else
+        null;
+    presentation_plan = plan;
+    defer {
+        presentation_plan = saved_plan;
+        scrim_viewport = saved_viewport;
+        if (plan) |owned| owned.deinit();
+    }
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutClipEscapingMotions(builder, layout, tokens, state);
@@ -226,12 +249,13 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
 /// The window-space translation around a floating drag preview. The same
 /// value drives both the builder stack and span visibility below, so a rich
 /// text child is culled at its lifted pose rather than its standing slot.
-fn widgetLayoutDragPreviewTranslation(
+pub fn widgetLayoutDragPreviewTranslation(
     layout: anytype,
     source_index: usize,
     state: WidgetRenderState,
     ancestor_transform: Affine,
 ) Affine {
+    if (activePresentation(layout)) |plan| return plan.drag() orelse @panic("missing compiled drag translation");
     const current_frame = layout.nodes[source_index].frame.normalized();
     const current_origin = ancestor_transform.transformPoint(geometry.PointF.init(current_frame.x, current_frame.y));
     const source_layout_origin = state.drag_preview_origin orelse geometry.PointF.init(current_frame.x, current_frame.y);
@@ -247,6 +271,10 @@ fn widgetLayoutDragPreviewTranslation(
 /// retain those bounds separately from their resolved frame so a root
 /// dialog can be centered without shrinking its own scrim to the dialog.
 pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
+    if (presentation_policy.owner(layout)) |policy| {
+        if (presentation_plan) |plan| if (plan.matches(layout)) return plan.root();
+        return presentation_policy.rootBounds(policy, layout);
+    }
     if (@hasField(@TypeOf(layout), "root_bounds")) {
         if (layout.root_bounds) |root_bounds| return root_bounds.normalized();
     }
@@ -262,7 +290,7 @@ pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
 /// Accumulated transform active while `node_index` emits. Window-level
 /// surfaces are hoisted into the late top-level pass, so their original
 /// ancestors do not contribute transforms there.
-fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+pub fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
     if (node_index >= layout.nodes.len) return null;
     var indices: [widget_layout.max_widget_depth]usize = undefined;
     var len: usize = 0;
@@ -286,7 +314,7 @@ fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine
 /// The transform active while `node_index` paints in this frame. Unlike the
 /// standing emission transform above, this includes presentation-only layout
 /// motion and the window-level translation around a floating drag preview.
-fn widgetLayoutNodePresentationTransform(
+pub fn widgetLayoutNodePresentationTransform(
     layout: anytype,
     node_index: usize,
     state: WidgetRenderState,
@@ -328,7 +356,8 @@ fn widgetLayoutNodePresentationTransform(
 /// so it must explicitly restore this stack before painting the source.
 /// Window-level nodes were already hoisted and therefore inherit no
 /// original ancestors there.
-fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+pub fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+    if (activePresentation(layout)) |plan| return if (node_index < layout.nodes.len) plan.facts(node_index).ancestor else null;
     if (node_index >= layout.nodes.len) return null;
     if (widget_tree.widgetEscapesAncestorClips(layout.nodes[node_index].widget)) return Affine.identity();
     const parent_index = layout.nodes[node_index].parent_index orelse return Affine.identity();
@@ -341,12 +370,17 @@ fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize)
 /// mapped back through the exact PRESENTATION transform stack. Floating
 /// drag previews and clip-escaping landing motions stop at their lifted
 /// subtree root, so the culling policy matches the late unclipped paint pass.
-fn widgetLayoutNodeVisibleBounds(
+pub fn widgetLayoutNodeVisibleBounds(
     layout: anytype,
     node_index: usize,
     bounds: geometry.RectF,
     state: WidgetRenderState,
 ) ?geometry.RectF {
+    if (activePresentation(layout)) |plan| {
+        if (node_index >= layout.nodes.len) return null;
+        const facts = plan.facts(node_index);
+        return if (state.rendering_drag_preview) facts.preview_visible else facts.visible;
+    }
     if (node_index >= layout.nodes.len) return null;
     var device_visible = (widgetLayoutRootBounds(layout) orelse return null).normalized();
     const has_layout_motion = state.layout_motions.len > 0;
@@ -1013,7 +1047,7 @@ fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
     return @round(value * scale) / scale;
 }
 
-fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
+pub fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
     if (!tokens.pixel_snap.geometry) return rect;
     const scale = pixelSnapScale(tokens) orelse return rect;
     const normalized = rect.normalized();
