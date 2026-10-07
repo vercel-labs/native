@@ -19,7 +19,9 @@ function compare(name: string, values: NativeSnapshot[]) {
 }
 
 test("Habits preserves streaks, keyed filtering, keyboard navigation, capacity and complete replay", async () => {
-  const app = await NativeApp.start({ width: 720, height: 520 });
+  // The 64-row session replays every intermediate tree in one request.
+  // Allow bounded headroom when the compiled driver shares CI with builds.
+  const app = await NativeApp.start({ width: 720, height: 520, timeoutMs: 60000 });
   try {
     let s = await app.snapshot(); const snapshots = [s];
     if (process.env.NATIVE_SDK_TEST_VIEW_BACKEND) assert.equal(s.viewBackend, process.env.NATIVE_SDK_TEST_VIEW_BACKEND);

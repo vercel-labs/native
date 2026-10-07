@@ -1282,15 +1282,11 @@ pub fn build(b: *std.Build) void {
         habits_reference_run.has_side_effects = true;
         habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
         habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
-        _ = habits_reference_run.captureStdOut(.{});
-        _ = habits_reference_run.captureStdErr(.{});
         const habits_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=true" });
         habits_driver_run.setCwd(b.path("examples/habits"));
         habits_driver_run.has_side_effects = true;
         habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
         habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
-        _ = habits_driver_run.captureStdOut(.{});
-        _ = habits_driver_run.captureStdErr(.{});
         habits_driver_run.step.dependOn(&habits_reference_run.step);
         native_driver_step.dependOn(&habits_driver_run.step);
         ts_core_e2e_step.dependOn(&habits_driver_run.step);
