@@ -1258,6 +1258,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/control_content.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/surface_recipes.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_metrics.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/intrinsic_measure.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");

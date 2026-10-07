@@ -12,6 +12,124 @@ fn owned(tokens: c.DesignTokens) c.DesignTokens {
     t.control_geometry_policy = core.nativeWindowPolicy;
     return t;
 }
+fn ownedIntrinsic(tokens: c.DesignTokens) c.DesignTokens {
+    var t = owned(tokens);
+    t.intrinsic_layout_policy = core.nativeWindowPolicy;
+    return t;
+}
+
+test "compiled widget metric container coordination preserves complete sizes and measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const spans_ = [_]c.TextSpan{ .{ .text = "First\xff\x00 line\n", .scale = 1.125 }, .{ .text = "monospace second", .monospace = true } };
+    const descendants = [_]c.Widget{ .{ .kind = .text, .text = "paragraph", .spans = &spans_ }, .{ .kind = .button, .text = "nested button" } };
+    const children = [_]c.Widget{
+        .{ .kind = .column, .children = &descendants, .layout = .{ .gap = 2.25, .padding = .{ .left = 1.125, .right = 2.25, .top = 3.5, .bottom = 4.75 } } },
+        .{ .kind = .separator },
+        .{ .kind = .text, .text = "last\xff\x00 label", .frame = .init(0, 0, 12.25, 0), .layout = .{ .min_size = .init(7.25, 11.5), .max_size = .init(40.25, 55.125) } },
+        .{ .kind = .popover, .text = "out of flow", .children = &descendants },
+    };
+    var widget: c.Widget = .{ .kind = .column, .text = "Title\xff\x00", .children = &children, .layout = .{ .gap = 3.125, .padding = .{ .left = 3.25, .right = 7.5, .top = 5.125, .bottom = 9.25 }, .min_size = .init(15.25, 17.5) } };
+    for (std.enums.values(c.WidgetKind)) |kind| for ([_]c.WidgetSize{ .default, .sm, .lg }) |size| for (std.enums.values(c.Density)) |density| for ([_]u8{ 0, 1, 2, 4, 7 }) |flags| {
+        var t: c.DesignTokens = .{ .text_measure = &provider, .density = density };
+        t.controls.tabs_indicator = if (flags & 1 != 0) .underline else .pill;
+        t.controls.button_group_style = .detached;
+        t.metrics.button_group_gap = 5.125;
+        t.metrics.tabs_gap = 7.25;
+        widget.kind = kind;
+        widget.size = size;
+        widget.text = if (flags & 2 != 0) "" else "Title\xff\x00";
+        widget.state.selected = flags & 1 != 0;
+        widget.scroll_axes = if (flags & 1 != 0) .horizontal else .vertical;
+        widget.layout.padding_is_kind_default = flags & 2 != 0;
+        widget.layout.virtualized = flags & 4 != 0;
+        widget.layout.columns = if (flags & 2 != 0) std.math.maxInt(usize) else 2;
+        c.bumpTextMeasureGeneration();
+        trace.count = 0;
+        const expected = c.intrinsicWidgetSize(widget, t);
+        const count = trace.count;
+        const observations = trace.observations;
+        c.bumpTextMeasureGeneration();
+        trace.count = 0;
+        const actual = c.intrinsicWidgetSize(widget, ownedIntrinsic(t));
+        exact(expected, actual) catch |err| {
+            std.debug.print("container kind {t} size {t} density {t} flags {d}\n", .{ kind, size, density, flags });
+            return err;
+        };
+        try std.testing.expectEqual(count, trace.count);
+        try exact(observations[0..count], trace.observations[0..trace.count]);
+        core.rt.frameReset();
+    };
+}
+
+test "compiled widget metric container continuation packets survive nested calls and arena resets" {
+    _ = core.initialModel();
+    const child: c.Widget = .{ .kind = .button, .text = "owned child" };
+    const widget: c.Widget = .{ .kind = .scroll_view, .scroll_axes = .horizontal, .children = &.{child} };
+    const tokens = ownedIntrinsic(.{});
+    const plan = try c.intrinsic_measure_policy.Plan.init(std.testing.allocator, widget, tokens, 0, 32, false);
+    defer plan.deinit();
+    plan.setChild(0, child, true);
+    const first = plan.run();
+    const first_bytes = first.bytes;
+    try std.testing.expectEqual(c.intrinsic_measure_policy.Action.child, first.action());
+    const size = c.intrinsicWidgetSize(child, tokens);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &first_bytes, &first.bytes);
+    plan.reply(first, size);
+    const second = plan.run();
+    try std.testing.expectEqual(c.intrinsic_measure_policy.Action.wrapped, second.action());
+    const second_bytes = second.bytes;
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &second_bytes, &second.bytes);
+    plan.reply(second, .init(0, size.height));
+    const final = plan.run();
+    try std.testing.expectEqual(c.intrinsic_measure_policy.Action.done, final.action());
+    const expected: @TypeOf(size) = .init(0, size.height);
+    try exact(expected, final.size());
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &first_bytes, &first.bytes);
+    try std.testing.expectEqualSlices(u8, &second_bytes, &second.bytes);
+}
+
+test "compiled widget metric container continuations preserve the recursive depth boundary" {
+    _ = core.initialModel();
+    var nodes: [36]c.Widget = undefined;
+    for (&nodes) |*node| node.* = .{ .kind = .column, .layout = .{ .padding = .{ .left = 1.125, .right = 2.25, .top = 3.5, .bottom = 4.75 }, .min_size = .init(5.5, 7.25) } };
+    nodes[nodes.len - 1] = .{ .kind = .button, .text = "depth leaf" };
+    for (0..nodes.len - 1) |i| nodes[i].children = nodes[i + 1 .. i + 2];
+    for ([_]c.WidgetKind{ .column, .row, .grid, .stack, .scroll_view, .accordion, .card, .alert, .dialog, .list_item, .data_cell }) |kind| {
+        for (nodes[0 .. nodes.len - 1]) |*node| {
+            node.kind = kind;
+            node.state.selected = true;
+            node.scroll_axes = .vertical;
+        }
+        try exact(c.intrinsicWidgetSize(nodes[0], .{}), c.intrinsicWidgetSize(nodes[0], ownedIntrinsic(.{})));
+        core.rt.frameReset();
+    }
+    for (nodes[0 .. nodes.len - 1]) |*node| node.kind = .column;
+    nodes[32].kind = .scroll_view;
+    nodes[32].scroll_axes = .horizontal;
+    try exact(c.intrinsicWidgetSize(nodes[0], .{}), c.intrinsicWidgetSize(nodes[0], ownedIntrinsic(.{})));
+    core.rt.frameReset();
+}
+
+test "compiled widget metric container recipes preserve exceptional f32 words" {
+    _ = core.initialModel();
+    const children = [_]c.Widget{ .{ .kind = .button, .text = "Exceptional" }, .{ .kind = .separator } };
+    for ([_]c.WidgetKind{ .row, .column, .stack, .grid, .card, .dialog, .alert, .accordion, .list_item }) |kind| for ([_]u32{ 0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 }) |word_| {
+        const value: f32 = @bitCast(word_);
+        const widget: c.Widget = .{ .kind = kind, .text = "Title", .children = &children, .state = .{ .selected = true }, .layout = .{ .gap = value, .padding = .{ .left = value, .right = 3.25, .top = 5.5, .bottom = 7.125 }, .min_size = .init(value, value) } };
+        const expected = c.intrinsicWidgetSize(widget, .{});
+        const actual = c.intrinsicWidgetSize(widget, ownedIntrinsic(.{}));
+        exact(expected, actual) catch |err| {
+            std.debug.print("container exceptional kind {t} word {x}\n", .{ kind, word_ });
+            return err;
+        };
+        core.rt.frameReset();
+    };
+}
 fn scalar(op: m.Operation, widget: c.Widget, t: c.DesignTokens, base: f32) f32 {
     return switch (op) {
         .button => reference.widgetButtonTextSize(widget, t),

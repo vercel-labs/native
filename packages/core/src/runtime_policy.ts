@@ -225,6 +225,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 30) return nscvControlContent(request);
   if (request[0] === 31) return nscvSurfaceRecipes(request);
   if (request[0] === 32) return nscvWidgetMetrics(request);
+  if (request[0] === 33) return nscvIntrinsicMeasure(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -1386,16 +1387,23 @@ function nscvContainerCross(child: NscContainerChild, axis: number, available: n
  * portable policy. Native copies every result before recursive measurement;
  * collection belongs to the enclosing app cycle, never to this operation.
  */
-function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
+function nscvIntrinsicLayout(request: Uint8Array, numericFlags: number = -1, signalingFlags: number = 0, bothNaNMaximum: number = 0): Uint8Array {
   if (request.length < 96 || request[0] !== 6) throw new Error("invalid intrinsic layout request");
   const op = request[1]!, axis = request[2]!, flags = request[3]!;
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(4, true);
   if (op > 10 || axis > 1 || flags > 3 || wire.getUint32(92, true) !== 0 || request.length !== 96 + count * 40)
     throw new Error("invalid intrinsic layout operation, flags or length");
-  const f = Math.fround, max = nscvSurfaceMax, min = nscvSurfaceMin;
+  const f = Math.fround;
+  const max = (a: number, b: number): number => numericFlags < 0 ? nscvSurfaceMax(a, b) : nscvRenderExtreme(a, b, numericFlags, true);
+  const min = (a: number, b: number): number => numericFlags < 0 ? nscvSurfaceMin(a, b) : nscvRenderExtreme(a, b, numericFlags, false);
   const v = (at: number): number => wire.getFloat32(at, true);
+  const signalingAt = (at: number): boolean => {
+    const word = wire.getUint32(at, true);
+    return (word & 0x7f800000) === 0x7f800000 && (word & 0x007fffff) !== 0 && (word & 0x00400000) === 0;
+  };
+  const rightMax = (value: number, at: number): number => (signalingFlags & 16) !== 0 && signalingAt(at) ? v(at) : max(value, v(at));
   const minWidth = v(24), minHeight = v(28), left = v(32), right = v(36), top = v(40), bottom = v(44);
-  const gap = max(0, v(48)), stopped = (flags & 1) !== 0, hasTitle = (flags & 2) !== 0;
+  const gap = rightMax(0, 48), stopped = (flags & 1) !== 0, hasTitle = (flags & 2) !== 0;
   const result = new Uint8Array(12 + count * 12), out = new DataView(result.buffer); out.setUint32(0, count, true);
   let flows = 0, width = 0, height = 0;
   for (let i = 0; i < count; i++) {
@@ -1416,8 +1424,8 @@ function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
     } else { width = max(width, w); height = max(height, op === 3 ? v(at + 36) : h); }
   }
   if (op === 0) return result;
-  const paddedWidth = (w: number): number => max(f(f(w + left) + right), minWidth);
-  const paddedHeight = (h: number): number => max(f(f(h + top) + bottom), minHeight);
+  const paddedWidth = (w: number): number => rightMax(f(f(w + left) + right), 24);
+  const paddedHeight = (h: number): number => rightMax(f(f(h + top) + bottom), 28);
   if (op === 6) { width = paddedWidth(v(52)); height = paddedHeight(v(56)); }
   else if (op === 7) {
     width = paddedWidth(width); height = paddedHeight(f(f(v(64) + (height > 0 ? gap : 0)) + height));
@@ -1442,7 +1450,7 @@ function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
   } else if (op === 5) {
     if (stopped) { width = 0; height = 0; }
   } else if (stopped || count === 0 || (op === 1 || op === 4) && flows === 0) {
-    width = op === 3 ? 0 : max(0, minWidth); height = max(0, minHeight);
+    width = op === 3 ? 0 : rightMax(0, 24); height = rightMax(0, 28);
   } else {
     if (op === 1) {
       const gaps = f(gap * f(flows - 1));
@@ -1456,7 +1464,12 @@ function nscvIntrinsicLayout(request: Uint8Array): Uint8Array {
     }
     width = op === 3 ? 0 : paddedWidth(width); height = paddedHeight(height);
   }
-  out.setFloat32(4, width, true); out.setFloat32(8, height, true); return result;
+  out.setFloat32(4, width, true); out.setFloat32(8, height, true);
+  if (op !== 5 && op < 8) {
+    if (op !== 3 && signalingAt(24) && ((signalingFlags & 16) !== 0 || bothNaNMaximum !== 0 && Number.isNaN(width))) result.set(request.subarray(24, 28), 4);
+    if (signalingAt(28) && ((signalingFlags & 16) !== 0 || bothNaNMaximum !== 0 && Number.isNaN(height))) result.set(request.subarray(28, 32), 8);
+  }
+  return result;
 }
 
 /** Width-aware sizing over stable widget-kind codes and native paragraph,

@@ -2230,6 +2230,12 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
 }
 
 fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (tokens.intrinsic_layout_policy) |policy| {
+        var owned = tokens;
+        owned.control_geometry_policy = owned.control_geometry_policy orelse policy;
+        if (@import("widget_metric_policy.zig").intrinsic(widget, owned)) |size| return size;
+        return compiledIntrinsicMeasure(widget, owned, depth);
+    }
     if (tokens.control_geometry_policy != null) {
         if (@import("widget_metric_policy.zig").intrinsic(widget, tokens)) |size| return size;
     }
@@ -2340,6 +2346,28 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
     };
 }
 
+fn compiledIntrinsicMeasure(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("intrinsic_measure_policy.zig").Plan.init(scratch.get(), widget, tokens, depth, max_widget_depth, booleanControlSelected(widget)) catch @panic("intrinsic measurement allocation failed");
+    defer plan.deinit();
+    for (widget.children, 0..) |child, index| plan.setChild(index, child, widgetTakesFlowSlot(child));
+    while (true) {
+        const result = plan.run();
+        const measured = switch (result.action()) {
+            .done => return result.size(),
+            .title => intrinsicTextWidgetSize(widget, tokens, result.textSize()),
+            .row => blk: {
+                var leaf = widget;
+                leaf.children = &.{};
+                break :blk @import("widget_metric_policy.zig").intrinsic(leaf, tokens) orelse @panic("missing intrinsic row owner");
+            },
+            .child => intrinsicWidgetSizeDepth(widget.children[result.index()], tokens, depth + 1),
+            .wrapped => geometry.SizeF.init(0, wrappedVerticalExtentForWidth(widget.children[result.index()], result.width(), tokens, depth + 1)),
+        };
+        plan.reply(result, measured);
+    }
+}
+
 fn intrinsicChildSize(child: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
     const intrinsic = intrinsicWidgetSizeDepth(child, tokens, depth);
     if (tokens.intrinsic_layout_policy) |policy| {
@@ -2378,14 +2406,6 @@ fn intrinsicChildSizeInAxis(child: Widget, tokens: DesignTokens, depth: usize, a
 }
 
 fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutAxis, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) {
-        const gap = switch (widget.kind) {
-            .button_group => buttonGroupGap(widget, tokens),
-            .tabs => tabsGap(widget, tokens),
-            else => widget.layout.gap,
-        };
-        return compiledIntrinsicChildren(widget, tokens, depth, 1, .{ .axis = @intFromEnum(axis), .gap = gap, .padding = if (widget.kind == .tabs) tabsLayoutPadding(widget, tokens) else widget.layout.padding, .min_size = widget.layout.min_size });
-    }
     if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
     var flow_count: usize = 0;
     var main_sum: f32 = 0;
@@ -2425,7 +2445,6 @@ fn intrinsicAxisChildrenSize(widget: Widget, tokens: DesignTokens, axis: LayoutA
 }
 
 fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 2, .{ .padding = widget.layout.padding, .min_size = widget.layout.min_size });
     if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
     var width_max: f32 = 0;
     var height_max: f32 = 0;
@@ -2443,7 +2462,6 @@ fn intrinsicOverlayChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
 /// intrinsic height, so measure each child through the width-aware seam at
 /// its natural width; explicit newlines then contribute every painted row.
 fn intrinsicHorizontalScrollSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 3, .{ .padding = widget.layout.padding, .min_size = widget.layout.min_size });
     if (depth >= max_widget_depth or widget.children.len == 0) {
         return geometry.SizeF.init(0, intrinsicOwnMinSize(widget).height);
     }
@@ -2462,7 +2480,6 @@ fn intrinsicHorizontalScrollSize(widget: Widget, tokens: DesignTokens, depth: us
 }
 
 fn intrinsicGridChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 4, .{ .columns = widget.layout.columns, .gap = widget.layout.gap, .padding = widget.layout.padding, .min_size = widget.layout.min_size });
     if (depth >= max_widget_depth or widget.children.len == 0) return intrinsicOwnMinSize(widget);
     const flow_count = widgetFlowChildCount(widget.children);
     if (flow_count == 0) return intrinsicOwnMinSize(widget);
@@ -2494,35 +2511,19 @@ fn intrinsicChildFacts(child: Widget, measured: geometry.SizeF) @import("intrins
     return .{ .flags = 1 | (if (child.kind == .separator) @as(u32, 2) else 0), .measured = measured, .authored = .init(child.frame.width, child.frame.height), .min_size = child.layout.min_size, .max_size = child.layout.max_size };
 }
 
-fn compiledIntrinsicChildren(widget: Widget, tokens: DesignTokens, depth: usize, operation: u8, options: @import("intrinsic_layout_policy.zig").Options) geometry.SizeF {
-    var owned = options;
-    owned.stopped = depth >= max_widget_depth;
-    const children: []const Widget = if (owned.stopped) &.{} else widget.children;
-    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
-    const plan = @import("intrinsic_layout_policy.zig").Plan.init(scratch.get(), tokens.intrinsic_layout_policy.?, children.len, owned) catch @panic("intrinsic layout allocation failed");
-    defer plan.deinit();
-    for (children, 0..) |child, index| {
-        if (!widgetTakesFlowSlot(child)) continue;
-        plan.setChild(index, intrinsicChildFacts(child, intrinsicWidgetSizeDepth(child, tokens, depth + 1)));
-    }
-    if (operation == 3) {
-        plan.run(0);
-        for (children, 0..) |child, index| {
-            if (!widgetTakesFlowSlot(child)) continue;
-            plan.setWrappedHeight(index, wrappedVerticalExtentForWidth(child, plan.measurementWidth(index), tokens, depth + 1));
-        }
-    }
-    plan.run(operation);
-    return plan.size();
-}
-
 fn paddedIntrinsicSize(widget: Widget, tokens: DesignTokens, content: geometry.SizeF) geometry.SizeF {
     const padding = widget.layout.padding;
     return paddedIntrinsicSizeWithPadding(widget, tokens, content, padding);
 }
 
 fn paddedIntrinsicSizeWithPadding(widget: Widget, tokens: DesignTokens, content: geometry.SizeF, padding: geometry.InsetsF) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, max_widget_depth, 6, .{ .content = content, .padding = padding, .min_size = widget.layout.min_size });
+    if (tokens.intrinsic_layout_policy) |policy| {
+        var scratch = std.heap.stackFallback(256, std.heap.page_allocator);
+        const plan = @import("intrinsic_layout_policy.zig").Plan.init(scratch.get(), policy, 0, .{ .content = content, .padding = padding, .min_size = widget.layout.min_size }) catch @panic("intrinsic padding allocation failed");
+        defer plan.deinit();
+        plan.run(6);
+        return plan.size();
+    }
     return geometry.SizeF.init(
         @max(content.width + padding.left + padding.right, widget.layout.min_size.width),
         @max(content.height + padding.top + padding.bottom, widget.layout.min_size.height),
@@ -2569,7 +2570,6 @@ fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) 
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const text_gap = widgetControlInset(widget, tokens, tokens.spacing.md);
     const text = intrinsicTextWidgetSize(widget, tokens, text_size);
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 10, .{ .title = .init(text.width, widgetLineHeightWithTokens(text_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 52)), .padding = padding, .icon = icon_size, .text_gap = text_gap, .title_gap = densityValue(tokens, tokens.spacing.xs) });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + padding.left + padding.right + icon_size + text_gap),
         @max(widgetSizedDensityValue(widget, tokens, 52), widgetLineHeightWithTokens(text_size, tokens) + padding.top + padding.bottom),
@@ -2591,7 +2591,6 @@ fn intrinsicAlertWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) 
 /// The overlay max of a stacking surface's flow children, WITHOUT the
 /// widget's own padding or min-size floors (callers fold those in).
 fn intrinsicStackedChildrenSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 5, .{});
     if (depth >= max_widget_depth) return geometry.SizeF.zero();
     var width_max: f32 = 0;
     var height_max: f32 = 0;
@@ -2605,11 +2604,6 @@ fn intrinsicStackedChildrenSize(widget: Widget, tokens: DesignTokens, depth: usi
 }
 
 fn intrinsicAccordionWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
-    if (tokens.intrinsic_layout_policy != null) {
-        var measured = widget;
-        if (!accordionChildrenVisible(widget)) measured.children = &.{};
-        return compiledIntrinsicChildren(measured, tokens, depth, 7, .{ .title = .init(0, accordionHeaderHeight(widget, tokens)), .gap = widget.layout.gap, .padding = widget.layout.padding, .min_size = widget.layout.min_size });
-    }
     // Header band always; expanded content (plus the header-to-content
     // gap the accordion consumes) only while disclosed — so accordion
     // items size themselves and a toggle reflows the column around them.
@@ -2626,7 +2620,6 @@ fn intrinsicCardWidgetSize(widget: Widget, tokens: DesignTokens, depth: usize) g
     const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.body_size + 1, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
     const text = intrinsicTextWidgetSize(widget, tokens, title_size);
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 8, .{ .title = .init(text.width, widgetLineHeightWithTokens(title_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, 240), widgetSizedDensityValue(widget, tokens, 120)), .inset = inset, .padding = widget.layout.padding });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, 240), text.width + inset * 2),
         @max(widgetSizedDensityValue(widget, tokens, 120), if (widget.text.len > 0) widgetLineHeightWithTokens(title_size, tokens) + inset * 2 else 0),
@@ -2652,7 +2645,6 @@ fn intrinsicModalSurfaceWidgetSize(widget: Widget, tokens: DesignTokens, depth: 
         .sheet => geometry.SizeF.init(320, 420),
         else => geometry.SizeF.init(420, 220),
     };
-    if (tokens.intrinsic_layout_policy != null) return compiledIntrinsicChildren(widget, tokens, depth, 9, .{ .title = .init(text.width, widgetLineHeightWithTokens(title_size, tokens)), .has_title = widget.text.len > 0, .floor = .init(widgetSizedDensityValue(widget, tokens, default_size.width), widgetSizedDensityValue(widget, tokens, default_size.height)), .inset = inset, .padding = widget.layout.padding });
     var size = geometry.SizeF.init(
         @max(widgetSizedDensityValue(widget, tokens, default_size.width), text.width + inset * 2),
         @max(widgetSizedDensityValue(widget, tokens, default_size.height), if (widget.text.len > 0) widgetLineHeightWithTokens(title_size, tokens) + inset * 2 else 0),
