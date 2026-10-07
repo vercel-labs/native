@@ -526,6 +526,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             container_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             measurement_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
             flow_measurement_policy: ?*const fn ([]const u8, []u8) usize = null,
+            layout_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
             intrinsic_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2026,6 +2027,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
                 tokens.measurement_coordination_policy = self.options.measurement_coordination_policy;
                 tokens.flow_measurement_policy = self.options.flow_measurement_policy;
+                tokens.layout_coordination_policy = self.options.layout_coordination_policy;
                 tokens.widget_motion_policy = self.options.widget_motion_policy;
                 tokens.widget_audit_policy = self.options.widget_audit_policy;
                 tokens.widget_routing_policy = self.options.widget_routing_policy;
@@ -2086,6 +2088,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
             tokens.measurement_coordination_policy = self.options.measurement_coordination_policy;
             tokens.flow_measurement_policy = self.options.flow_measurement_policy;
+            tokens.layout_coordination_policy = self.options.layout_coordination_policy;
             tokens.widget_motion_policy = self.options.widget_motion_policy;
             tokens.widget_audit_policy = self.options.widget_audit_policy;
             tokens.widget_routing_policy = self.options.widget_routing_policy;

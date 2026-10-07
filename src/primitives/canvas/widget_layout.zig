@@ -55,7 +55,8 @@ const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
 const widgetTextSpanLayoutOptions = widget_metrics.widgetTextSpanLayoutOptions;
 
-pub const max_widget_depth: usize = 32;
+const coordination = @import("layout_coordination_policy.zig");
+pub const max_widget_depth: usize = coordination.max_depth;
 
 pub fn layoutWidgetDepth(
     widget: Widget,
@@ -66,8 +67,13 @@ pub fn layoutWidgetDepth(
     len: *usize,
     tokens: DesignTokens,
 ) Error!usize {
-    if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
-    if (len.* >= output.len) return error.WidgetLayoutListFull;
+    const route = if (tokens.layout_coordination_policy) |policy|
+        try coordination.admission(policy, widget, depth, len.*, output.len)
+    else reference: {
+        if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
+        if (len.* >= output.len) return error.WidgetLayoutListFull;
+        break :reference coordination.referenceRoute(widget);
+    };
 
     const index = len.*;
     const root_bounds = if (index == 0) proposed_frame else output[0].frame;
@@ -85,95 +91,23 @@ pub fn layoutWidgetDepth(
 
     const layout_padding = widgetLayoutPadding(widget, tokens);
     const content = windowControlsClearedContent(frame.inset(layout_padding), widget, tokens);
-    switch (widget.kind) {
-        .row, .breadcrumb, .pagination, .radio_group, .toggle_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
-        // Button groups flow like rows but at their register's effective
-        // gap: the detached register supplies its own inter-chip gap when
-        // the author left the group's gap at 0.
+    switch (route) {
+        .horizontal => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .button_group => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, buttonGroupLayoutStyle(widget, tokens), tokens),
-        // Tab strips flow the same way: the underline register supplies
-        // its own inter-trigger gap when the author left the strip's gap
-        // at 0 (the house pill container keeps its flush triggers).
         .tabs => try layoutTabsChildren(widget, content, index, depth, output, len, tokens),
-        .column => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        // The grouped input flows vertically inside its own field chrome:
-        // the text entry (grow-stretched by `Ui.inputGroup`) above the
-        // accessory actions row.
-        .input_group => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .grid => if (widget.layout.virtualized)
-            try layoutVirtualGridChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
-        else
-            try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns, tokens),
-        .data_grid, .table => if (widget.layout.virtualized)
-            try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
-        else
-            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .data_row => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
-        // A list row with custom content: children flow horizontally
-        // (gap-consuming, like a row) inside the flat wash chrome, so
-        // apps compose indicator/title/meta rows without reaching for
-        // bordered card surfaces. Text/icon-only items stay leaves.
-        .list_item => try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
-        .scroll_view => if (widget.layout.virtualized)
-            try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
-        else
-            try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.scroll_axes, if (tokens.intrinsic_layout_policy != null) geometry.OffsetF.init(widget.value_x, widget.value) else scrollLayoutOffset(widget), tokens),
-        .list => if (widget.layout.virtualized)
-            try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens)
-        else
-            try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .tree => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
+        .vertical => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
+        .grid => try layoutGridChildren(widget.children, content, index, depth, output, len, widget.layout.gap, widget.layout.columns, tokens),
+        .virtual_grid => try layoutVirtualGridChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens),
+        .virtual_vertical => try layoutVirtualVerticalChildren(widget.children, content, index, depth, output, len, widget.value, widget.layout, tokens),
+        .scroll => try layoutScrollChildren(widget.children, content, index, depth, output, len, widget.scroll_axes, if (tokens.intrinsic_layout_policy != null) geometry.OffsetF.init(widget.value_x, widget.value) else scrollLayoutOffset(widget), tokens),
         .split => try layoutSplitChildren(widget, content, index, depth, output, len, tokens),
-        .menu_surface, .dropdown_menu => try layoutAxisChildren(widget.children, content, .vertical, index, depth, output, len, widget.layout, tokens),
-        .accordion => {
-            // Disclosure contract: children lay out at FULL size whether
-            // or not the item is open. A closed (or still-revealing)
-            // item keeps its header-only extent — the content overflows
-            // the frame, unpainted and inert until revealed — so a
-            // reveal never re-wraps text mid-flight: child geometry is
-            // identical in both poses and only the item's own extent
-            // (plus whatever stacks below it) moves.
-            const child_content = accordionContentFrame(widget, content, tokens, depth);
-            for (widget.children) |child| {
-                if (!widgetTakesFlowSlot(child)) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
-            }
-        },
-        .alert => {
-            // Alert children (the description under a chrome-drawn
-            // title) hang past the icon column and start under the
-            // title line — the standard callout grid.
-            const child_content = alertContentFrame(widget, content, tokens);
-            for (widget.children) |child| {
-                if (!widgetTakesFlowSlot(child)) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(child_content, child, tokens), index, depth + 1, output, len, tokens);
-            }
-        },
-        .stack, .bubble, .card, .resizable, .panel, .popover => {
-            for (widget.children) |child| {
-                if (!widgetTakesFlowSlot(child)) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
-            }
-        },
-        // Modal surfaces own root-relative geometry: the dialog centers,
-        // the drawer pins to the bottom edge, and the sheet pins right.
-        // Their content still uses the stacking-surface contract inside
-        // that resolved frame.
-        .dialog, .drawer, .sheet => {
-            for (widget.children) |child| {
-                if (!widgetTakesFlowSlot(child)) continue;
-                _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), index, depth + 1, output, len, tokens);
-            }
-        },
-        // Span paragraphs and span-carrying table cells share the link
-        // hotspot child convention. A span-less table cell may instead be
-        // a composed inline row (Markdown's resolved image + text shape).
-        .text => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
-        .data_cell => if (widget.spans.len > 0)
-            try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens)
-        else
-            try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
-        .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
+        // Disclosure children keep their full layout while the parent's
+        // extent reveals them. Alert descriptions clear the title/icon.
+        .accordion => try layoutStackChildren(widget.children, accordionContentFrame(widget, content, tokens, depth), index, depth, output, len, tokens),
+        .alert => try layoutStackChildren(widget.children, alertContentFrame(widget, content, tokens), index, depth, output, len, tokens),
+        .stack => try layoutStackChildren(widget.children, content, index, depth, output, len, tokens),
+        .spans => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
+        .leaf => {},
     }
 
     // Root-relative modals and anchored floating children are excluded from
@@ -249,6 +183,14 @@ fn layoutRootRelativeModalChildren(
     root_bounds: geometry.RectF,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(1024, std.heap.page_allocator);
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, children.len, 0, .modal, root_bounds, 0) catch @panic("modal layout program allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, i| plan.setChild(i, child, false);
+        try applyLayoutChildren(plan, children, parent_index, depth, output, len, root_bounds, tokens);
+        return;
+    }
     for (children) |child| {
         if (!widget_tree.widgetIsRootRelativeModal(child)) continue;
         _ = try layoutWidgetDepth(child, root_bounds, parent_index, depth + 1, output, len, tokens);
@@ -403,6 +345,14 @@ fn layoutAnchoredChildren(
     root_bounds: geometry.RectF,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(1024, std.heap.page_allocator);
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, children.len, 0, .anchor, anchor_rect, 0) catch @panic("anchor layout program allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, i| plan.setChild(i, child, false);
+        try applyLayoutChildren(plan, children, parent_index, depth, output, len, root_bounds, tokens);
+        return;
+    }
     for (children) |child| {
         if (widget_tree.widgetIsRootRelativeModal(child)) continue;
         const anchor = child.layout.anchor orelse continue;
@@ -424,12 +374,34 @@ pub fn anchoredNestingDepth(output: []const WidgetLayoutNode, node_index: usize)
     if (node_index >= output.len) return 0;
     var count: usize = 0;
     var current: ?usize = node_index;
+    var remaining = output.len;
     while (current) |index| {
-        if (index >= output.len) break;
+        if (index >= output.len or remaining == 0) break;
+        remaining -= 1;
         if (widget_tree.widgetIsAnchored(output[index].widget)) count += 1;
         current = output[index].parent_index;
     }
     return count;
+}
+
+pub fn anchoredNestingDepthWithTokens(output: []const WidgetLayoutNode, node_index: usize, tokens: DesignTokens) usize {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.RetainedPlan.init(scratch.get(), policy, output) catch @panic("retained nesting allocation failed");
+        defer plan.deinit();
+        return plan.nesting(node_index);
+    }
+    return anchoredNestingDepth(output, node_index);
+}
+
+pub fn maxAnchoredNestingDepthWithTokens(output: []const WidgetLayoutNode, tokens: DesignTokens) usize {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.RetainedPlan.init(scratch.get(), policy, output) catch @panic("retained strata allocation failed");
+        defer plan.deinit();
+        return plan.maximum();
+    }
+    return maxAnchoredNestingDepth(output);
 }
 
 pub fn maxAnchoredNestingDepth(output: []const WidgetLayoutNode) usize {
@@ -459,6 +431,20 @@ pub fn relayoutAnchoredChildrenAtDepth(output: []WidgetLayoutNode, root_bounds: 
     // searching every parent's subtree: rebuilds with no open surface stay
     // O(nodes), and an open surface pays only for the bounded anchored
     // subtrees that are actually replayed.
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.RetainedPlan.init(scratch.get(), policy, output) catch @panic("retained anchor program allocation failed");
+        defer plan.deinit();
+        var cursor: usize = 1;
+        while (plan.next(cursor, parent_anchored_depth)) |selected| {
+            const parent = output[selected.parent];
+            var len = selected.index;
+            try layoutAnchoredChildren(parent.widget.children, windowControlsClearedContent(parent.frame, parent.widget, tokens), selected.parent, parent.depth, output, &len, root_bounds, tokens);
+            for (output[selected.index..len], selected.index..) |node, i| plan.setNode(i, node);
+            cursor = plan.advance(selected.index, len);
+        }
+        return;
+    }
     var anchored_start: usize = 1;
     while (anchored_start < output.len) {
         const anchored = output[anchored_start];
@@ -471,6 +457,10 @@ pub fn relayoutAnchoredChildrenAtDepth(output: []WidgetLayoutNode, root_bounds: 
             continue;
         };
         if (anchoredNestingDepth(output, parent_index) != parent_anchored_depth) {
+            anchored_start += 1;
+            continue;
+        }
+        if (parent_index >= output.len) {
             anchored_start += 1;
             continue;
         }
@@ -500,7 +490,7 @@ pub fn relayoutAnchoredChildren(output: []WidgetLayoutNode, tokens: DesignTokens
 }
 
 pub fn relayoutAnchoredChildrenWithRootBounds(output: []WidgetLayoutNode, root_bounds: geometry.RectF, tokens: DesignTokens) Error!void {
-    const max_depth = maxAnchoredNestingDepth(output);
+    const max_depth = maxAnchoredNestingDepthWithTokens(output, tokens);
     var parent_depth: usize = 0;
     while (parent_depth < max_depth) : (parent_depth += 1) {
         try relayoutAnchoredChildrenAtDepth(output, root_bounds, tokens, parent_depth);
@@ -1332,6 +1322,21 @@ fn layoutTextSpanLinkChildren(
         &runs,
     );
 
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, widget.children.len, widget.spans.len, .spans, content, 0) catch @panic("span child program allocation failed");
+        defer plan.deinit();
+        for (widget.children, 0..) |child, i| plan.setChild(i, child, false);
+        for (widget.spans, 0..) |span, i| plan.setLink(i, span.link.len != 0);
+        while (true) {
+            const result = plan.run();
+            if (result.action() == .done) break;
+            if (result.action() != .bounds) @panic("unexpected span child capability");
+            plan.replyBounds(result, text_spans_model.textSpanBounds(layout, result.span()));
+        }
+        try applyReadyLayoutChildren(plan, widget.children, parent_index, depth, output, len, .init(0, 0, 0, 0), tokens);
+        return;
+    }
     var child_index: usize = 0;
     for (widget.spans, 0..) |span, span_index| {
         if (span.link.len == 0) continue;
@@ -1984,6 +1989,20 @@ fn layoutSplitChildren(
     len: *usize,
     tokens: DesignTokens,
 ) Error!void {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, widget.children.len, 0, .split, content, widget.layout.gap) catch @panic("split layout program allocation failed");
+        defer plan.deinit();
+        for (widget.children, 0..) |child, i| plan.setChild(i, child, false);
+        while (true) {
+            const result = plan.run();
+            if (result.action() == .done) break;
+            if (result.action() != .fraction) @panic("unexpected split layout capability");
+            plan.replyFraction(result, widgetSplitEffectiveFraction(widget, widget.value, result.available(), result.firstMin(), result.secondMin(), false));
+        }
+        try applyReadyLayoutChildren(plan, widget.children, parent_index, depth, output, len, .init(0, 0, 0, 0), tokens);
+        return;
+    }
     var panes: [2]?Widget = .{ null, null };
     var divider: ?Widget = null;
     var extra_start: ?usize = null;
@@ -2082,6 +2101,34 @@ pub fn slideSplitChildren(
     node_index: usize,
     nodes: []WidgetLayoutNode,
 ) void {
+    slideSplitChildrenWithTokens(frame, fraction, node_index, nodes, .{});
+}
+
+pub fn slideSplitChildrenWithTokens(frame: geometry.RectF, fraction: f32, node_index: usize, nodes: []WidgetLayoutNode, tokens: DesignTokens) void {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const content = frame.inset(nodes[node_index].widget.layout.padding).normalized();
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, nodes.len, 0, .slide, content, 0) catch @panic("split slide program allocation failed");
+        defer plan.deinit();
+        plan.setRoot(node_index);
+        for (nodes, 0..) |node, i| plan.setNode(i, node);
+        while (true) {
+            const result = plan.run();
+            if (result.action() == .done) break;
+            if (result.action() != .fraction) @panic("unexpected split slide capability");
+            plan.replyFraction(result, widgetSplitEffectiveFraction(nodes[node_index].widget, fraction, result.available(), result.firstMin(), result.secondMin(), true));
+        }
+        const count = std.mem.readInt(u32, plan.result[8..12], .little);
+        for (0..count) |i| {
+            const index = plan.source(i);
+            if (plan.flags(i) & 1 != 0) nodes[index].widget.value = plan.value(i);
+            if (plan.flags(i) & 2 != 0) {
+                nodes[index].frame = plan.frame(i);
+                nodes[index].widget.frame = nodes[index].frame;
+            }
+        }
+        return;
+    }
     const split_depth = nodes[node_index].depth;
     var pane_indices: [2]?usize = .{ null, null };
     var divider_index: ?usize = null;
@@ -2150,6 +2197,35 @@ pub fn widgetKindStacksChildren(kind: widget_model.WidgetKind) bool {
         .stack, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover => true,
         else => false,
     };
+}
+
+fn layoutStackChildren(children: []const Widget, content: geometry.RectF, parent: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, tokens: DesignTokens) Error!void {
+    if (tokens.layout_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+        const plan = coordination.ChildPlan.init(scratch.get(), policy, children.len, 0, .stack, content, 0) catch @panic("stack layout program allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, i| plan.setChild(i, child, primaryUnderlineTabsFillWidth(child, tokens));
+        try applyLayoutChildren(plan, children, parent, depth, output, len, .init(0, 0, 0, 0), tokens);
+        return;
+    }
+    for (children) |child| {
+        if (!widgetTakesFlowSlot(child)) continue;
+        _ = try layoutWidgetDepth(child, stackChildFrame(content, child, tokens), parent, depth + 1, output, len, tokens);
+    }
+}
+fn applyLayoutChildren(plan: coordination.ChildPlan, children: []const Widget, parent: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, root: geometry.RectF, tokens: DesignTokens) Error!void {
+    if (plan.run().action() != .done) @panic("unexpected child layout capability");
+    try applyReadyLayoutChildren(plan, children, parent, depth, output, len, root, tokens);
+}
+fn applyReadyLayoutChildren(plan: coordination.ChildPlan, children: []const Widget, parent: usize, depth: usize, output: []WidgetLayoutNode, len: *usize, root: geometry.RectF, tokens: DesignTokens) Error!void {
+    const count = std.mem.readInt(u32, plan.result[8..12], .little);
+    for (0..count) |i| {
+        var child = children[plan.source(i)];
+        const flags = plan.flags(i);
+        if (flags & 1 != 0) child.value = plan.value(i);
+        const frame = if (flags == 4) anchoredWidgetFrame(child, child.layout.anchor orelse @panic("missing planned anchor"), plan.frame(i), root, tokens) else plan.frame(i);
+        _ = try layoutWidgetDepth(child, frame, parent, depth + 1, output, len, tokens);
+    }
 }
 
 fn stackChildFrame(content: geometry.RectF, child: Widget, tokens: DesignTokens) geometry.RectF {

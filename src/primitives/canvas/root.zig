@@ -853,7 +853,9 @@ pub const relayoutAnchoredChildren = @import("widget_layout.zig").relayoutAnchor
 pub const relayoutAnchoredChildrenWithRootBounds = @import("widget_layout.zig").relayoutAnchoredChildrenWithRootBounds;
 pub const relayoutAnchoredChildrenAtDepth = @import("widget_layout.zig").relayoutAnchoredChildrenAtDepth;
 pub const anchoredNestingDepth = @import("widget_layout.zig").anchoredNestingDepth;
+pub const anchoredNestingDepthWithTokens = @import("widget_layout.zig").anchoredNestingDepthWithTokens;
 pub const maxAnchoredNestingDepth = @import("widget_layout.zig").maxAnchoredNestingDepth;
+pub const maxAnchoredNestingDepthWithTokens = @import("widget_layout.zig").maxAnchoredNestingDepthWithTokens;
 pub const widgetLayoutRootBounds = @import("widget_render.zig").widgetLayoutRootBounds;
 /// Window-control reservation trigger (widget_layout.zig): true when a
 /// laid-out tree left drag-header CONTENT under the OS window-control
@@ -875,6 +877,7 @@ pub const widgetCompiledScrollResult = @import("events.zig").widgetCompiledScrol
 pub const SplitPolicyRequest = @import("events.zig").SplitPolicyRequest;
 pub const relayoutSplitChildren = @import("widget_layout.zig").relayoutSplitChildren;
 pub const slideSplitChildren = @import("widget_layout.zig").slideSplitChildren;
+pub const slideSplitChildrenWithTokens = @import("widget_layout.zig").slideSplitChildrenWithTokens;
 /// The layout audit (layout_audit.zig): a machine pass over a laid-out
 /// tree that reports clipped/overflowing text, overlapping flow siblings,
 /// content escaping its clip scope, and undersized pointer targets — plus
@@ -911,6 +914,7 @@ pub const widget_metric_policy = @import("widget_metric_policy.zig");
 pub const intrinsic_measure_policy = @import("intrinsic_measure_policy.zig");
 pub const measurement_coordination_policy = @import("measurement_coordination_policy.zig");
 pub const flow_measurement_policy = @import("flow_measurement_policy.zig");
+pub const layout_coordination_policy = @import("layout_coordination_policy.zig");
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;

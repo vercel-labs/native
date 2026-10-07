@@ -929,4 +929,5 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./intrinsic_measure.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./measurement_coordination.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./flow_measurement.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./layout_coordination.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

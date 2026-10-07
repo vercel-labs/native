@@ -247,6 +247,212 @@ fn measured(context: ?*anyopaque, font: c.FontId, size: f32, bytes: []const u8) 
     trace.count += 1;
     return @as(f32, @floatFromInt(bytes.len)) * size * 0.45;
 }
+
+test "compiled widget metric layout admission covers every kind and exact wide counts" {
+    _ = core.initialModel();
+    const policy = c.layout_coordination_policy;
+    for (std.enums.values(c.WidgetKind)) |kind| for ([_]bool{ false, true }) |virtual| for ([_]bool{ false, true }) |spans| {
+        const widget: c.Widget = .{ .kind = kind, .layout = .{ .virtualized = virtual }, .spans = if (spans) &.{.{ .text = "span" }} else &.{} };
+        try std.testing.expectEqual(policy.referenceRoute(widget), try policy.admission(core.nativeWindowPolicy, widget, 31, 1, 2));
+        try std.testing.expectError(error.WidgetDepthExceeded, policy.admission(core.nativeWindowPolicy, widget, 32, 2, 2));
+        try std.testing.expectError(error.WidgetLayoutListFull, policy.admission(core.nativeWindowPolicy, widget, 0, 2, 2));
+        core.rt.frameReset();
+    };
+    if (@sizeOf(usize) == 8) {
+        const large: usize = 9007199254740992;
+        try std.testing.expectEqual(policy.Route.stack, try policy.admission(core.nativeWindowPolicy, .{ .kind = .stack }, 0, large, large + 1));
+        try std.testing.expectEqual(policy.Route.stack, try policy.admission(core.nativeWindowPolicy, .{ .kind = .stack }, 0, std.math.maxInt(usize) - 1, std.math.maxInt(usize)));
+        try std.testing.expectError(error.WidgetDepthExceeded, policy.admission(core.nativeWindowPolicy, .{ .kind = .stack }, std.math.maxInt(usize), 0, 0));
+    }
+    core.rt.frameReset();
+}
+test "compiled widget metric layout routes preserve complete trees and measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const nested = [_]c.Widget{.{ .id = 9007199254740993, .kind = .text, .text = "Nested\xff\x00 paragraph", .spans = &.{.{ .text = "Measured link", .link = "target" }} }};
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .column, .children = &nested, .frame = .init(2.25, 3.125, 19.5, 33.75) },
+        .{ .id = 3, .kind = .tabs, .frame = .init(1.125, 7.25, 13.5, 21.25) },
+        .{ .id = 4, .kind = .menu_surface, .children = &nested, .layout = .{ .anchor = .{ .placement = .above, .alignment = .stretch, .offset = 3.125 } } },
+        .{ .id = std.math.maxInt(u64), .kind = .dialog, .frame = .init(0, 0, 91.25, 73.5), .children = &nested },
+    };
+    for (std.enums.values(c.WidgetKind)) |kind| for ([_]bool{ false, true }) |virtual| for ([_]c.ThemePack{ .house, .geist }) |pack| {
+        var t = c.DesignTokens.theme(.{ .pack = pack });
+        t.text_measure = &provider;
+        t.window_controls = .init(0, 0, 32, 17);
+        const widget: c.Widget = .{ .id = 1, .kind = kind, .text = "Parent title", .spans = &.{.{ .text = "Parent link", .link = "destination" }}, .children = &children, .window_drag = true, .state = .{ .selected = true }, .layout = .{ .virtualized = virtual, .virtual_item_extent = 27.5, .columns = 2, .padding = .all(3.25), .gap = 2.125 } };
+        layoutTree(widget, t, &trace) catch |err| {
+            std.debug.print("layout route {t} virtual {} pack {t}\n", .{ kind, virtual, pack });
+            return err;
+        };
+    };
+}
+test "compiled widget metric split plans preserve ordering extras and effective handle values" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const nested = [_]c.Widget{.{ .id = 30, .kind = .button, .text = "Second pane action" }};
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .split_divider },
+        .{ .id = 3, .kind = .column, .children = &nested, .layout = .{ .min_size = .init(61.25, 0) } },
+        .{ .id = 4, .kind = .split_divider },
+        .{ .id = 5, .kind = .popover, .children = &nested, .layout = .{ .anchor = .{ .offset = 2.125 } } },
+        .{ .id = 6, .kind = .column, .children = &nested, .layout = .{ .min_size = .init(83.5, 0) } },
+        .{ .id = 7, .kind = .text, .text = "Extra pane" },
+        .{ .id = 8, .kind = .sheet, .children = &nested },
+    };
+    for ([_]f32{ -1, 0, 0.00001, 0.25, 0.9, 2, std.math.inf(f32), std.math.nan(f32) }) |fraction| for ([_]f32{ 0, 11.25, 250 }) |gap| for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 }) |count| {
+        const widget: c.Widget = .{ .id = 1, .kind = .split, .value = fraction, .children = children[0..count], .layout = .{ .gap = gap, .padding = .all(3.25) } };
+        try layoutTree(widget, .{ .text_measure = &provider }, &trace);
+    };
+}
+test "compiled widget metric span hotspots consume excluded children and preserve complete paragraph output" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const spans = [_]c.TextSpan{ .{ .text = "First\xff\x00 link", .link = "one" }, .{ .text = " plain text\n" }, .{ .text = "Second wrapped link", .link = "two", .scale = 1.125 }, .{ .text = "", .link = "empty" } };
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .popover, .frame = .init(0, 0, 51.25, 33.5), .layout = .{ .anchor = .{} } },
+        .{ .id = 3, .kind = .text, .semantics = .{ .role = .link }, .text = "Second link hotspot" },
+        .{ .id = 4, .kind = .dialog, .frame = .init(0, 0, 33.25, 27.5) },
+        .{ .id = 5, .kind = .text, .text = "Surplus collapsed hotspot" },
+    };
+    for ([_]c.WidgetKind{ .text, .data_cell }) |kind| for ([_]usize{ 1, 2, 3, 4 }) |count| {
+        const widget: c.Widget = .{ .id = 1, .kind = kind, .text = "Paragraph", .spans = &spans, .children = children[0..count], .layout = .{ .padding = .all(2.125) } };
+        try layoutTree(widget, .{ .text_measure = &provider }, &trace);
+    };
+}
+test "compiled widget metric layout preserves complete initialized prefixes on depth and capacity failures" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    var chain: [35]c.Widget = undefined;
+    chain[34] = .{ .kind = .button, .text = "Depth leaf" };
+    for (0..34) |i| chain[i] = .{ .id = @intCast(i + 1), .kind = .stack, .children = chain[i + 1 .. i + 2], .layout = .{ .padding = .all(1.125) } };
+    for ([_]c.WidgetKind{ .stack, .accordion, .column, .button, .split }) |kind| {
+        for (chain[0..34]) |*widget| {
+            widget.kind = kind;
+            widget.state.selected = true;
+            if (kind == .button) widget.layout.anchor = .{};
+        }
+        for ([_]usize{ 0, 1, 7, 31, 32, 35 }) |capacity| {
+            var expected: [35]c.WidgetLayoutNode = undefined;
+            var actual: [35]c.WidgetLayoutNode = undefined;
+            const bounds: sdk.geometry.RectF = .init(0, 0, 220.25, 137.5);
+            c.bumpTextMeasureGeneration();
+            trace.count = 0;
+            const expected_error = c.layoutWidgetTreeWithTokens(chain[0], bounds, flowOwned(.{ .text_measure = &provider }), expected[0..capacity]);
+            const count = trace.count;
+            const observations = trace.observations;
+            c.bumpTextMeasureGeneration();
+            trace.count = 0;
+            const actual_error = c.layoutWidgetTreeWithTokens(chain[0], bounds, layoutOwned(.{ .text_measure = &provider }), actual[0..capacity]);
+            const err = if (capacity < 32) error.WidgetLayoutListFull else error.WidgetDepthExceeded;
+            try std.testing.expectError(err, expected_error);
+            try std.testing.expectError(err, actual_error);
+            try exact(@as([]const c.WidgetLayoutNode, expected[0..@min(32, capacity)]), @as([]const c.WidgetLayoutNode, actual[0..@min(32, capacity)]));
+            try std.testing.expectEqual(count, trace.count);
+            try exact(observations[0..count], trace.observations[0..trace.count]);
+            core.rt.frameReset();
+        }
+        for (chain[0..34]) |*widget| widget.layout.anchor = null;
+    }
+}
+test "compiled widget metric retained anchors and split slides preserve every node and source wrap" {
+    _ = core.initialModel();
+    const leaf = [_]c.Widget{.{ .id = 30, .kind = .text, .text = "Wrapped pane content remains stable\nacross slides", .spans = &.{.{ .text = "Wrapped content" }} }};
+    const nested = [_]c.Widget{.{ .id = 20, .kind = .popover, .children = &leaf, .layout = .{ .anchor = .{ .placement = .above, .alignment = .end } } }};
+    const panes = [_]c.Widget{ .{ .id = 3, .kind = .column, .children = &leaf, .layout = .{ .min_size = .init(33.5, 0) } }, .{ .id = 4, .kind = .split_divider }, .{ .id = 5, .kind = .stack, .children = &nested, .layout = .{ .min_size = .init(47.25, 0) } } };
+    const children = [_]c.Widget{ .{ .id = 2, .kind = .split, .value = 0.65, .children = &panes, .layout = .{ .gap = 7.25, .padding = .all(3.125) } }, .{ .id = 6, .kind = .menu_surface, .children = &nested, .layout = .{ .anchor = .{ .placement = .above, .alignment = .stretch } } }, .{ .id = 7, .kind = .dialog, .children = &nested, .frame = .init(0, 0, 103.25, 87.5) } };
+    const root: c.Widget = .{ .id = 1, .kind = .stack, .children = &children };
+    const bounds: sdk.geometry.RectF = .init(0.125, 2.25, 220.25, 137.5);
+    for ([_]f32{ -1, 0, 0.00001, 0.25, 0.65, 0.9, 2 }) |fraction| {
+        var expected: [128]c.WidgetLayoutNode = undefined;
+        var actual: [128]c.WidgetLayoutNode = undefined;
+        const a = try c.layoutWidgetTreeWithTokens(root, bounds, flowOwned(.{}), &expected);
+        const b = try c.layoutWidgetTreeWithTokens(root, bounds, layoutOwned(.{}), &actual);
+        try exact(a.nodes, b.nodes);
+        const frame = a.nodes[1].frame;
+        c.slideSplitChildren(frame, fraction, 1, expected[0..a.nodes.len]);
+        c.slideSplitChildrenWithTokens(frame, fraction, 1, actual[0..b.nodes.len], layoutOwned(.{}));
+        try exact(@as([]const c.WidgetLayoutNode, expected[0..a.nodes.len]), @as([]const c.WidgetLayoutNode, actual[0..b.nodes.len]));
+        try std.testing.expectEqual(c.maxAnchoredNestingDepth(a.nodes), c.maxAnchoredNestingDepthWithTokens(b.nodes, layoutOwned(.{})));
+        for (a.nodes, 0..) |_, i| try std.testing.expectEqual(c.anchoredNestingDepth(a.nodes, i), c.anchoredNestingDepthWithTokens(b.nodes, i, layoutOwned(.{})));
+        try c.relayoutAnchoredChildrenWithRootBounds(expected[0..a.nodes.len], bounds, flowOwned(.{}));
+        try c.relayoutAnchoredChildrenWithRootBounds(actual[0..b.nodes.len], bounds, layoutOwned(.{}));
+        try exact(@as([]const c.WidgetLayoutNode, expected[0..a.nodes.len]), @as([]const c.WidgetLayoutNode, actual[0..b.nodes.len]));
+        var split = children[0];
+        split.value = fraction;
+        try c.relayoutSplitChildren(split, frame, 1, 1, expected[0..a.nodes.len], bounds, flowOwned(.{}));
+        try c.relayoutSplitChildren(split, frame, 1, 1, actual[0..b.nodes.len], bounds, layoutOwned(.{}));
+        try exact(@as([]const c.WidgetLayoutNode, expected[0..a.nodes.len]), @as([]const c.WidgetLayoutNode, actual[0..b.nodes.len]));
+        core.rt.frameReset();
+    }
+}
+test "compiled widget metric layout packets retain copied continuations and exact malformed-tree progress" {
+    _ = core.initialModel();
+    const policy = c.layout_coordination_policy;
+    const plan = try policy.ChildPlan.init(std.testing.allocator, core.nativeWindowPolicy, 3, 0, .split, .init(3.25, 5.125, 200, 100), 0);
+    defer plan.deinit();
+    plan.setChild(0, .{ .kind = .button }, false);
+    plan.setChild(1, .{ .kind = .split_divider }, false);
+    plan.setChild(2, .{ .kind = .text }, false);
+    const first = plan.run();
+    const saved = first.bytes;
+    try std.testing.expectEqual(policy.Action.fraction, first.action());
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &saved, &first.bytes);
+    plan.replyFraction(first, 0.25);
+    const final = plan.run();
+    try std.testing.expectEqual(policy.Action.done, final.action());
+    const result = try std.testing.allocator.dupe(u8, plan.result);
+    defer std.testing.allocator.free(result);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, result, plan.result);
+    var destination: [512]u8 = @splat(0xa5);
+    const len = core.nativeWindowPolicy(plan.request, &destination);
+    try std.testing.expectEqual(plan.result.len, len);
+    try std.testing.expectEqualSlices(u8, plan.result, destination[0..len]);
+    try std.testing.expect(std.mem.allEqual(u8, destination[len..], 0xa5));
+    var nodes = [_]c.WidgetLayoutNode{ .{ .widget = .{ .kind = .stack }, .frame = .init(0, 0, 200, 100), .depth = 0 }, .{ .widget = .{ .kind = .popover, .layout = .{ .anchor = .{} } }, .frame = .init(5, 5, 30, 20), .depth = 1, .parent_index = 0 } };
+    const before = nodes;
+    try c.relayoutAnchoredChildrenAtDepth(&nodes, .init(0, 0, 300, 200), layoutOwned(.{}), 0);
+    try exact(before, nodes);
+    const retained = try policy.RetainedPlan.init(std.testing.allocator, core.nativeWindowPolicy, &nodes);
+    defer retained.deinit();
+    if (@sizeOf(usize) == 8) try std.testing.expectEqual(@as(usize, 0x100000000), retained.advance(0xffffffff, 0));
+    try std.testing.expectEqual(@as(usize, 2), retained.advance(1, 1));
+    core.rt.frameReset();
+}
+test "compiled widget metric layout proposals and slide buffers preserve untouched exceptional float words" {
+    _ = core.initialModel();
+    const policy = c.layout_coordination_policy;
+    for ([_]u32{ 0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 }) |raw| {
+        const value: f32 = @bitCast(raw);
+        const content: sdk.geometry.RectF = .init(value, value, value, value);
+        for ([_]policy.Mode{ .modal, .anchor }) |mode| {
+            const plan = try policy.ChildPlan.init(std.testing.allocator, core.nativeWindowPolicy, 1, 0, mode, content, 0);
+            defer plan.deinit();
+            plan.setChild(0, .{ .kind = if (mode == .modal) .dialog else .popover, .layout = .{ .anchor = if (mode == .anchor) .{} else null } }, false);
+            const result = plan.run();
+            try std.testing.expectEqual(policy.Action.done, result.action());
+            try exact(content, plan.frame(0));
+        }
+        var expected = [_]c.WidgetLayoutNode{
+            .{ .widget = .{ .kind = .split, .value = 0.5 }, .frame = .init(0, 0, 200, 100), .depth = 0 },
+            .{ .widget = .{ .kind = .column }, .frame = .init(0, value, 95.5, value), .depth = 1, .parent_index = 0 },
+            .{ .widget = .{ .kind = .split_divider }, .frame = .init(95.5, value, 9, value), .depth = 1, .parent_index = 0 },
+            .{ .widget = .{ .kind = .column }, .frame = .init(104.5, value, 95.5, value), .depth = 1, .parent_index = 0 },
+            .{ .widget = .{ .kind = .text }, .frame = .init(107, value, value, value), .depth = 2, .parent_index = 3 },
+        };
+        var actual = expected;
+        c.slideSplitChildren(.init(0, 0, 200, 100), 0.25, 0, &expected);
+        c.slideSplitChildrenWithTokens(.init(0, 0, 200, 100), 0.25, 0, &actual, layoutOwned(.{}));
+        try exact(expected, actual);
+        core.rt.frameReset();
+    }
+}
 test "compiled widget metric preserves native measurement arguments admission and order" {
     _ = core.initialModel();
     var trace: Measures = .{};
@@ -429,11 +635,22 @@ fn flowOwned(tokens: c.DesignTokens) c.DesignTokens {
     t.flow_measurement_policy = core.nativeWindowPolicy;
     return t;
 }
+fn layoutOwned(tokens: c.DesignTokens) c.DesignTokens {
+    var t = flowOwned(tokens);
+    t.layout_coordination_policy = core.nativeWindowPolicy;
+    return t;
+}
+fn layoutTree(widget: c.Widget, tokens: c.DesignTokens, trace: *Measures) !void {
+    try ownedTree(widget, tokens, trace, true);
+}
 fn flowTree(widget: c.Widget, tokens: c.DesignTokens, trace: *Measures) !void {
+    try ownedTree(widget, tokens, trace, false);
+}
+fn ownedTree(widget: c.Widget, tokens: c.DesignTokens, trace: *Measures, layout_owner: bool) !void {
     var native_nodes: [128]c.WidgetLayoutNode = undefined;
     var compiled_nodes: [128]c.WidgetLayoutNode = undefined;
     const bounds: sdk.geometry.RectF = .init(0.125, -0.0, 220.25, 137.5);
-    const reference_tokens = coordinated(tokens);
+    const reference_tokens = if (layout_owner) flowOwned(tokens) else coordinated(tokens);
     c.bumpTextMeasureGeneration();
     trace.count = 0;
     const expected = try c.layoutWidgetTreeWithTokens(widget, bounds, reference_tokens, &native_nodes);
@@ -446,7 +663,7 @@ fn flowTree(widget: c.Widget, tokens: c.DesignTokens, trace: *Measures) !void {
     const count = trace.count;
     c.bumpTextMeasureGeneration();
     trace.count = 0;
-    const t = flowOwned(tokens);
+    const t = if (layout_owner) layoutOwned(tokens) else flowOwned(tokens);
     const actual = try c.layoutWidgetTreeWithTokens(widget, bounds, t, &compiled_nodes);
     var actual_semantics: [128]c.WidgetSemanticsNode = undefined;
     var actual_commands: [4096]c.CanvasCommand = undefined;

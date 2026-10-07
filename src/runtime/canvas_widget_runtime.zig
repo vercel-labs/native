@@ -225,7 +225,7 @@ pub fn restoreCanvasWidgetLayoutScrollOffsets(
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
 ) void {
-    restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(nodes, previous_runtime_offsets, previous_source_offsets, null);
+    restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(nodes, previous_runtime_offsets, previous_source_offsets, null, null);
 }
 
 fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
@@ -233,11 +233,12 @@ fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
     anchored_depth: ?usize,
+    strata: ?canvas.layout_coordination_policy.RetainedPlan,
 ) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
         if (anchored_depth) |depth| {
-            if (canvas.anchoredNestingDepth(nodes, index) != depth) continue;
+            if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(nodes, index)) != depth) continue;
         }
         const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id) orelse continue;
         const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id);
@@ -280,12 +281,13 @@ fn clampCanvasWidgetLayoutProgrammaticScrollOffsets(
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
     anchored_depth: ?usize,
+    strata: ?canvas.layout_coordination_policy.RetainedPlan,
 ) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
         if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
         if (anchored_depth) |depth| {
-            if (canvas.anchoredNestingDepth(nodes, index) != depth) continue;
+            if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(nodes, index)) != depth) continue;
         }
 
         const source_node = source.findById(node.widget.id) orelse continue;
@@ -341,13 +343,13 @@ fn previousLayoutHasSelectedTab(previous: canvas.WidgetLayoutTree, id: canvas.Ob
 /// viewport. This runs after retained scroll restoration, against final layout
 /// frames, so an already-visible tab preserves the exact offset and a newly
 /// mounted native scroll driver never paints a speculative leading-edge jump.
-fn revealNewlySelectedTabs(previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode, anchored_depth: ?usize) void {
+fn revealNewlySelectedTabs(previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode, anchored_depth: ?usize, strata: ?canvas.layout_coordination_policy.RetainedPlan) void {
     for (nodes, 0..) |tab_node, tab_index| {
         const tab = tab_node.widget;
         if (tab.semantics.role != .tab or !tab.state.selected) continue;
         if (tab.id != 0 and previousLayoutHasSelectedTab(previous, tab.id)) continue;
         if (anchored_depth) |depth| {
-            if (canvas.anchoredNestingDepth(nodes, tab_index) != depth) continue;
+            if ((if (strata) |plan| plan.nesting(tab_index) else canvas.anchoredNestingDepth(nodes, tab_index)) != depth) continue;
         }
 
         var ancestor = tab_node.parent_index;
@@ -1079,12 +1081,18 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     const staged_nodes = node_buffer[0..next.nodes.len];
     @memcpy(staged_nodes, next.nodes);
     const staged_root_bounds = next.root_bounds orelse if (staged_nodes.len > 0) staged_nodes[0].frame else geometry.RectF.init(0, 0, 0, 0);
-    const max_anchored_depth = canvas.maxAnchoredNestingDepth(staged_nodes);
+    var strata_scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+    const strata = if (tokens.layout_coordination_policy) |policy|
+        canvas.layout_coordination_policy.RetainedPlan.init(strata_scratch.get(), policy, staged_nodes) catch @panic("reconcile strata allocation failed")
+    else
+        null;
+    defer if (strata) |plan| plan.deinit();
+    const max_anchored_depth = if (strata) |plan| plan.maximum() else canvas.maxAnchoredNestingDepth(staged_nodes);
     var anchored_depth: usize = 0;
     while (anchored_depth <= max_anchored_depth) : (anchored_depth += 1) {
         for (staged_nodes, 0..) |node, index| {
             if (node.widget.kind != .split or node.widget.id == 0) continue;
-            if (canvas.anchoredNestingDepth(staged_nodes, index) != anchored_depth) continue;
+            if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(staged_nodes, index)) != anchored_depth) continue;
             const tween_armed = objectIdInList(armed_split_tween_ids, node.widget.id);
             const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse {
                 // A FRESH split (no retained fraction): a declared enter
@@ -1093,7 +1101,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
                 // so the tween armed right after this reconcile eases it in
                 // instead of the mount popping to its value.
                 if (node.widget.resize_duration_ms != 0 and node.widget.resize_origin >= 0 and node.widget.children.len != 0) {
-                    canvas.slideSplitChildren(node.frame, node.widget.resize_origin, index, staged_nodes);
+                    canvas.slideSplitChildrenWithTokens(node.frame, node.widget.resize_origin, index, staged_nodes, tokens);
                 }
                 continue;
             };
@@ -1128,7 +1136,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
             // so the slide shape only applies to tween-owned motion.
             const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
             if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
-                canvas.slideSplitChildren(node.frame, retained_fraction, index, staged_nodes);
+                canvas.slideSplitChildrenWithTokens(node.frame, retained_fraction, index, staged_nodes, tokens);
             } else {
                 try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, staged_root_bounds, tokens);
             }
@@ -1144,6 +1152,7 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
             previous_runtime_offsets,
             previous_source_scroll_entries,
             anchored_depth,
+            strata,
         );
         clampCanvasWidgetLayoutProgrammaticScrollOffsets(
             staged_nodes,
@@ -1151,10 +1160,12 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
             previous_runtime_offsets,
             previous_source_scroll_entries,
             anchored_depth,
+            strata,
         );
-        revealNewlySelectedTabs(previous, staged_nodes, anchored_depth);
+        revealNewlySelectedTabs(previous, staged_nodes, anchored_depth, strata);
         if (anchored_depth < max_anchored_depth) {
             try canvas.relayoutAnchoredChildrenAtDepth(staged_nodes, staged_root_bounds, tokens, anchored_depth);
+            if (strata) |plan| for (staged_nodes, 0..) |node, i| plan.setNode(i, node);
         }
     }
 

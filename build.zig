@@ -1326,6 +1326,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/control_content.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/surface_recipes.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_metrics.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/layout_coordination.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -5420,6 +5421,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/intrinsic_measure.ts"));
     stage_run.addFileInput(b.path("packages/core/src/measurement_coordination.ts"));
     stage_run.addFileInput(b.path("packages/core/src/flow_measurement.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/layout_coordination.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);
