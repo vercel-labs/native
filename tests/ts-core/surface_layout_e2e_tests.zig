@@ -232,6 +232,7 @@ test "TypeScript app adapter supplies placement through every theme path" {
         try std.testing.expect(tokens.grid_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.container_layout_policy == core.nativeWindowPolicy);
         try std.testing.expect(tokens.intrinsic_layout_policy == core.nativeWindowPolicy);
+        try std.testing.expect(tokens.measurement_coordination_policy == core.nativeWindowPolicy);
     }
 }
 

@@ -226,6 +226,10 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 31) return nscvSurfaceRecipes(request);
   if (request[0] === 32) return nscvWidgetMetrics(request);
   if (request[0] === 33) return nscvIntrinsicMeasure(request);
+  if (request[0] === 34) return nscvWrappedMeasure(request);
+  if (request[0] === 35) return nscvAxisChildMeasure(request);
+  if (request[0] === 36) return nscvSpanSubtree(request);
+  if (request[0] === 37) return nscvAxisMeasure(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

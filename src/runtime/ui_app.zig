@@ -524,6 +524,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             surface_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             grid_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             container_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+            measurement_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
             intrinsic_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2022,6 +2023,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.grid_layout_policy = self.options.grid_layout_policy;
                 tokens.container_layout_policy = self.options.container_layout_policy;
                 tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
+                tokens.measurement_coordination_policy = self.options.measurement_coordination_policy;
                 tokens.widget_motion_policy = self.options.widget_motion_policy;
                 tokens.widget_audit_policy = self.options.widget_audit_policy;
                 tokens.widget_routing_policy = self.options.widget_routing_policy;
@@ -2080,6 +2082,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.grid_layout_policy = self.options.grid_layout_policy;
             tokens.container_layout_policy = self.options.container_layout_policy;
             tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
+            tokens.measurement_coordination_policy = self.options.measurement_coordination_policy;
             tokens.widget_motion_policy = self.options.widget_motion_policy;
             tokens.widget_audit_policy = self.options.widget_audit_policy;
             tokens.widget_routing_policy = self.options.widget_routing_policy;

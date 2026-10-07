@@ -746,6 +746,30 @@ fn layoutAxisChildrenMode(
     }
     if (flow_count == 0) return;
 
+    if (tokens.measurement_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("measurement_coordination_policy.zig").AxisPlan.init(scratch.get(), policy, children.len, content, @intFromEnum(axis), @intFromEnum(style.main_alignment), @intFromEnum(style.cross_alignment), style.gap) catch @panic("axis measurement allocation failed");
+        defer plan.deinit();
+        for (children, 0..) |child, index| plan.setFlow(index, widgetTakesFlowSlot(child));
+        while (true) {
+            const result = plan.run();
+            const index = result.index();
+            switch (result.action()) {
+                .done => break,
+                .child => plan.replyChild(result, containerChildFacts(children[index], axis, tokens, fill_primary_tabs, stretch_tab_triggers, true)),
+                .first_spans, .second_spans => plan.replySpans(result, widgetSubtreeHasTextSpans(children[index], 0, tokens)),
+                .wrapped => plan.replyHeight(result, wrappedVerticalExtentForWidth(children[index], result.width(), tokens, 0)),
+            }
+        }
+        if (!(plan.overflow() <= axis_layout_overflow_epsilon)) logAxisChildrenOverflow(output, parent_index, axis, if (axis == .horizontal) content.width else content.height, plan.used(), plan.overflow());
+        for (children, 0..) |child, index| {
+            if (!widgetTakesFlowSlot(child)) continue;
+            const frame = plan.frame(index);
+            _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
+        }
+        return;
+    }
+
     if (tokens.container_layout_policy) |policy| {
         var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
         const plan = @import("container_layout_policy.zig").Plan.init(scratch.get(), policy, children.len, content, @intFromEnum(axis), @intFromEnum(style.main_alignment), @intFromEnum(style.cross_alignment), style.gap) catch @panic("container layout allocation failed");
@@ -754,7 +778,7 @@ fn layoutAxisChildrenMode(
         for (children, 0..) |child, index| {
             if (!widgetTakesFlowSlot(child)) continue;
             plan.setChild(index, containerChildFacts(child, axis, tokens, fill_primary_tabs, stretch_tab_triggers, true));
-            if (axis == .vertical and nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0)) needs_wrapped = true;
+            if (axis == .vertical and nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0, tokens)) needs_wrapped = true;
         }
         // Resolve cross sizes before measuring span paragraphs at their
         // actual offered width. The measurements are native capabilities;
@@ -763,7 +787,7 @@ fn layoutAxisChildrenMode(
             plan.run(0);
             for (children, 0..) |child, index| {
                 if (!widgetTakesFlowSlot(child)) continue;
-                if (nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0))
+                if (nonNegative(child.layout.grow) == 0 and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0, tokens))
                     plan.setMeasuredMain(index, wrappedVerticalExtentForWidth(child, plan.cross(index), tokens, 0));
             }
         }
@@ -1024,7 +1048,7 @@ fn preferredMainExtentInCross(
     alignment: WidgetCrossAlignment,
     tokens: DesignTokens,
 ) f32 {
-    if (axis == .vertical and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0)) {
+    if (axis == .vertical and child.frame.height <= 0 and widgetSubtreeHasTextSpans(child, 0, tokens)) {
         const width = preferredCrossExtent(child, axis, cross_extent, alignment, tokens);
         return clampMainExtent(child, axis, wrappedVerticalExtentForWidth(child, width, tokens, 0));
     }
@@ -1038,11 +1062,21 @@ fn widgetIsSpanParagraph(widget: Widget) bool {
     return (widget.kind == .text or widget.kind == .data_cell) and widget.spans.len > 0;
 }
 
-fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
+fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize, tokens: DesignTokens) bool {
+    if (tokens.measurement_coordination_policy) |policy| {
+        var scratch = std.heap.stackFallback(256, std.heap.page_allocator);
+        const plan = @import("measurement_coordination_policy.zig").SpanPlan.init(scratch.get(), policy, widget, depth, max_widget_depth) catch @panic("span subtree allocation failed");
+        defer plan.deinit();
+        while (true) {
+            const result = plan.run();
+            if (!result.pending()) return result.found();
+            plan.reply(result, widgetSubtreeHasTextSpans(widget.children[result.index()], depth + 1, tokens));
+        }
+    }
     if (depth >= max_widget_depth) return false;
     if (widgetIsSpanParagraph(widget)) return true;
     for (widget.children) |child| {
-        if (widgetSubtreeHasTextSpans(child, depth + 1)) return true;
+        if (widgetSubtreeHasTextSpans(child, depth + 1, tokens)) return true;
     }
     return false;
 }
@@ -1053,7 +1087,8 @@ fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize) bool {
 /// content composes from and falls back to the classic intrinsic extent
 /// everywhere else.
 fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
-    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, false);
+    if (tokens.measurement_coordination_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, false);
+    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtentReference(widget, width, tokens, depth, false, false);
     if (depth >= max_widget_depth) return preferredMainExtent(widget, .vertical, tokens);
     if (widget.frame.height > 0) return clampMainExtent(widget, .vertical, widget.frame.height);
     const padding = widgetLayoutPadding(widget, tokens);
@@ -1798,7 +1833,8 @@ fn layoutVariableVirtualChild(
 /// non-virtual list_item keeps its classic intrinsic sizing
 /// byte-identically.
 fn variableVirtualRowExtent(child: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
-    if (child.kind == .list_item and tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(child, width, tokens, depth, true, false);
+    if (child.kind == .list_item and tokens.measurement_coordination_policy != null) return compiledWrappedExtent(child, width, tokens, depth, true, false);
+    if (child.kind == .list_item and tokens.intrinsic_layout_policy != null) return compiledWrappedExtentReference(child, width, tokens, depth, true, false);
     if (child.kind != .list_item) return wrappedVerticalExtentForWidth(child, width, tokens, depth);
     if (depth >= max_widget_depth) return preferredMainExtent(child, .vertical, tokens);
     if (child.frame.height > 0) return clampMainExtent(child, .vertical, child.frame.height);
@@ -2120,7 +2156,8 @@ fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: Design
 /// vertical extent uses, replayed so a closed pose can hand children
 /// full-size frames.
 fn accordionOpenContentExtent(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
-    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, true);
+    if (tokens.measurement_coordination_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, true);
+    if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtentReference(widget, width, tokens, depth, false, true);
     var max_height: f32 = 0;
     for (widget.children) |child| {
         if (!widgetTakesFlowSlot(child)) continue;
@@ -2134,6 +2171,26 @@ fn accordionOpenContentExtent(widget: Widget, width: f32, tokens: DesignTokens, 
 /// TypeScript selects widths, short circuits and complete height composition.
 /// Recursive calls never invalidate a borrowed core/view result.
 fn compiledWrappedExtent(widget: Widget, width: f32, tokens: DesignTokens, depth: usize, variable_row: bool, accordion_content: bool) f32 {
+    var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+    const plan = @import("measurement_coordination_policy.zig").WrappedPlan.init(scratch.get(), widget, tokens, width, depth, max_widget_depth, variable_row, accordion_content, accordionChildrenVisible(widget)) catch @panic("wrapped measurement allocation failed");
+    defer plan.deinit();
+    for (widget.children, 0..) |child, index| plan.setChild(index, child, widgetTakesFlowSlot(child));
+    while (true) {
+        const result = plan.run();
+        const measured = switch (result.action()) {
+            .done => return result.height(),
+            .intrinsic => intrinsicWidgetSize(widget, tokens).height,
+            .paragraph => spanParagraphHeight(widget, result.width(), tokens),
+            .row_width => rowChildWidth(widget, result.width(), result.index(), tokens),
+            .bubble_width => intrinsicWidgetSizeDepth(widget.children[result.index()], tokens, depth + 1).width,
+            .child_height => wrappedVerticalExtentForWidth(widget.children[result.index()], result.width(), tokens, depth + 1),
+        };
+        plan.reply(result, measured);
+    }
+}
+
+// Retained native coordinator for existing callers and parity verification.
+fn compiledWrappedExtentReference(widget: Widget, width: f32, tokens: DesignTokens, depth: usize, variable_row: bool, accordion_content: bool) f32 {
     const wrapped = @import("wrapped_layout_policy.zig");
     const padding = if (variable_row) widget.layout.padding else widgetLayoutPadding(widget, tokens);
     const text_size = widgetBodyTextSize(widget, tokens);
@@ -2975,6 +3032,14 @@ fn intrinsicMainExtent(widget: Widget, axis: LayoutAxis, tokens: DesignTokens) f
 }
 
 fn containerChildFacts(child: Widget, axis: LayoutAxis, tokens: DesignTokens, comptime fill_primary_tabs: bool, comptime stretch_tab_triggers: bool, measure_cross: bool) @import("container_layout_policy.zig").Child {
+    if (tokens.measurement_coordination_policy != null) {
+        var plan = @import("measurement_coordination_policy.zig").ChildPlan.init(child, tokens, @intFromEnum(axis), fill_primary_tabs, stretch_tab_triggers, measure_cross);
+        while (true) {
+            const result = plan.run();
+            if (result.action() == .done) return result.child();
+            plan.reply(result, intrinsicWidgetSize(child, tokens));
+        }
+    }
     const horizontal = axis == .horizontal;
     const authored_main = if (horizontal) child.frame.width else child.frame.height;
     const authored_cross = if (horizontal) child.frame.height else child.frame.width;

@@ -414,3 +414,192 @@ test "compiled widget metric preserves exceptional padded paragraph minimum word
         core.rt.frameReset();
     };
 }
+
+fn coordinated(tokens: c.DesignTokens) c.DesignTokens {
+    var t = ownedIntrinsic(tokens);
+    t.container_layout_policy = core.nativeWindowPolicy;
+    t.surface_layout_policy = core.nativeWindowPolicy;
+    t.grid_layout_policy = core.nativeWindowPolicy;
+    t.measurement_coordination_policy = core.nativeWindowPolicy;
+    return t;
+}
+fn coordinatedTree(widget: c.Widget, width: f32, tokens: c.DesignTokens, trace: *Measures) !void {
+    var reference_nodes: [32]c.WidgetLayoutNode = undefined;
+    var compiled_nodes: [32]c.WidgetLayoutNode = undefined;
+    c.bumpTextMeasureGeneration();
+    trace.count = 0;
+    // Hold already-shipped owners constant: compare the native coordination
+    // reference against the new owner, including every provider call.
+    var reference_tokens = coordinated(tokens);
+    reference_tokens.measurement_coordination_policy = null;
+    const expected = try c.layoutWidgetTreeWithTokens(widget, .init(0.125, -0.0, width, 640), reference_tokens, &reference_nodes);
+    var expected_semantics: [32]c.WidgetSemanticsNode = undefined;
+    const semantics = try expected.collectSemantics(&expected_semantics);
+    var expected_commands: [1024]c.CanvasCommand = undefined;
+    var expected_builder = c.Builder.init(&expected_commands);
+    try expected.emitDisplayList(&expected_builder, reference_tokens);
+    const observations = trace.observations;
+    const count = trace.count;
+    c.bumpTextMeasureGeneration();
+    trace.count = 0;
+    const t = coordinated(tokens);
+    const actual = try c.layoutWidgetTreeWithTokens(widget, .init(0.125, -0.0, width, 640), t, &compiled_nodes);
+    var actual_semantics: [32]c.WidgetSemanticsNode = undefined;
+    var actual_commands: [1024]c.CanvasCommand = undefined;
+    var actual_builder = c.Builder.init(&actual_commands);
+    try actual.emitDisplayList(&actual_builder, t);
+    try exact(expected.nodes, actual.nodes);
+    try exact(semantics, try actual.collectSemantics(&actual_semantics));
+    try exact(expected_builder.displayList().commands, actual_builder.displayList().commands);
+    if (count != trace.count) {
+        for (0..@min(count, trace.count)) |i| {
+            exact(observations[i], trace.observations[i]) catch {
+                std.debug.print("first measurement mismatch {d}: native {any} compiled {any}\n", .{ i, observations[i], trace.observations[i] });
+                break;
+            };
+        }
+    }
+    try std.testing.expectEqual(count, trace.count);
+    try exact(observations[0..count], trace.observations[0..trace.count]);
+}
+test "compiled widget metric width-aware coordination preserves complete trees commands and measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const paragraphs = [_]c.Widget{
+        .{ .id = 4, .kind = .text, .spans = &.{ .{ .text = "First caf\xc3\xa9\xff\x00 line\n", .scale = 1.125 }, .{ .text = "second measured words", .monospace = true } } },
+        .{ .id = 5, .kind = .data_cell, .spans = &.{.{ .text = "Padded paragraph with enough words to wrap" }}, .layout = .{ .padding = .{ .left = 1.125, .right = 3.25, .top = 2.5, .bottom = 4.75 } } },
+    };
+    const children = [_]c.Widget{
+        .{ .id = 3, .kind = .column, .children = &paragraphs, .layout = .{ .grow = 1, .gap = 2.125 } },
+        .{ .id = 6, .kind = .separator },
+        .{ .id = 7, .kind = .text, .spans = &.{.{ .text = "Fixed-width paragraph retains its independent lines" }}, .frame = .init(0, 0, 71.25, 0) },
+        .{ .id = 8, .kind = .dialog, .text = "Skipped surface" },
+    };
+    for ([_]c.WidgetKind{ .row, .column, .stack, .card, .alert, .accordion, .bubble, .data_row, .data_cell, .tabs, .button_group, .list }) |kind| for ([_]f32{ 96.25, 240.125, 640 }) |width| for ([_]bool{ false, true }) |alternate| {
+        var t: c.DesignTokens = .{ .text_measure = &provider, .density = if (alternate) .compact else .regular };
+        t.controls.tabs_indicator = if (alternate) .underline else .pill;
+        t.metrics.tabs_list_full_width = alternate;
+        t.controls.button_group_style = .detached;
+        t.metrics.tabs_gap = 5.125;
+        t.metrics.button_group_gap = 3.25;
+        const nested: c.Widget = .{ .id = 2, .kind = kind, .text = "Measured title", .size = if (alternate) .lg else .sm, .value = if (alternate) 1 else 0, .children = &children, .layout = .{ .gap = 2.125, .padding_is_kind_default = alternate, .padding = .{ .left = 3.25, .right = 5.5, .top = 7.125, .bottom = 9.25 }, .cross_alignment = .center } };
+        const root: c.Widget = .{ .id = 1, .kind = .column, .children = &.{nested} };
+        coordinatedTree(root, width, t, &trace) catch |err| {
+            std.debug.print("measurement coordination kind {t} width {d} alternate {}\n", .{ kind, width, alternate });
+            return err;
+        };
+        core.rt.frameReset();
+    };
+}
+test "compiled widget metric nested wrapping preserves sibling measurement order" {
+    _ = core.initialModel();
+    var trace: Measures = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = measured };
+    const runs = [_]c.TextSpan{ .{ .text = "First measured line\n", .scale = 1.125 }, .{ .text = "Second wrapped words", .monospace = true } };
+    const paragraphs = [_]c.Widget{
+        .{ .id = 4, .kind = .text, .spans = &runs },
+        .{ .id = 5, .kind = .text, .spans = &.{.{ .text = "Independent paragraph" }} },
+    };
+    const children = [_]c.Widget{
+        .{ .id = 2, .kind = .row, .children = &paragraphs },
+        .{ .id = 3, .kind = .bubble, .children = &paragraphs },
+    };
+    for ([_]c.WidgetKind{ .row, .column, .data_cell, .card, .alert, .accordion, .list_item }) |kind| {
+        var t: c.DesignTokens = .{ .text_measure = &provider };
+        const row: c.Widget = .{ .id = 1, .kind = kind, .children = &children, .state = .{ .selected = true }, .layout = .{ .gap = 2.125, .padding = .all(3.25) } };
+        const root: c.Widget = .{ .kind = .scroll_view, .scroll_axes = .horizontal, .children = &.{row} };
+        t.container_layout_policy = core.nativeWindowPolicy;
+        t.intrinsic_layout_policy = core.nativeWindowPolicy;
+        t.control_geometry_policy = core.nativeWindowPolicy;
+        c.bumpTextMeasureGeneration();
+        trace.count = 0;
+        const expected = c.intrinsicWidgetSize(root, t);
+        const count = trace.count;
+        const observations = trace.observations;
+        c.bumpTextMeasureGeneration();
+        trace.count = 0;
+        try exact(expected, c.intrinsicWidgetSize(root, coordinated(t)));
+        try std.testing.expectEqual(count, trace.count);
+        try exact(observations[0..count], trace.observations[0..trace.count]);
+        core.rt.frameReset();
+    }
+}
+test "compiled widget metric wrapped continuations preserve exceptional words through scroll sizing" {
+    _ = core.initialModel();
+    const paragraphs = [_]c.Widget{.{ .kind = .text, .spans = &.{.{ .text = "Measured words\nAnother line" }} }};
+    for ([_]c.WidgetKind{ .column, .stack, .card, .alert, .accordion, .row, .bubble }) |kind| for ([_]u32{ 0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 }) |word_| {
+        const value: f32 = @bitCast(word_);
+        const nested: c.Widget = .{ .kind = kind, .text = "Title", .value = 1, .children = &paragraphs, .layout = .{ .gap = value, .padding = .{ .left = 3.125, .right = 5.25, .top = value, .bottom = 7.5 }, .min_size = .init(0, value) } };
+        const root: c.Widget = .{ .kind = .scroll_view, .scroll_axes = .horizontal, .children = &.{nested} };
+        exact(c.intrinsicWidgetSize(root, .{}), c.intrinsicWidgetSize(root, coordinated(.{}))) catch |err| {
+            std.debug.print("wrapped exceptional kind {t} word {x}\n", .{ kind, word_ });
+            return err;
+        };
+        core.rt.frameReset();
+    };
+}
+test "compiled widget metric measurement packets retain copied continuations across arena resets" {
+    _ = core.initialModel();
+    const coordination = c.measurement_coordination_policy;
+    const child: c.Widget = .{ .kind = .separator };
+    var axis = coordination.ChildPlan.init(child, coordinated(.{}), 0, false, false, true);
+    const first = axis.run();
+    try std.testing.expectEqual(coordination.ChildAction.main, first.action());
+    try std.testing.expectEqual(@as(usize, 1), first.dimension());
+    const saved = first.bytes;
+    axis.reply(first, c.intrinsicWidgetSize(child, coordinated(.{})));
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &saved, &first.bytes);
+    const second = axis.run();
+    try std.testing.expectEqual(coordination.ChildAction.cross, second.action());
+    axis.reply(second, c.intrinsicWidgetSize(child, coordinated(.{})));
+    core.rt.frameReset();
+    const final = axis.run();
+    try std.testing.expectEqual(coordination.ChildAction.done, final.action());
+    try std.testing.expectEqualSlices(u8, &saved, &first.bytes);
+    const widget: c.Widget = .{ .kind = .row, .children = &.{child} };
+    const wrapped = try coordination.WrappedPlan.init(std.testing.allocator, widget, coordinated(.{}), 120, 0, 32, false, false, true);
+    defer wrapped.deinit();
+    wrapped.setChild(0, child, true);
+    const width = wrapped.run();
+    try std.testing.expectEqual(coordination.WrappedAction.row_width, width.action());
+    const copy = width.bytes;
+    core.rt.frameReset();
+    wrapped.reply(width, 12.5);
+    const height = wrapped.run();
+    try std.testing.expectEqual(coordination.WrappedAction.child_height, height.action());
+    try std.testing.expectEqual(@as(f32, 12.5), height.width());
+    wrapped.reply(height, 30.25);
+    core.rt.frameReset();
+    try std.testing.expectEqualSlices(u8, &copy, &width.bytes);
+    try std.testing.expectEqual(@as(f32, 30.25), wrapped.run().height());
+}
+test "compiled widget metric subtree continuations preserve depth first-match stopping and owned results" {
+    _ = core.initialModel();
+    const coordination = c.measurement_coordination_policy;
+    const paragraph: c.Widget = .{ .kind = .text, .spans = &.{.{ .text = "Paragraph" }} };
+    for ([_]usize{ 31, 32, 33 }) |depth| {
+        const plan = try coordination.SpanPlan.init(std.testing.allocator, core.nativeWindowPolicy, paragraph, depth, 32);
+        defer plan.deinit();
+        const result = plan.run();
+        try std.testing.expect(!result.pending());
+        try std.testing.expectEqual(depth < 32, result.found());
+        const bytes = result.bytes;
+        core.rt.frameReset();
+        try std.testing.expectEqualSlices(u8, &bytes, &result.bytes);
+    }
+    const root: c.Widget = .{ .kind = .column, .children = &.{ paragraph, paragraph, paragraph } };
+    const plan = try coordination.SpanPlan.init(std.testing.allocator, core.nativeWindowPolicy, root, 0, 32);
+    defer plan.deinit();
+    const first = plan.run();
+    try std.testing.expect(first.pending());
+    plan.reply(first, false);
+    const second = plan.run();
+    try std.testing.expectEqual(@as(usize, 1), second.index());
+    plan.reply(second, true);
+    core.rt.frameReset();
+    const final = plan.run();
+    try std.testing.expect(!final.pending());
+    try std.testing.expect(final.found());
+}
