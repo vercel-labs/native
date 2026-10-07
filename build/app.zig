@@ -1255,6 +1255,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/widget_presentation.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_paint_walk.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_geometry.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/control_content.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");
