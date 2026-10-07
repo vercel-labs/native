@@ -2016,7 +2016,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
                 tokens.widget_motion_policy = self.options.widget_motion_policy;
                 tokens.code_content_policy = self.options.code_content_policy;
-                tokens.markdown_content_policy = self.options.markdown_content_policy;
                 return tokens;
             }
             const state = self.currentThemeState();
@@ -2068,7 +2067,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
             tokens.widget_motion_policy = self.options.widget_motion_policy;
             tokens.code_content_policy = self.options.code_content_policy;
-            tokens.markdown_content_policy = self.options.markdown_content_policy;
             return tokens;
         }
 
