@@ -34,7 +34,7 @@ pub const Plan = struct {
         @memset(request, 0);
         request[0] = 33;
         request[1] = 1;
-        request[2] = @intFromBool(bothNaNMaximumKeepsSignaling());
+        request[2] = maximumWords();
         request[3] = @as(u8, @intFromBool(widget.layout.virtualized)) | (@as(u8, @intFromBool(widget.layout.padding_is_kind_default)) << 1) | (@as(u8, @intFromBool(selected)) << 2) | (@as(u8, @intFromBool(widget.scroll_axes == .horizontal)) << 3) | (@as(u8, @intFromBool(tokens.controls.button_group_style == .detached)) << 4);
         word(request, 4, std.math.cast(u32, depth) orelse std.math.maxInt(u32));
         word(request, 8, @intCast(limit));
@@ -116,12 +116,13 @@ fn float(b: []const u8, at: usize) f32 {
 }
 // LLVM's target maximum can retain the second signaling word only when both
 // operands are NaN. This representation fact is distinct from the one-NaN probe.
-noinline fn bothNaNMaximumKeepsSignaling() bool {
+noinline fn maximumWords() u8 {
     var words = [_]u32{ 0x7fc12345, 0x7f812345 };
     const input: *volatile [2]u32 = &words;
     const values = input.*;
-    var result: u32 = 0;
-    const output: *volatile u32 = &result;
-    output.* = @bitCast(@max(@as(f32, @bitCast(values[0])), @as(f32, @bitCast(values[1]))));
-    return output.* == values[1];
+    var result: [2]u32 = undefined;
+    const output: *volatile [2]u32 = &result;
+    output.* = .{ @bitCast(@max(@as(f32, @bitCast(values[0])), @as(f32, @bitCast(values[1])))), @bitCast(@max(@as(f32, 0), @as(f32, @bitCast(values[1])))) };
+    const observed = output.*;
+    return @as(u8, @intFromBool(observed[0] == values[1])) | (@as(u8, @intFromBool(observed[1] == values[1])) << 1);
 }

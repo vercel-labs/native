@@ -51,6 +51,9 @@ test("the both-NaN maximum fact preserves a signaling floor without changing one
   assert.equal(word(derive(b), 12), 0x7fc12345);
   b[2] = 1; assert.equal(word(derive(b), 12), 0x7f812345);
   w.setFloat32(216, 0, true); assert.equal(value(derive(b), 12), 42.125);
+  // A target can choose a signaling argument and still quiet its word.
+  b[72] = 16; b[2] = 0; assert.equal(word(derive(b), 12), 0x7fc12345);
+  b[2] = 2; assert.equal(word(derive(b), 12), 0x7f812345);
 });
 test("malformed lengths enums status words and reserved bytes reject before measurement", () => {
   for (const at of [0, 1, 2, 3, 16, 60, 64, 65, 67, 68, 71, 73, 264]) {

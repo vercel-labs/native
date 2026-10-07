@@ -1,7 +1,7 @@
 /** Per-node measurement continuations. Native supplies widget facts and executes
  * the requested measurements; this policy selects recipes, order and stopping. */
 function nscvIntrinsicMeasure(request: Uint8Array): Uint8Array {
-  if (request.length < 288 || request[0] !== 33 || request[1] !== 1 || request[2]! > 1 || request[3]! > 31)
+  if (request.length < 288 || request[0] !== 33 || request[1] !== 1 || request[2]! > 3 || request[3]! > 31)
     throw new Error("invalid intrinsic measurement header");
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength), count = w.getUint32(12, true);
   if (request.length !== 288 + count * 44 || w.getUint32(16, true) > 3 || w.getUint32(60, true) !== 0)

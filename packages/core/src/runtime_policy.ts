@@ -1387,7 +1387,7 @@ function nscvContainerCross(child: NscContainerChild, axis: number, available: n
  * portable policy. Native copies every result before recursive measurement;
  * collection belongs to the enclosing app cycle, never to this operation.
  */
-function nscvIntrinsicLayout(request: Uint8Array, numericFlags: number = -1, signalingFlags: number = 0, bothNaNMaximum: number = 0): Uint8Array {
+function nscvIntrinsicLayout(request: Uint8Array, numericFlags: number = -1, signalingFlags: number = 0, maximumWords: number = 0): Uint8Array {
   if (request.length < 96 || request[0] !== 6) throw new Error("invalid intrinsic layout request");
   const op = request[1]!, axis = request[2]!, flags = request[3]!;
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength), count = wire.getUint32(4, true);
@@ -1466,8 +1466,8 @@ function nscvIntrinsicLayout(request: Uint8Array, numericFlags: number = -1, sig
   }
   out.setFloat32(4, width, true); out.setFloat32(8, height, true);
   if (op !== 5 && op < 8) {
-    if (op !== 3 && signalingAt(24) && ((signalingFlags & 16) !== 0 || bothNaNMaximum !== 0 && Number.isNaN(width))) result.set(request.subarray(24, 28), 4);
-    if (signalingAt(28) && ((signalingFlags & 16) !== 0 || bothNaNMaximum !== 0 && Number.isNaN(height))) result.set(request.subarray(28, 32), 8);
+    if (op !== 3 && signalingAt(24) && ((maximumWords & 2) !== 0 || (maximumWords & 1) !== 0 && Number.isNaN(width))) result.set(request.subarray(24, 28), 4);
+    if (signalingAt(28) && ((maximumWords & 2) !== 0 || (maximumWords & 1) !== 0 && Number.isNaN(height))) result.set(request.subarray(28, 32), 8);
   }
   return result;
 }
