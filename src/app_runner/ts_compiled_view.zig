@@ -75,7 +75,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart },
+    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -139,6 +139,9 @@ const Record = struct {
     spanWeight: ?sdk.canvas.TextSpanWeight = null,
     spanColor: ?sdk.canvas.TextSpanColor = null,
     spanScale: ?f32 = null,
+    markdownRecipe: ?ByteText = null,
+    markdownLink: ?u8 = null,
+    markdownDetails: ?u8 = null,
     codeLanguage: ?sdk.canvas.code.Language = null,
     codeLineDigits: ?u8 = null,
     codeEditable: ?bool = null,
@@ -262,6 +265,7 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
         ui.composition_policy = core.nativeWindowPolicy;
         ui.code_content_policy = core.nativeWindowPolicy;
         ui.chart_content_policy = core.nativeWindowPolicy;
+        ui.markdown_content_policy = core.nativeMarkdownPolicy;
     }
     if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
@@ -345,6 +349,24 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     }
     if (paragraph and value.kind != .text) return error.InvalidView;
     if (value.spanScale) |scale| if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidView;
+    if (value.kind == .markdown) {
+        if (value.markdownRecipe == null or value.end != index + 1) return error.InvalidView;
+        const defaults: Record = .{ .end = value.end, .kind = .markdown, .text = "" };
+        inline for (@typeInfo(Record).@"struct".fields) |field| {
+            if (comptime !std.mem.eql(u8, field.name, "end") and !std.mem.eql(u8, field.name, "kind") and !std.mem.eql(u8, field.name, "markdownRecipe") and !std.mem.eql(u8, field.name, "markdownLink") and !std.mem.eql(u8, field.name, "markdownDetails")) {
+                const provided = @field(value, field.name);
+                const expected = @field(defaults, field.name);
+                if (comptime @typeInfo(field.type) == .pointer and @typeInfo(field.type).pointer.size == .slice) {
+                    if (provided.len != expected.len) return error.InvalidView;
+                } else if (!std.meta.eql(provided, expected)) return error.InvalidView;
+            }
+        }
+        return stampCompound(try sdk.canvas.MarkdownContentPolicy.execute(core.Msg, ui, value.markdownRecipe.?.bytes, .{
+            .on_link = if (value.markdownLink) |tag| try markdownLinkEvent(tag) else null,
+            .on_details = if (value.markdownDetails) |tag| try markdownDetailsEvent(tag) else null,
+        }));
+    }
+    if (value.markdownRecipe != null or value.markdownLink != null or value.markdownDetails != null) return error.InvalidView;
     if (value.kind == .code) {
         if (value.codeLanguage == null or value.codeEditable == null or value.codeNumbered == null or value.wrap == null or value.codeLineDigits != null or
             paragraph or value.placeholder.len != 0 or value.submitOnEnter or value.submit != null or value.contextMenu.len != 0 or value.autofocus or
@@ -423,7 +445,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         }, children.items[0], if (children.items.len == 2) children.items[1] else null));
     }
     const kind: sdk.canvas.WidgetKind = switch (value.kind) {
-        .input_group_actions, .code => return error.InvalidView,
+        .input_group_actions, .code, .markdown => return error.InvalidView,
         .spacer => .stack,
         .scroll => .scroll_view,
         inline else => |tag| @field(sdk.canvas.WidgetKind, @tagName(tag)),
@@ -635,6 +657,39 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     return result;
 }
 
+test "compiled app Markdown rejects unrelated fields malformed bytes and incompatible routes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var recipe = [_]u8{0} ** 80;
+    recipe[0] = 1;
+    recipe[4] = 1;
+    recipe[16] = 3;
+    @memset(recipe[48..52], 255);
+    @memset(recipe[76..80], 255);
+    const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), recipe, .{});
+    for ([_][]const u8{
+        "\"textBytes\":[]",       "\"labelBytes\":[]",             "\"placeholderBytes\":[]", "\"placeholder\":\"x\"",   "\"command\":\"x\"",
+        "\"wrap\":false",         "\"keyInt\":1",                  "\"globalKeyInt\":1",      "\"columns\":1",           "\"virtualized\":true",
+        "\"padding\":0",          "\"minWidth\":1",                "\"maxWidth\":1",          "\"image\":1",             "\"icon\":\"x\"",
+        "\"role\":\"group\"",     "\"foreground\":\"text_muted\"", "\"windowDrag\":true",     "\"main\":\"center\"",     "\"cross\":\"center\"",
+        "\"checked\":true",       "\"disabled\":true",             "\"selected\":true",       "\"focusable\":true",      "\"spans\":[]",
+        "\"spanScale\":1",        "\"textAlignment\":\"center\"",  "\"codeLineDigits\":1",    "\"videoAutoplay\":false", "\"clipContent\":true",
+        "\"zeroIntrinsic\":true", "\"overflow\":\"clip\"",         "\"markdownLink\":255",    "\"markdownDetails\":255",
+    }) |fields| {
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"markdown\",\"text\":\"\",\"markdownRecipe\":{s},{s}}}]}}", .{ encoded, fields });
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    for ([_][]const u8{ "null", "[1.0]", "[1.5]", "[-1]", "[256]", "[true]", "[\"1\"]" }) |invalid| {
+        var ui = Ui.init(arena.allocator());
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"markdown\",\"text\":\"\",\"markdownRecipe\":{s}}}]}}", .{invalid});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    var ui = Ui.init(arena.allocator());
+    const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"markdown\",\"text\":\"\",\"markdownRecipe\":{s}}}]}}", .{encoded});
+    _ = try decode(&ui, bytes);
+}
+
 test "compiled app code rejects incomplete modes and unrelated renderer metadata" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -727,6 +782,26 @@ fn inputEvent(tag: u8) !Ui.InputMsgFn {
     inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
         if (comptime sdk.canvas.ui_markup_reflect.declaredTextInputUnion(field.type)) {
             if (tag == index) return Ui.translatedInputMsg(@field(std.meta.Tag(core.Msg), field.name), field.type);
+        }
+    }
+    return error.InvalidView;
+}
+
+fn markdownLinkEvent(tag: u8) !Ui.LinkMsgFn {
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
+        if (comptime field.type == []const u8) if (tag == index) return Ui.linkMsg(@field(std.meta.Tag(core.Msg), field.name));
+    }
+    return error.InvalidView;
+}
+fn markdownDetailsEvent(tag: u8) !*const fn (usize) core.Msg {
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, index| {
+        if (comptime @typeInfo(field.type) == .int or @typeInfo(field.type) == .float) {
+            if (tag == index) return struct {
+                fn make(ordinal: usize) core.Msg {
+                    const value: field.type = if (comptime @typeInfo(field.type) == .int) @intCast(ordinal) else @floatFromInt(ordinal);
+                    return @unionInit(core.Msg, field.name, value);
+                }
+            }.make;
         }
     }
     return error.InvalidView;

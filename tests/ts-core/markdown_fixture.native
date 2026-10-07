@@ -1,0 +1,4 @@
+<column gap="8">
+  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{expanded}" issue-link-base="{issue}" images="{images}" />
+  <markdown source="{body}" issue-link-base="literal://" />
+</column>

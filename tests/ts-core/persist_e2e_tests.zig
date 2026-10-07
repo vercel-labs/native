@@ -11,7 +11,9 @@ test {
     _ = @import("component_composition_e2e_tests.zig");
     _ = @import("code_content_e2e_tests.zig");
     _ = @import("chart_content_e2e_tests.zig");
+    _ = @import("markdown_content_e2e_tests.zig");
     _ = @import("widget_motion_e2e_tests.zig");
+    _ = @import("widget_audits_e2e_tests.zig");
 }
 
 const Adapter = native_sdk.TsUiApp(core);

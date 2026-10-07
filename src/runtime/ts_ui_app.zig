@@ -450,6 +450,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.code_content_policy = core.nativeWindowPolicy;
                 if (options.chart_content_policy != null) @panic("TsUiApp owns chart_content_policy - remove custom chart content wiring");
                 stamped.chart_content_policy = core.nativeWindowPolicy;
+                if (options.markdown_content_policy != null) @panic("TsUiApp owns markdown_content_policy - remove custom Markdown content wiring");
+                stamped.markdown_content_policy = core.nativeMarkdownPolicy;
                 if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
                 stamped.surface_layout_policy = core.nativeWindowPolicy;
                 if (options.grid_layout_policy != null) @panic("TsUiApp owns grid_layout_policy - remove custom grid layout wiring");
@@ -460,6 +462,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.intrinsic_layout_policy = core.nativeWindowPolicy;
                 if (options.widget_motion_policy != null) @panic("TsUiApp owns widget_motion_policy - remove custom motion wiring");
                 stamped.widget_motion_policy = core.nativeWindowPolicy;
+                if (options.widget_audit_policy != null) @panic("TsUiApp owns widget_audit_policy - remove custom audit wiring");
+                stamped.widget_audit_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");

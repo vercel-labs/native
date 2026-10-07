@@ -65,7 +65,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
   const origin = { file: entry, at: 0 };
   const reserved = ["NscAppearanceColor", "NscAppearanceVisual", "NscAppearanceContext", "NscViewSpan", "NscViewNode", "NscChartSeries", "NscChartDecimal", "NscChartSource", "NscChartPlan", "NscChartPrepared", "NscTimelineItem", "NscComponentText", "NscSurfaceRect", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_virtual_requests", "native_virtual_view", "NscVirtualRequest", "NscVirtualRange", "NscVirtualBuild", "nscvMainView", "NscVideoPlaybackState", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "JSON", "TextEncoder", "TextDecoder", "DataView", "String", "Number", "Array"];
   const names = [...contract.types.structs, ...contract.types.enums ?? [], ...contract.types.unions ?? [], ...contract.model_helpers];
-  if (names.some(item => reserved.includes(item.name) || item.name.startsWith("nscv")) || reserved.includes(contract.msg.name ?? "")) {
+  if (names.some(item => reserved.includes(item.name) || (item.name.startsWith("nscv") || item.name.startsWith("nscMd") || item.name.startsWith("NscMd") || item.name.startsWith("NscAudit"))) || reserved.includes(contract.msg.name ?? "")) {
     fail(origin, "core name collides with compiled view wiring");
   }
   let count = 0, sourceBytes = 0;
@@ -585,6 +585,37 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvVideoElement(nscvNodes, { ${props.join(", ")} }, nscvVideo, ${stringAttr("src")}, ${flag("controls", "false")}, ${flag("autoplay", "true")}, ${flag("loop", "false")}, ${flag("muted", "false")});`);
       return;
     }
+    if (node.name === "markdown") {
+      const allowed = ["source", "on-link", "on-details", "details-expanded", "issue-link-base", "images"];
+      if (node.children.length || node.text.trim() || !node.attrs.has("source") || [...node.attrs.keys()].some(name => !allowed.includes(name))) fail(node, "markdown requires source, no children, and its closed presentation attributes");
+      const source = binding(node.attrs.get("source")!, node, scope);
+      if (!/^\{[^{}]+\}$/.test(node.attrs.get("source")!) || source.type.kind !== "bytes") fail(node, "markdown source requires one byte binding");
+      let expanded = "[]", issue = "null", images = "[]";
+      if (node.attrs.has("details-expanded")) {
+        const raw = node.attrs.get("details-expanded")!, value = binding(raw, node, scope);
+        if (!/^\{[^{}]+\}$/.test(raw) || value.type.kind !== "slice" || value.type.elem?.kind !== "bool") fail(node, "details-expanded requires one boolean-array binding");
+        expanded = value.code;
+      }
+      if (node.attrs.has("images")) {
+        const raw = node.attrs.get("images")!, value = binding(raw, node, scope), record = value.type.kind === "slice" && value.type.elem && ["node", "value"].includes(value.type.elem.kind) ? contract.types.structs.find(item => item.name === value.type.elem!.name) : null;
+        if (!/^\{[^{}]+\}$/.test(raw) || !record || record.fields.length !== 4 || !record.fields.some(field => field.name === "source" && field.type.kind === "bytes") || !["image", "width", "height"].every(name => record.fields.some(field => field.name === name && category(field.type) === "number"))) fail(node, "images requires source bytes, registered image identity, width and height records");
+        images = value.code;
+      }
+      if (node.attrs.has("issue-link-base")) {
+        const raw = node.attrs.get("issue-link-base")!;
+        if (raw.startsWith("{")) { const value = binding(raw, node, scope); if (!/^\{[^{}]+\}$/.test(raw) || value.type.kind !== "bytes") fail(node, "issue-link-base requires literal text or one byte binding"); issue = value.code; }
+        else { if (/[{}]/.test(raw)) fail(node, "invalid issue-link-base literal"); issue = `new TextEncoder().encode(${JSON.stringify(raw)})`; }
+      }
+      const channels: string[] = [];
+      for (const [attribute, property, kind] of [["on-link", "markdownLink", "bytes"], ["on-details", "markdownDetails", "number"]]) {
+        const raw = node.attrs.get(attribute!); if (raw === undefined) continue;
+        const arm = contract.msg.arms.find(item => item.name === raw);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(raw) || !arm || arm.payload.kind !== kind) fail(node, `${attribute} requires a bare ${kind} Msg arm`);
+        channels.push(`${property}: ${contract.msg.arms.indexOf(arm)}`);
+      }
+      output.push(`nscvNodes.push({ end: nscvNodes.length + 1, kind: "markdown", text: "", markdownRecipe: nscvMarkdownRecipe(${source.code}, ${expanded}, ${issue}, ${images})${channels.length ? ", " + channels.join(", ") : ""} });`);
+      return;
+    }
     const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "terminal" && (!node.attrs.has("pty") || node.text.trim() || node.children.length || node.attrs.has("text"))) fail(node, "terminal requires pty and no authored content");
@@ -884,4 +915,6 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./component_composition.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./code_content.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./chart_content.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./markdown_content.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./widget_audits.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

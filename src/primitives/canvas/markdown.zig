@@ -144,6 +144,12 @@ pub const CollectedImageSource = struct {
 /// are byte-identical. An app can use this during `update` to issue
 /// `fx.loadImage` effects, then pass successful mappings back through
 /// `Options.images` on the next view.
+/// Use the compiled portable owner with explicit scratch storage. Results
+/// remain in the caller's fixed output records after either arena resets.
+pub fn collectImageSourcesOwned(policy: @import("markdown_content_policy.zig").Policy, arena: std.mem.Allocator, source: []const u8, output: []CollectedImageSource) ![]const CollectedImageSource {
+    return @import("markdown_content_policy.zig").collect(policy, arena, source, output);
+}
+
 pub fn collectImageSources(source: []const u8, output: []CollectedImageSource) []const CollectedImageSource {
     var lines = LineIterator{ .source = source };
     var len: usize = 0;
@@ -308,6 +314,10 @@ pub fn Markdown(comptime Msg: type) type {
         /// the existing convention) and malformed markdown degrades to
         /// plain text.
         pub fn view(ui: *Ui, source: []const u8, options: Options) Node {
+            if (ui.markdown_content_policy) |policy| return @import("markdown_content_policy.zig").view(Msg, policy, ui, source, options) catch {
+                ui.failed = true;
+                return ui.column(.{}, .{});
+            };
             var builder = Builder{ .ui = ui, .options = options };
             var lines = LineIterator{ .source = source };
             const blocks = builder.parseBlocks(&lines, .document);
@@ -1933,7 +1943,7 @@ fn collectTableImageSources(
     const alignments = tableDelimiterAlignments(delimiter_line) orelse return false;
     if (alignments.len != header.len) return false;
 
-    for (header.cells) |cell| appendLeadingImageSource(output, len, cell);
+    for (header.cells[0..header.len]) |cell| appendLeadingImageSource(output, len, cell);
     _ = lines.next(); // delimiter
     while (lines.peek()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t");
@@ -1941,7 +1951,7 @@ fn collectTableImageSources(
         _ = lines.next();
         const visible = imageDiscoveryVisiblePrefix(line, html_state);
         if (splitTableRow(visible)) |row| {
-            for (row.cells) |cell| appendLeadingImageSource(output, len, cell);
+            for (row.cells[0..row.len]) |cell| appendLeadingImageSource(output, len, cell);
         }
         if (len.* >= output.len) break;
     }

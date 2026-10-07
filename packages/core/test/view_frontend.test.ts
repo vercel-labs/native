@@ -40,6 +40,13 @@ const contract: ViewContract = {
   model_helpers: [{ name: "total", params: [], returns: { kind: "i64" } }],
   msg: { arms: ["load", "loaded", "failed", "increment", "decrement", "reset", "toggle_ticking", "stamp", "stamped", "tick"].map(name => ({ name, payload: { kind: ["loaded", "failed"].includes(name) ? "bytes" : ["stamped", "tick"].includes(name) ? "number" : "void" } })) },
 };
+
+test("compiled audit type names receive the wiring collision diagnostic", () => {
+  for (const name of ["NscAuditNode", "NscAuditDescendant", "NscAuditFinding", "nscvWidgetAudits"]) {
+    const conflicting = { ...contract, types: { ...contract.types, structs: [...contract.types.structs, { name, fields: [] }] } };
+    assert.throws(() => compileView("<column />", conflicting), /collides with compiled view wiring/);
+  }
+});
 const source = readFileSync(new URL("../../../tests/native-driver/src/app.native", import.meta.url), "utf8");
 const evaluate = (markup: string) => {
   const generated = compileView(markup, contract);
@@ -50,6 +57,50 @@ const evaluate = (markup: string) => {
     nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, contract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
   return { model, view: () => decodedView(exports.native_view!()), wire: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
+
+test("compiled Markdown accepts complete byte presentation bindings and rejects invalid shapes", () => {
+  const input: ViewContract = { ...contract, types: { structs: [
+    { name: "Model", fields: [
+      { name: "body", type: { kind: "bytes" } }, { name: "issue", type: { kind: "bytes" } },
+      { name: "expanded", type: { kind: "slice", elem: { kind: "bool" } } },
+      { name: "images", type: { kind: "slice", elem: { kind: "node", name: "ResolvedImage" } } },
+    ] },
+    { name: "ResolvedImage", fields: [
+      { name: "source", type: { kind: "bytes" } }, { name: "image", type: { kind: "i64" } },
+      { name: "width", type: { kind: "f64" } }, { name: "height", type: { kind: "f64" } },
+    ] },
+  ] }, model_helpers: [], msg: { arms: [
+    { name: "open_url", member: "url", payload: { kind: "bytes" } },
+    { name: "toggle_details", member: "index", payload: { kind: "number" } },
+    { name: "reset", payload: { kind: "void" } },
+  ] } };
+  const markup = '<markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{expanded}" issue-link-base="{issue}" images="{images}" />';
+  const model = { body: new Uint8Array([65, 0, 255]), issue: new Uint8Array([105, 58, 255]), expanded: [false, true], images: [{ source: new Uint8Array([97]), image: 4294967297, width: 10.25, height: 20.5 }] };
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(compileView(markup, input), { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  const first = decodedView(exports.native_view!()).nodes[0];
+  assert.equal(first.kind, "markdown"); assert.equal(first.markdownLink, 0); assert.equal(first.markdownDetails, 1);
+  assert.ok(first.markdownRecipe.includes(255));
+  model.body = new TextEncoder().encode("<details>\n<summary>More</summary>\nbody\n</details>");
+  const collapsed = decodedView(exports.native_view!()).nodes[0].markdownRecipe;
+  model.expanded[0] = true;
+  assert.notDeepEqual(decodedView(exports.native_view!()).nodes[0].markdownRecipe, collapsed);
+  assert.doesNotThrow(() => compileView(markup.replace('{issue}', 'literal://'), input));
+  assert.doesNotThrow(() => compileView('<markdown source="{body}"/>', input));
+  for (const invalid of [
+    '<markdown/>', '<markdown source="literal"/>', '<markdown source="{expanded}"/>',
+    '<markdown source="{body}">text</markdown>', '<markdown source="{body}"><text/></markdown>',
+    '<markdown source="{body}" width="10"/>', '<markdown source="{body}" source="{body}"/>',
+    markup.replace('details-expanded="{expanded}"', 'details-expanded="{body}"'),
+    markup.replace('images="{images}"', 'images="{expanded}"'),
+    markup.replace('issue-link-base="{issue}"', 'issue-link-base="{expanded}"'),
+    markup.replace('on-link="open_url"', 'on-link="reset"'),
+    markup.replace('on-details="toggle_details"', 'on-details="open_url"'),
+    markup.replace('on-details="toggle_details"', 'on-details="toggle_details:{body}"'),
+  ]) assert.throws(() => compileView(invalid, input), /compiled TypeScript view/);
+  const invalidImages: ViewContract = { ...input, types: { structs: [input.types.structs[0]!, { name: "ResolvedImage", fields: input.types.structs[1]!.fields.filter(field => field.name !== "height") }] } };
+  assert.throws(() => compileView(markup, invalidImages), /images requires/);
+});
 
 test("compiled views reject repeated virtual attributes before binding checks", () => {
   for (const markup of [
@@ -143,7 +194,7 @@ test("the view frontend and compiled portable component bundle typecheck", () =>
   };
   // Production joins these policies in one module before compiling the view.
   const bundlePath = new URL("../src/view_components_typecheck.ts", import.meta.url).pathname;
-  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "chart_content.ts", "stream_policy.ts"]
+  const bundle = ["view_components.ts", "runtime_policy.ts", "control_appearance.ts", "component_construction.ts", "widget_motion.ts", "component_composition.ts", "code_content.ts", "chart_content.ts", "markdown_content.ts", "widget_audits.ts", "stream_policy.ts"]
     .map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
   const host = ts.createCompilerHost(options);
   const readSource = host.getSourceFile.bind(host);

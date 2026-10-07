@@ -438,6 +438,7 @@ pub fn Ui(comptime Msg: type) type {
         composition_policy: ?composition_recipes.Policy = null,
         code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
         chart_content_policy: ?canvas.ChartContentPolicy.Policy = null,
+        markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
         construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each

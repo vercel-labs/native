@@ -1,5 +1,6 @@
 pub const ComponentCompositionPolicy = @import("component_composition_policy.zig");
 pub const CodeContentPolicy = @import("code_content_policy.zig");
+pub const MarkdownContentPolicy = @import("markdown_content_policy.zig");
 pub const ComponentConstructionPolicy = @import("component_construction_policy.zig");
 pub const ControlAppearancePolicy = @import("control_appearance_policy.zig");
 pub const WidgetAppearance = @import("widget_render_style.zig");
@@ -898,6 +899,7 @@ pub const pseudo_locale_text_expansion = @import("layout_audit.zig").pseudo_loca
 /// (the markup lint in ui_markup.zig is the source-level half). The
 /// sweep helper (`canvas.a11y.expectA11yAuditSweepClean`, re-exported
 /// below) is adopted by the example suites like the layout audit's.
+pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;
 /// Minimum pointer hit-target register (tokens.zig): the floor the layout
