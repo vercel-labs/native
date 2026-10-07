@@ -497,6 +497,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// builder copies descriptors into its existing generation arena.
             composition_policy: ?canvas.ComponentCompositionPolicy.Policy = null,
             code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
+            markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
             construction_policy: ?canvas.ComponentConstructionPolicy.Policy = null,
             shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
             text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
@@ -2015,6 +2016,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
                 tokens.widget_motion_policy = self.options.widget_motion_policy;
                 tokens.code_content_policy = self.options.code_content_policy;
+                tokens.markdown_content_policy = self.options.markdown_content_policy;
                 return tokens;
             }
             const state = self.currentThemeState();
@@ -2066,6 +2068,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.intrinsic_layout_policy = self.options.intrinsic_layout_policy;
             tokens.widget_motion_policy = self.options.widget_motion_policy;
             tokens.code_content_policy = self.options.code_content_policy;
+            tokens.markdown_content_policy = self.options.markdown_content_policy;
             return tokens;
         }
 
@@ -2454,6 +2457,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 var ui = Ui.init(self.arenas[next_index].allocator());
                 ui.composition_policy = self.options.composition_policy;
                 ui.code_content_policy = self.options.code_content_policy;
+                ui.markdown_content_policy = self.options.markdown_content_policy;
                 ui.construction_policy = self.options.construction_policy;
                 // The house video chrome renders the channel's honest
                 // snapshot, stamped before the view fn runs — the model
@@ -3373,6 +3377,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             var ui = Ui.init(slot.arenas[next_index].allocator());
             ui.composition_policy = self.options.composition_policy;
             ui.code_content_policy = self.options.code_content_policy;
+            ui.markdown_content_policy = self.options.markdown_content_policy;
             ui.construction_policy = self.options.construction_policy;
             // Window views render the same honest video chrome state,
             // and their `<video src>` declarations reconcile the channel

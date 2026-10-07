@@ -25,6 +25,7 @@ type NscViewNode = {
   listItemIndex?: number; listItemCount?: number;
   spans?: readonly NscViewSpan[]; textAlignment?: string;
   spanWeight?: string; spanColor?: string; spanScale?: number;
+  markdownRecipe?: readonly number[]; markdownLink?: number; markdownDetails?: number;
   codeLanguage?: string; codeLineDigits?: number; codeEditable?: boolean; codeNumbered?: boolean;
   codeAddedLines?: readonly number[]; codeRemovedLines?: readonly number[];
   contextMenu?: readonly NscContextMenuItem[];

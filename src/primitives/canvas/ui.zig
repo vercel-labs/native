@@ -437,6 +437,7 @@ pub fn Ui(comptime Msg: type) type {
         /// extensions retain the reference when the corresponding owner is absent.
         composition_policy: ?composition_recipes.Policy = null,
         code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
+        markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
         construction_policy: ?construction.Policy = null,
         /// Window source for `virtualWindow` (see `VirtualWindowSourceFn`):
         /// null outside an app loop, where builds fall back to each
