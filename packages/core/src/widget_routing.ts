@@ -8,7 +8,7 @@ interface NscRouteNode {
   frame: NscSurfaceRect; transform: number[];
 }
 interface NscRouteEntry { index: number; phase: number }
-interface NscRouteObservation { index: number }
+interface NscRouteObservation { routing_observation_slot: number }
 function nscvRouteModal(n: NscRouteNode): boolean { return n.kind >= 19 && n.kind <= 21; }
 function nscvRouteEscapes(n: NscRouteNode): boolean { return (n.flags & 8) !== 0 || nscvRouteModal(n); }
 function nscvRouteClips(n: NscRouteNode): boolean { return n.kind === 6 || (n.flags & 16) !== 0; }
@@ -146,7 +146,7 @@ function nscvRouteFocus(nodes: NscRouteNode[], index: number, logical: boolean, 
     // Ask for a semantic observation only at the same eligibility gate as
     // the reference. Native copies that fact, then resumes this query.
     if ((n.flags & 2048) === 0) {
-      if (observation.index === 4294967295) observation.index = index;
+      if (observation.routing_observation_slot === 4294967295) observation.routing_observation_slot = index;
       return false;
     }
     if ((n.flags & 256) === 0) return false;
@@ -197,7 +197,7 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
   const lo = wire.getUint32(16, true), hi = wire.getUint32(20, true), x = wire.getFloat32(24, true), y = wire.getFloat32(28, true);
   const lookup = (): number => { if (lo === 0 && hi === 0) return missing; for (let i = 0; i < count; i++) if (nodes[i]!.lo === lo && nodes[i]!.hi === hi) return i; return missing; };
   let target = missing, press = missing, status = 0, keepHit = false;
-  const observation: NscRouteObservation = { index: missing };
+  const observation: NscRouteObservation = { routing_observation_slot: missing };
   const entries: NscRouteEntry[] = [];
   if (op <= 1) target = nscvRouteHitTree(nodes, x, y, layers, op === 1);
   else if (op === 2) target = nscvRoutePress(nodes, subject);
@@ -239,9 +239,9 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
       if (target === missing) for (let i = count - 1; i >= (current === missing ? 0 : current + 1); i--) if (nscvRouteFocus(nodes, i, false, observation)) { target = i; break; }
     }
   } else if ((op === 12 || op === 13) && subject < count && nscvRouteFocus(nodes, subject, op === 13, observation)) target = subject;
-  if (observation.index !== missing) {
+  if (observation.routing_observation_slot !== missing) {
     const pending = new Uint8Array(24), out = new DataView(pending.buffer);
-    pending.set([1, op, 3, 0]); out.setUint32(4, observation.index, true); out.setUint32(8, missing, true);
+    pending.set([1, op, 3, 0]); out.setUint32(4, observation.routing_observation_slot, true); out.setUint32(8, missing, true);
     return pending;
   }
   if (op >= 6 && op <= 9 && target < count) {
