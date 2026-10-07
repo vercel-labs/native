@@ -448,7 +448,7 @@ pub fn relayoutAnchoredChildrenAtDepth(output: []WidgetLayoutNode, root_bounds: 
     var anchored_start: usize = 1;
     while (anchored_start < output.len) {
         const anchored = output[anchored_start];
-        if (anchored.widget.layout.anchor == null) {
+        if (anchored.widget.layout.anchor == null or widget_tree.widgetIsRootRelativeModal(anchored.widget)) {
             anchored_start += 1;
             continue;
         }

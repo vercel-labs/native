@@ -65,6 +65,9 @@ test("retained passes select anchor strata, bound malformed chains and guarantee
   w.setBigUint64(16,9007199254740993n,true);assert.equal(wire(retained(b)).getBigUint64(8,true),9007199254740993n);
   const cycle=retainedPacket([1n,0n],[1,1]);assert.equal(word(retained(cycle),8),2);
   const invalid=retainedPacket([0xffffffffffffffffn,9007199254740993n],[0,1]);invalid[2]=2;assert.equal(word(retained(invalid),4),0);
+  // A modal's anchor metadata never admits it to the floating-child pass.
+  const modal=retainedPacket([0xffffffffffffffffn,0n,0n],[0,1,1]);modal[2]=2;wire(modal).setUint32(60,19,true);
+  assert.equal(word(retained(modal),8),2);
 });
 test("plans reject malformed tables and keep requests and copied continuations independent",()=>{
   const b=packet(3,[31,58,26]),saved=b.slice(),r=children(b),copy=r.slice();assert.deepEqual(b,saved);b.fill(255);assert.deepEqual(r,copy);

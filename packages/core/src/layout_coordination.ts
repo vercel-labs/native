@@ -169,7 +169,7 @@ function nscvLayoutRetained(request: Uint8Array): Uint8Array {
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength), count = w.getUint32(4, true), mode = request[2]!;
   if (request.length !== 32 + count * 24) throw new Error("invalid retained layout shape");
   for (let i = 24; i < 32; i++) if (request[i] !== 0) throw new Error("invalid retained layout reserved bytes");
-  for (let i = 0; i < count; i++) if (w.getUint32(32 + i * 24, true) > 1 || w.getUint32(36 + i * 24, true) !== 0)
+  for (let i = 0; i < count; i++) if (w.getUint32(32 + i * 24, true) > 1 || w.getUint32(36 + i * 24, true) > 62)
     throw new Error("invalid retained layout facts");
   const parent = (i: number): number => {
     const at = 32 + i * 24 + 16, low = w.getUint32(at, true);
@@ -189,7 +189,7 @@ function nscvLayoutRetained(request: Uint8Array): Uint8Array {
     out.setUint32(8, maximum, true);
   } else if (mode === 2) {
     if (w.getUint32(12, true) === 0 && w.getUint32(20, true) === 0) for (let i = Math.max(1, w.getUint32(8, true)); i < count; i++) {
-      if (w.getUint32(32 + i * 24, true) === 0) continue;
+      if (w.getUint32(32 + i * 24, true) === 0 || nscvLayoutModal(w.getUint32(36 + i * 24, true))) continue;
       const p = parent(i); if (p < 0 || nesting(p) !== w.getUint32(16, true)) continue;
       out.setUint32(4, 1, true); out.setUint32(8, i, true); out.setUint32(12, p, true); break;
     }

@@ -218,6 +218,7 @@ pub const RetainedPlan = struct {
     pub fn setNode(self: RetainedPlan, index: usize, node: events.WidgetLayoutNode) void {
         const at = 32 + index * 24;
         word(self.request, at, @intFromBool(node.widget.layout.anchor != null));
+        word(self.request, at + 4, @intFromEnum(node.widget.kind));
         integer(self.request, at + 8, node.depth);
         std.mem.writeInt(u64, self.request[at + 16 ..][0..8], if (node.parent_index) |parent| parent else std.math.maxInt(u64), .little);
     }

@@ -364,7 +364,7 @@ test "compiled widget metric retained anchors and split slides preserve every no
     const leaf = [_]c.Widget{.{ .id = 30, .kind = .text, .text = "Wrapped pane content remains stable\nacross slides", .spans = &.{.{ .text = "Wrapped content" }} }};
     const nested = [_]c.Widget{.{ .id = 20, .kind = .popover, .children = &leaf, .layout = .{ .anchor = .{ .placement = .above, .alignment = .end } } }};
     const panes = [_]c.Widget{ .{ .id = 3, .kind = .column, .children = &leaf, .layout = .{ .min_size = .init(33.5, 0) } }, .{ .id = 4, .kind = .split_divider }, .{ .id = 5, .kind = .stack, .children = &nested, .layout = .{ .min_size = .init(47.25, 0) } } };
-    const children = [_]c.Widget{ .{ .id = 2, .kind = .split, .value = 0.65, .children = &panes, .layout = .{ .gap = 7.25, .padding = .all(3.125) } }, .{ .id = 6, .kind = .menu_surface, .children = &nested, .layout = .{ .anchor = .{ .placement = .above, .alignment = .stretch } } }, .{ .id = 7, .kind = .dialog, .children = &nested, .frame = .init(0, 0, 103.25, 87.5) } };
+    const children = [_]c.Widget{ .{ .id = 2, .kind = .split, .value = 0.65, .children = &panes, .layout = .{ .gap = 7.25, .padding = .all(3.125) } }, .{ .id = 6, .kind = .menu_surface, .children = &nested, .layout = .{ .anchor = .{ .placement = .above, .alignment = .stretch } } }, .{ .id = 7, .kind = .dialog, .children = &nested, .frame = .init(0, 0, 103.25, 87.5), .layout = .{ .anchor = .{ .point = .init(3.25, 5.125) } } } };
     const root: c.Widget = .{ .id = 1, .kind = .stack, .children = &children };
     const bounds: sdk.geometry.RectF = .init(0.125, 2.25, 220.25, 137.5);
     for ([_]f32{ -1, 0, 0.00001, 0.25, 0.65, 0.9, 2 }) |fraction| {
@@ -381,6 +381,11 @@ test "compiled widget metric retained anchors and split slides preserve every no
         for (a.nodes, 0..) |_, i| try std.testing.expectEqual(c.anchoredNestingDepth(a.nodes, i), c.anchoredNestingDepthWithTokens(b.nodes, i, layoutOwned(.{})));
         try c.relayoutAnchoredChildrenWithRootBounds(expected[0..a.nodes.len], bounds, flowOwned(.{}));
         try c.relayoutAnchoredChildrenWithRootBounds(actual[0..b.nodes.len], bounds, layoutOwned(.{}));
+        var dialogs: usize = 0;
+        for (expected[0..a.nodes.len]) |node| if (node.widget.id == 7) {
+            dialogs += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), dialogs);
         try exact(@as([]const c.WidgetLayoutNode, expected[0..a.nodes.len]), @as([]const c.WidgetLayoutNode, actual[0..b.nodes.len]));
         var split = children[0];
         split.value = fraction;
