@@ -18,7 +18,30 @@ fn compare(layout: c.WidgetLayoutTree, tokens: c.DesignTokens, state: c.WidgetRe
     try exact(policy.referencePreview(layout, state), plan.previewIndex());
     for (layout.nodes, 0..) |_, i| {
         errdefer std.debug.print("paint walk node {d}\n", .{i});
-        try exact(policy.referenceFacts(layout, i, tokens, state), plan.facts(i));
+        const expected = policy.referenceFacts(layout, i, tokens, state);
+        const actual = plan.facts(i);
+        inline for (std.meta.fields(policy.Facts)) |field| {
+            if (comptime field.type == policy.Lane) {
+                inline for (std.meta.fields(policy.Lane)) |member| {
+                    if (comptime member.type == ?c.Affine) {
+                        const left = @field(@field(expected, field.name), member.name);
+                        const right = @field(@field(actual, field.name), member.name);
+                        try exact(left != null, right != null);
+                        if (left) |affine| inline for (std.meta.fields(c.Affine)) |entry| {
+                            exact(@field(affine, entry.name), @field(right.?, entry.name)) catch |err| {
+                                std.debug.print("{s}.{s}.{s}\n", .{ field.name, member.name, entry.name });
+                                return err;
+                            };
+                        };
+                        continue;
+                    }
+                    exact(@field(@field(expected, field.name), member.name), @field(@field(actual, field.name), member.name)) catch |err| {
+                        std.debug.print("{s}.{s}\n", .{ field.name, member.name });
+                        return err;
+                    };
+                }
+            } else try exact(@field(expected, field.name), @field(actual, field.name));
+        }
     }
     const saved = try std.testing.allocator.dupe(u8, plan.result);
     defer std.testing.allocator.free(saved);
@@ -80,7 +103,7 @@ test "compiled widget paint walk preserves nested disclosure late surfaces hidde
 test "compiled widget paint walk preserves exceptional opacity motion transforms and command identity namespace" {
     _ = core.initialModel();
     var nodes = [_]c.WidgetLayoutNode{ node(.menu_item, 1, null, 0), node(.accordion, 2, null, 0), node(.terminal, 3, null, 0) };
-    const words = [_]u32{ 0, 0x80000000, 1, 0x3f000000, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc12345 };
+    const words = [_]u32{ 0, 0x80000000, 1, 0x3f000000, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 };
     const mapped = policy.previewCommandId(2);
     const reveals = [_]u64{ 2, mapped };
     for (words) |word| {
@@ -88,11 +111,17 @@ test "compiled widget paint walk preserves exceptional opacity motion transforms
         nodes[0].widget.opacity = value;
         nodes[1].widget.value = value;
         const motions = [_]c.WidgetLayoutMotion{.{ .id = 1, .offset = .{ .dx = value, .dy = -value }, .escape_ancestor_clips = true }};
-        for ([_]bool{ false, true }) |preview| try compare(.{ .nodes = &nodes }, .{}, .{ .rendering_drag_preview = preview, .focused_id = mapped, .focus_visible_id = 3, .revealing_disclosure_ids = &reveals, .layout_motions = &motions });
+        for ([_]bool{ false, true }) |preview| compare(.{ .nodes = &nodes }, .{}, .{ .rendering_drag_preview = preview, .focused_id = mapped, .focus_visible_id = 3, .revealing_disclosure_ids = &reveals, .layout_motions = &motions }) catch |err| {
+            std.debug.print("input word {x} preview {}\n", .{ word, preview });
+            return err;
+        };
         inline for (.{ "a", "b", "c", "d", "tx", "ty" }) |name| {
             nodes[2].widget.transform = .{};
             @field(nodes[2].widget.transform, name) = value;
-            try compare(.{ .nodes = &nodes }, .{}, .{});
+            compare(.{ .nodes = &nodes }, .{}, .{}) catch |err| {
+                std.debug.print("input word {x} field {s}\n", .{ word, name });
+                return err;
+            };
         }
     }
 }

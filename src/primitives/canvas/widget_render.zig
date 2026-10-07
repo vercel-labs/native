@@ -850,7 +850,7 @@ fn emitWidgetLayoutNode(
     const wrap_opacity = if (planned) |facts| facts.wrap_opacity else opacity < 1;
     const transform = widgetTransform(widget);
     const wrap_transform = if (planned) |facts| facts.wrap_transform else !affinesEqual(transform, Affine.identity());
-    const inverse_transform = if (planned) |facts| facts.inverse orelse return error.InvalidTransform else if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    const inverse_transform = if (planned) |facts| facts.inverse orelse return error.InvalidTransform else if (wrap_transform) inversePaintTransform(transform) orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
     if (wrap_layout_motion) try builder.transform(Affine.translate(layout_motion.dx, layout_motion.dy));
     if (wrap_transform) try builder.transform(transform);
@@ -4518,11 +4518,21 @@ pub fn referencePaintWalkLane(layout: anytype, index: usize, state: WidgetRender
         .disclosure = if (widget.kind != .accordion) .open else if (accordionChildrenVisible(widget)) if (widget_tree.disclosureSettledOpen(layout, index)) .open else .revealing else if (state.disclosureRevealing(widget.id)) .revealing else .closed,
         .opacity = opacity,
         .motion = motion,
-        .inverse = if (wrap_transform) transform.inverse() else Affine.identity(),
+        .inverse = if (wrap_transform) inversePaintTransform(transform) else Affine.identity(),
     };
 }
 pub fn referencePaintWalkSegment(layout: anytype, index: usize, tokens: DesignTokens) widget_model.WidgetGroupSegment {
     const parent = layout.nodes[index].parent_index orelse return .none;
     if (parent >= layout.nodes.len or layout.nodes[parent].widget.kind != .button_group or !buttonGroupStampsSegments(layout.nodes[parent].widget, tokens)) return .none;
     return layoutButtonGroupSegment(layout, parent, index);
+}
+
+/// GPU transform capability for exceptional scalar words. Keep its native
+/// arithmetic in one call boundary: inline specialization can move a NaN sign
+/// flip across multiplication. Finite transforms retain the ordinary path.
+pub fn inversePaintTransform(transform: Affine) ?Affine {
+    inline for (.{ "a", "b", "c", "d", "tx", "ty" }) |name| {
+        if (!std.math.isFinite(@field(transform, name))) return @call(.never_inline, Affine.inverse, .{transform});
+    }
+    return transform.inverse();
 }

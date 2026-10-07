@@ -87,7 +87,7 @@ pub const Plan = struct {
         const request = try allocator.alloc(u8, size);
         errdefer allocator.free(request);
         @memset(request, 0);
-        request[0..4].* = .{ 28, 1, @import("render_plan_policy.zig").numericFlags(), 0 };
+        request[0..4].* = .{ 28, 1, @import("render_plan_policy.zig").numericFlags(), signalingClampFlags() | inverseNegationFlags() };
         put(request, 4, layout.nodes.len);
         put(request, 8, state.layout_motions.len);
         put(request, 12, state.revealing_disclosure_ids.len);
@@ -101,6 +101,7 @@ pub const Plan = struct {
         flags |= @as(u32, @intFromBool(state.rendering_drag_preview)) << 6;
         flags |= @as(u32, @intFromBool(tokens.controls.button_group_style == .detached)) << 7;
         put(request, 16, flags);
+        float(request, 76, invalidOperationNaN());
         inline for (.{ "base", "overlay", "floating", "modal" }, 0..) |name, i| put(request, 20 + i * 4, @as(u32, @bitCast(@field(tokens.layer, name))));
         for (layout.nodes, 0..) |n, i| {
             const at = 80 + i * 96;
@@ -218,4 +219,34 @@ pub fn referenceRoot(layout: anytype, tokens: tokens_model.DesignTokens) ?usize 
 }
 pub fn previewCommandId(id: u64) u64 {
     return if (id == 0) 0 else @import("widget_render.zig").dragPreviewWidgetId(id);
+}
+
+/// A scalar ABI descriptor, measured with target f32 arithmetic rather than
+/// assuming the unspecified JavaScript invalid-operation NaN sign.
+fn invalidOperationNaN() f32 {
+    var operands = [_]f32{ std.math.inf(f32), 0 };
+    const pointer: *volatile [2]f32 = &operands;
+    const values = pointer.*;
+    return values[0] * values[1];
+}
+
+/// Hardware minimum-number operations distinguish signaling NaNs from
+/// quiet NaNs on some targets; describe that scalar behavior explicitly.
+fn signalingClampFlags() u8 {
+    var operand: u32 = 0x7f800001;
+    const pointer: *volatile u32 = &operand;
+    const value: f32 = @bitCast(pointer.*);
+    return @intFromBool(std.math.clamp(value, @as(f32, 0), @as(f32, 1)) == 0);
+}
+
+/// Native inverse emission may move off-diagonal negation across a
+/// multiplication. The descriptor preserves the otherwise unspecified NaN sign.
+fn inverseNegationFlags() u8 {
+    var operand: drawing.Affine = .{ .b = std.math.inf(f32) };
+    const pointer: *volatile drawing.Affine = &operand;
+    var result: drawing.Affine = undefined;
+    const output: *volatile drawing.Affine = &result;
+    output.* = @import("widget_render.zig").inversePaintTransform(pointer.*).?;
+    const inverse = output.*;
+    return @as(u8, @intFromBool(@as(u32, @bitCast(inverse.a)) != @as(u32, @bitCast(inverse.b)))) << 1;
 }
