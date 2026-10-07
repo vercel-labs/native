@@ -49,7 +49,8 @@ fn writeNode(bytes: []u8, node: events.WidgetLayoutNode) void {
     word(bytes, 0, widgets.widgetKindCode(w.kind));
     word(bytes, 4, sizeCode(w.size));
     word(bytes, 8, @intFromEnum(w.variant));
-    word(bytes, 12, if (node.parent_index) |p| std.math.cast(u32, p) orelse missing else missing);
+    word(bytes, 12, if (node.parent_index) |p| @as(u32, @truncate(p)) else missing);
+    word(bytes, 124, if (node.parent_index) |p| @as(u64, p) >> 32 else 0);
     word(bytes, 16, @as(u32, @truncate(node.depth)));
     word(bytes, 120, @as(u64, node.depth) >> 32);
     const alignment: u32 = switch (w.text_alignment) {
@@ -61,7 +62,7 @@ fn writeNode(bytes: []u8, node: events.WidgetLayoutNode) void {
         (@as(u32, @intFromBool(w.layout.anchor != null)) << 2) | (@as(u32, @intFromBool(w.scrim)) << 3) |
         (@as(u32, @intFromBool(w.text.len > 0)) << 4) | (@as(u32, @intFromBool(w.icon.len > 0)) << 5) |
         (@as(u32, @intFromBool(w.style.border != null)) << 6) | (@as(u32, @intFromBool(w.style.stroke_width != null)) << 7) |
-        (@as(u32, @intFromBool(w.group_segment != .none)) << 8) | (alignment << 9);
+        (@as(u32, @intFromBool(w.group_segment != .none)) << 8) | (alignment << 9) | (@as(u32, @intFromBool(node.parent_index != null)) << 11);
     word(bytes, 20, flags);
     word(bytes, 24, changes.stateBits(w.state));
     word(bytes, 28, if (w.backdrop_blur_token) |t| @intFromEnum(t) else missing);
@@ -108,7 +109,7 @@ pub const Plan = struct {
         const request = try allocator.alloc(u8, std.math.add(usize, base_size, payload.len) catch @panic("paint payload capacity"));
         errdefer allocator.free(request);
         @memset(request, 0);
-        request[0..4].* = .{ 26, 0, 1, @import("render_plan_policy.zig").numericFlags() };
+        request[0..4].* = .{ 26, 0, 2, @import("render_plan_policy.zig").numericFlags() };
         word(request, 4, previous.len);
         word(request, 8, next.len);
         word(request, 12, payload.len);

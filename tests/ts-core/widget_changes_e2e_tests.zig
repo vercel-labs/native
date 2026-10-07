@@ -370,3 +370,19 @@ test "compiled widget changes paint subtree comparisons preserve full width dept
     after[1].widget.semantics.hidden = true;
     try compare(.{ .nodes = &before }, .{ .nodes = &after }, .{}, 4);
 }
+
+test "compiled widget changes paint ancestry preserves present invalid parent words and hoisted escape" {
+    _ = core.initialModel();
+    const parents = [_]usize{ std.math.maxInt(u32), if (@bitSizeOf(usize) > 32) 0x1_00000000 else std.math.maxInt(usize), std.math.maxInt(usize) };
+    for (parents) |parent| for (0..4) |flags| {
+        var before = [_]canvas.WidgetLayoutNode{
+            node(.{ .kind = .row, .id = 1 }, .init(0, 0, 100, 100), null, 0),
+            node(.{ .kind = if (flags & 1 != 0) .dialog else .button, .id = 2, .text = "invalid-parent", .layout = .{ .anchor = if (flags & 2 != 0) .{} else null } }, .init(5, 5, 40, 30), parent, 1),
+        };
+        var after = before;
+        after[1].widget.opacity = 0.5;
+        try compare(.{ .nodes = &before }, .{ .nodes = &after }, .{}, 4);
+        try compare(.{ .nodes = &before }, .{}, .{}, 4);
+        try compare(.{}, .{ .nodes = &after }, .{}, 4);
+    };
+}

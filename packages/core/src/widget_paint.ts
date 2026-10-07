@@ -3,7 +3,7 @@
  * Every intermediate follows the reference's f32 evaluation order. */
 interface NscPaintNode {
   readonly paint_kind: number; readonly paint_size: number; readonly paint_variant: number;
-  readonly paint_parent: number; readonly paint_depth: number; readonly paint_depth_high: number; readonly paint_flags: number;
+  readonly paint_parent: number; readonly paint_parent_high: number; readonly paint_depth: number; readonly paint_depth_high: number; readonly paint_flags: number;
   readonly paint_state: number; readonly paint_blur_token: number; readonly paint_frame: NscSurfaceRect;
   readonly paint_authored_frame: NscSurfaceRect; readonly paint_transform: NscRenderAffine;
   readonly paint_value: number; readonly paint_stroke: number; readonly paint_border: readonly number[];
@@ -121,9 +121,10 @@ function nscvPaintFull(c: NscPaintContext, n: NscPaintNode, transform: NscRender
   }
   return nscvSurfaceNormalize(nscvRenderTransform(transform, bounds, c.paint_numeric));
 }
+function nscvPaintParent(n: NscPaintNode, count: number): number { return (n.paint_flags & 2048) === 0 ? 4294967295 : n.paint_parent_high !== 0 || n.paint_parent >= count ? count : n.paint_parent; }
 function nscvPaintHidden(nodes: readonly NscPaintNode[], slot: number): boolean {
   let n = slot;
-  for (let guard = 0; n !== 4294967295 && guard <= nodes.length; guard++) { if (n >= nodes.length) return false; if ((nodes[n]!.paint_flags & 1) !== 0) return true; n = nodes[n]!.paint_parent; }
+  for (let guard = 0; n !== 4294967295 && guard <= nodes.length; guard++) { if (n >= nodes.length) return false; if ((nodes[n]!.paint_flags & 1) !== 0) return true; n = nscvPaintParent(nodes[n]!, nodes.length); }
   if (n !== 4294967295) throw new Error("cyclic paint ancestry");
   return false;
 }
@@ -133,17 +134,18 @@ function nscvPaintClipped(c: NscPaintContext, nodes: readonly NscPaintNode[], sl
   for (let guard = 0; guard <= nodes.length; guard++) {
     const n = nodes[current]!;
     if ((n.paint_flags & 4) !== 0 || [19, 20, 21].includes(n.paint_kind)) return bounds;
-    if (n.paint_parent === 4294967295) return bounds;
-    if (n.paint_parent >= nodes.length) return null;
-    const parent = nodes[n.paint_parent]!;
+    const parentSlot = nscvPaintParent(n, nodes.length);
+    if (parentSlot === 4294967295) return bounds;
+    if (parentSlot >= nodes.length) return null;
+    const parent = nodes[parentSlot]!;
     if (parent.paint_kind === 6 || (parent.paint_flags & 2) !== 0) { bounds = nscvRenderIntersection(bounds, nscvSurfaceNormalize(parent.paint_frame), c.paint_numeric); if (nscvRenderEmpty(bounds)) return null; }
-    current = n.paint_parent;
+    current = parentSlot;
   }
   throw new Error("cyclic paint clipping");
 }
 function nscvPaintAccumulated(nodes: readonly NscPaintNode[], slot: number): NscRenderAffine {
   const slots: number[] = []; let current = slot;
-  while (current !== 4294967295 && current < nodes.length && slots.length < 32) { slots.push(current); current = nodes[current]!.paint_parent; }
+  while (current !== 4294967295 && current < nodes.length && slots.length < 32) { slots.push(current); current = nscvPaintParent(nodes[current]!, nodes.length); }
   let t: NscRenderAffine = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
   for (let i = slots.length - 1; i >= 0; i--) t = nscvRenderMultiply(t, nodes[slots[i]!]!.paint_transform);
   return t;
@@ -178,7 +180,7 @@ function nscvPaintChanged(c: NscPaintContext, a: NscPaintNode, b: NscPaintNode, 
   return bounds;
 }
 function nscvWidgetPaint(request: Uint8Array): Uint8Array {
-  if (request.length < 544 || request[0] !== 26 || request[1]! > 2 || request[2] !== 1 || request[3]! > 15) throw new Error("invalid widget paint header");
+  if (request.length < 544 || request[0] !== 26 || request[1]! > 2 || request[2] !== 2 || request[3]! > 15) throw new Error("invalid widget paint header");
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength), mode = request[1]!, beforeCount = w.getUint32(4, true), afterCount = w.getUint32(8, true), payloadSize = w.getUint32(12, true), total = beforeCount + afterCount;
   if (request.length !== 544 + total * 128 + payloadSize || w.getUint32(16, true) < 1 || w.getUint32(16, true) > 2 || w.getUint32(20, true) !== 0 || w.getUint32(24, true) !== 0 || w.getUint32(28, true) > 3) throw new Error("invalid widget paint shape");
   const tokens: number[] = [], strokes: (number | null)[] = [], nodes: NscPaintNode[] = [];
@@ -188,9 +190,9 @@ function nscvWidgetPaint(request: Uint8Array): Uint8Array {
   for (let i = 536; i < 544; i++) if (request[i] !== 0) throw new Error("invalid widget paint padding");
   for (let i = 0; i < total; i++) {
     const at = 544 + i * 128, kind = w.getUint32(at, true), size = w.getUint32(at + 4, true), variant = w.getUint32(at + 8, true), flags = w.getUint32(at + 20, true), state = w.getUint32(at + 24, true), blurToken = w.getUint32(at + 28, true);
-    if (kind > 62 || size > 5 || variant > 5 || flags > 2047 || ((flags >>> 9) & 3) > 2 || state > 1023 || blurToken !== 4294967295 && blurToken > 2 || w.getUint32(at + 124, true) !== 0) throw new Error("invalid widget paint node");
+    if (kind > 62 || size > 5 || variant > 5 || flags > 4095 || ((flags >>> 9) & 3) > 2 || state > 1023 || blurToken !== 4294967295 && blurToken > 2 || (flags & 2048) === 0 && (w.getUint32(at + 12, true) !== 4294967295 || w.getUint32(at + 124, true) !== 0)) throw new Error("invalid widget paint node");
     const border: number[] = []; for (let j = 0; j < 4; j++) border.push(w.getFloat32(at + 96 + j * 4, true));
-    nodes.push({ paint_kind: kind, paint_size: size, paint_variant: variant, paint_parent: w.getUint32(at + 12, true), paint_depth: w.getUint32(at + 16, true), paint_depth_high: w.getUint32(at + 120, true), paint_flags: flags, paint_state: state, paint_blur_token: blurToken, paint_frame: nscvRenderRect(w, at + 32), paint_authored_frame: nscvRenderRect(w, at + 48), paint_transform: nscvRenderAffine(w, at + 64), paint_value: w.getFloat32(at + 88, true), paint_stroke: w.getFloat32(at + 92, true), paint_border: border, paint_blur: w.getFloat32(at + 112, true), paint_text_width: w.getFloat32(at + 116, true) });
+    nodes.push({ paint_kind: kind, paint_size: size, paint_variant: variant, paint_parent: w.getUint32(at + 12, true), paint_parent_high: w.getUint32(at + 124, true), paint_depth: w.getUint32(at + 16, true), paint_depth_high: w.getUint32(at + 120, true), paint_flags: flags, paint_state: state, paint_blur_token: blurToken, paint_frame: nscvRenderRect(w, at + 32), paint_authored_frame: nscvRenderRect(w, at + 48), paint_transform: nscvRenderAffine(w, at + 64), paint_value: w.getFloat32(at + 88, true), paint_stroke: w.getFloat32(at + 92, true), paint_border: border, paint_blur: w.getFloat32(at + 112, true), paint_text_width: w.getFloat32(at + 116, true) });
   }
   const c: NscPaintContext = { paint_numeric: request[3]!, paint_tokens: tokens, paint_strokes: strokes };
   if (mode === 0) {

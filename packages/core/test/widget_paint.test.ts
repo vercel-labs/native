@@ -9,11 +9,11 @@ interface Node { kind?: number; parent?: number; depth?: number; flags?: number;
 function packet(nodes: Node[], entries: number[][], options: { mode?: number; numeric?: number; tokens?: Record<number, number>; before?: number } = {}) {
   const mode = options.mode ?? 1, before = options.before ?? 0, payload = 16 + entries.length * 16;
   const b = new Uint8Array(544 + nodes.length * 128 + payload), w = new DataView(b.buffer);
-  b.set([26, mode, 1, options.numeric ?? 0]); w.setUint32(4, before, true); w.setUint32(8, nodes.length - before, true); w.setUint32(12, payload, true); w.setUint32(16, 1, true);
+  b.set([26, mode, 2, options.numeric ?? 0]); w.setUint32(4, before, true); w.setUint32(8, nodes.length - before, true); w.setUint32(12, payload, true); w.setUint32(16, 1, true);
   const tokens = { 0: 2, 1: 2, 2: 1, 3: 1, 4: 1, 6: 1, 7: 14, 10: 2, 11: 2, 12: 4, 13: 2, 14: 12, 15: 12, ...options.tokens };
   for (const [slot, value] of Object.entries(tokens)) w.setFloat32(64 + Number(slot) * 4, value, true);
   nodes.forEach((n, i) => { const at = 544 + i * 128;
-    w.setUint32(at, n.kind ?? 26, true); w.setUint32(at + 4, n.size ?? 1, true); w.setUint32(at + 12, n.parent ?? missing, true); w.setUint32(at + 16, n.depth ?? i, true); w.setUint32(at + 20, n.flags ?? 0, true); w.setUint32(at + 28, missing, true);
+    w.setUint32(at, n.kind ?? 26, true); w.setUint32(at + 4, n.size ?? 1, true); w.setUint32(at + 12, n.parent ?? missing, true); w.setUint32(at + 16, n.depth ?? i, true); w.setUint32(at + 20, (n.flags ?? 0) | (n.parent !== undefined && n.parent !== missing ? 2048 : 0), true); w.setUint32(at + 28, missing, true);
     (n.frame ?? [0, 0, 100, 100]).forEach((v, j) => { w.setFloat32(at + 32 + j * 4, v, true); w.setFloat32(at + 48 + j * 4, v, true); });
     (n.transform ?? [1, 0, 0, 1, 0, 0]).forEach((v, j) => w.setFloat32(at + 64 + j * 4, v, true)); w.setFloat32(at + 116, n.textWidth ?? 0, true);
   });
