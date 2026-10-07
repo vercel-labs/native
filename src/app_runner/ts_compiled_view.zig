@@ -614,8 +614,6 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
 }
 
 test "compiled app Markdown rejects unrelated fields malformed bytes and incompatible routes" {
-    _ = core.initialModel();
-    defer core.rt.frameReset();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var recipe = [_]u8{0} ** 80;
