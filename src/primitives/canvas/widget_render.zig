@@ -24,6 +24,7 @@ const widget_render_controls = @import("widget_render_controls.zig");
 const icon_model = @import("icons.zig");
 const chart_model = @import("chart.zig");
 const presentation_policy = @import("widget_presentation_policy.zig");
+const paint_walk_policy = @import("widget_paint_walk_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -151,6 +152,15 @@ fn activePresentation(layout: anytype) ?presentation_policy.Plan {
     return plan;
 }
 
+threadlocal var painting_drag_copy: bool = false;
+threadlocal var paint_walk_plan: ?paint_walk_policy.Plan = null;
+fn activePaintWalk(layout: anytype) ?paint_walk_policy.Plan {
+    if (paint_walk_policy.owner(layout) == null) return null;
+    const plan = paint_walk_plan orelse @panic("missing compiled paint walk plan");
+    if (!plan.matches(layout)) @panic("mismatched compiled paint walk layout");
+    return plan;
+}
+
 /// Visible bounds for the direct widget-tree walk, in the coordinate
 /// space active at the current recursion depth. The layout walk derives
 /// the same value from retained parent links; the direct walk carries it
@@ -170,6 +180,19 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const saved_copy = painting_drag_copy;
+    painting_drag_copy = false;
+    defer painting_drag_copy = saved_copy;
+    const saved_walk = paint_walk_plan;
+    const walk = if (paint_walk_policy.owner(layout)) |policy|
+        paint_walk_policy.Plan.init(std.heap.page_allocator, policy, layout, tokens, state) catch @panic("paint walk allocation failed")
+    else
+        null;
+    paint_walk_plan = walk;
+    defer {
+        paint_walk_plan = saved_walk;
+        if (walk) |owned| owned.deinit();
+    }
     const saved_plan = presentation_plan;
     const saved_viewport = scrim_viewport;
     const plan = if (presentation_policy.owner(layout)) |policy|
@@ -196,19 +219,29 @@ pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: Des
 /// the card at the destination lane's bounds. Other layout motions stay in the
 /// ordinary tree walk and retain their scroll clipping.
 fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = plan.firstEscaping();
+        while (current) |index| {
+            try emitWidgetLayoutEscapingMotion(builder, layout, index, tokens, state);
+            current = plan.facts(index).next_escaping;
+        }
+        return;
+    }
     for (layout.nodes, 0..) |node, index| {
         if (widget_tree.widgetEscapesAncestorClips(node.widget)) continue;
         if (!state.layoutMotionEscapesAncestorClips(node.widget.id)) continue;
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
-
-        const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, index) orelse return error.InvalidTransform;
-        const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
-        const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
-        if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
-        try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
-        if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
+        try emitWidgetLayoutEscapingMotion(builder, layout, index, tokens, state);
     }
+}
+fn emitWidgetLayoutEscapingMotion(builder: *Builder, layout: anytype, index: usize, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, index) orelse return error.InvalidTransform;
+    const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
+    const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+    try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
+    if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
 }
 
 /// Paint the active drag source in a late, window-level pass so the card under
@@ -216,13 +249,14 @@ fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, token
 /// subtree, leaving its one current layout slot blank.
 fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     const source_id = state.drag_preview_id orelse return;
-    const source_index = widget_tree.widgetIndexById(layout, source_id) orelse return;
-    // Resizable panels and split dividers use semantic drag for their built-in
-    // geometry controls. Their retained frame already follows the pointer;
-    // painting a generic translated preview would duplicate the control.
-    if (!widgetKindUsesFloatingDragPreview(layout.nodes[source_index].widget.kind)) return;
-    if (widget_tree.isWidgetHiddenInAncestors(layout, source_index)) return;
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, source_index)) return;
+    const source_index = if (activePaintWalk(layout)) |plan| plan.previewIndex() orelse return else blk: {
+        const index = widget_tree.widgetIndexById(layout, source_id) orelse return;
+        // Geometry controls already follow the pointer in retained layout.
+        if (!widgetKindUsesFloatingDragPreview(layout.nodes[index].widget.kind)) return;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) return;
+        if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return;
+        break :blk index;
+    };
 
     var preview_state = WidgetRenderState{
         .rendering_drag_preview = true,
@@ -241,6 +275,9 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
     const translation = widgetLayoutDragPreviewTranslation(layout, source_index, state, ancestor_transform);
     try builder.transform(translation);
     if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+    const saved_copy = painting_drag_copy;
+    painting_drag_copy = true;
+    defer painting_drag_copy = saved_copy;
     try emitWidgetLayoutNode(builder, layout, source_index, tokens, preview_state, .none);
     if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
     try builder.transform(Affine.translate(-translation.tx, -translation.ty));
@@ -431,6 +468,14 @@ pub fn widgetLayoutNodeVisibleBounds(
 /// floating surfaces preserve their structural z-order.
 /// Ancestor hiding still applies.
 fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = plan.firstSurface();
+        while (current) |index| {
+            try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
+            current = plan.facts(index).next_surface;
+        }
+        return;
+    }
     const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
     var emitted: usize = 0;
     var previous: ?widget_tree.WidgetPaintOrder = null;
@@ -721,6 +766,16 @@ fn emitWidgetLayoutChildren(
     tokens: DesignTokens,
     state: WidgetRenderState,
 ) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = if (parent_index) |index| plan.facts(index).first_child else plan.firstRoot();
+        while (current) |index| {
+            const facts = plan.facts(index);
+            if (!plan.activeLane(index, painting_drag_copy).suppress_flow)
+                try emitWidgetLayoutNode(builder, layout, index, tokens, state, facts.segment);
+            current = facts.next_sibling;
+        }
+        return;
+    }
     const child_count = widgetLayoutDirectChildCount(layout, parent_index);
     // The layout walk's flush button-group stamp (the tree walk's twin
     // lives in `emitButtonGroupWidget`): children of a gap-0 group get
@@ -772,25 +827,30 @@ fn emitWidgetLayoutNode(
     segment: widget_model.WidgetGroupSegment,
 ) Error!void {
     const node = layout.nodes[node_index];
-    if (node.widget.semantics.hidden) return;
-    // During a drag the retained source remains in flow as the exact blank
-    // source slot. Its one visible rendering happens in the late floating
-    // pass above, fully opaque under the pointer.
-    if (!state.rendering_drag_preview and
-        state.drag_preview_id != null and
-        state.drag_preview_id.? == node.widget.id and
-        widgetKindUsesFloatingDragPreview(node.widget.kind)) return;
-
-    var widget = widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state);
+    const planned: ?paint_walk_policy.Lane = if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy) else null;
+    if (planned) |facts| {
+        if (facts.skip) return;
+    } else {
+        if (node.widget.semantics.hidden) return;
+        if (!state.rendering_drag_preview and state.drag_preview_id != null and
+            state.drag_preview_id.? == node.widget.id and widgetKindUsesFloatingDragPreview(node.widget.kind)) return;
+    }
+    var widget = widgetWithFrame(node.widget, node.frame);
+    if (planned) |facts| {
+        widget.state.focused = facts.focused;
+        widget.state.hovered = facts.hovered;
+        widget.state.pressed = facts.pressed;
+        if (state.rendering_drag_preview and widget.id != 0) widget.id = dragPreviewWidgetId(widget.id);
+    } else widget = widgetWithRenderState(widget, state);
     widget.group_segment = segment;
-    const opacity = widgetOpacity(widget);
+    const opacity = if (planned) |facts| facts.opacity else widgetOpacity(widget);
     if (opacity <= 0) return;
-    const layout_motion = state.layoutMotionOffset(widget.id);
-    const wrap_layout_motion = layout_motion.dx != 0 or layout_motion.dy != 0;
-    const wrap_opacity = opacity < 1;
+    const layout_motion = if (planned) |facts| facts.motion else state.layoutMotionOffset(widget.id);
+    const wrap_layout_motion = if (planned) |facts| facts.wrap_motion else layout_motion.dx != 0 or layout_motion.dy != 0;
+    const wrap_opacity = if (planned) |facts| facts.wrap_opacity else opacity < 1;
     const transform = widgetTransform(widget);
-    const wrap_transform = !affinesEqual(transform, Affine.identity());
-    const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    const wrap_transform = if (planned) |facts| facts.wrap_transform else !affinesEqual(transform, Affine.identity());
+    const inverse_transform = if (planned) |facts| facts.inverse orelse return error.InvalidTransform else if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
     if (wrap_layout_motion) try builder.transform(Affine.translate(layout_motion.dx, layout_motion.dy));
     if (wrap_transform) try builder.transform(transform);
@@ -921,7 +981,7 @@ fn emitWidgetLayoutNodeContent(
         .icon => try emitIconWidget(builder, paint_widget, tokens),
         .image => try emitImageWidget(builder, paint_widget),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
-        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, widgetHasLogicalFocus(paint_widget, state)),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy).logical_focus else widgetHasLogicalFocus(paint_widget, state)),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -957,7 +1017,9 @@ fn emitWidgetLayoutNodeContent(
             // trees, docs scenes) the baked child state is truth — the
             // same override-vs-baked split `widgetWithRenderState` makes.
             var group = paint_widget;
-            if (!group.state.focused) {
+            if (activePaintWalk(layout)) |plan| {
+                group.state.focused = plan.activeLane(node_index, painting_drag_copy).group_focus;
+            } else if (!group.state.focused) {
                 group.state.focused = if (state.focused_id != null or state.focus_visible_id != null)
                     layoutSubtreeHasFocusVisible(layout, node_index, state)
                 else
@@ -1242,6 +1304,7 @@ fn emitAccordionWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 const AccordionLayoutDisclosure = enum { closed, revealing, open };
 
 fn accordionLayoutDisclosure(layout: anytype, node_index: usize, widget: Widget, state: WidgetRenderState) AccordionLayoutDisclosure {
+    if (activePaintWalk(layout)) |plan| return @enumFromInt(@intFromEnum(plan.activeLane(node_index, painting_drag_copy).disclosure));
     if (accordionChildrenVisible(widget)) {
         return if (widget_tree.disclosureSettledOpen(layout, node_index)) .open else .revealing;
     }
@@ -4400,7 +4463,7 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 /// Widget emitters derive every command id from the widget id, so remapping
 /// each node before emission keeps the copied subtree valid for display-list
 /// diffing without changing its retained/accessibility identity.
-fn dragPreviewWidgetId(id: ObjectId) ObjectId {
+pub fn dragPreviewWidgetId(id: ObjectId) ObjectId {
     const mapped = std.hash.Wyhash.hash(0x5eed_59a2_d6a6_0001, std.mem.asBytes(&id));
     return if (mapped == 0) 0x5eed_59a2_d6a6_0001 else mapped;
 }
@@ -4431,4 +4494,35 @@ fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: Design
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+/// Independent native lane used to qualify the copied traversal boundary.
+pub fn referencePaintWalkLane(layout: anytype, index: usize, state: WidgetRenderState) paint_walk_policy.Lane {
+    const node = layout.nodes[index];
+    const widget = widgetWithRenderState(node.widget, state);
+    const opacity = widgetOpacity(widget);
+    const motion = state.layoutMotionOffset(widget.id);
+    const transform = widgetTransform(widget);
+    const wrap_transform = !affinesEqual(transform, Affine.identity());
+    return .{
+        .focused = widget.state.focused,
+        .hovered = widget.state.hovered,
+        .pressed = widget.state.pressed,
+        .logical_focus = widgetHasLogicalFocus(widget, state),
+        .group_focus = if (widget.kind != .input_group or widget.state.focused) widget.state.focused else if (state.focused_id != null or state.focus_visible_id != null) layoutSubtreeHasFocusVisible(layout, index, state) else layoutSubtreeHasBakedFocus(layout, index),
+        .skip = node.widget.semantics.hidden or (!state.rendering_drag_preview and state.drag_preview_id != null and state.drag_preview_id.? == node.widget.id and widgetKindUsesFloatingDragPreview(node.widget.kind)),
+        .wrap_opacity = opacity < 1,
+        .wrap_motion = motion.dx != 0 or motion.dy != 0,
+        .wrap_transform = wrap_transform,
+        .suppress_flow = widget_tree.widgetEscapesAncestorClips(node.widget) or state.layoutMotionEscapesAncestorClips(node.widget.id),
+        .disclosure = if (widget.kind != .accordion) .open else if (accordionChildrenVisible(widget)) if (widget_tree.disclosureSettledOpen(layout, index)) .open else .revealing else if (state.disclosureRevealing(widget.id)) .revealing else .closed,
+        .opacity = opacity,
+        .motion = motion,
+        .inverse = if (wrap_transform) transform.inverse() else Affine.identity(),
+    };
+}
+pub fn referencePaintWalkSegment(layout: anytype, index: usize, tokens: DesignTokens) widget_model.WidgetGroupSegment {
+    const parent = layout.nodes[index].parent_index orelse return .none;
+    if (parent >= layout.nodes.len or layout.nodes[parent].widget.kind != .button_group or !buttonGroupStampsSegments(layout.nodes[parent].widget, tokens)) return .none;
+    return layoutButtonGroupSegment(layout, parent, index);
 }

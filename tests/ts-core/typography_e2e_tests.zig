@@ -37,6 +37,7 @@ test "compiled model themes copy the complete register across frame and commit o
         reference.widget_change_policy = core.nativeWindowPolicy;
         reference.widget_paint_policy = core.nativeWindowPolicy;
         reference.widget_presentation_policy = core.nativeWindowPolicy;
+        reference.widget_paint_walk_policy = core.nativeWindowPolicy;
         reference.code_content_policy = core.nativeWindowPolicy;
         try std.testing.expectEqualDeep(reference, snapshot);
         const large = app.model.large;
@@ -93,6 +94,7 @@ fn restamp(reference: *canvas.DesignTokens, actual: canvas.DesignTokens) void {
     reference.widget_change_policy = core.nativeWindowPolicy;
     reference.widget_paint_policy = core.nativeWindowPolicy;
     reference.widget_presentation_policy = core.nativeWindowPolicy;
+    reference.widget_paint_walk_policy = core.nativeWindowPolicy;
     reference.code_content_policy = core.nativeWindowPolicy;
 }
 test "compiled themes retain forced scheme, accessibility and complete-register precedence" {
