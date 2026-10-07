@@ -85,3 +85,30 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("Markdown recipe wrapper names reserve only when window policy glue is emitted", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-markdown-collision-"));
+  try {
+    for (const declaration of ["helper", "type"] as const) for (const enabled of [false, true]) {
+      const contract = baseContract();
+      if (enabled) contract.abi.exports.push("native_window_policy");
+      if (declaration === "helper") {
+        contract.model_helpers.push({ name: "nativeMarkdownPolicy", params: [], returns: { kind: "f64" }, arena: false });
+      } else {
+        contract.types.enums.push({ name: "nativeMarkdownPolicy", origin: "src/core.ts", exported: true, members: ["first", "second"] });
+        contract.types.structs[0].fields[1].type = { kind: "enum", name: "nativeMarkdownPolicy" };
+      }
+      fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(contract, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));
+      fs.writeFileSync(path.join(dir, "mirror"), "retain");
+      const result = spawnSync(corewire, ["--sidecar", "input.json", "--out", "mirror"], { cwd: dir, encoding: "utf8" });
+      assert.ifError(result.error); assert.equal(result.signal, null, result.stderr);
+      assert.equal(result.status, enabled ? 1 : 0, result.stderr);
+      if (enabled) {
+        assert.match(result.stderr, /nativeMarkdownPolicy.*collides with a declaration the generated shim/);
+        assert.equal(fs.readFileSync(path.join(dir, "mirror"), "utf8"), "retain", "refusal wrote an output");
+      } else {
+        assert.doesNotMatch(fs.readFileSync(path.join(dir, "mirror"), "utf8"), /pub fn nativeMarkdownPolicy\(request:/);
+      }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

@@ -118,6 +118,7 @@ function mirrorNames(s: CoreContract, out: Diagnostic[]): void {
   for (let i = 0; i < policies.length; i++) if (s.abi.exports.includes("native_" + policies[i] + "_policy")) {
     reserved.push(methods[i]);
     if (policies[i] === "text") reserved.push("nativePressHoldPolicy", "nativeTabFocusPolicy", "nativeSurfaceScopePolicy", "nativeFocusReturnPolicy", "nativeTooltipPolicy");
+    if (policies[i] === "window") reserved.push("nativeMarkdownPolicy", "arena");
     reserved.push("request", "output", "ptr", "len");
   }
   if (s.model_helpers.length > 0) reserved.push("callHelper");
