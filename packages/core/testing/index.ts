@@ -220,11 +220,12 @@ export class NativeApp implements AsyncDisposable {
 
   #request(request: object): Promise<Reply> {
     const line = JSON.stringify(request) + "\n";
+    const operation = "op" in request ? String(request.op) : "unknown";
     if (Buffer.byteLength(line) > 64 * 1024) return Promise.reject(new Error("Native test request exceeds 64 KiB"));
     const result = this.#queue.then(() => {
       if (this.#failed) throw this.#failed;
       return new Promise<Reply>((resolve, reject) => {
-        const timer = setTimeout(() => this.#fail(new Error(`Native test request timed out after ${this.#timeout}ms${this.#tail ? `\n${this.#tail}` : ""}`)), this.#timeout);
+        const timer = setTimeout(() => this.#fail(new Error(`Native test ${operation} request timed out after ${this.#timeout}ms${this.#tail ? `\n${this.#tail}` : ""}`)), this.#timeout);
         this.#pending = { resolve, reject, timer };
         this.#child.stdin.write(line);
       });

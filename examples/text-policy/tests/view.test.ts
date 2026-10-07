@@ -15,7 +15,9 @@ const bytes = (value: unknown) => Buffer.from(value as number[]).toString("utf8"
 const primary = process.platform === "darwin" ? "super" : "ctrl";
 
 test("writing editors preserve UTF-8 editing, multiline Enter policy, IME, identity and replay", async () => {
-  const app = await NativeApp.start({ width: 960, height: 720 });
+  // Replaying the complete editing journal processes over a thousand events.
+  // Keep a bounded budget that also covers Debug builds on shared CI runners.
+  const app = await NativeApp.start({ width: 960, height: 720, timeoutMs: 60000 });
   try {
     let s = await app.snapshot();
     if (backend) assert.equal(s.viewBackend, backend);
