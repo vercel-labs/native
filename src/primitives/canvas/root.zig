@@ -906,6 +906,7 @@ pub const widget_presentation_policy = @import("widget_presentation_policy.zig")
 pub const widget_paint_walk_policy = @import("widget_paint_walk_policy.zig");
 pub const control_geometry_policy = @import("control_geometry_policy.zig");
 pub const control_content_policy = @import("control_content_policy.zig");
+pub const surface_recipe_policy = @import("surface_recipe_policy.zig");
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;

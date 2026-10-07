@@ -1,4 +1,5 @@
 const std = @import("std");
+const recipe = @import("surface_recipe_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
@@ -48,6 +49,7 @@ const surfaceStateBackground = widget_render_style.surfaceStateBackground;
 const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualTokens;
 
 pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.alert, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
@@ -127,6 +129,14 @@ fn alertVariantForeground(widget: Widget, visual: ControlVisualTokens, tokens: D
 }
 
 pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, frame: geometry.RectF, color_value: Color) Error!void {
+    if (tokens.control_geometry_policy != null) {
+        var copied = widget;
+        copied.frame = frame;
+        var request = recipe.Request.init(.alert_mark, copied, tokens, .{}, 0);
+        request.putColor(192, color_value);
+        const planned = request.run(copied, tokens);
+        return planned.emit(builder, copied, tokens);
+    }
     const normalized = pixelSnapGeometryRect(tokens, frame.normalized());
     if (normalized.isEmpty()) return;
     // The registry icons the house alerts wear: `info` for the plain
@@ -140,6 +150,7 @@ pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, fr
 }
 
 pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.card, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
@@ -191,6 +202,7 @@ pub fn emitSheetSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
 }
 
 pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, fallback_radius: f32) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.modal, builder, widget, tokens, visual, fallback_radius);
     const radius = controlRadius(widget, visual, fallback_radius);
     const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
@@ -242,6 +254,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
 }
 
 pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.panel, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     const background = surfaceStateBackground(widget, visual, tokens);
@@ -288,6 +301,10 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// instead of ballooning into a lozenge. Deriving from the lg token
 /// keeps themed radius scales in step. An author `radius` wins.
 pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.bubble_radius, widget, tokens, .{}, 0);
+        return planned.bubbleRadius();
+    }
     if (widget.style.radius) |radius| return Radius.all(@max(0, radius));
     return Radius.all(@max(0, tokens.radius.lg) + 12);
 }
@@ -314,6 +331,7 @@ pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
 /// Themed apps may still pin `controls.bubble` background/border; those
 /// land on the default variant, and author `style.*` always wins.
 pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.bubble, builder, widget, tokens, tokens.controls.bubble, 0);
     const radius = bubbleWidgetRadius(widget, tokens);
     if (bubbleFillColor(widget, tokens)) |background| {
         try builder.fillRoundedRect(.{
@@ -373,6 +391,10 @@ fn bubbleBorderColor(widget: Widget, tokens: DesignTokens) ?Color {
 /// captions); an explicit `style.foreground` on a child still wins,
 /// and the unfilled variants pass the palette through untouched.
 pub fn bubbleContentTokens(widget: Widget, tokens: DesignTokens) DesignTokens {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.bubble_ink, widget, tokens, .{}, 0);
+        return planned.contentTokens(tokens);
+    }
     var content = tokens;
     switch (widget.variant) {
         .primary => {
@@ -420,6 +442,10 @@ pub const bubble_reactions_ring: f32 = 3;
 /// reference, the pill consumes no flow space, so a thread gives the
 /// overlap breathing room with its own turn spacing.
 pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.pill_rect, widget, tokens, .{}, 0);
+        return planned.pill();
+    }
     if (widget.kind != .bubble or widget.text.len == 0) return null;
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return null;
@@ -444,6 +470,7 @@ pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geom
 /// a primary bubble's knockout ink never applies — so it draws from the
 /// page tokens regardless of variant.
 pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.reactions, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), 0);
     const pill = bubbleWidgetReactionsPillRect(widget, tokens) orelse return;
     const snapped = pixelSnapGeometryRect(tokens, pill);
     const ring = snapped.inflate(geometry.InsetsF.all(bubble_reactions_ring));
@@ -486,6 +513,7 @@ pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: Desi
 /// explicit background (author style or themed control tokens) still
 /// paints.
 pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.accordion, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), 0);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
@@ -550,6 +578,13 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
 /// at its endpoints). The icon takes slots 4/5 (single stroke shape),
 /// clear of the chrome slots — slots are 4-bit, never 16 or above.
 pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, frame: geometry.RectF) Error!void {
+    if (tokens.control_geometry_policy != null) {
+        var copied = widget;
+        copied.frame = frame;
+        const request = recipe.Request.init(.chevron, copied, tokens, .{}, 0);
+        const planned = request.run(copied, tokens);
+        return planned.emit(builder, copied, tokens);
+    }
     const icon = icon_model.resolve("chevron-down") orelse return;
     const normalized = pixelSnapGeometryRect(tokens, frame.normalized());
     if (normalized.isEmpty()) return;
@@ -586,6 +621,7 @@ pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTok
 ///   trigger's bar sinks to this same edge and covers the hairline
 ///   where they meet.
 pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.tabs, builder, widget, tokens, tokens.controls.tabs, tokens.radius.lg);
     // No children guard: the retained layout copy flattens children into
     // sibling nodes, so the container paints purely from its own frame
     // (an empty tabs list lays out to a sliver nothing meaningful paints
@@ -642,6 +678,7 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
 }
 
 pub fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.grip, builder, widget, tokens, visual, 0);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
@@ -674,6 +711,7 @@ pub fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: Desi
 }
 
 pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.floating, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.xl);
     const shadow_token = tokens.shadow.md;
@@ -707,6 +745,7 @@ pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
 }
 
 pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.floating, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     const shadow_token = tokens.shadow.md;
