@@ -25,6 +25,7 @@ pub const Request = struct {
     pub fn init(op: Operation, frame: geometry.RectF, tokens: tokens_model.DesignTokens) Request {
         var self: Request = .{};
         self.bytes[0..4].* = .{ 30, 1, @intFromEnum(op), @import("render_plan_policy.zig").numericFlags() };
+        self.bytes[9] = @import("control_geometry_policy.zig").signalingFlags();
         self.flags(@as(u32, @intFromBool(tokens.pixel_snap.geometry)) | (@as(u32, @intFromBool(tokens.pixel_snap.text)) << 1));
         inline for (.{ "x", "y", "width", "height" }, 0..) |name, i| self.float(16 + i * 4, @field(frame, name));
         self.float(48, tokens.pixel_snap.scale);

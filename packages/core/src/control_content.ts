@@ -4,11 +4,13 @@ function nscvControlContent(request: Uint8Array): Uint8Array {
   if (request.length !== 128) throw new Error("invalid control content shape");
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const op = request[2]!, numeric = request[3]!, flags = w.getUint32(4, true), alignment = request[8]!;
-  if (request[0] !== 30 || request[1] !== 1 || op > 18 || numeric > 15 || flags > 31 || alignment > (op === 7 ? 5 : 2) || request[9] !== 0 || request[10] !== 0 || request[11] !== 0 || w.getUint32(12, true) !== 0) throw new Error("invalid control content header");
+  if (request[0] !== 30 || request[1] !== 1 || op > 18 || numeric > 15 || flags > 31 || alignment > (op === 7 ? 5 : 2) || request[9]! > 31 || request[10] !== 0 || request[11] !== 0 || w.getUint32(12, true) !== 0) throw new Error("invalid control content header");
   for (let at = 92; at < 128; at++) if (request[at] !== 0) throw new Error("invalid control content reserved bytes");
   const f = Math.fround, v = (at: number): number => w.getFloat32(at, true);
   const max = (a: number, b: number): number => nscvRenderExtreme(a, b, numeric, true);
   const min = (a: number, b: number): number => nscvRenderExtreme(a, b, numeric, false);
+  const signalingAt = (at: number): boolean => { const word = w.getUint32(at, true); return (word & 0x7f800000) === 0x7f800000 && (word & 0x007fffff) !== 0 && (word & 0x00400000) === 0; };
+  const rawMax = (other: number, at: number): number => signalingAt(at) && (request[9]! & 16) !== 0 ? v(at) : max(other, v(at));
   const raw = nscvRenderRect(w, 16), scale = v(48), size = v(52), inset = v(56);
   const rect = (x: number, y: number, width: number, height: number): NscSurfaceRect => ({ x, y, width, height });
   const round = (x: number): number => x < 0 || 1 / x < 0 ? -Math.floor(-x + 0.5) : Math.floor(x + 0.5);
@@ -45,16 +47,16 @@ function nscvControlContent(request: Uint8Array): Uint8Array {
     scalar(raw.height > 0 ? min(max(v(72), f(raw.height * f(alignment === 1 ? 0.44 : alignment === 2 ? 0.52 : 0.48))), max(v(72), v(76))) : v(80));
     if (!(raw.height > 0)) result.set(request.subarray(80, 84), 64);
   } else if (op === 8) {
-    const n = nscvSurfaceNormalize(raw), offset = max(0, v(84));
+    const n = nscvSurfaceNormalize(raw), offset = rawMax(0, 84);
     // RectF.inflate normalizes first, then performs left/right additions.
     putRect(0, rect(f(n.x - offset), f(n.y - offset), f(f(n.width + offset) + offset), f(f(n.height + offset) + offset)));
   } else if (op === 9) {
-    mark(4); const offset = max(0, v(84));
+    mark(4); const offset = rawMax(0, 84);
     for (let i = 0; i < 4; i++) out.setFloat32(40 + i * 4, f(v(32 + i * 4) + offset), true);
   } else if (op === 10) {
     putRect(0, raw); mark(4); scalar(v(88)); result.set(request.subarray(16, 32), 8); result.set(request.subarray(32, 48), 40); result.set(request.subarray(88, 92), 64);
     if (!snaps(1)) return result;
-    const exact = f(max(0, v(88)) * scale), rounded = round(exact);
+    const exact = f(rawMax(0, 88) * scale), rounded = round(exact);
     if (rounded < 1 || rounded > 2) return result;
     const width = max(1, Math.floor(exact)), n = nscvSurfaceNormalize(raw);
     if (n.width <= 0 || n.height <= 0) return result;

@@ -51,3 +51,8 @@ test("clear targets reserve the trailing icon without shrinking code gutters", (
   w.setUint32(4, 20, true); assert.equal(values(derive(b), 64, 1)[0], 0);
   b[2] = 16; assert.deepEqual(values(derive(b), 8, 4), [107, 17, 10, 10]);
 });
+test("hairline admission retains target signaling-extrema behavior", () => {
+  const b = packet(10), w = new DataView(b.buffer); w.setUint32(4, 1, true); w.setUint32(88, 0x7f812345, true);
+  assert.equal(values(derive(b), 8, 1)[0], 5);
+  b[9] = 16; assert.equal(values(derive(b), 8, 1)[0], 5.25);
+});

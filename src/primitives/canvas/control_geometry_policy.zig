@@ -149,7 +149,7 @@ pub fn scrollMetrics(widget: widgets.Widget, tokens: tokens_model.DesignTokens) 
 // Read probe results through volatile storage: an optimizer may otherwise
 // infer that minimum-number with a finite operand can never produce NaN,
 // despite the target instruction's signaling-operand behavior.
-noinline fn signalingFlags() u8 {
+pub noinline fn signalingFlags() u8 {
     var signaling: u32 = 0x7f800001;
     const input: *volatile u32 = &signaling;
     const value: f32 = @bitCast(input.*);
