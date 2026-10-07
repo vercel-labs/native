@@ -466,6 +466,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.flow_measurement_policy = core.nativeWindowPolicy;
                 if (options.layout_coordination_policy != null) @panic("TsUiApp owns layout_coordination_policy - remove custom layout coordination wiring");
                 stamped.layout_coordination_policy = core.nativeWindowPolicy;
+                if (options.render_coordination_policy != null) @panic("TsUiApp owns render_coordination_policy - remove custom render coordination wiring");
+                stamped.render_coordination_policy = core.nativeWindowPolicy;
                 if (options.widget_motion_policy != null) @panic("TsUiApp owns widget_motion_policy - remove custom motion wiring");
                 stamped.widget_motion_policy = core.nativeWindowPolicy;
                 if (options.widget_audit_policy != null) @panic("TsUiApp owns widget_audit_policy - remove custom audit wiring");

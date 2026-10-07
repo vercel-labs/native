@@ -25,6 +25,7 @@ const icon_model = @import("icons.zig");
 const chart_model = @import("chart.zig");
 const presentation_policy = @import("widget_presentation_policy.zig");
 const paint_walk_policy = @import("widget_paint_walk_policy.zig");
+const emission = @import("render_coordination_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -492,8 +493,20 @@ fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: De
 }
 
 fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
-    if (widget.semantics.hidden) return;
+    const recipe = if (tokens.render_coordination_policy) |policy|
+        emission.Recipe.init(policy, .tree, widget, tokens, depth, 0, isSyntaxCodeParagraph(widget))
+    else
+        null;
+    if (recipe) |plan| {
+        switch (plan.status) {
+            .depth => return error.WidgetDepthExceeded,
+            .hidden => return,
+            .ready => {},
+        }
+    } else {
+        if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
+        if (widget.semantics.hidden) return;
+    }
 
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
@@ -510,16 +523,17 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
         else
             null;
         try builder.transform(transform);
-        try emitWidgetDepthContent(builder, widget, tokens, depth);
+        try emitWidgetDepthContent(builder, widget, tokens, depth, recipe);
         try builder.transform(inverse_transform);
     } else {
-        try emitWidgetDepthContent(builder, widget, tokens, depth);
+        try emitWidgetDepthContent(builder, widget, tokens, depth, recipe);
     }
     if (wrap_opacity) try builder.popOpacity();
 }
 
-fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize, recipe: ?emission.Recipe) Error!void {
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (recipe) |plan| return emitTreeRecipe(builder, paint_widget, tokens, depth, plan);
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => {
@@ -681,6 +695,7 @@ fn emitDataCellContent(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 }
 
 fn emitWidgetChildren(builder: *Builder, children: []const Widget, tokens: DesignTokens, depth: usize) Error!void {
+    if (tokens.render_coordination_policy) |policy| return emitCompiledChildren(builder, children, tokens, depth, policy, false);
     var emitted: usize = 0;
     var previous: ?WidgetPaintOrder = null;
     while (emitted < children.len) : (emitted += 1) {
@@ -876,6 +891,12 @@ fn emitWidgetLayoutNodeContent(
     widget: Widget,
 ) Error!void {
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (tokens.render_coordination_policy) |policy| {
+        const disclosure: u8 = if (widget.kind == .accordion) @intFromEnum(accordionLayoutDisclosure(layout, node_index, paint_widget, state)) else 0;
+        const recipe = emission.Recipe.init(policy, .retained, paint_widget, tokens, 0, disclosure, isSyntaxCodeParagraph(paint_widget));
+        if (recipe.status != .ready) @panic("inactive retained render recipe");
+        return emitRetainedRecipe(builder, layout, node_index, tokens, state, paint_widget, recipe);
+    }
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => try emitLayoutContainerBackground(builder, paint_widget, tokens),
@@ -1030,6 +1051,142 @@ fn emitWidgetLayoutNodeContent(
     }
 
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
+}
+
+// These executors provide explicit drawing capabilities. Kind routing,
+// ordered composition, clip selection and scrollbar admission live in the
+// copied program; the independent native reference above remains selectable.
+fn emitPlannedDraw(builder: *Builder, widget: Widget, tokens: DesignTokens, draw: emission.Draw, visible: ?geometry.RectF, logical_focus: bool, group_focus: bool) Error!void {
+    switch (draw) {
+        .container => try emitLayoutContainerBackground(builder, widget, tokens),
+        .data_row => try emitDataRowWidgetWash(builder, widget, tokens),
+        .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, widget, tokens),
+        .alert => try widget_render_surfaces.emitAlertWidgetChrome(builder, widget, tokens),
+        .card => try widget_render_surfaces.emitCardWidgetChrome(builder, widget, tokens),
+        .dialog => try widget_render_surfaces.emitDialogSurfaceWidgetChrome(builder, widget, tokens),
+        .drawer => try widget_render_surfaces.emitDrawerSurfaceWidgetChrome(builder, widget, tokens),
+        .sheet => try widget_render_surfaces.emitSheetSurfaceWidgetChrome(builder, widget, tokens),
+        .accordion => try widget_render_surfaces.emitAccordionWidgetChrome(builder, widget, tokens),
+        .bubble => try widget_render_surfaces.emitBubbleWidgetChrome(builder, widget, tokens),
+        .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, widget, tokens),
+        .popover => try widget_render_surfaces.emitPopoverWidgetChrome(builder, widget, tokens),
+        .menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, widget, tokens),
+        .text => try emitTextWidget(builder, widget, tokens),
+        .code_paragraph => if (visible) |bounds| {
+            try emitVisibleCodeTextSpansWidget(builder, widget, tokens, bounds, .{});
+        },
+        .spans => if (visible) |bounds| {
+            try emitVisibleTextSpansWidget(builder, widget, tokens, bounds);
+        },
+        .icon => try emitIconWidget(builder, widget, tokens),
+        .image => try emitImageWidget(builder, widget),
+        .media => try emitMediaSurfaceWidget(builder, widget),
+        .terminal => try emitTerminalWidget(builder, widget, tokens, logical_focus),
+        .avatar => try emitAvatarWidget(builder, widget, tokens),
+        .badge => try emitBadgeWidget(builder, widget, tokens),
+        .button => try widget_render_controls.emitButtonWidget(builder, widget, tokens),
+        .icon_button => try widget_render_controls.emitIconButtonWidget(builder, widget, tokens),
+        .select => try widget_render_controls.emitSelectWidget(builder, widget, tokens),
+        .text_field => try widget_render_controls.emitTextFieldWidget(builder, widget, tokens),
+        .code_editor => try emitCodeEditorWidget(builder, widget, tokens),
+        .search => try widget_render_controls.emitSearchFieldWidget(builder, widget, tokens),
+        .tooltip => try widget_render_controls.emitTooltipWidget(builder, widget, tokens),
+        .menu_item => try widget_render_controls.emitMenuItemWidget(builder, widget, tokens),
+        .list_item => try widget_render_controls.emitListItemWidget(builder, widget, tokens),
+        .data_cell => try emitDataCellContent(builder, widget, tokens),
+        .status => try emitStatusBarWidget(builder, widget, tokens),
+        .segmented => try widget_render_controls.emitSegmentedControlWidget(builder, widget, tokens),
+        .checkbox => try widget_render_controls.emitCheckboxWidget(builder, widget, tokens),
+        .radio => try widget_render_controls.emitRadioWidget(builder, widget, tokens),
+        .toggle => try widget_render_controls.emitToggleWidget(builder, widget, tokens),
+        .slider => try widget_render_controls.emitSliderWidget(builder, widget, tokens),
+        .progress => try widget_render_controls.emitProgressWidget(builder, widget, tokens),
+        .separator => try emitSeparatorWidget(builder, widget, tokens),
+        .split_divider => try emitSplitDividerWidget(builder, widget, tokens),
+        .skeleton => try emitSkeletonWidget(builder, widget, tokens),
+        .spinner => try emitSpinnerWidget(builder, widget, tokens),
+        .chart => try emitChartWidget(builder, widget, tokens),
+        .input_group => {
+            var group = widget;
+            group.state.focused = group_focus;
+            try widget_render_controls.emitInputGroupWidget(builder, group, tokens);
+        },
+    }
+}
+
+fn plannedClip(widget: Widget, tokens: DesignTokens, arg: u32) ?Clip {
+    return switch (arg & 3) {
+        0 => null,
+        1 => widgetContentClip(widget, tokens),
+        2 => .{ .id = widgetPartId(widget.id, 1), .rect = widget.frame },
+        3 => .{ .id = widgetPartId(widget.id, 9), .rect = widget.frame },
+        else => unreachable,
+    };
+}
+fn emitCompiledChildren(builder: *Builder, children: []const Widget, tokens: DesignTokens, depth: usize, policy: emission.Policy, stamp: bool) Error!void {
+    const plan = emission.ChildPlan.init(std.heap.page_allocator, policy, children, tokens, stamp) catch @panic("render child allocation failed");
+    defer plan.deinit();
+    for (0..plan.count) |i| {
+        var child = children[plan.index(i)];
+        if (stamp) child.group_segment = plan.segment(i);
+        try emitWidgetDepth(builder, child, tokens, depth + 1);
+    }
+}
+fn emitTreeRecipe(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize, recipe: emission.Recipe) Error!void {
+    for (recipe.commands[0..recipe.count]) |command| switch (command.opcode) {
+        .backdrop => try emitWidgetBackdropBlur(builder, widget, tokens),
+        .scrim => try emitModalSurfaceScrim(builder, widget, tokens),
+        .draw => {
+            const draw: emission.Draw = @enumFromInt(command.arg);
+            const visible = if (draw == .spans or draw == .code_paragraph) visibleBoundsInsideClip(tree_visible_bounds, widget.frame) else null;
+            const group_focus = if (draw == .input_group) widget.state.focused or widgetSubtreeHasFocusedState(widget) else widget.state.focused;
+            try emitPlannedDraw(builder, widget, tokens, draw, visible, widget.state.focused, group_focus);
+        },
+        .children => {
+            const child_tokens = if (command.arg & 256 != 0) widget_render_surfaces.bubbleContentTokens(widget, tokens) else tokens;
+            const saved_visible = tree_visible_bounds;
+            defer tree_visible_bounds = saved_visible;
+            const clip = plannedClip(widget, child_tokens, command.arg);
+            if (clip) |value| {
+                tree_visible_bounds = visibleBoundsInsideClip(saved_visible, value.rect);
+                try builder.pushClip(value);
+            }
+            try emitCompiledChildren(builder, widget.children, child_tokens, depth, tokens.render_coordination_policy.?, command.arg & 512 != 0);
+            if (clip != null) try builder.popClip();
+        },
+        .separators => try emitTableRowSeparators(builder, widget.children, tokens),
+        .scrollbars => try widget_render_scroll.emitScrollViewScrollbars(builder, widget.frame, widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .vertical), if (command.arg == 1) widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .horizontal) else .{}, tokens, widget.id),
+        .reactions => try widget_render_surfaces.emitBubbleWidgetReactions(builder, widget, tokens),
+    };
+}
+fn emitRetainedRecipe(builder: *Builder, layout: anytype, node_index: usize, tokens: DesignTokens, state: WidgetRenderState, widget: Widget, recipe: emission.Recipe) Error!void {
+    for (recipe.commands[0..recipe.count]) |command| switch (command.opcode) {
+        .backdrop => try emitWidgetBackdropBlur(builder, widget, tokens),
+        .scrim => try emitModalSurfaceScrim(builder, widget, tokens),
+        .draw => {
+            const draw: emission.Draw = @enumFromInt(command.arg);
+            const visible = if (draw == .spans or draw == .code_paragraph) widgetLayoutNodeVisibleBounds(layout, node_index, widget.frame, state) else null;
+            const logical_focus = if (draw == .terminal) if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy).logical_focus else widgetHasLogicalFocus(widget, state) else widget.state.focused;
+            var group_focus = widget.state.focused;
+            if (draw == .input_group) {
+                if (activePaintWalk(layout)) |plan| group_focus = plan.activeLane(node_index, painting_drag_copy).group_focus else if (!group_focus) group_focus = if (state.focused_id != null or state.focus_visible_id != null)
+                    layoutSubtreeHasFocusVisible(layout, node_index, state)
+                else
+                    layoutSubtreeHasBakedFocus(layout, node_index);
+            }
+            try emitPlannedDraw(builder, widget, tokens, draw, visible, logical_focus, group_focus);
+        },
+        .children => {
+            const child_tokens = if (command.arg & 256 != 0) widget_render_surfaces.bubbleContentTokens(widget, tokens) else tokens;
+            const clip = plannedClip(widget, child_tokens, command.arg);
+            if (clip) |value| try builder.pushClip(value);
+            try emitWidgetLayoutChildren(builder, layout, node_index, child_tokens, state);
+            if (clip != null) try builder.popClip();
+        },
+        .separators => try emitTableRowSeparatorsLayout(builder, layout, node_index, tokens, widget, command.arg == 1),
+        .scrollbars => try widget_render_scroll.emitScrollViewScrollbars(builder, widget.frame, widgetScrollAxisMetrics(layout, node_index, .vertical), if (command.arg == 1) widgetScrollAxisMetrics(layout, node_index, .horizontal) else .{}, tokens, widget.id),
+        .reactions => try widget_render_surfaces.emitBubbleWidgetReactions(builder, widget, tokens),
+    };
 }
 
 /// Flow and stacking containers have no implicit surface treatment. An

@@ -1915,6 +1915,8 @@ pub const DesignTokens = struct {
     flow_measurement_policy: ?@import("flow_measurement_policy.zig").Policy = null,
     /// Portable layout admission, ordered child plans and retained relayout.
     layout_coordination_policy: ?@import("layout_coordination_policy.zig").Policy = null,
+    /// Portable paint capability scheduling and direct-tree sibling programs.
+    render_coordination_policy: ?@import("render_coordination_policy.zig").Policy = null,
     intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
     /// Widget motion plans supplied by the compiled app, outside theme overrides.
     widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,

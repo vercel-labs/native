@@ -7,6 +7,9 @@ const m = @import("native_sdk").canvas.widget_metric_policy;
 const reference = m.reference;
 const layout = c;
 const exact = @import("component_construction_e2e_tests.zig").exact;
+test {
+    _ = @import("render_coordination_e2e_tests.zig");
+}
 fn owned(tokens: c.DesignTokens) c.DesignTokens {
     var t = tokens;
     t.control_geometry_policy = core.nativeWindowPolicy;
