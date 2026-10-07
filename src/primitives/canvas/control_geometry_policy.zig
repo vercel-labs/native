@@ -47,10 +47,7 @@ pub const Request = struct {
         self.bytes[0..4].* = .{ 29, 1, @intFromEnum(shape), @import("render_plan_policy.zig").numericFlags() };
         self.bytes[8] = @intFromEnum(tokens.density);
         self.bytes[9] = @intFromEnum(widget.size);
-        var signaling: u32 = 0x7f800001;
-        const pointer: *volatile u32 = &signaling;
-        const value: f32 = @bitCast(pointer.*);
-        self.bytes[10] = @intFromBool(std.math.clamp(value, @as(f32, 0), @as(f32, 1)) == 0);
+        self.bytes[10] = signalingFlags();
         word(&self.bytes, 4, @intFromBool(tokens.pixel_snap.geometry));
         putRect(&self.bytes, 16, widget.frame);
         float(&self.bytes, 32, tokens.pixel_snap.scale);
@@ -147,4 +144,22 @@ pub fn scrollMetrics(widget: widgets.Widget, tokens: tokens_model.DesignTokens) 
     word(bytes, 12, std.math.cast(u32, widget.children.len) orelse @panic("control geometry child capacity"));
     for (widget.children, 0..) |child, i| putRect(bytes, 160 + i * 16, child.frame);
     return evaluate(bytes, tokens.control_geometry_policy.?);
+}
+
+// Read probe results through volatile storage: an optimizer may otherwise
+// infer that minimum-number with a finite operand can never produce NaN,
+// despite the target instruction's signaling-operand behavior.
+noinline fn signalingFlags() u8 {
+    var signaling: u32 = 0x7f800001;
+    const input: *volatile u32 = &signaling;
+    const value: f32 = @bitCast(input.*);
+    var results: [5]f32 = undefined;
+    const output: *volatile [5]f32 = &results;
+    output.* = .{ std.math.clamp(value, @as(f32, 0), @as(f32, 1)), @min(value, @as(f32, 44)), @min(@as(f32, 44), value), @max(value, @as(f32, 0)), @max(@as(f32, 0), value) };
+    const observed = output.*;
+    return @as(u8, @intFromBool(observed[0] == 0)) |
+        (@as(u8, @intFromBool(std.math.isNan(observed[1]))) << 1) |
+        (@as(u8, @intFromBool(std.math.isNan(observed[2]))) << 2) |
+        (@as(u8, @intFromBool(std.math.isNan(observed[3]))) << 3) |
+        (@as(u8, @intFromBool(std.math.isNan(observed[4]))) << 4);
 }

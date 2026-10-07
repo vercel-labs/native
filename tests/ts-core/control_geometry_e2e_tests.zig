@@ -20,6 +20,8 @@ fn compare(widget: c.Widget, tokens: c.DesignTokens) !void {
     // The native slider asserts ordered bounds; NaN x is outside its domain.
     if (!std.math.isNan(widget.frame.x)) try exact(controls.sliderWidgetKnobRect(widget, tokens), controls.sliderWidgetKnobRect(widget, t));
     try exact(c.toggleWidgetKnobTravel(widget, tokens), c.toggleWidgetKnobTravel(widget, t));
+    var underline = tokens; underline.controls.tabs_indicator = .underline;
+    try exact(controls.segmentedControlUnderlineRect(widget, underline), controls.segmentedControlUnderlineRect(widget, owned(underline)));
     const copied = p.controls(widget, t, .choice);
     core.rt.frameReset();
     try exact(copied, p.controls(widget, t, .choice));
@@ -92,9 +94,31 @@ test "compiled control geometry preserves scrollbar axes corner gaps and static 
     widget.layout.virtual_item_count = 100;
     widget.scroll_axes = .both;
     for ([_]c.ScrollAxis{ .vertical, .horizontal }) |axis| try exact(scroll.widgetScrollAxisMetricsForWidget(widget, t, axis), scroll.widgetScrollAxisMetricsForWidget(widget, owned(t), axis));
+    for ([_]u32{ 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 }) |word| {
+        widget.value = @bitCast(word);
+        try exact(scroll.widgetScrollMetricsForWidget(widget, t), scroll.widgetScrollMetricsForWidget(widget, owned(t)));
+    }
     widget.layout.virtualized = false;
     widget.layout.padding.left = 999;
     try exact(scroll.widgetScrollMetricsForWidget(widget, t), scroll.widgetScrollMetricsForWidget(widget, owned(t)));
+}
+test "compiled control geometry preserves exceptional scrollbar fields" {
+    _ = core.initialModel();
+    const words = [_]u32{ 0, 0x80000000, 1, 0x7f800000, 0xff800000, 0x7fc12345, 0xffc12345, 0x7f812345, 0xff812345 };
+    const frame: sdk.geometry.RectF = .init(-3.25, 6.75, 333.125, 91.625);
+    const original: c.WidgetScrollMetrics = .{ .present = true, .offset = 10, .viewport_extent = 40, .content_extent = 120 };
+    for (words) |word| for ([_]c.ScrollAxis{ .vertical, .horizontal }) |axis| {
+        const value: f32 = @bitCast(word);
+        inline for (.{ "offset", "viewport_extent", "content_extent" }) |name| {
+            var metric = original;
+            @field(metric, name) = value;
+            exact(scroll.scrollViewScrollbarGeometryForAxis(frame, metric, .{}, axis, 0), scroll.scrollViewScrollbarGeometryForAxis(frame, metric, owned(.{}), axis, 0)) catch |err| {
+                std.debug.print("scroll field {s} word {x} axis {t}\n", .{ name, word, axis });
+                return err;
+            };
+        }
+        try exact(scroll.scrollViewScrollbarGeometryForAxis(frame, original, .{}, axis, value), scroll.scrollViewScrollbarGeometryForAxis(frame, original, owned(.{}), axis, value));
+    };
 }
 test "compiled control geometry preserves underline measurements and grouped radius words" {
     _ = core.initialModel();

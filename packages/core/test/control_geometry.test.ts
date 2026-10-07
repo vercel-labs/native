@@ -45,3 +45,9 @@ test("slider refuses unordered native clamp bounds", () => {
   const b = packet(2); new DataView(b.buffer).setFloat32(16, NaN, true);
   assert.throws(() => derive(b), /unordered control geometry bounds/);
 });
+
+test("signaling extrema follow the native scalar descriptor", () => {
+  const b = packet(1), w = new DataView(b.buffer); w.setUint32(24, 0x7f812345, true);
+  assert.equal(float(derive(b), 16), 52.5);
+  b[10] = 2; assert.equal(word(derive(b), 16), 0x7fc12345);
+});
