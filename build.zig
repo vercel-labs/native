@@ -5380,6 +5380,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_composition.ts"));
     stage_run.addFileInput(b.path("packages/core/src/code_content.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/chart_content.ts"));
     stage_run.addFileInput(b.path("packages/core/src/markdown_content.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_routing.ts"));

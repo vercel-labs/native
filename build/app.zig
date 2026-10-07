@@ -1242,6 +1242,15 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/view_components.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/runtime_policy.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_appearance.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/component_construction.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/widget_motion.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/component_composition.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/code_content.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/chart_content.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/markdown_content.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/widget_audits.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/widget_routing.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");
         stage_run.addFileArg(b.path(appPath(b, app_root, "src/app.native")));
