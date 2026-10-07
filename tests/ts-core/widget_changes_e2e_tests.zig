@@ -12,6 +12,7 @@ fn node(widget: canvas.Widget, frame: sdk.geometry.RectF, parent: ?usize, depth:
 fn owned(reference: Tree) Tree {
     var result = reference;
     result.change_policy = core.nativeWindowPolicy;
+    result.paint_policy = core.nativeWindowPolicy;
     return result;
 }
 fn compare(previous: Tree, next: Tree, tokens: canvas.DesignTokens, capacity: usize) !void {
@@ -194,6 +195,12 @@ test "compiled widget changes preserve full view budgets reorder keyed zero iden
     for ([_]usize{ 0, 1, 31, 32, 33, 512, 1024 }) |capacity| try compare(.{ .nodes = &before }, .{ .nodes = &after }, .{}, capacity);
     var plan = try canvas.widget_change_policy.Plan.init(std.testing.allocator, core.nativeWindowPolicy, Tree{ .nodes = &before }, Tree{ .nodes = &after }, null, null, 2048);
     defer plan.deinit();
+    const paint = try canvas.widget_paint_policy.Plan.diff(std.testing.allocator, core.nativeWindowPolicy, Tree{ .nodes = &before }, Tree{ .nodes = &after }, .{}, null, null, plan);
+    defer paint.deinit();
+    const paint_request = try std.testing.allocator.dupe(u8, paint.request);
+    defer std.testing.allocator.free(paint_request);
+    const paint_result = try std.testing.allocator.dupe(u8, paint.result);
+    defer std.testing.allocator.free(paint_result);
     const request = try std.testing.allocator.dupe(u8, plan.request);
     defer std.testing.allocator.free(request);
     const result = try std.testing.allocator.dupe(u8, plan.result);
@@ -203,6 +210,8 @@ test "compiled widget changes preserve full view budgets reorder keyed zero iden
         core.rt.frameReset();
         try std.testing.expectEqualSlices(u8, request, plan.request);
         try std.testing.expectEqualSlices(u8, result, plan.result);
+        try std.testing.expectEqualSlices(u8, paint_request, paint.request);
+        try std.testing.expectEqualSlices(u8, paint_result, paint.result);
     }
 }
 
@@ -236,4 +245,128 @@ test "compiled widget changes preserve complete render state damage with focus g
         try exact(layout.renderStateDirtyBoundsWithTokens(.{ .keyboard_active = false }, .{ .keyboard_active = true }, .{}), owned(layout).renderStateDirtyBoundsWithTokens(.{ .keyboard_active = false }, .{ .keyboard_active = true }, .{}));
         core.rt.frameReset();
     }
+}
+
+test "compiled widget changes paint geometry preserves all chrome sizes densities token overrides and snapping" {
+    _ = core.initialModel();
+    for (std.enums.values(canvas.WidgetKind)) |kind| for (std.enums.values(canvas.WidgetSize)) |size| for (std.enums.values(canvas.Density)) |density| for (0..8) |flags| {
+        var tokens: canvas.DesignTokens = .{ .density = density };
+        tokens.pixel_snap = .{ .geometry = flags & 1 != 0, .scale = if (flags & 2 != 0) 1.5 else 2.25 };
+        tokens.controls.tabs_indicator = if (flags & 4 != 0) .underline else .pill;
+        tokens.controls.button_group_style = if (flags & 4 != 0) .detached else .segmented;
+        tokens.controls.panel.stroke_width = 3.125;
+        tokens.controls.button_outline.stroke_width = 0.625;
+        tokens.controls.toggle_button.stroke_width = 4.25;
+        tokens.controls.checkbox.stroke_width = -0.0;
+        tokens.stroke.focus = 2.75;
+        tokens.stroke.focus_offset = 1.375;
+        tokens.metrics.size_inset_step = 3.625;
+        tokens.metrics.tabs_trigger_inset = 7.75;
+        tokens.metrics.tabs_label_size_step = 2.125;
+        tokens.shadow.sm = .{ .y = -2.625, .blur = 3.375, .spread = -1.125 };
+        tokens.shadow.md = .{ .y = 4.125, .blur = 6.625, .spread = -2.875 };
+        var before = [_]canvas.WidgetLayoutNode{
+            node(.{ .kind = .row, .id = 1, .layout = .{ .clip_content = true } }, .init(-20.5, -30.25, 260.75, 230.5), null, 0),
+            node(.{ .kind = kind, .size = size, .id = 0xfedcba9876543210, .text = "raw\xff\x00label", .icon = "check", .frame = .init(-4.75, -6.5, 73.375, 34.125), .variant = .outline, .group_segment = .first, .backdrop_blur_token = .sm, .state = .{ .focused = true } }, .init(-3.625, -5.25, 74.125, 33.375), 0, 1),
+            node(.{ .kind = .bubble, .id = 3, .text = "reaction", .text_alignment = .center }, .init(5.125, 23.625, 60.75, 25.5), 1, 2),
+        };
+        var after = before;
+        after[1].frame = .init(-7.25, 10.75, 90.375, 43.125);
+        after[1].widget.transform = .{ .a = 0.875, .b = 0.25, .c = -0.125, .d = 1.125, .tx = -0.0, .ty = 5.375 };
+        after[1].widget.style.stroke_width = if (flags & 2 != 0) -1 else 4.125;
+        after[1].widget.text_alignment = if (flags & 2 != 0) .start else .end;
+        errdefer std.debug.print("paint geometry kind {t} size {t} density {t} flags {d}\n", .{ kind, size, density, flags });
+        try compare(.{ .nodes = &before }, .{ .nodes = &after }, tokens, 4);
+        const layout: Tree = .{ .nodes = &before };
+        try exact(layout.renderStateDirtyBoundsWithTokens(.{}, .{ .hovered_id = before[1].widget.id, .focus_visible_id = before[1].widget.id }, tokens), owned(layout).renderStateDirtyBoundsWithTokens(.{}, .{ .hovered_id = before[1].widget.id, .focus_visible_id = before[1].widget.id }, tokens));
+        core.rt.frameReset();
+    };
+}
+
+test "compiled widget changes paint measurement requests preserve raw text font sizes and callback order" {
+    _ = core.initialModel();
+    const Provider = struct {
+        const Call = struct { font: canvas.FontId, size: f32, text: [32]u8, length: usize };
+        calls: std.ArrayList(Call) = .empty,
+        fn width(context: ?*anyopaque, font: canvas.FontId, size: f32, text: []const u8) f32 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            var bytes: [32]u8 = @splat(0);
+            @memcpy(bytes[0..text.len], text);
+            self.calls.append(std.testing.allocator, .{ .font = font, .size = size, .text = bytes, .length = text.len }) catch @panic("measurement log allocation");
+            return @as(f32, @floatFromInt(text.len)) * size * 0.713;
+        }
+    };
+    var state = Provider{};
+    defer state.calls.deinit(std.testing.allocator);
+    const provider = canvas.TextMeasureProvider{ .context = &state, .measure_fn = Provider.width };
+    var tokens: canvas.DesignTokens = .{ .text_measure = &provider };
+    tokens.controls.tabs_indicator = .underline;
+    const before = [_]canvas.WidgetLayoutNode{
+        node(.{ .kind = .bubble, .id = 1, .text = "before\xff\x00", .size = .sm, .text_alignment = .end }, .init(0, 0, 30, 20), null, 0),
+        node(.{ .kind = .segmented_control, .id = 2, .text = "tab-before", .icon = "check", .size = .lg }, .init(0, 50, 70, 30), null, 0),
+    };
+    var after = before;
+    after[0].widget.text = "after\x00\xff";
+    after[0].frame.height = 31.75;
+    after[1].widget.text = "tab-after";
+    after[1].frame.width = 100.25;
+    for (0..4) |capacity| {
+        var a: [4]canvas.WidgetInvalidation = undefined;
+        var b: [4]canvas.WidgetInvalidation = undefined;
+        state.calls.clearRetainingCapacity();
+        canvas.bumpTextMeasureGeneration();
+        const expected = Tree.diffWithTokens(.{ .nodes = &before }, .{ .nodes = &after }, tokens, a[0..capacity]);
+        const calls = try std.testing.allocator.dupe(Provider.Call, state.calls.items);
+        defer std.testing.allocator.free(calls);
+        state.calls.clearRetainingCapacity();
+        canvas.bumpTextMeasureGeneration();
+        const actual = Tree.diffWithTokens(owned(.{ .nodes = &before }), owned(.{ .nodes = &after }), tokens, b[0..capacity]);
+        if (expected) |v| try exact(v, try actual) else |err| try std.testing.expectError(err, actual);
+        try exact(@as([]const Provider.Call, calls), state.calls.items);
+        core.rt.frameReset();
+    }
+}
+
+test "compiled widget changes paint geometry preserves bounded transforms hidden ancestors and escaped clips" {
+    _ = core.initialModel();
+    var before: [40]canvas.WidgetLayoutNode = undefined;
+    for (&before, 0..) |*n, i| n.* = node(.{ .kind = .panel, .id = i + 1, .frame = .init(0, 0, 100, 100), .transform = .{ .a = 0.9375, .d = 1.0625, .tx = 1.125, .ty = -0.375 }, .layout = .{ .clip_content = i % 3 == 0 } }, .init(@floatFromInt(i), 0, 100, 100), if (i == 0) null else i - 1, i);
+    for (0..8) |flags| {
+        var after = before;
+        after[0].widget.opacity = 0.5;
+        after[33].widget.semantics.hidden = flags & 1 != 0;
+        after[35].widget.layout.anchor = if (flags & 2 != 0) .{} else null;
+        after[36].widget.kind = if (flags & 4 != 0) .dialog else .panel;
+        try compare(.{ .nodes = &before }, .{ .nodes = &after }, .{}, 40);
+    }
+}
+
+test "compiled widget changes paint geometry preserves exceptional scalar words and signed zero extrema" {
+    _ = core.initialModel();
+    const words = [_]u32{ 0, 0x80000000, 0x3f400000, 0xbf400000, 0x7f800000, 0xff800000, 0x7fc00037 };
+    for ([_]canvas.WidgetKind{ .button, .checkbox, .slider, .panel, .bubble }) |kind| for (words) |a| for (words) |b| {
+        var before = [_]canvas.WidgetLayoutNode{node(.{ .kind = kind, .id = 1, .frame = .init(-0.0, 0, 100, 32), .value = @bitCast(a), .style = .{ .stroke_width = @bitCast(a) } }, .init(-0.0, 0, 100, 32), null, 0)};
+        var after = before;
+        after[0].widget.state.focused = true;
+        after[0].widget.value = @bitCast(b);
+        after[0].widget.style.stroke_width = @bitCast(b);
+        var tokens: canvas.DesignTokens = .{};
+        tokens.stroke.focus = @bitCast(a);
+        tokens.stroke.focus_offset = @bitCast(b);
+        errdefer std.debug.print("paint scalar words {t} {x}/{x}\n", .{ kind, a, b });
+        try compare(.{ .nodes = &before }, .{ .nodes = &after }, tokens, 2);
+    };
+}
+
+test "compiled widget changes paint subtree comparisons preserve full width depth words" {
+    _ = core.initialModel();
+    var before = [_]canvas.WidgetLayoutNode{
+        node(.{ .kind = .panel, .id = 1 }, .init(0, 0, 100, 100), null, std.math.maxInt(usize) - 2),
+        node(.{ .kind = .bubble, .id = 2, .text = "wide" }, .init(5, 5, 30, 20), 0, std.math.maxInt(usize) - 1),
+        node(.{ .kind = .button, .id = 3 }, .init(5, 30, 20, 20), 0, std.math.maxInt(usize)),
+    };
+    var after = before;
+    after[0].widget.opacity = 0.5;
+    after[1].widget.semantics.hidden = true;
+    try compare(.{ .nodes = &before }, .{ .nodes = &after }, .{}, 4);
 }

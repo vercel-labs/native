@@ -919,4 +919,5 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./widget_audits.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_routing.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_changes.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./widget_paint.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

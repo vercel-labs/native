@@ -468,6 +468,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.widget_routing_policy = core.nativeWindowPolicy;
                 if (options.widget_change_policy != null) @panic("TsUiApp owns widget_change_policy - remove custom change wiring");
                 stamped.widget_change_policy = core.nativeWindowPolicy;
+                if (options.widget_paint_policy != null) @panic("TsUiApp owns widget_paint_policy - remove custom paint wiring");
+                stamped.widget_paint_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");

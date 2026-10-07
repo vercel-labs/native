@@ -1918,6 +1918,8 @@ pub const DesignTokens = struct {
     widget_routing_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable retained widget matching and change classification.
     widget_change_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable retained damage geometry; native supplies font measurements.
+    widget_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
     code_content_policy: ?*const fn ([]const u8, []u8) usize = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {

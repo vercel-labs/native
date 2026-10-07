@@ -73,6 +73,7 @@ pub const WidgetLayoutTree = struct {
     routing_policy: ?@import("widget_routing_policy.zig").Policy = null,
     /// Explicit retained-change owner, independent of input routing.
     change_policy: ?@import("widget_change_policy.zig").Policy = null,
+    paint_policy: ?@import("widget_paint_policy.zig").Policy = null,
 
     pub fn nodeCount(self: WidgetLayoutTree) usize {
         return self.nodes.len;
@@ -226,7 +227,7 @@ pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens
     const root_bounds = bounds.normalized();
     var len: usize = 0;
     _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
-    return .{ .nodes = output[0..len], .root_bounds = root_bounds, .semantic_policy = tokens.intrinsic_layout_policy, .audit_policy = tokens.widget_audit_policy, .routing_policy = tokens.widget_routing_policy, .change_policy = tokens.widget_change_policy };
+    return .{ .nodes = output[0..len], .root_bounds = root_bounds, .semantic_policy = tokens.intrinsic_layout_policy, .audit_policy = tokens.widget_audit_policy, .routing_policy = tokens.widget_routing_policy, .change_policy = tokens.widget_change_policy, .paint_policy = tokens.widget_paint_policy };
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

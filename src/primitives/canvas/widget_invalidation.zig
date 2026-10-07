@@ -15,6 +15,7 @@ const widget_render_controls = @import("widget_render_controls.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
 const change_policy = @import("widget_change_policy.zig");
+const paint_policy = @import("widget_paint_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -96,7 +97,7 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
     const previous_root_bounds = widget_render.widgetLayoutRootBounds(previous);
     const next_root_bounds = widget_render.widgetLayoutRootBounds(next);
-    if (tokens.widget_change_policy orelse change_policy.owner(next) orelse change_policy.owner(previous)) |policy|
+    if (tokens.widget_change_policy orelse tokens.widget_paint_policy orelse change_policy.owner(next) orelse change_policy.owner(previous) orelse paint_policy.owner(next) orelse paint_policy.owner(previous)) |policy|
         return diffWithPolicy(previous, next, tokens, output, policy, previous_root_bounds, next_root_bounds);
     const root_bounds_dirty = !optionalRectsEqual(previous_root_bounds, next_root_bounds);
     // Id lookups ride the probe-table index whenever the trees are big
@@ -201,15 +202,29 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     return output[0..len];
 }
 
-/// Renderer geometry remains native-owned. The selected portable owner sends
-/// complete change flags and ordered source references, never a native verdict.
+/// Change and paint owners exchange complete copied plans. The independent
+/// native geometry remains the reference for layouts without paint ownership.
 fn diffWithPolicy(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation, policy: change_policy.Policy, previous_root: ?geometry.RectF, next_root: ?geometry.RectF) Error![]const WidgetInvalidation {
     const plan = change_policy.Plan.init(std.heap.page_allocator, policy, previous, next, previous_root, next_root, output.len) catch @panic("widget change allocation");
     defer plan.deinit();
+    const geometry_owner = tokens.widget_paint_policy orelse paint_policy.owner(next) orelse paint_policy.owner(previous);
+    // The reference evaluates the overflowing entry's geometry before its
+    // append fails. Keep those font capability calls, but never write that
+    // entry into the caller's complete capacity-error prefix.
+    const overflow: ?change_policy.Plan = if (geometry_owner != null and plan.status == 2)
+        change_policy.Plan.init(std.heap.page_allocator, policy, previous, next, previous_root, next_root, output.len + 1) catch @panic("widget paint overflow allocation")
+    else
+        null;
+    defer if (overflow) |extra| extra.deinit();
+    if (overflow) |extra| {
+        if (extra.length != plan.length + 1 or !std.mem.eql(u8, plan.result[16 .. 16 + plan.length * 16], extra.result[16 .. 16 + plan.length * 16])) @panic("inconsistent compiled paint overflow prefix");
+    }
+    const damage: ?paint_policy.Plan = if (geometry_owner) |owner| paint_policy.Plan.diff(std.heap.page_allocator, owner, previous, next, tokens, previous_root, next_root, overflow orelse plan) catch @panic("widget paint allocation") else null;
+    defer if (damage) |owned| owned.deinit();
     for (0..plan.length) |i| {
         const entry = plan.entry(i);
         const flags = entry.flags;
-        const bounds: ?geometry.RectF = switch (entry.kind) {
+        const bounds: ?geometry.RectF = if (damage) |owned| owned.bounds(i) else switch (entry.kind) {
             .removed => blk: {
                 const p = entry.previous.?;
                 break :blk widgetClippedDirtyBounds(previous, p, unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetModalScrimBounds(previous, previous.nodes[p].widget, tokens)));
@@ -417,7 +432,7 @@ fn widgetChange(
 }
 
 pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens) ?geometry.RectF {
-    if (tokens.widget_change_policy orelse change_policy.owner(layout)) |policy|
+    if (tokens.widget_change_policy orelse tokens.widget_paint_policy orelse change_policy.owner(layout) orelse paint_policy.owner(layout)) |policy|
         return renderStateWithPolicy(layout, previous, next, tokens, policy);
     var ids: [8]?ObjectId = [_]?ObjectId{null} ** 8;
     var id_len: usize = 0;
@@ -525,27 +540,32 @@ fn widgetWithProjectedState(base: Widget, bits: u32) Widget {
 fn renderStateWithPolicy(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens, policy: change_policy.Policy) ?geometry.RectF {
     const plan = change_policy.RenderPlan.init(std.heap.page_allocator, policy, layout, previous, next) catch @panic("render change allocation");
     defer plan.deinit();
-    var bounds: ?geometry.RectF = null;
-    for (0..plan.length) |i| {
-        const item = plan.entry(i);
-        const index = item.node_index;
-        const node = layout.nodes[index];
-        if (item.terminal) bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens)));
-        if (item.state) {
-            const base = widgetWithFrame(node.widget, node.frame);
-            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(widgetWithProjectedState(base, item.previous), widgetWithProjectedState(base, item.next), tokens)));
-        }
-    }
-    for (0..2) |g| {
-        var group_bounds: ?geometry.RectF = null;
-        for (0..plan.group_lengths[g]) |i| {
-            const index = plan.groupIndex(g, i);
+    const geometry_owner = tokens.widget_paint_policy orelse paint_policy.owner(layout);
+    const damage: ?paint_policy.Plan = if (geometry_owner) |owner| paint_policy.Plan.render(std.heap.page_allocator, owner, layout, tokens, plan) catch @panic("render paint allocation") else null;
+    defer if (damage) |owned| owned.deinit();
+    var bounds: ?geometry.RectF = if (damage) |owned| owned.bounds(0) else null;
+    if (damage == null) {
+        for (0..plan.length) |i| {
+            const item = plan.entry(i);
+            const index = item.node_index;
             const node = layout.nodes[index];
-            var focused = widgetWithFrame(node.widget, node.frame);
-            focused.state.focused = true;
-            group_bounds = unionOptionalBounds(group_bounds, widgetClippedDirtyBounds(layout, index, widgetFocusPaintBounds(focused, tokens)));
+            if (item.terminal) bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens)));
+            if (item.state) {
+                const base = widgetWithFrame(node.widget, node.frame);
+                bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(widgetWithProjectedState(base, item.previous), widgetWithProjectedState(base, item.next), tokens)));
+            }
         }
-        bounds = unionOptionalBounds(bounds, group_bounds);
+        for (0..2) |g| {
+            var group_bounds: ?geometry.RectF = null;
+            for (0..plan.group_lengths[g]) |i| {
+                const index = plan.groupIndex(g, i);
+                const node = layout.nodes[index];
+                var focused = widgetWithFrame(node.widget, node.frame);
+                focused.state.focused = true;
+                group_bounds = unionOptionalBounds(group_bounds, widgetClippedDirtyBounds(layout, index, widgetFocusPaintBounds(focused, tokens)));
+            }
+            bounds = unionOptionalBounds(bounds, group_bounds);
+        }
     }
     if (plan.chart) {
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, previous, tokens));

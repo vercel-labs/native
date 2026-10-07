@@ -529,6 +529,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_routing_policy: ?*const fn ([]const u8, []u8) usize = null,
             widget_change_policy: ?*const fn ([]const u8, []u8) usize = null,
+            widget_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
             /// Which built-in theme pack the stock tokens resolve when
             /// the app claims neither `tokens` nor `tokens_fn`: the
             /// pack composes with the live system appearance (scheme,
@@ -2022,6 +2023,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.widget_audit_policy = self.options.widget_audit_policy;
                 tokens.widget_routing_policy = self.options.widget_routing_policy;
                 tokens.widget_change_policy = self.options.widget_change_policy;
+                tokens.widget_paint_policy = self.options.widget_paint_policy;
                 tokens.code_content_policy = self.options.code_content_policy;
                 return tokens;
             }
@@ -2076,6 +2078,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.widget_audit_policy = self.options.widget_audit_policy;
             tokens.widget_routing_policy = self.options.widget_routing_policy;
             tokens.widget_change_policy = self.options.widget_change_policy;
+            tokens.widget_paint_policy = self.options.widget_paint_policy;
             tokens.code_content_policy = self.options.code_content_policy;
             return tokens;
         }

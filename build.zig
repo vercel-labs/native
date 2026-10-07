@@ -1323,6 +1323,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/widget_audits.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_routing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/widget_changes.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_paint.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -5389,6 +5390,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_routing.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_changes.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/widget_paint.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);

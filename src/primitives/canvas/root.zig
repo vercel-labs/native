@@ -901,6 +901,7 @@ pub const pseudo_locale_text_expansion = @import("layout_audit.zig").pseudo_loca
 /// below) is adopted by the example suites like the layout audit's.
 pub const widget_routing_policy = @import("widget_routing_policy.zig");
 pub const widget_change_policy = @import("widget_change_policy.zig");
+pub const widget_paint_policy = @import("widget_paint_policy.zig");
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;
