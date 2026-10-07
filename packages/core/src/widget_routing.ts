@@ -8,6 +8,7 @@ interface NscRouteNode {
   frame: NscSurfaceRect; transform: number[];
 }
 interface NscRouteEntry { index: number; phase: number }
+interface NscRouteObservation { index: number }
 function nscvRouteModal(n: NscRouteNode): boolean { return n.kind >= 19 && n.kind <= 21; }
 function nscvRouteEscapes(n: NscRouteNode): boolean { return (n.flags & 8) !== 0 || nscvRouteModal(n); }
 function nscvRouteClips(n: NscRouteNode): boolean { return n.kind === 6 || (n.flags & 16) !== 0; }
@@ -138,23 +139,32 @@ function nscvRouteHitTree(nodes: NscRouteNode[], x: number, y: number, layers: n
 function nscvRoutePress(nodes: NscRouteNode[], index: number): number {
   let i = index; while (i < nodes.length) { if (nscvRouteClaims(nodes[i]!)) return i; i = nodes[i]!.parent; } return 4294967295;
 }
-function nscvRouteFocus(nodes: NscRouteNode[], index: number, logical: boolean): boolean {
+function nscvRouteFocus(nodes: NscRouteNode[], index: number, logical: boolean, observation: NscRouteObservation): boolean {
   const n = nodes[index]!;
-  return nscvRouteLive(n) && !nscvRouteHidden(nodes, index) && !nscvRouteConcealed(nodes, index) &&
-    ((n.flags & 128) !== 0 || (n.actions & 1) !== 0 || nscvRouteDefaultFocus(n) || (n.flags & 256) !== 0) && (logical || nscvRouteVisible(nodes, index, false, 0, 0));
+  if (!nscvRouteLive(n) || nscvRouteHidden(nodes, index) || nscvRouteConcealed(nodes, index)) return false;
+  if ((n.flags & 128) === 0 && (n.actions & 1) === 0 && !nscvRouteDefaultFocus(n)) {
+    // Ask for a semantic observation only at the same eligibility gate as
+    // the reference. Native copies that fact, then resumes this query.
+    if ((n.flags & 2048) === 0) {
+      if (observation.index === 4294967295) observation.index = index;
+      return false;
+    }
+    if ((n.flags & 256) === 0) return false;
+  }
+  return logical || nscvRouteVisible(nodes, index, false, 0, 0);
 }
 function nscvRouteGap(a: number, sizeA: number, b: number, sizeB: number): number {
   const f = Math.fround, endA = f(a + sizeA), endB = f(b + sizeB);
   if (nscvSurfaceMin(endA, endB) > nscvSurfaceMax(a, b)) return 0;
   return b >= endA ? f(b - endA) : f(a - endB);
 }
-function nscvRouteSpatial(nodes: NscRouteNode[], current: number, direction: number): number {
+function nscvRouteSpatial(nodes: NscRouteNode[], current: number, direction: number, observation: NscRouteObservation): number {
   const missing = 4294967295, f = Math.fround;
-  if (!nscvRouteFocus(nodes, current, false)) return missing;
+  if (!nscvRouteFocus(nodes, current, false, observation)) return missing;
   const a = nodes[current]!.frame, ax = f(a.x + f(a.width / 2)), ay = f(a.y + f(a.height / 2));
   let best = missing, bestScore = Infinity;
   for (let i = 0; i < nodes.length; i++) {
-    if (i === current || !nscvRouteFocus(nodes, i, false)) continue;
+    if (i === current || !nscvRouteFocus(nodes, i, false, observation)) continue;
     const b = nodes[i]!.frame;
     if (!(direction === 2 ? f(b.x + b.width) <= ax : direction === 3 ? b.x >= ax : direction === 4 ? f(b.y + b.height) <= ay : b.y >= ay)) continue;
     const bx = f(b.x + f(b.width / 2)), by = f(b.y + f(b.height / 2)), dx = Math.abs(f(bx - ax)), dy = Math.abs(f(by - ay));
@@ -177,7 +187,7 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
     const at = 64 + i * 96, kind = wire.getUint32(at, true), role = wire.getUint32(at + 4, true), parent = wire.getUint32(at + 8, true), flags = wire.getUint32(at + 24, true), actions = wire.getUint32(at + 28, true);
     // Solved trees are preorder. Requiring an earlier parent also excludes
     // cycles before any recursive or ancestor walk can begin.
-    if (kind > 62 || role > 26 || parent !== missing && parent >= i || flags > 2047 || actions > 2047) throw new Error("invalid widget routing node facts");
+    if (kind > 62 || role > 26 || parent !== missing && parent >= i || flags > 4095 || actions > 2047) throw new Error("invalid widget routing node facts");
     for (let r = 80; r < 96; r += 4) if (wire.getUint32(at + r, true) !== 0) throw new Error("invalid widget routing node reserved bytes");
     const transform: number[] = []; for (let t = 0; t < 6; t++) transform.push(wire.getFloat32(at + 56 + t * 4, true));
     nodes.push({ kind, role, parent, depth: wire.getUint32(at + 12, true), lo: wire.getUint32(at + 16, true), hi: wire.getUint32(at + 20, true), flags, actions,
@@ -187,6 +197,7 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
   const lo = wire.getUint32(16, true), hi = wire.getUint32(20, true), x = wire.getFloat32(24, true), y = wire.getFloat32(28, true);
   const lookup = (): number => { if (lo === 0 && hi === 0) return missing; for (let i = 0; i < count; i++) if (nodes[i]!.lo === lo && nodes[i]!.hi === hi) return i; return missing; };
   let target = missing, press = missing, status = 0, keepHit = false;
+  const observation: NscRouteObservation = { index: missing };
   const entries: NscRouteEntry[] = [];
   if (op <= 1) target = nscvRouteHitTree(nodes, x, y, layers, op === 1);
   else if (op === 2) target = nscvRoutePress(nodes, subject);
@@ -210,7 +221,7 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
       const i = lookup(); if (i < count && nscvRouteHit(nodes[i]!, false) && !nscvRouteHidden(nodes, i) && !nscvRouteConcealed(nodes, i) && nscvRouteVisible(nodes, i, false, 0, 0)) target = i;
     } else target = nscvRouteHitTree(nodes, x, y, layers, false);
     press = nscvRoutePress(nodes, target);
-  } else if (op === 7 || op === 11) { const i = lookup(); if (i < count && nscvRouteFocus(nodes, i, false)) target = i; }
+  } else if (op === 7 || op === 11) { const i = lookup(); if (i < count && nscvRouteFocus(nodes, i, false, observation)) target = i; }
   else if (op === 8 && param === 1) {
     for (let i = count - 1; i >= 0; i--) { const n = nodes[i]!; if (nscvRouteLive(n) && (n.flags & 1) === 0 && (n.actions & 512) !== 0 && !nscvRouteHidden(nodes, i) && !nscvRouteConcealed(nodes, i) && nscvRouteContains(n.frame, x, y) && nscvRouteVisible(nodes, i, true, x, y)) { target = i; break; } }
   } else if (op === 9) {
@@ -219,15 +230,20 @@ function nscvWidgetRouting(request: Uint8Array): Uint8Array {
     }
   } else if (op === 10) {
     const current = lookup();
-    if (param >= 2) { if (current < count) target = nscvRouteSpatial(nodes, current, param); }
+    if (param >= 2) { if (current < count) target = nscvRouteSpatial(nodes, current, param, observation); }
     else if (param === 0) {
-      for (let i = current === missing ? 0 : current + 1; i < count; i++) if (nscvRouteFocus(nodes, i, false)) { target = i; break; }
-      if (target === missing) for (let i = 0; i < (current === missing ? count : current); i++) if (nscvRouteFocus(nodes, i, false)) { target = i; break; }
+      for (let i = current === missing ? 0 : current + 1; i < count; i++) if (nscvRouteFocus(nodes, i, false, observation)) { target = i; break; }
+      if (target === missing) for (let i = 0; i < (current === missing ? count : current); i++) if (nscvRouteFocus(nodes, i, false, observation)) { target = i; break; }
     } else {
-      for (let i = (current === missing ? count : current) - 1; i >= 0; i--) if (nscvRouteFocus(nodes, i, false)) { target = i; break; }
-      if (target === missing) for (let i = count - 1; i >= (current === missing ? 0 : current + 1); i--) if (nscvRouteFocus(nodes, i, false)) { target = i; break; }
+      for (let i = (current === missing ? count : current) - 1; i >= 0; i--) if (nscvRouteFocus(nodes, i, false, observation)) { target = i; break; }
+      if (target === missing) for (let i = count - 1; i >= (current === missing ? 0 : current + 1); i--) if (nscvRouteFocus(nodes, i, false, observation)) { target = i; break; }
     }
-  } else if ((op === 12 || op === 13) && subject < count && nscvRouteFocus(nodes, subject, op === 13)) target = subject;
+  } else if ((op === 12 || op === 13) && subject < count && nscvRouteFocus(nodes, subject, op === 13, observation)) target = subject;
+  if (observation.index !== missing) {
+    const pending = new Uint8Array(24), out = new DataView(pending.buffer);
+    pending.set([1, op, 3, 0]); out.setUint32(4, observation.index, true); out.setUint32(8, missing, true);
+    return pending;
+  }
   if (op >= 6 && op <= 9 && target < count) {
     const path: number[] = []; let i = target;
     while (i < count) { if (path.length >= 32) { status = 1; break; } path.push(i); i = nodes[i]!.parent; }

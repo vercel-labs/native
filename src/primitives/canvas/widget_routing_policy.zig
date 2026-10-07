@@ -58,8 +58,8 @@ fn readIndex(value: u32, count: usize) ?usize {
     if (value >= count) @panic("invalid compiled routing index");
     return value;
 }
-/// op is a protocol query, param is its phase/direction. Scroll facts are
-/// observed only for focus queries, through the existing semantic owner.
+/// op is a protocol query, param is its phase/direction. The portable owner
+/// requests scroll observations only when ordinary focus gates need them.
 pub fn query(layout: anytype, policy: Policy, comptime op: u8, param: u8, subject: ?usize, id: ?u64, point: geometry.PointF, tokens: tokens_model.DesignTokens, capacity: usize, scroll_semantics_fn: anytype) Result {
     const allocator = std.heap.page_allocator;
     const count = std.math.cast(u32, layout.nodes.len) orelse @panic("routing node capacity");
@@ -86,14 +86,11 @@ pub fn query(layout: anytype, policy: Policy, comptime op: u8, param: u8, subjec
         put(bytes, 12, std.math.cast(u32, node.depth) orelse @panic("routing depth capacity"));
         std.mem.writeInt(u64, bytes[16..24], n.id, .little);
         // Authored flags only: no native target/visibility/focus verdicts.
-        var flags: u32 = @intFromBool(n.semantics.hidden) | (@as(u32, @intFromBool(n.state.disabled)) << 1) |
+        const flags: u32 = @intFromBool(n.semantics.hidden) | (@as(u32, @intFromBool(n.state.disabled)) << 1) |
             (@as(u32, @intFromBool(n.state.selected)) << 2) | (@as(u32, @intFromBool(n.layout.anchor != null)) << 3) |
             (@as(u32, @intFromBool(n.layout.clip_content)) << 4) | (@as(u32, @intFromBool(n.hover_msgs)) << 5) |
             (@as(u32, @intFromBool(n.window_drag)) << 6) | (@as(u32, @intFromBool(n.semantics.focusable)) << 7) |
             (@as(u32, @intFromBool(n.layer != null)) << 9) | (@as(u32, @intFromBool(n.chart.hover_details)) << 10);
-        if (comptime op == 7 or op >= 10) {
-            if (scroll_semantics_fn(layout, i).scrollable) flags |= 256;
-        }
         put(bytes, 24, flags);
         put(bytes, 28, events.semanticActionBits(n.semantics.actions));
         float(bytes, 32, n.value);
@@ -103,7 +100,24 @@ pub fn query(layout: anytype, policy: Policy, comptime op: u8, param: u8, subjec
     }
     // Path depth is 32, so the complete capture/target/bubble path is 63.
     var output: [24 + 63 * 8]u8 = undefined;
-    const written = policy(request, &output);
+    var written: usize = undefined;
+    var observations: usize = 0;
+    while (true) {
+        written = policy(request, &output);
+        if (written < 24 or output[2] != 3) break;
+        if (comptime op == 7 or op >= 10) {
+            const index = word(&output, 4);
+            if (written != 24 or output[0] != 1 or output[1] != op or output[3] != 0 or index >= count or word(&output, 8) != missing or word(&output, 12) != 0 or word(&output, 16) != 0 or word(&output, 20) != 0 or observations >= count)
+                @panic("invalid compiled routing observation");
+            const at = 64 + @as(usize, index) * 96 + 24;
+            var flags = word(request, at);
+            if (flags & 2048 != 0) @panic("repeated compiled routing observation");
+            flags |= 2048;
+            if (scroll_semantics_fn(layout, index).scrollable) flags |= 256;
+            put(request, at, flags);
+            observations += 1;
+        } else @panic("unexpected compiled routing observation");
+    }
     if (written < 24 or written > output.len or output[0] != 1 or output[1] != op or output[2] > 2 or (if (op == 3) output[3] > 1 else output[3] != 0) or word(&output, 16) != 0 or word(&output, 20) != 0) @panic("invalid compiled routing result");
     const len = word(&output, 12);
     if (len > 63 or len > capacity or written != 24 + @as(usize, len) * 8 or (op != 4 and (op < 6 or op > 9) and len != 0) or ((op < 6 or op > 9) and output[2] != 0)) @panic("invalid compiled routing path");

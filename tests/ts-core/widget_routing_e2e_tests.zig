@@ -14,6 +14,32 @@ fn owned(reference: tree) tree {
     value.routing_policy = core.nativeWindowPolicy;
     return value;
 }
+var observation_indices: [128]usize = undefined;
+var observation_count: usize = 0;
+fn observeScroll(_: tree, index: usize) struct { scrollable: bool } {
+    observation_indices[observation_count] = index;
+    observation_count += 1;
+    return .{ .scrollable = index == 1 };
+}
+test "compiled widget routing requests only required scroll observations in focus order" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var nodes: [128]canvas.WidgetLayoutNode = undefined;
+    for (&nodes, 0..) |*n, i| n.* = node(.{ .kind = if (i == 2) .button else .row, .id = i + 1 }, .init(0, 0, 30, 30), null, 0);
+    const layout = owned(.{ .nodes = &nodes });
+    observation_count = 0;
+    const direct = routing.query(layout, core.nativeWindowPolicy, 12, 0, 2, null, .{}, .{}, 0, observeScroll);
+    try std.testing.expectEqual(@as(?usize, 2), direct.target);
+    try std.testing.expectEqual(@as(usize, 0), observation_count);
+    const forward = routing.query(layout, core.nativeWindowPolicy, 10, 0, null, null, .{}, .{}, 0, observeScroll);
+    try std.testing.expectEqual(@as(?usize, 1), forward.target);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, observation_indices[0..observation_count]);
+    observation_count = 0;
+    nodes[1].widget.state.disabled = true;
+    const eligible = routing.query(layout, core.nativeWindowPolicy, 10, 0, null, null, .{}, .{}, 0, observeScroll);
+    try std.testing.expectEqual(@as(?usize, 2), eligible.target);
+    try std.testing.expectEqualSlices(usize, &.{0}, observation_indices[0..observation_count]);
+}
 fn routeEqual(expected: anytype, actual: @TypeOf(expected)) !void {
     if (expected) |value| {
         try exact(value, try actual);

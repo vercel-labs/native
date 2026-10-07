@@ -6,13 +6,13 @@ const source = ["runtime_policy.ts", "widget_routing.ts"].map(p => readFileSync(
 const { nscvWidgetRouting: route } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport { nscvWidgetRouting };").toString("base64")}`);
 const missing = 0xffffffff;
 const wire = (b: Uint8Array) => new DataView(b.buffer, b.byteOffset, b.byteLength);
-interface Node { kind?: number; role?: number; parent?: number; depth?: number; id?: bigint; flags?: number; actions?: number; value?: number; layer?: number; frame?: number[]; transform?: number[] }
+interface Node { kind?: number; role?: number; parent?: number; depth?: number; id?: bigint; flags?: number; observed?: boolean; actions?: number; value?: number; layer?: number; frame?: number[]; transform?: number[] }
 function packet(op: number, nodes: Node[], options: { param?: number; subject?: number; id?: bigint; point?: number[]; capacity?: number; layers?: number[] } = {}) {
   const b = new Uint8Array(64 + nodes.length * 96), w = wire(b);
   b.set([24, 1, op, options.param ?? 0]); w.setUint32(4, nodes.length, true); w.setUint32(8, options.subject ?? missing, true); w.setUint32(12, options.capacity ?? 63, true);
   w.setUint32(48, Number(options.id !== undefined), true); w.setBigUint64(16, options.id ?? 0n, true); (options.point ?? [5, 5]).forEach((v, i) => w.setFloat32(24 + i * 4, v, true)); (options.layers ?? [0, 10, 20, 30]).forEach((v, i) => w.setInt32(32 + i * 4, v, true));
   nodes.forEach((n, i) => { const p = 64 + i * 96;
-    for (const [at, v] of [[0, n.kind ?? 31], [4, n.role ?? 0], [8, n.parent ?? missing], [12, n.depth ?? i], [24, n.flags ?? 0], [28, n.actions ?? 0]]) w.setUint32(p + at!, v!, true);
+    for (const [at, v] of [[0, n.kind ?? 31], [4, n.role ?? 0], [8, n.parent ?? missing], [12, n.depth ?? i], [24, (n.flags ?? 0) | (n.observed === false ? 0 : 2048)], [28, n.actions ?? 0]]) w.setUint32(p + at!, v!, true);
     w.setBigUint64(p + 16, n.id ?? BigInt(i + 1), true); w.setFloat32(p + 32, n.value ?? 0, true); w.setInt32(p + 36, n.layer ?? 0, true);
     (n.frame ?? [0, 0, 30, 30]).forEach((v, t) => w.setFloat32(p + 40 + t * 4, v, true)); (n.transform ?? [1, 0, 0, 1, 0, 0]).forEach((v, t) => w.setFloat32(p + 56 + t * 4, v, true));
   }); return b;
@@ -76,6 +76,21 @@ test("file-drop reverses mounted order while drag falls through to its eligible 
   assert.equal(result(route(packet(8, nodes))).target, missing);
   nodes[3]!.flags = 2; assert.equal(result(route(packet(8, nodes, { param: 1 }))).target, 2);
 });
+test("focus asks only for necessary semantic facts and resumes in reference order", () => {
+  const nodes: Node[] = [{ kind: 1, observed: false }, { kind: 1, observed: false }, { observed: false }, { kind: 1, observed: false }];
+  // Indexed and keyboard focus on a button need no scroll observation,
+  // including when unrelated containers have no supplied facts.
+  for (const op of [7, 11]) assert.equal(result(route(packet(op, nodes, { id: 3n }))).status, 0);
+  for (const op of [12, 13]) assert.equal(result(route(packet(op, nodes, { subject: 2 }))).status, 0);
+  const request = packet(10, nodes);
+  assert.deepEqual(result(route(request)), { status: 3, target: 0, press: missing, entries: [] });
+  wire(request).setUint32(64 + 24, 2048, true);
+  assert.deepEqual(result(route(request)), { status: 3, target: 1, press: missing, entries: [] });
+  wire(request).setUint32(64 + 96 + 24, 2048 | 256, true);
+  assert.deepEqual(result(route(request)), { status: 0, target: 1, press: missing, entries: [] });
+  // A disabled candidate stands down before it can request a fact.
+  assert.equal(result(route(packet(13, [{ kind: 1, flags: 2, observed: false }], { subject: 0 }))).status, 0);
+});
 test("hover keeps a caller's complete link or unclaimed hit and reconstructs claiming ancestors", () => {
   const nodes: Node[] = [{ kind: 1 }, { kind: 26, parent: 0 }];
   let out = route(packet(3, nodes, { subject: 1, param: 1 })); assert.equal(out[3], 1); assert.equal(result(out).target, 1);
@@ -91,5 +106,5 @@ test("requests reject truncation, trailing bytes, cycles, future parents and unk
   const valid = packet(0, [{}]);
   for (let i = 0; i < valid.length; i++) assert.throws(() => route(valid.subarray(0, i)));
   const trailing = new Uint8Array(valid.length + 1); trailing.set(valid); assert.throws(() => route(trailing));
-  for (const [at, value] of [[0, 0], [1, 2], [2, 14], [3, 1], [48, 2], [52, 1], [64, 63], [68, 27], [72, 0], [88, 2048], [92, 2048], [144, 1]]) { const bad = valid.slice(); if (at! < 4) bad[at!] = value!; else wire(bad).setUint32(at!, value!, true); assert.throws(() => route(bad), `field ${at}`); }
+  for (const [at, value] of [[0, 0], [1, 2], [2, 14], [3, 1], [48, 2], [52, 1], [64, 63], [68, 27], [72, 0], [88, 4096], [92, 2048], [144, 1]]) { const bad = valid.slice(); if (at! < 4) bad[at!] = value!; else wire(bad).setUint32(at!, value!, true); assert.throws(() => route(bad), `field ${at}`); }
 });
