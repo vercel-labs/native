@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_geometry = @import("control_geometry_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -281,6 +282,7 @@ pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTok
 /// each keeps all four corners.
 fn buttonGroupSegmentRadius(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Radius {
     const radius = buttonControlRadius(widget, visual, tokens);
+    if (tokens.control_geometry_policy != null) return control_geometry.segment(widget, tokens, radius, widget_render_style.buttonInDetachedGroup(widget, tokens));
     if (widget_render_style.buttonInDetachedGroup(widget, tokens)) return radius;
     return switch (widget.group_segment) {
         .none => radius,
@@ -951,9 +953,10 @@ fn segmentedTriggerRadius(widget: Widget, visual: ControlVisualTokens, tokens: D
 /// hairline where they meet. Null in the `.pill` register; shared with
 /// invalidation.
 pub fn segmentedControlUnderlineRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
-    if (tokens.controls.tabs_indicator != .underline) return null;
+    if (tokens.controls.tabs_indicator != .underline or widget.frame.normalized().isEmpty()) {
+        return if (tokens.control_geometry_policy != null) control_geometry.underline(widget, tokens, 0, 0, 0) else null;
+    }
     const frame = widget.frame.normalized();
-    if (frame.isEmpty()) return null;
     const thickness = @min(frame.height, widgetSizedDensityValue(widget, tokens, tokens.metrics.tabs_indicator_thickness));
     const text_size = widgetTabTriggerTextSize(widget, tokens);
     const text_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
@@ -962,6 +965,7 @@ pub fn segmentedControlUnderlineRect(widget: Widget, tokens: DesignTokens) ?geom
     else
         0;
     const content_width = icon_width + text_width;
+    if (tokens.control_geometry_policy != null) return control_geometry.underline(widget, tokens, text_width, icon_width, widgetTabTriggerInset(widget, tokens));
     // A truly empty trigger has no content to hug, so retain the
     // historical full-frame marker instead of collapsing it to an
     // invisible zero-width rect.
@@ -1236,8 +1240,9 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const selected = booleanControlSelected(widget);
     const visual = selectionControlVisualTokens(widget, tokens);
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .toggle) else null;
     const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
-    const track = toggleWidgetTrackRect(widget, tokens);
+    const track = if (plan) |v| v.rects[0] else toggleWidgetTrackRect(widget, tokens);
     // The house rail is a pill in every size register. Explicit
     // widget/theme radii still shape both rail and thumb.
     const track_radius = selectionShapeRadius(widget, visual, track.height * 0.5);
@@ -1246,7 +1251,7 @@ pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         track.x + track.width - knob_size - knob_inset
     else
         track.x + knob_inset;
-    const knob = pixelSnapGeometryRect(tokens, geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size));
+    const knob = if (plan) |v| v.rects[if (selected) @as(usize, 2) else 1] else pixelSnapGeometryRect(tokens, geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size));
 
     const track_rest = if (selected)
         widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
@@ -1326,11 +1331,12 @@ fn selectionShapeRadius(widget: Widget, visual: ControlVisualTokens, fallback: f
 }
 
 pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const value = std.math.clamp(widget.value, 0, 1);
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .slider) else null;
+    const value = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
-    const track = sliderWidgetTrackRect(widget, tokens);
-    const active = pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
-    const knob = sliderWidgetKnobRect(widget, tokens);
+    const track = if (plan) |v| v.rects[0] else sliderWidgetTrackRect(widget, tokens);
+    const active = if (plan) |v| v.rects[2] else pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
+    const knob = if (plan) |v| v.rects[1] else sliderWidgetKnobRect(widget, tokens);
     // The rail is a pill in every register; the RADIUS channel (widget
     // style or the themed slider table) shapes only the thumb, because
     // thumb shape is where slider registers actually differ — a round
@@ -1362,7 +1368,7 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     // width-zero pill still owns anti-aliased edge coverage, so an idle
     // transport slider (value 0, disabled) showed a one-pixel filled
     // sliver at the rail's start.
-    if (value > 0) {
+    if (if (plan) |v| v.flags & 8 != 0 else value > 0) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 2),
             .rect = active,
@@ -1403,6 +1409,7 @@ pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 }
 
 pub fn checkboxWidgetBoxRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_geometry.controls(widget, tokens, .choice).rects[0];
     // 16px box at default size/density — the size-4 checkbox metric.
     const box_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
@@ -1414,6 +1421,7 @@ pub fn checkboxWidgetBoxRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 pub fn radioWidgetCircleRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_geometry.controls(widget, tokens, .choice).rects[0];
     // 16px circle at default size/density — the size-4 radio metric.
     const circle_size = @min(@max(widgetSizedDensityValue(widget, tokens, 16), widget.frame.height * 0.55), widgetSizedDensityValue(widget, tokens, 20));
     return pixelSnapGeometryRect(tokens, geometry.RectF.init(
@@ -1425,6 +1433,7 @@ pub fn radioWidgetCircleRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 pub fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_geometry.controls(widget, tokens, .toggle).rects[0];
     // 44x24 track at default size/density, giving the 20px thumb (track
     // height minus the 2px inset per side) 20px of travel — the classic
     // switch proportion, and wide enough that on/off read at a glance.
@@ -1439,6 +1448,7 @@ pub fn toggleWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.Rect
 }
 
 fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_geometry.controls(widget, tokens, .slider).rects[0];
     // The rail thickness comes off the metric ladder (house register:
     // a quiet 4px line — the thumb, not the rail, gives the control its
     // weight); packs with a heavier rail restate the token.
@@ -1452,6 +1462,7 @@ fn sliderWidgetTrackRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
 }
 
 pub fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_geometry.controls(widget, tokens, .slider).rects[1];
     const value = std.math.clamp(widget.value, 0, 1);
     // Thumb geometry off the metric ladder (house register: a 12px dot;
     // width and height are separate tokens because some registers use a
@@ -1474,10 +1485,11 @@ pub fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF
 }
 
 pub fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const progress = std.math.clamp(widget.value, 0, 1);
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .progress) else null;
+    const progress = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, @min(tokens.radius.md, widget.frame.height * 0.5));
-    if (progress < 1) {
+    if (if (plan) |v| v.flags & 16 != 0 else progress < 1) {
         // The unfilled track sits on the muted wash (the same rail the
         // slider uses), so the primary indicator reads against a quiet
         // gray rather than against a tint of itself.
@@ -1488,10 +1500,10 @@ pub fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignToken
             .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
         });
     }
-    if (progress > 0) {
+    if (if (plan) |v| v.flags & 8 != 0 else progress > 0) {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 2),
-            .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
+            .rect = if (plan) |v| v.rects[0] else pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
             .radius = radius,
             .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
         });

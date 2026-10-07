@@ -4337,6 +4337,7 @@ pub fn textCaretCommandId(kind: WidgetKind, id: ObjectId) ObjectId {
 
 pub fn toggleWidgetKnobTravel(widget: Widget, tokens: DesignTokens) f32 {
     if (!widgetSwitchControlKind(widget.kind)) return 0;
+    if (tokens.control_geometry_policy != null) return @import("control_geometry_policy.zig").controls(widget, tokens, .toggle).scalar;
     // Shares the renderer's track/inset metrics (44x24 track, 2px thumb
     // inset, both size- and density-scaled) so animated travel lands on
     // exactly the painted on/off thumb positions.

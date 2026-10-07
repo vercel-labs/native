@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_geometry = @import("control_geometry_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -42,6 +43,7 @@ pub fn emitScrollViewScrollbars(builder: *Builder, frame: geometry.RectF, vertic
 /// OTHER bar's thickness plus the edge inset, 0 when either bar is
 /// absent.
 fn scrollbarCornerReserve(frame: geometry.RectF, vertical: WidgetScrollMetrics, horizontal: WidgetScrollMetrics, tokens: DesignTokens, axis: token_model.ScrollAxis) f32 {
+    if (tokens.control_geometry_policy != null) return control_geometry.corner(frame, vertical, horizontal, tokens, axis);
     if (!scrollbarAxisVisible(vertical) or !scrollbarAxisVisible(horizontal)) return 0;
     const inset = densityValue(tokens, 3);
     const other: token_model.ScrollAxis = if (axis == .vertical) .horizontal else .vertical;
@@ -64,9 +66,10 @@ fn scrollbarThickness(frame: geometry.RectF, tokens: DesignTokens, axis: token_m
 }
 
 fn emitScrollViewScrollbarAxis(builder: *Builder, frame: geometry.RectF, metrics: WidgetScrollMetrics, tokens: DesignTokens, id: ObjectId, axis: token_model.ScrollAxis, reserved_end: f32, track_slot: ObjectId) Error!void {
-    const scrollbar = scrollViewScrollbarGeometryForAxis(frame, metrics, tokens, axis, reserved_end) orelse return;
-    const track = pixelSnapGeometryRect(tokens, scrollbar.track);
-    const thumb = pixelSnapGeometryRect(tokens, scrollbar.thumb);
+    const owned = tokens.control_geometry_policy != null;
+    const scrollbar = (if (owned) control_geometry.scrollbar(frame, metrics, tokens, axis, reserved_end, true) else scrollViewScrollbarGeometryForAxis(frame, metrics, tokens, axis, reserved_end)) orelse return;
+    const track = if (owned) scrollbar.track else pixelSnapGeometryRect(tokens, scrollbar.track);
+    const thumb = if (owned) scrollbar.thumb else pixelSnapGeometryRect(tokens, scrollbar.thumb);
     const visual = tokens.controls.scrollbar;
     const bar_thickness = if (axis == .vertical) track.width else track.height;
     const radius = Radius.all(if (visual.radius) |value| nonNegative(value) else bar_thickness * 0.5);
@@ -91,6 +94,7 @@ pub fn scrollViewScrollbarGeometry(frame: geometry.RectF, metrics: WidgetScrollM
 }
 
 pub fn scrollViewScrollbarGeometryForAxis(frame: geometry.RectF, metrics: WidgetScrollMetrics, tokens: DesignTokens, axis: token_model.ScrollAxis, reserved_end: f32) ?ScrollbarGeometry {
+    if (tokens.control_geometry_policy != null) return control_geometry.scrollbar(frame, metrics, tokens, axis, reserved_end, false);
     if (!metrics.present) return null;
     const viewport = nonNegative(metrics.viewport_extent);
     const content = nonNegative(metrics.content_extent);
@@ -138,6 +142,10 @@ pub fn widgetScrollMetricsForWidget(widget: Widget, tokens: DesignTokens) Widget
 /// scenes — children carry their own frames). `present = false` on an
 /// axis the region does not grant, mirroring the layout-walk metrics.
 pub fn widgetScrollAxisMetricsForWidget(widget: Widget, tokens: DesignTokens, axis: token_model.ScrollAxis) WidgetScrollMetrics {
+    if (tokens.control_geometry_policy != null) {
+        const plan = control_geometry.scrollMetrics(widget, tokens);
+        return if (axis == .vertical) plan.vertical else plan.horizontal;
+    }
     if (widget.kind != .scroll_view) return .{};
 
     const viewport = widget.frame.inset(widget.layout.padding).normalized();

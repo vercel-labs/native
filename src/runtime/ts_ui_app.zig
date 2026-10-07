@@ -474,6 +474,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 if (options.widget_paint_walk_policy != null) @panic("TsUiApp owns widget_paint_walk_policy - remove custom paint traversal wiring");
                 stamped.widget_presentation_policy = core.nativeWindowPolicy;
                 stamped.widget_paint_walk_policy = core.nativeWindowPolicy;
+                if (options.control_geometry_policy != null) @panic("TsUiApp owns control_geometry_policy - remove custom geometry wiring");
+                stamped.control_geometry_policy = core.nativeWindowPolicy;
             }
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");
