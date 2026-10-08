@@ -130,19 +130,20 @@ test "root TypeScript markup discovery classification and resolver budgets" {
 
 test "generated TypeScript runners install the compiled root markup view" {
     const desktop = @embedFile("src/app_runner/ts_core_main.zig");
-    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled })") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "if (dev) void else @import(\"app_markup_root\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
-    try std.testing.expect(std.mem.indexOf(u8, desktop, "if (comptime ts_view.enabled) options.view = ts_view.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "if (comptime ts_view.enabled) options.view = ts_view.buildRuntime") != null);
     try std.testing.expect(std.mem.indexOf(u8, desktop, ".markup = if (dev and !ts_view.enabled)") != null);
 
     const mobile = @embedFile("src/app_runner/ts_core_mobile.zig");
-    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false, .compiled_model = ts_view.enabled }") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, "TsUiAppWithFeatures(core, features)") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, "const app_markup_root = @import(\"app_markup_root\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mobile, ".view = CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, ".view = if (ts_view.enabled) ts_view.buildRuntime else CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const SourceModel = core.Model") != null);
     try std.testing.expect(std.mem.indexOf(u8, mobile, ".markup =") == null);
 }
 
