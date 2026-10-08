@@ -79,6 +79,14 @@ test "compiled widget metric render recipes preserve nested cascades segment sta
         for ([_]bool{ false, true }) |retained| try compare(widget, .{}, state, retained, 2048);
     };
 }
+test "compiled widget metric render recipes preserve numeric accordion disclosure and capacity prefixes" {
+    _ = core.initialModel();
+    const children = [_]c.Widget{.{ .id = 2, .kind = .text, .text = "Numeric disclosure child", .frame = .init(12, 48, 180, 28) }};
+    for ([_]bool{ false, true }) |selected| for ([_]f32{ 0, 0.49999997, 0.5, 1, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) }) |value| {
+        const widget: c.Widget = .{ .id = 1, .kind = .accordion, .text = "Details", .value = value, .state = .{ .selected = selected }, .frame = .init(0, 0, 250, 140), .children = &children, .layout = .{ .clip_content = true } };
+        for ([_]bool{ false, true }) |retained| for ([_]usize{ 0, 1, 2, 3, 8, 32, 2048 }) |capacity| try compare(widget, .{}, .{}, retained, capacity);
+    };
+}
 test "compiled widget metric render recipes preserve complete capacity failure prefixes" {
     _ = core.initialModel();
     const children = [_]c.Widget{.{ .id = 2, .kind = .button, .text = "Child", .frame = .init(10, 45, 100, 30) }};

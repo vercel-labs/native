@@ -2,6 +2,7 @@
 const std = @import("std");
 const widgets = @import("widgets.zig");
 const tokens = @import("tokens.zig");
+const widget_access = @import("widget_access.zig");
 pub const reference = @import("widget_tree.zig");
 pub const Policy = @import("surface_layout_policy.zig").Policy;
 pub const Mode = enum(u8) { tree, retained };
@@ -69,7 +70,7 @@ pub const Recipe = struct {
         var request: [32]u8 = @splat(0);
         request[0..4].* = .{ 43, 1, @intFromEnum(mode), disclosure };
         var flags: u32 = 0;
-        for ([_]bool{ widget.layout.clip_content, widget.layout.virtualized, widget.spans.len > 0, code_paragraph, widget.runtime_flags.code_editor, widget.runtime_flags.native_scroll, widget.state.selected, widget.children.len > 0, widget.semantics.hidden, t.controls.button_group_style == .detached, widget.scrim }, 0..) |value, i|
+        for ([_]bool{ widget.layout.clip_content, widget.layout.virtualized, widget.spans.len > 0, code_paragraph, widget.runtime_flags.code_editor, widget.runtime_flags.native_scroll, widget_access.booleanControlSelected(widget), widget.children.len > 0, widget.semantics.hidden, t.controls.button_group_style == .detached, widget.scrim }, 0..) |value, i|
             flags |= @as(u32, @intFromBool(value)) << @intCast(i);
         word(&request, 4, flags);
         std.mem.writeInt(u64, request[8..16], depth, .little);
