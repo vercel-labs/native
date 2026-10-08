@@ -567,8 +567,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             nodes: for (layout.nodes, 0..) |node, node_index| {
                 if (node.widget.kind != .spinner and node.widget.kind != .skeleton) continue;
                 const mode: u8 = if (node.widget.kind == .skeleton) 2 else if (view.widget_tokens.metrics.spinner_style == .segmented) 1 else 0;
-                const count = if (mode == 1) canvas.spinnerWidgetSegmentCount(view.widget_tokens) else 1;
-                const first_id = if (mode == 2) canvas.skeletonWidgetFillCommandId(node.widget.id) else if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, 0) else canvas.spinnerWidgetArcCommandId(node.widget.id);
+                var laid_out = node.widget;
+                laid_out.frame = node.frame;
+                // Portable spinner plans own segment identities and the rotation center.
+                const anchors: ?canvas.indicator_plan_policy.Anchors = if (mode != 2 and view.widget_tokens.control_command_policy != null) canvas.indicator_plan_policy.anchors(laid_out, view.widget_tokens) else null;
+                const count = if (mode == 1) (if (anchors) |a| a.count else canvas.spinnerWidgetSegmentCount(view.widget_tokens)) else 1;
+                const first_id = if (mode == 2) canvas.skeletonWidgetFillCommandId(node.widget.id) else if (anchors) |a| (if (mode == 1) a.segment_ids[0] else a.arc_id) else if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, 0) else canvas.spinnerWidgetArcCommandId(node.widget.id);
                 const existing = existingCanvasRenderAnimationStartNs(view, first_id);
                 const capacity = desired_ids.len - desired_count;
                 const flags = @as(u8, @intFromBool(node.widget.id != 0)) | (@as(u8, @intFromBool(view.widget_tokens.motion.durationMs(.slow) != 0)) << 1) |
@@ -582,14 +586,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                         if (flags & 31 == 31 and count > capacity) break :nodes;
                         break;
                     }
-                    const command_id = if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, segment) else first_id;
+                    const command_id = if (mode == 1) (if (anchors) |a| a.segment_ids[segment] else canvas.spinnerWidgetSegmentCommandId(node.widget.id, segment)) else first_id;
                     var animation: canvas.CanvasRenderAnimation = .{ .id = command_id, .start_ns = plan.start, .duration_ms = plan.duration, .easing = plan.easing, .loop = plan.loop };
                     if (mode == 0) {
-                        var laid_out = node.widget;
-                        laid_out.frame = node.frame;
                         animation.from_rotation = plan.from;
                         animation.to_rotation = plan.to;
-                        animation.rotation_center = canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens);
+                        animation.rotation_center = if (anchors) |a| a.center else canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens);
                     } else {
                         animation.from_opacity = plan.from;
                         animation.to_opacity = plan.to;

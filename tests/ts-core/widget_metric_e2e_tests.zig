@@ -12,6 +12,8 @@ test {
     _ = @import("control_command_e2e_tests.zig");
     _ = @import("leaf_plan_e2e_tests.zig");
     _ = @import("chart_plan_e2e_tests.zig");
+    _ = @import("indicator_plan_e2e_tests.zig");
+    _ = @import("effect_plan_e2e_tests.zig");
 }
 fn owned(tokens: c.DesignTokens) c.DesignTokens {
     var t = tokens;

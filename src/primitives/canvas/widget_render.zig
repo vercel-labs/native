@@ -27,6 +27,8 @@ const presentation_policy = @import("widget_presentation_policy.zig");
 const paint_walk_policy = @import("widget_paint_walk_policy.zig");
 const leaves = @import("leaf_plan_policy.zig");
 const chart_plans = @import("chart_plan_policy.zig");
+const indicator_plans = @import("indicator_plan_policy.zig");
+const effect_plans = @import("effect_plan_policy.zig");
 const emission = @import("render_coordination_policy.zig");
 
 const Error = canvas.Error;
@@ -1196,6 +1198,16 @@ fn emitRetainedRecipe(builder: *Builder, layout: anytype, node_index: usize, tok
 /// ladder as a list row over its full hit frame; an authored background is
 /// its rest fill. Non-actionable containers paint only that authored fill.
 fn emitLayoutContainerBackground(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.container, widget, tokens, null);
+        plan.run();
+        if (plan.wantsListFill()) {
+            plan.reply(listItemFillColor(widget, tokens, widget.state));
+            plan.run();
+            if (plan.wantsListFill()) @panic("effect plan repeated its appearance query");
+        }
+        return executeEffectPlan(builder, plan);
+    }
     const actions = widget.semantics.actions;
     const actionable = widget.id != 0 and !widget.state.disabled and
         (actions.press or actions.toggle or actions.drag);
@@ -1298,6 +1310,11 @@ fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.Poi
 }
 
 fn emitWidgetBackdropBlur(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.backdrop, widget, tokens, null);
+        plan.run();
+        return executeEffectPlan(builder, plan);
+    }
     const radius = widgetBackdropBlur(widget, tokens);
     if (radius <= 0 or widget.frame.normalized().isEmpty()) return;
     try builder.blur(.{
@@ -1308,6 +1325,11 @@ fn emitWidgetBackdropBlur(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 pub fn widgetBackdropBlur(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.backdrop, widget, tokens, null);
+        plan.run();
+        return plan.scalar();
+    }
     const explicit = nonNegative(widget.backdrop_blur);
     if (explicit > 0) return explicit;
     if (widget.backdrop_blur_token) |token| return nonNegative(tokens.blur.value(token));
@@ -1320,6 +1342,11 @@ pub fn widgetBackdropBlur(widget: Widget, tokens: DesignTokens) f32 {
 /// blur + dim treatment. Anchored surfaces (popover, menus, tooltips)
 /// are NOT modal and never scrim.
 pub fn widgetEmitsModalScrim(widget: Widget, tokens: DesignTokens) bool {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.scrim, widget, tokens, null);
+        plan.run();
+        return plan.flag();
+    }
     if (!widget.scrim) return false;
     return switch (widget.kind) {
         .dialog, .drawer, .sheet => tokens.colors.scrim.a > 0 or nonNegative(tokens.blur.scrim) > 0,
@@ -1339,6 +1366,11 @@ pub fn widgetEmitsModalScrim(widget: Widget, tokens: DesignTokens) bool {
 /// wrappers, and honoring reduced motion costs nothing because nothing
 /// here moves.
 fn emitModalSurfaceScrim(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.scrim, widget, tokens, scrim_viewport);
+        plan.run();
+        return executeEffectPlan(builder, plan);
+    }
     if (!widgetEmitsModalScrim(widget, tokens)) return;
     const viewport = (scrim_viewport orelse widget.frame.normalized());
     if (viewport.isEmpty()) return;
@@ -1359,6 +1391,18 @@ fn emitModalSurfaceScrim(builder: *Builder, widget: Widget, tokens: DesignTokens
     }
 }
 
+/// Draw copied surface effect commands through native capabilities.
+fn executeEffectPlan(builder: *Builder, plan: effect_plans.Plan) Error!void {
+    for (0..plan.count()) |index| {
+        const command = plan.command(index);
+        switch (command.op) {
+            .fill_round => try builder.fillRoundedRect(.{ .id = command.id, .rect = command.rect, .radius = Radius.all(command.radius), .fill = colorFill(command.color) }),
+            .blur => try builder.blur(.{ .id = command.id, .rect = command.rect, .radius = command.radius }),
+            .fill_rect => try builder.fillRect(.{ .id = command.id, .rect = command.rect, .fill = colorFill(command.color) }),
+        }
+    }
+}
+
 fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
     return .{
         .id = widgetPartId(widget.id, 9),
@@ -1368,6 +1412,17 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 }
 
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.clip, widget, tokens, null);
+        plan.run();
+        return switch (plan.clipSource()) {
+            .none => .{},
+            .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
+            .large => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+            .extra_large => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+            .medium => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
+        };
+    }
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
         // The bubble clips at its own capsule arc so wide content (an
@@ -3601,6 +3656,7 @@ const spinner_arc_stroke_ratio: f32 = 2.0 / 24.0;
 ///   the static pose shows the head-to-tail trail.
 fn emitSpinnerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = componentControlVisualTokens(widget, tokens);
+    if (tokens.control_command_policy != null) return executeIndicatorPlan(builder, widget, tokens, visual);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
     const size = @min(normalized.width, normalized.height);
@@ -3747,6 +3803,25 @@ fn emitSpinnerSegments(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     }
 }
 
+/// Execute the portable spinner plan: resolve appearance when asked, then
+/// draw each copied path through the native builder.
+fn executeIndicatorPlan(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    var plan = indicator_plans.Plan.init(widget, tokens);
+    if (plan.run() == .appearance) {
+        const ink = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+        const stroke = if (tokens.metrics.spinner_style == .arc) controlStrokeWidth(widget, visual, plan.strokeFallback()) else 0;
+        plan.reply(ink, stroke);
+        if (plan.run() != .done) @panic("indicator plan repeated its appearance query");
+    }
+    for (0..plan.count()) |index| {
+        const elements = try builder.allocPathElements(plan.elementCount(index));
+        for (elements, 0..) |*element, ordinal| element.* = plan.element(index, ordinal);
+        if (plan.stroked(index)) {
+            try builder.strokePath(.{ .id = plan.commandId(index), .elements = elements, .stroke = .{ .fill = colorFill(plan.color(index)), .width = plan.strokeWidth() }, .cap = .round });
+        } else try builder.fillPath(.{ .id = plan.commandId(index), .elements = elements, .fill = colorFill(plan.color(index)) });
+    }
+}
+
 /// The command id of a spinner's accent arc segment — the part slot
 /// `emitSpinnerWidget` draws it under — so the runtime can target the
 /// arc with a looping rotation render animation.
@@ -3758,6 +3833,7 @@ pub fn spinnerWidgetArcCommandId(id: ObjectId) ObjectId {
 /// center of the PAINTED frame (pixel-snapped exactly like emission),
 /// so the sampled rotation never wobbles against the emitted geometry.
 pub fn spinnerWidgetRotationCenter(widget: Widget, tokens: DesignTokens) geometry.PointF {
+    if (tokens.control_command_policy != null) return indicator_plans.anchors(widget, tokens).center;
     const normalized = pixelSnapGeometryRect(tokens, widget.frame).normalized();
     return geometry.PointF.init(normalized.x + normalized.width * 0.5, normalized.y + normalized.height * 0.5);
 }
@@ -3775,6 +3851,7 @@ pub fn spinnerWidgetSegmentCommandId(id: ObjectId, index: usize) ObjectId {
 /// range). Emitter and runtime both resolve the count through here, so
 /// the armed opacity loops always match the emitted commands one-to-one.
 pub fn spinnerWidgetSegmentCount(tokens: DesignTokens) usize {
+    if (tokens.control_command_policy != null) return indicator_plans.anchors(.{ .kind = .spinner }, tokens).count;
     return @intCast(std.math.clamp(tokens.metrics.spinner_segment_count, 3, 15));
 }
 

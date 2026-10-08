@@ -243,6 +243,8 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 48) return nscvControlVectors(request);
   if (request[0] === 49) return nscvLeafPlans(request);
   if (request[0] === 50) return nscvChartPlans(request);
+  if (request[0] === 51) return nscvIndicatorPlans(request);
+  if (request[0] === 52) return nscvEffectPlans(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
