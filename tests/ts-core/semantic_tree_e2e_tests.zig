@@ -190,6 +190,71 @@ test "compiled semantics preserve authored roles all state bits values chart dat
 fn customVirtualExtent(_: canvas.Widget, viewport: f32) f32 {
     return viewport + 512.25;
 }
+
+var semantic_action_calls: usize = 0;
+fn countedSemanticActions(request: []const u8, output: []u8) usize {
+    std.debug.assert(request.len == 6 and request[0] == 17);
+    semantic_action_calls += 1;
+    return core.nativeTextPolicy(request, output);
+}
+
+test "compiled semantic collection shares one copied action and focusability response" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    for (std.enums.values(canvas.WidgetKind)) |kind| {
+        for (0..32) |bits| {
+            const widget = canvas.Widget{
+                .id = 1,
+                .kind = kind,
+                .command = if (bits & 16 != 0) "activate" else "",
+                .state = .{ .disabled = bits & 1 != 0, .read_only = bits & 2 != 0 },
+                .semantics = .{
+                    .role = if (bits & 4 != 0) .treeitem else .none,
+                    .focusable = bits & 8 != 0,
+                    .actions = .{ .focus = true, .press = true, .set_text = true, .drop_files = true, .dismiss = true },
+                },
+            };
+            const expected_nodes = [_]canvas.WidgetLayoutNode{.{ .widget = widget, .frame = .init(0, 0, 240, 100), .depth = 0, .parent_index = null }};
+            var actual_nodes = expected_nodes;
+            actual_nodes[0].widget.interaction_policy = countedSemanticActions;
+            const native = canvas.WidgetLayoutTree{ .nodes = &expected_nodes };
+            const compiled = canvas.WidgetLayoutTree{ .nodes = &actual_nodes, .semantic_policy = core.nativeWindowPolicy };
+            var expected: [1]canvas.WidgetSemanticsNode = undefined;
+            var actual: [1]canvas.WidgetSemanticsNode = undefined;
+            semantic_action_calls = 0;
+            try expectComplete(try native.collectSemantics(&expected), try compiled.collectSemantics(&actual));
+            try std.testing.expectEqual(@as(usize, if (widget.state.disabled) 0 else 1), semantic_action_calls);
+            core.rt.frameReset();
+        }
+    }
+}
+
+test "compiled scroll observations retain both axes without querying unrelated widget actions" {
+    _ = core.initialModel();
+    defer core.rt.frameReset();
+    var expected_nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .scroll_axes = .both }, .frame = .init(0, 0, 240, 100), .depth = 0, .parent_index = null },
+        .{ .widget = .{ .id = 2, .kind = .text_field, .state = .{ .read_only = true }, .semantics = .{ .actions = .{ .set_text = true, .drop_files = true } } }, .frame = .init(0, 120, 320, 30), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 3, .kind = .radio, .command = "activate" }, .frame = .init(0, 200, 300, 40), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 4, .kind = .row, .semantics = .{ .role = .treeitem } }, .frame = .init(0, 250, 360, 30), .depth = 1, .parent_index = 0 },
+    };
+    for ([_]bool{ false, true }) |disabled| {
+        expected_nodes[2].widget.state.disabled = disabled;
+        var actual_nodes = expected_nodes;
+        for (&actual_nodes) |*node| node.widget.interaction_policy = countedSemanticActions;
+        const native = canvas.WidgetLayoutTree{ .nodes = &expected_nodes };
+        const compiled = canvas.WidgetLayoutTree{ .nodes = &actual_nodes, .semantic_policy = core.nativeWindowPolicy };
+        for (expected_nodes, 0..) |node, index| {
+            const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+            inline for (.{ canvas.ScrollAxis.vertical, canvas.ScrollAxis.horizontal }) |axis| {
+                semantic_action_calls = 0;
+                try expectComplete(canvas.widgetScrollAxisMetrics(native, index, canvas.virtualWidgetScrollContentExtent, axis, viewport), canvas.widgetScrollAxisMetrics(compiled, index, canvas.virtualWidgetScrollContentExtent, axis, viewport));
+                try std.testing.expectEqual(@as(usize, if (node.widget.state.disabled) 0 else 1), semantic_action_calls);
+                core.rt.frameReset();
+            }
+        }
+    }
+}
 test "compiled axis queries honor custom virtual extent callbacks and supplied viewports" {
     _ = core.initialModel();
     defer core.rt.frameReset();

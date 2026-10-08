@@ -37,6 +37,12 @@ pub const Plan = struct {
         putWord(request, 12, std.math.cast(u32, capacity) orelse std.math.maxInt(u32));
         for (layout.nodes, 0..) |node, i| {
             const widget = node.widget;
+            // A metrics query emits only its target's semantic record. Other
+            // nodes supply geometry and tree facts for the extent walk.
+            const actions: @TypeOf(events.semanticActionsAndFocusable(widget)) = if (query == null or query == i)
+                events.semanticActionsAndFocusable(widget)
+            else
+                .{ .actions = widgets.WidgetActions{}, .focusable = false };
             const bytes = request[16 + i * 128 ..][0..128];
             const bounds = if (query == i and viewport != null) viewport.? else node.frame.inset(widget.layout.padding).normalized();
             const chart_value: ?f32 = if (widget.chart.series.len > 0 and widget.chart.series[0].values.len > 0) widget.chart.series[0].values[widget.chart.series[0].values.len - 1] else null;
@@ -47,8 +53,8 @@ pub const Plan = struct {
                 @as(u32, if (widget.semantics.label.len > 0) 256 else 0) | @as(u32, if (widget.semantics.value != null) 512 else 0) |
                 @as(u32, if (chart_value != null) 1024 else 0) | @as(u32, if (widget.semantics.list_item_index != null) 2048 else 0) |
                 @as(u32, if (widget.semantics.list_item_count != null) 4096 else 0) | @as(u32, if (widget.semantics.focusable or widget.semantics.actions.focus) 8192 else 0) |
-                @as(u32, if (events.defaultFocusable(widget)) 16384 else 0);
-            for ([_]u32{ widgets.widgetKindCode(widget.kind), roleCode(widget.semantics.role), @intCast(node.depth), if (node.parent_index) |p| (if (p < count) @as(u32, @intCast(p)) else std.math.maxInt(u32)) else std.math.maxInt(u32), flags, stateBits(widget.state), events.semanticActionBits(events.semanticActions(widget)), widget.semantics.list_item_count orelse 0, widget.semantics.list_item_index orelse 0 }, 0..) |value, field| putWord(bytes, field * 4, value);
+                @as(u32, if (actions.focusable) 16384 else 0);
+            for ([_]u32{ widgets.widgetKindCode(widget.kind), roleCode(widget.semantics.role), @intCast(node.depth), if (node.parent_index) |p| (if (p < count) @as(u32, @intCast(p)) else std.math.maxInt(u32)) else std.math.maxInt(u32), flags, stateBits(widget.state), events.semanticActionBits(actions.actions), widget.semantics.list_item_count orelse 0, widget.semantics.list_item_index orelse 0 }, 0..) |value, field| putWord(bytes, field * 4, value);
             std.mem.writeInt(u64, bytes[36..44], widget.layout.columns, .little);
             std.mem.writeInt(u64, bytes[44..52], widget.children.len, .little);
             // A previously compiled virtual-flow operation supplies the
