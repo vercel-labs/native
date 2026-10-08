@@ -1709,22 +1709,22 @@ pub fn textSpanLinkCount(spans: []const TextSpan) usize {
 }
 
 test "paragraph copied transport rejects malformed ownership cursors and runs" {
-    var request: [741]u8 = @splat(0);
+    var request: [773]u8 = @splat(0);
     request[0..6].* = .{ 53, 0, 1, 1, 0, 0 };
     paragraphPut(&request, 8, 1);
     paragraphPut(&request, 12, 1);
-    paragraphPut(&request, 20, 736);
+    paragraphPut(&request, 20, 768);
     paragraphPut(&request, 24, request.len);
     paragraphPut(&request, 40, 10);
-    paragraphPut(&request, 192, 736);
+    paragraphPut(&request, 192, 768);
     paragraphPut(&request, 196, 5);
-    @memcpy(request[736..], "hello");
+    @memcpy(request[768..], "hello");
     var good = request;
     good[7] = 1;
     paragraphPut(&good, 40, 3);
     paragraphPut(&good, 136, 5);
     try std.testing.expect(paragraphResultValid(&request, &good));
-    for ([_]usize{ 0, 6, 7, 8, 24, 28, 172, 192, 736 }) |at| {
+    for ([_]usize{ 0, 6, 7, 8, 24, 28, 172, 192, 768 }) |at| {
         var bad = good;
         bad[at] +%= 3;
         try std.testing.expect(!paragraphResultValid(&request, &bad));
@@ -1739,9 +1739,9 @@ test "paragraph copied transport rejects malformed ownership cursors and runs" {
     paragraphPut(&done, 40, 0);
     paragraphPut(&done, 56, 1);
     paragraphPut(&done, 144, 1);
-    paragraphPut(&done, 712, 5);
+    paragraphPut(&done, 744, 5);
     try std.testing.expect(paragraphResultValid(&request, &done));
-    for ([_]usize{ 704, 708, 712, 716, 732 }) |at| {
+    for ([_]usize{ 736, 740, 744, 748, 764 }) |at| {
         var bad = done;
         paragraphPut(&bad, at, 999);
         try std.testing.expect(!paragraphResultValid(&request, &bad));

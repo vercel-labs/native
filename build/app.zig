@@ -1957,7 +1957,8 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config);
+    const defer_ts_archives = target.result.ofmt == .elf;
+    const app_mod = appModule(b, dep, target, app_optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config, !defer_ts_archives);
     // TypeScript app code and platform hosts are expensive Zig/Clang semantic
     // work but do not depend on primary markup bytes. Compile them once into
     // an object, then make the executable a link-only artifact over that
@@ -1978,6 +1979,13 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         });
         const link_mod = b.createModule(.{ .target = target, .optimize = app_optimize });
         link_mod.addObject(app_code);
+        // ELF relocatable links can leave an archive's unwind terminator
+        // before later .eh_frame records. Keep the compiled archives on the
+        // final link, preserving unwind data and the cached app-code split.
+        if (defer_ts_archives) {
+            link_mod.addObjectFile(stage.archive);
+            if (stage.service_archive) |service_archive| link_mod.addObjectFile(service_archive);
+        }
         if (app_optimize == .Debug) link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
         // Object dependencies propagate framework/system-library NAMES, but
         // Zig does not propagate the search paths or rpaths recorded on the
@@ -2045,7 +2053,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // the production app module feeds the cached app-code object and must not
     // absorb the separately linked markup data object.
     const test_app_mod = if (ts_stage != null or app_optimize != optimize)
-        appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config)
+        appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config, true)
     else
         app_mod;
     if (ts_stage) |stage| {
@@ -2256,7 +2264,7 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
     };
 }
 
-fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, manifest_name: []const u8, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig) *std.Build.Module {
+fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, manifest_name: []const u8, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig, link_ts_archives: bool) *std.Build.Module {
     const native_sdk_mod = nativeSdkModuleWithTerminal(b, dep, target, optimize, app_options.terminal_sessions);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
@@ -2292,7 +2300,7 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         // The compiled-core archive links behind the staged mirror; the
         // toolchain's runtime needs libc.
         app_mod.link_libc = true;
-        app_mod.addObjectFile(stage.archive);
+        if (link_ts_archives) app_mod.addObjectFile(stage.archive);
         // Debug reads src/app.native only through the separately linked C
         // data object. Supplying this generated module in Debug would put
         // the authored root back into the app-code dependency graph even
@@ -2306,7 +2314,9 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         }
         // The in-process service archive links beside it (distinct symbol
         // prefix; its runtime internals are localized).
-        if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
+        if (link_ts_archives) {
+            if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
+        }
     }
     if (app_config.sqlite_capability) {
         // `store` and the relational `sqlite` tier share this exact object.
