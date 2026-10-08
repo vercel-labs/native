@@ -2089,6 +2089,17 @@ pub fn defaultFocusable(widget: Widget) bool {
     };
 }
 
+/// Both facts share one portable response. Copy them together before any
+/// further policy call can invalidate the compiler's borrowed result.
+pub fn semanticActionsAndFocusable(widget: Widget) struct { actions: WidgetActions, focusable: bool } {
+    if (widget.state.disabled) return .{ .actions = .{}, .focusable = false };
+    if (widget.interaction_policy != null) {
+        const result = compiledSemanticActions(widget);
+        return .{ .actions = result.actions, .focusable = result.focusable };
+    }
+    return .{ .actions = semanticActions(widget), .focusable = defaultFocusable(widget) };
+}
+
 // Explicit wire bits, independent of WidgetActions' native bool layout.
 const semantic_action_fields = [_][]const u8{
     "focus",         "press",  "toggle", "increment",  "decrement", "set_text",
