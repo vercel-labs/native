@@ -273,7 +273,9 @@ test "a write against a synchronously failed spawn journals the verdict replay's
     // write consumes one.
     var capture: VerdictCapture = .{};
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.bindJournal(capture.journal());
         fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
@@ -283,7 +285,7 @@ test "a write against a synchronously failed spawn journals the verdict replay's
         // The refusal LANDS in the delivered exit: the staged terminal
         // has no slot left to carry drops, so the count rides the
         // staged entry itself — never silence.
-        const exit = try expectExit(&fx, 91, .spawn_failed);
+        const exit = try expectExit(fx, 91, .spawn_failed);
         try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
         // Past the terminal's delivery the key is free: no slot, no
         // staged terminal — a write refuses with NO verdict (replay's
@@ -297,14 +299,16 @@ test "a write against a synchronously failed spawn journals the verdict replay's
     // spawn_failed (carrying the journaled tally) retires the park,
     // and the feeds settle exactly.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 91, .argv = &.{"/nonexistent-binary-for-this-test"}, .on_event = DirectFx.ptyMsg(.pty) });
         try fx.pushReplayPtyWriteVerdict(91, false);
         try testing.expect(!fx.ptyWrite(91, "same dispatch"));
         try fx.feedPtyExit(91, -1, 0, .spawn_failed, 1);
-        const exit = try expectExit(&fx, 91, .spawn_failed);
+        const exit = try expectExit(fx, 91, .spawn_failed);
         try testing.expectEqual(@as(u32, 1), exit.dropped_writes);
         try testing.expect(!fx.ptyWrite(91, "after delivery"));
         try fx.settleReplayFeeds();
@@ -337,7 +341,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // the recording. No checkpoint necessarily moves (nothing consumed
     // the verdict), so only the end-of-journal settle makes it loud.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         try fx.pushReplayPtyWriteVerdict(82, true);
@@ -348,7 +354,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // fire-and-forget caller ignores it, changing no state), so again
     // only settle catches it.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
@@ -359,7 +367,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // for: same count, same result, still divergent input — the keyed
     // comparison catches what a global boolean sequence would pass.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 82, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
@@ -371,7 +381,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // The clock feed settles by the same rule: a journaled value never
     // consumed (the replayed updates read the clock fewer times)...
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         try fx.pushReplayClock(1_000);
@@ -380,7 +392,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // ...and a read past the journaled values (answered 0 optimistically,
     // which need not move any checkpoint) both fail the settle.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         try testing.expectEqual(@as(i64, 0), fx.wallMs());
@@ -389,7 +403,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // A fed result still awaiting delivery: the journal ended before
     // the event that consumed it live — truncation, not success.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 85, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
@@ -404,7 +420,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // LINE still queued at the journal's end is the identical
     // truncation, and delivering it settles clean.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.spawn(.{ .key = 86, .argv = &.{"sh"}, .on_line = DirectFx.lineMsg(.line), .on_exit = DirectFx.exitMsg(.exit) });
@@ -417,7 +435,9 @@ test "settle refuses replay write-count divergence in both directions" {
     // Journaled environment deliveries never consumed settle by the
     // clock's rule too.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         try fx.pushReplayEnv("appearance", "dark");
@@ -425,7 +445,9 @@ test "settle refuses replay write-count divergence in both directions" {
     }
     // Exact consumption settles clean.
     {
-        var fx = DirectFx.init(testing.allocator);
+        const fx = try testing.allocator.create(DirectFx);
+        defer testing.allocator.destroy(fx);
+        fx.* = DirectFx.init(testing.allocator);
         defer fx.deinit();
         fx.armReplay();
         fx.ptySpawn(.{ .key = 83, .argv = &.{"sh"}, .on_event = DirectFx.ptyMsg(.pty) });
