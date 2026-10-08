@@ -105,3 +105,31 @@ test "compiled widget metric copied control programs survive nested policy calls
     try std.testing.expectEqualSlices(u8, &saved, &result);
     try std.testing.expect(std.mem.allEqual(u8, result[200..], 0xa5));
 }
+
+test "compiled widget metric payload programs preserve custom color overrides disabled swaps and complete error prefixes" {
+    _ = core.initialModel();
+    for (kinds) |kind| for (0..16) |flags| for ([_]c.ThemePack{ .house, .geist }) |pack| {
+        var tokens = c.DesignTokens.theme(.{ .pack = pack });
+        const swap = c.Color.rgba(0.125, 0.375, 0.625, 0.75);
+        if (flags & 1 != 0) tokens.controls.slider.disabled_background = swap;
+        if (flags & 2 != 0) tokens.controls.slider.disabled_foreground = swap;
+        const widget: c.Widget = .{ .id = 0xfffffffffffff001, .kind = kind, .frame = .init(-3.125, 2.375, 113.25, 31.25), .text = "Caf\xc3\xa9\xff\x00", .icon = "check", .value = if (flags & 4 != 0) 0.5 else 0.49999997, .group_segment = .last, .state = .{ .disabled = true, .focused = true, .hovered = true, .selected = flags & 8 != 0 }, .style = .{ .background = if (flags & 1 != 0) swap else null, .foreground = if (flags & 2 != 0) swap else null, .border = if (flags & 4 != 0) swap else null, .quiet_hover = true } };
+        for ([_]bool{ false, true }) |retained| for ([_]usize{ 0, 1, 2, 3, 4, 8, 1024 }) |capacity| try compare(widget, tokens, retained, capacity, flags & 1 != 0);
+    };
+}
+
+test "compiled widget metric payload results survive nested policy calls and frame resets" {
+    _ = core.initialModel();
+    var tokens: c.DesignTokens = .{};
+    tokens.control_command_policy = core.nativeWindowPolicy;
+    const payload = c.control_payload_policy;
+    const saved = payload.frames(.checkmark, .init(1.25, -3.75, 17.25, 17.25), .{ 0, 0, 0, 0 }, .init(0, 0, 0, 0), tokens);
+    _ = payload.color(.{ .id = 1, .kind = .slider, .frame = .init(0, 0, 10, 10) }, tokens, .{}, .slider, .fill);
+    core.rt.frameReset();
+    try exact(saved, payload.frames(.checkmark, .init(1.25, -3.75, 17.25, 17.25), .{ 0, 0, 0, 0 }, .init(0, 0, 0, 0), tokens));
+    var request: [128]u8 = @splat(0);
+    request[0..4].* = .{ 46, 1, 0, 0 };
+    var result: [80]u8 = @splat(0xa5);
+    try std.testing.expectEqual(64, core.nativeWindowPolicy(&request, &result));
+    try std.testing.expect(std.mem.allEqual(u8, result[64..], 0xa5));
+}

@@ -917,6 +917,7 @@ pub const flow_measurement_policy = @import("flow_measurement_policy.zig");
 pub const layout_coordination_policy = @import("layout_coordination_policy.zig");
 pub const render_coordination_policy = @import("render_coordination_policy.zig");
 pub const control_command_policy = @import("control_command_policy.zig");
+pub const control_payload_policy = @import("control_payload_policy.zig");
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;

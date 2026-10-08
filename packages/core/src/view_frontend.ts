@@ -932,4 +932,5 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./layout_coordination.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./render_coordination.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./control_commands.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./control_payloads.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./stream_policy.ts", import.meta.url), "utf8");

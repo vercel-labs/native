@@ -238,6 +238,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 43) return nscvRenderRecipe(request);
   if (request[0] === 44) return nscvRenderChildren(request);
   if (request[0] === 45) return nscvControlCommands(request);
+  if (request[0] === 46) return nscvControlPayloads(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

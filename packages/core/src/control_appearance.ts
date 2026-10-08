@@ -1,3 +1,16 @@
+function nscvAppearanceContext(request: Uint8Array): NscAppearanceContext {
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const variant = request[4]!, kind = nscvAppearanceKinds[request[3]!]!, detached = request[7] === 3;
+  const flags = request[6]!, styleMask = wire.getUint32(164, true); if (styleMask > 255 || wire.getUint32(452, true) > 1) throw new Error("invalid control style presence");
+  const style: (NscAppearanceColor | null)[] = []; for (let i = 0; i < 6; i++) style.push((styleMask & (1 << i)) !== 0 ? request.subarray(168 + i * 16, 184 + i * 16) : null);
+  const palette: NscAppearanceColor[] = []; for (let i = 0; i < 8; i++) palette.push(request.subarray(272 + i * 16, 288 + i * 16));
+  const alpha: number[] = [], geometry: number[] = []; for (let i = 0; i < 9; i++) alpha.push(wire.getFloat32(400 + i * 4, true)); for (let i = 0; i < 4; i++) geometry.push(wire.getFloat32(436 + i * 4, true));
+  const c: NscAppearanceContext = { variant, size: request[5]!, disabled: (flags & 1) !== 0, pressed: (flags & 2) !== 0, selected: (flags & 4) !== 0, hovered: (flags & 8) !== 0 && (flags & 16) === 0, toggle: kind === "toggle_button" || kind === "toggle", detached,
+    visual: nscvAppearanceVisual(wire, request, 8), style, radius: (styleMask & 64) !== 0 ? wire.getFloat32(264, true) : null, stroke: (styleMask & 128) !== 0 ? wire.getFloat32(268, true) : null,
+    palette, alpha, geometry, disabledBorder: wire.getUint32(452, true) !== 0 ? request.subarray(456, 472) : null, fallback: request.subarray(472, 488), scalar: wire.getFloat32(488, true), numeric: wire.getUint32(492, true) };
+  if (c.numeric > 15) throw new Error("invalid appearance numeric capability");
+  return c;
+}
 /** Portable control appearance, compiled beside the model and view. The wire
  * carries exact f32 bytes and explicit optional presence. Selected colors are
  * copied as bytes; arithmetic rounds at every native f32 stage. No token or
@@ -46,6 +59,10 @@ function nscvAppearanceComposite(ink: NscAppearanceColor, page: NscAppearanceCol
   const out = new Uint8Array(16), wire = new DataView(out.buffer);
   for (let i = 0; i < 3; i++) wire.setFloat32(i * 4, f(f(f(nscvAppearanceColorValue(ink, i) * ia) + f(nscvAppearanceColorValue(page, i) * weight)) / outputAlpha), true);
   wire.setFloat32(12, outputAlpha, true); return out;
+}
+function nscvAppearanceListFill(c: NscAppearanceContext): NscAppearanceColor {
+  const v = c.visual.colors, p = c.palette;
+  return c.pressed ? v[3] ?? v[2] ?? v[1] ?? v[0] ?? p[2]! : c.selected ? v[2] ?? v[1] ?? v[0] ?? p[2]! : c.hovered ? v[1] ?? v[0] ?? p[1]! : c.style[0] ?? v[0] ?? nscvAppearanceTransparent();
 }
 function nscvAppearanceBackground(c: NscAppearanceContext, fallback: NscAppearanceColor): NscAppearanceColor { return c.style[0] ?? fallback; }
 function nscvAppearanceAccent(c: NscAppearanceContext, fallback: NscAppearanceColor): NscAppearanceColor { return c.style[2] ?? fallback; }
@@ -168,14 +185,7 @@ function nscvControlAppearance(request: Uint8Array): Uint8Array {
     return nscvAppearanceWriteVisual({ colors, radius: a.radius ?? b.radius, stroke: a.stroke ?? b.stroke });
   }
   if (request.length !== 496 || family !== 0) throw new Error("invalid control appearance context");
-  const flags = request[6]!, styleMask = wire.getUint32(164, true); if (styleMask > 255 || wire.getUint32(452, true) > 1) throw new Error("invalid control style presence");
-  const style: (NscAppearanceColor | null)[] = []; for (let i = 0; i < 6; i++) style.push((styleMask & (1 << i)) !== 0 ? request.subarray(168 + i * 16, 184 + i * 16) : null);
-  const palette: NscAppearanceColor[] = []; for (let i = 0; i < 8; i++) palette.push(request.subarray(272 + i * 16, 288 + i * 16));
-  const alpha: number[] = [], geometry: number[] = []; for (let i = 0; i < 9; i++) alpha.push(wire.getFloat32(400 + i * 4, true)); for (let i = 0; i < 4; i++) geometry.push(wire.getFloat32(436 + i * 4, true));
-  const c: NscAppearanceContext = { variant, size: request[5]!, disabled: (flags & 1) !== 0, pressed: (flags & 2) !== 0, selected: (flags & 4) !== 0, hovered: (flags & 8) !== 0 && (flags & 16) === 0, toggle: kind === "toggle_button" || kind === "toggle", detached,
-    visual: nscvAppearanceVisual(wire, request, 8), style, radius: (styleMask & 64) !== 0 ? wire.getFloat32(264, true) : null, stroke: (styleMask & 128) !== 0 ? wire.getFloat32(268, true) : null,
-    palette, alpha, geometry, disabledBorder: wire.getUint32(452, true) !== 0 ? request.subarray(456, 472) : null, fallback: request.subarray(472, 488), scalar: wire.getFloat32(488, true), numeric: wire.getUint32(492, true) };
-  if (c.numeric > 15) throw new Error("invalid appearance numeric capability");
+  const c = nscvAppearanceContext(request), alpha = c.alpha, geometry = c.geometry;
   const v = c.visual.colors, p = c.palette; let color: NscAppearanceColor;
   if (op === 2) color = nscvAppearanceButtonFill(c);
   else if (op === 3) color = nscvAppearanceButtonText(c);
@@ -185,7 +195,7 @@ function nscvControlAppearance(request: Uint8Array): Uint8Array {
     const border = c.style[4] ?? (variant < 2 ? nscvAppearanceAccent(c, v[8] ?? p[3]!) : variant === 5 ? nscvAppearanceAccent(c, v[8] ?? p[5]!) : variant === 2 ? nscvAppearanceAccent(c, v[8] ?? c.fallback) : v[8] ?? c.fallback);
     color = nscvAppearanceWash(border, c.disabled, alpha[0]!, c.numeric);
   } else if (op === 7) color = nscvAppearanceBadgeText(c);
-  else if (op === 8) color = c.pressed ? v[3] ?? v[2] ?? v[1] ?? v[0] ?? p[2]! : c.selected ? v[2] ?? v[1] ?? v[0] ?? p[2]! : c.hovered ? v[1] ?? v[0] ?? p[1]! : c.style[0] ?? v[0] ?? nscvAppearanceTransparent();
+  else if (op === 8) color = nscvAppearanceListFill(c);
   else if (op === 9) color = c.style[0] ?? (c.pressed ? v[3] ?? v[2] ?? v[1] ?? p[2]! : c.selected ? v[2] ?? v[1] ?? p[2]! : c.hovered ? v[1] ?? p[1]! : v[0] ?? p[0]!);
   else if (op === 10) color = c.disabled ? v[4] ?? nscvAppearanceWash(nscvAppearanceBackground(c, nscvAppearanceState(c.visual, false, false, p[0]!)), true, alpha[0]!, c.numeric) : nscvAppearanceBackground(c, nscvAppearanceState(c.visual, false, c.hovered, p[0]!));
   else if (op === 11) color = c.style[4] ?? v[8] ?? c.fallback;

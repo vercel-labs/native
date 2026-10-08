@@ -2,6 +2,7 @@ const std = @import("std");
 const control_content = @import("control_content_policy.zig");
 const control_geometry = @import("control_geometry_policy.zig");
 const control_commands = @import("control_command_policy.zig");
+const control_payloads = @import("control_payload_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -1776,12 +1777,9 @@ fn controlCommandFacts(widget: Widget) control_commands.Facts {
 fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = selectionControlVisualTokens(widget, tokens);
     const box = checkboxWidgetBoxRect(widget, tokens);
-    const selected = booleanControlSelected(widget);
+
     const radius = controlRadius(widget, visual, 4);
-    const box_rest = if (selected)
-        widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
-    else
-        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
+
     const facts = controlCommandFacts(widget);
 
     const program = control_commands.Program.init(tokens.control_command_policy.?, .checkbox, facts);
@@ -1791,7 +1789,7 @@ fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens)
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = box,
                 .radius = radius,
-                .fill = colorFill(selectionDisabledBackground(widget, visual, box_rest, tokens)),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .checkbox, .fill)),
             });
         },
         .stroke => {
@@ -1800,12 +1798,7 @@ fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens)
                 .rect = box,
                 .radius = radius,
                 .stroke = .{
-                    .fill = colorFill(selectionDisabledNeutral(
-                        widget,
-                        visual,
-                        if (selected) widgetAccentColor(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderColor(widget, visual.border orelse tokens.colors.border),
-                        tokens,
-                    )),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .checkbox, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -1814,15 +1807,11 @@ fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens)
             try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, box, radius);
         },
         .mark => {
-            const check_color = selectionDisabledForeground(
-                widget,
-                visual,
-                widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text,
-                tokens,
-            );
-            const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.26, box.y + box.height * 0.54));
-            const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.43, box.y + box.height * 0.70));
-            const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.76, box.y + box.height * 0.32));
+            const check_color = control_payloads.color(widget, tokens, visual, .checkbox, .mark);
+            const marks = control_payloads.frames(.checkmark, box, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens);
+            const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(marks[0].x, marks[0].y));
+            const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(marks[1].x, marks[1].y));
+            const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(marks[2].x, marks[2].y));
             const elements = try builder.allocPathElements(3);
             elements[0] = .{ .verb = .move_to, .points = .{ left, geometry.PointF.zero(), geometry.PointF.zero() } };
             elements[1] = .{ .verb = .line_to, .points = .{ mid, geometry.PointF.zero(), geometry.PointF.zero() } };
@@ -1839,9 +1828,9 @@ fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens)
                 builder,
                 widget,
                 tokens,
-                box.x + box.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                control_payloads.frames(.label_x, box, .{ 0, widgetControlInset(widget, tokens, tokens.spacing.sm), 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x,
                 command.slot,
-                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+                control_payloads.color(widget, tokens, visual, .checkbox, .ink),
             );
         },
         else => @panic("unsupported control drawing capability"),
@@ -1851,8 +1840,8 @@ fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens)
 fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = selectionControlVisualTokens(widget, tokens);
     const circle = radioWidgetCircleRect(widget, tokens);
-    const radius = selectionShapeRadius(widget, visual, circle.height * 0.5);
-    const circle_rest = widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
+    const radius = selectionShapeRadius(widget, visual, control_payloads.frames(.slider_radius, circle, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x);
+
     const facts = controlCommandFacts(widget);
 
     const program = control_commands.Program.init(tokens.control_command_policy.?, .radio, facts);
@@ -1862,7 +1851,7 @@ fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = circle,
                 .radius = radius,
-                .fill = colorFill(selectionDisabledBackground(widget, visual, circle_rest, tokens)),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .radio, .fill)),
             });
         },
         .stroke => {
@@ -1871,7 +1860,7 @@ fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
                 .rect = circle,
                 .radius = radius,
                 .stroke = .{
-                    .fill = colorFill(selectionDisabledNeutral(widget, visual, widgetBorderColor(widget, visual.border orelse tokens.colors.border), tokens)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .radio, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -1880,23 +1869,12 @@ fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
             try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, circle, radius);
         },
         .mark => {
-            const dot_size = @max(0, circle.height * 0.5);
-            const dot = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-                circle.x + (circle.width - dot_size) * 0.5,
-                circle.y + (circle.height - dot_size) * 0.5,
-                dot_size,
-                dot_size,
-            ));
+            const dot = pixelSnapGeometryRect(tokens, control_payloads.frames(.radio_dot, circle, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0]);
             try builder.fillRoundedRect(.{
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = dot,
-                .radius = Radius.all(dot.height * 0.5),
-                .fill = colorFill(selectionDisabledForeground(
-                    widget,
-                    visual,
-                    widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent),
-                    tokens,
-                )),
+                .radius = Radius.all(control_payloads.frames(.slider_radius, dot, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .radio, .mark)),
             });
         },
         .text => {
@@ -1904,9 +1882,9 @@ fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Er
                 builder,
                 widget,
                 tokens,
-                circle.x + circle.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                control_payloads.frames(.label_x, circle, .{ 0, widgetControlInset(widget, tokens, tokens.spacing.sm), 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x,
                 command.slot,
-                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+                control_payloads.color(widget, tokens, visual, .radio, .ink),
             );
         },
         else => @panic("unsupported control drawing capability"),
@@ -1919,7 +1897,7 @@ fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .toggle) else null;
     const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
     const track = if (plan) |v| v.rects[0] else toggleWidgetTrackRect(widget, tokens);
-    const track_radius = selectionShapeRadius(widget, visual, track.height * 0.5);
+    const track_radius = selectionShapeRadius(widget, visual, control_payloads.frames(.slider_radius, track, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x);
     const knob_size = @max(0, track.height - knob_inset * 2);
     const knob_x = if (selected)
         track.x + track.width - knob_size - knob_inset
@@ -1927,10 +1905,6 @@ fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         track.x + knob_inset;
     const knob = if (plan) |v| v.rects[if (selected) @as(usize, 2) else 1] else pixelSnapGeometryRect(tokens, geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size));
 
-    const track_rest = if (selected)
-        widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
-    else
-        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface_pressed));
     const wants_track_stroke = widget.style.border != null or visual.border != null;
     const track_stroke_width = controlStrokeWidth(widget, visual, if (wants_track_stroke) tokens.stroke.regular else 0);
     var facts = controlCommandFacts(widget);
@@ -1943,19 +1917,14 @@ fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                     .id = widgetPartId(widget.id, command.slot),
                     .rect = track,
                     .radius = track_radius,
-                    .fill = colorFill(selectionDisabledBackground(widget, visual, track_rest, tokens)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .toggle, .fill)),
                 });
             } else {
                 try builder.fillRoundedRect(.{
                     .id = widgetPartId(widget.id, command.slot),
                     .rect = knob,
-                    .radius = selectionShapeRadius(widget, visual, knob.height * 0.5),
-                    .fill = colorFill(selectionDisabledForeground(
-                        widget,
-                        visual,
-                        widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text,
-                        tokens,
-                    )),
+                    .radius = selectionShapeRadius(widget, visual, control_payloads.frames(.slider_radius, knob, .{ 0, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .toggle, .mark)),
                 });
             }
         },
@@ -1965,7 +1934,7 @@ fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .rect = track,
                 .radius = track_radius,
                 .stroke = .{
-                    .fill = colorFill(selectionDisabledNeutral(widget, visual, widgetBorderColor(widget, visual.border orelse tokens.colors.border), tokens)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .toggle, .border)),
                     .width = track_stroke_width,
                 },
             }));
@@ -1978,9 +1947,9 @@ fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 builder,
                 widget,
                 tokens,
-                track.x + track.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                control_payloads.frames(.label_x, track, .{ 0, widgetControlInset(widget, tokens, tokens.spacing.sm), 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x,
                 command.slot,
-                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+                control_payloads.color(widget, tokens, visual, .toggle, .ink),
             );
         },
         else => @panic("unsupported control drawing capability"),
@@ -1994,13 +1963,10 @@ fn emitCompiledSlider(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     const track = if (plan) |v| v.rects[0] else sliderWidgetTrackRect(widget, tokens);
     const active = if (plan) |v| v.rects[2] else pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
     const knob = if (plan) |v| v.rects[1] else sliderWidgetKnobRect(widget, tokens);
-    const track_radius = Radius.all(track.height * 0.5);
-    const knob_radius = controlRadius(widget, visual, @min(knob.width, knob.height) * 0.5);
+    const radii = control_payloads.frames(.slider_radius, track, .{ 0, 0, 0, 0 }, knob, tokens)[0];
+    const track_radius = Radius.all(radii.x);
+    const knob_radius = controlRadius(widget, visual, radii.y);
 
-    const swap_disabled = visual.disabled_background != null or visual.disabled_foreground != null;
-    const washed = widget.state.disabled and !swap_disabled;
-
-    const active_rest = widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent);
     var facts = controlCommandFacts(widget);
     facts.bar = if (plan) |v| v.flags & 8 != 0 else value > 0;
     const program = control_commands.Program.init(tokens.control_command_policy.?, .slider, facts);
@@ -2012,7 +1978,7 @@ fn emitCompiledSlider(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = track,
                         .radius = track_radius,
-                        .fill = colorFill(disabledWash(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle), washed, tokens.states.disabled_alpha)),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .slider, .fill)),
                     });
                 },
                 3 => {
@@ -2020,22 +1986,15 @@ fn emitCompiledSlider(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = active,
                         .radius = track_radius,
-                        .fill = colorFill(if (widget.state.disabled)
-                            visual.disabled_background orelse disabledWash(active_rest, true, tokens.states.disabled_alpha)
-                        else
-                            active_rest),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .slider, .active)),
                     });
                 },
                 4 => {
-                    const knob_rest = widgetBackgroundColor(widget, visual.foreground orelse Color.rgb8(255, 255, 255));
                     try builder.fillRoundedRect(.{
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = knob,
                         .radius = knob_radius,
-                        .fill = colorFill(if (widget.state.disabled)
-                            visual.disabled_foreground orelse disabledWash(knob_rest, washed, tokens.states.disabled_alpha)
-                        else
-                            knob_rest),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .slider, .knob)),
                     });
                 },
                 else => unreachable,
@@ -2047,7 +2006,7 @@ fn emitCompiledSlider(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .rect = knob,
                 .radius = knob_radius,
                 .stroke = .{
-                    .fill = widgetBorderFill(widget, disabledWash(visual.border orelse tokens.colors.focus_ring, washed, tokens.states.disabled_alpha)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .slider, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -2063,7 +2022,7 @@ fn emitCompiledProgress(builder: *Builder, widget: Widget, tokens: DesignTokens)
     const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .progress) else null;
     const progress = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
-    const radius = controlRadius(widget, visual, @min(tokens.radius.md, widget.frame.height * 0.5));
+    const radius = controlRadius(widget, visual, control_payloads.frames(.progress_radius, widget.frame, .{ tokens.radius.md, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0].x);
     var facts = controlCommandFacts(widget);
     facts.background = if (plan) |v| v.flags & 16 != 0 else progress < 1;
     facts.bar = if (plan) |v| v.flags & 8 != 0 else progress > 0;
@@ -2075,14 +2034,14 @@ fn emitCompiledProgress(builder: *Builder, widget: Widget, tokens: DesignTokens)
                     .id = widgetPartId(widget.id, command.slot),
                     .rect = widget.frame,
                     .radius = radius,
-                    .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .progress, .fill)),
                 });
             } else {
                 try builder.fillRoundedRect(.{
                     .id = widgetPartId(widget.id, command.slot),
                     .rect = if (plan) |v| v.rects[0] else pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
                     .radius = radius,
-                    .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .progress, .active)),
                 });
             }
         },
@@ -2101,11 +2060,11 @@ fn emitCompiledButton(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = buttonBorderFill(widget, tokens),
+            .fill = colorFill(control_payloads.color(widget, tokens, visual, .button, .border)),
             .width = stroke_width,
         },
     });
-    const content_color = buttonTextColorForWidget(widget, tokens);
+    const content_color = control_payloads.color(widget, tokens, visual, .button, .ink);
     const icon = icon_model.resolveOrMissing(widget.icon);
     var text_frame = widget.frame;
     var facts = controlCommandFacts(widget);
@@ -2119,7 +2078,7 @@ fn emitCompiledButton(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = buttonFill(widget, tokens),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .button, .fill)),
             });
         },
         .stroke => {
@@ -2128,15 +2087,9 @@ fn emitCompiledButton(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             try builder.strokeRect(stroke);
         },
         .seam_clip => {
-            const band_inner_x = border.rect.x + border.stroke.width * 0.5;
             try builder.pushClip(.{
                 .id = widgetPartId(widget.id, command.slot),
-                .rect = geometry.RectF.init(
-                    band_inner_x,
-                    widget.frame.y - stroke_width,
-                    @max(0, widget.frame.maxX() + stroke_width - band_inner_x),
-                    widget.frame.height + stroke_width * 2,
-                ),
+                .rect = control_payloads.frames(.seam, widget.frame, .{ border.stroke.width, 0, 0, stroke_width }, border.rect, tokens)[0],
             });
         },
         .seam_unclip => {
@@ -2190,7 +2143,7 @@ fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignToken
         .rect = widget.frame,
         .radius = radius,
         .stroke = .{
-            .fill = buttonBorderFill(widget, tokens),
+            .fill = colorFill(control_payloads.color(widget, tokens, visual, .icon_button, .border)),
             .width = stroke_width,
         },
     });
@@ -2206,7 +2159,7 @@ fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignToken
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = buttonFill(widget, tokens),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .icon_button, .fill)),
             });
         },
         .stroke => {
@@ -2215,15 +2168,9 @@ fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignToken
             try builder.strokeRect(stroke);
         },
         .seam_clip => {
-            const band_inner_x = border.rect.x + border.stroke.width * 0.5;
             try builder.pushClip(.{
                 .id = widgetPartId(widget.id, command.slot),
-                .rect = geometry.RectF.init(
-                    band_inner_x,
-                    widget.frame.y - stroke_width,
-                    @max(0, widget.frame.maxX() + stroke_width - band_inner_x),
-                    widget.frame.height + stroke_width * 2,
-                ),
+                .rect = control_payloads.frames(.seam, widget.frame, .{ border.stroke.width, 0, 0, stroke_width }, border.rect, tokens)[0],
             });
         },
         .seam_unclip => {
@@ -2236,13 +2183,8 @@ fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignToken
             const resolved = icon.?;
 
             const size = iconGlyphSize(widget, tokens);
-            const icon_frame = geometry.RectF.init(
-                widget.frame.x + (widget.frame.width - size) * 0.5,
-                widget.frame.y + (widget.frame.height - size) * 0.5,
-                size,
-                size,
-            );
-            try emitVectorIcon(builder, widget.id, command.slot, icon_frame, buttonTextColorForWidget(widget, tokens), resolved);
+            const icon_frame = control_payloads.frames(.centered_icon, widget.frame, .{ size, 0, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0];
+            try emitVectorIcon(builder, widget.id, command.slot, icon_frame, control_payloads.color(widget, tokens, visual, .icon_button, .ink), resolved);
         },
         .text => {
             const size = iconGlyphSize(widget, tokens);
@@ -2251,7 +2193,7 @@ fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignToken
                 .font_id = tokens.typography.font_id,
                 .size = size,
                 .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size, tokens)),
-                .color = buttonTextColorForWidget(widget, tokens),
+                .color = control_payloads.color(widget, tokens, visual, .icon_button, .ink),
                 .text = widget.text,
                 .measure = tokens.text_measure,
             });
@@ -2272,7 +2214,7 @@ fn emitCompiledInputGroup(builder: *Builder, widget: Widget, tokens: DesignToken
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = textInputFill(widget, tokens, visual),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .input_group, .fill)),
             });
         },
         .stroke => {
@@ -2281,7 +2223,7 @@ fn emitCompiledInputGroup(builder: *Builder, widget: Widget, tokens: DesignToken
                 .rect = widget.frame,
                 .radius = radius,
                 .stroke = .{
-                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .input_group, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -2299,13 +2241,9 @@ fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     const text_size = widgetBodyTextSize(widget, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
     const chevron_size = widgetRowIconExtent(widget, tokens);
-    const chevron_extent = chevron_size + inset;
-    const text_frame = geometry.RectF.init(
-        widget.frame.x + inset,
-        widget.frame.y,
-        @max(1, widget.frame.width - inset * 2 - chevron_extent),
-        widget.frame.height,
-    );
+
+    const content = control_payloads.frames(.select, widget.frame, .{ chevron_size, inset, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens);
+    const text_frame = content[0];
     const placeholder = widgetPlaceholder(widget);
     const visible_text = if (widget.text.len > 0) widget.text else placeholder;
     var facts = controlCommandFacts(widget);
@@ -2317,7 +2255,7 @@ fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed, washHovered(widget), tokens.colors.surface))),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .select, .fill)),
             });
         },
         .stroke => {
@@ -2326,7 +2264,7 @@ fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .rect = widget.frame,
                 .radius = radius,
                 .stroke = .{
-                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .select, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -2335,7 +2273,7 @@ fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
         },
         .text => {
-            const text_color = if (command.variant == 2) widgetForegroundColor(widget, tokens, tokens.colors.text_muted) else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+            const text_color = if (command.variant == 2) control_payloads.color(widget, tokens, visual, .select, .placeholder) else control_payloads.color(widget, tokens, visual, .select, .ink);
             try builder.drawText(.{
                 .id = widgetPartId(widget.id, command.slot),
                 .font_id = tokens.typography.font_id,
@@ -2348,13 +2286,8 @@ fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) E
         },
         .icon => {
             const icon = icon_model.resolve("chevron-down").?;
-            const icon_frame = geometry.RectF.init(
-                widget.frame.x + widget.frame.width - inset - chevron_size,
-                widget.frame.y + (widget.frame.height - chevron_size) * 0.5,
-                chevron_size,
-                chevron_size,
-            );
-            const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+            const icon_frame = content[1];
+            const color = control_payloads.color(widget, tokens, visual, .select, .mark);
             try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
         },
         else => @panic("unsupported control drawing capability"),
@@ -2369,7 +2302,7 @@ fn emitCompiledTextField(builder: *Builder, widget: Widget, tokens: DesignTokens
     const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
     const clip_rect = widgetTextInputClipRect(widget, tokens, text_size, text_inset, layout_options);
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
-    const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const text_color = control_payloads.color(widget, tokens, visual, .text_field, .ink);
     var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
     const selection_range = widgetTextSelectionRange(widget);
@@ -2391,7 +2324,7 @@ fn emitCompiledTextField(builder: *Builder, widget: Widget, tokens: DesignTokens
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = textInputFill(widget, tokens, visual),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .text_field, .fill)),
             });
         },
         .stroke => {
@@ -2400,7 +2333,7 @@ fn emitCompiledTextField(builder: *Builder, widget: Widget, tokens: DesignTokens
                 .rect = widget.frame,
                 .radius = radius,
                 .stroke = .{
-                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .text_field, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -2421,7 +2354,7 @@ fn emitCompiledTextField(builder: *Builder, widget: Widget, tokens: DesignTokens
             draw_command.id = widgetPartId(widget.id, command.slot);
             draw_command.text = visible_text;
             if (command.variant == 2) {
-                draw_command.color = widgetForegroundColor(widget, tokens, tokens.colors.text_muted);
+                draw_command.color = control_payloads.color(widget, tokens, visual, .text_field, .placeholder);
             }
             try builder.drawText(draw_command);
         },
@@ -2445,14 +2378,14 @@ fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) E
     const visual = textInputControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetTextInputSize(widget, tokens);
-    const icon_size = @max(8, text_size - 2);
+
     const text_inset = widgetTextInputInset(widget, tokens);
     const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
     const clip_rect = widgetTextInputClipRect(widget, tokens, text_size, text_inset, layout_options);
     const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
     const selection_range = widgetTextSelectionRange(widget);
     const composition_range = widgetTextCompositionRange(widget);
-    const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const text_color = control_payloads.color(widget, tokens, visual, .search, .ink);
     var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
     draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
     const clips_text = widgetTextInputClipsText(widget, tokens, text_size, text_inset, layout_options);
@@ -2476,7 +2409,7 @@ fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = textInputFill(widget, tokens, visual),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .search, .fill)),
             });
         },
         .stroke => {
@@ -2485,7 +2418,7 @@ fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) E
                 .rect = widget.frame,
                 .radius = radius,
                 .stroke = .{
-                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .search, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
@@ -2505,7 +2438,7 @@ fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             var draw_command = draw_text;
             draw_command.id = widgetPartId(widget.id, command.slot);
             draw_command.text = visible_text;
-            draw_command.color = if (command.variant != 2) text_color else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+            draw_command.color = if (command.variant != 2) text_color else control_payloads.color(widget, tokens, visual, .search, .placeholder);
             try builder.drawText(draw_command);
         },
         .selection => {
@@ -2524,29 +2457,22 @@ fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             switch (command.variant) {
                 2 => {
                     const icon = icon_model.resolve("search").?;
-                    const left = widget.frame.x + widgetControlInset(widget, tokens, tokens.spacing.md);
-                    const top = widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5);
-                    const icon_frame = geometry.RectF.init(left, top, icon_size, icon_size);
-                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    const icon_frame = control_payloads.frames(.search_icon, widget.frame, .{ text_size, widgetControlInset(widget, tokens, tokens.spacing.md), 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0];
+                    const color = control_payloads.color(widget, tokens, visual, .search, .placeholder);
                     try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
                 },
                 4 => {
                     const icon = icon_model.resolve("chevron-down").?;
                     const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
                     const chevron_size = widgetRowIconExtent(widget, tokens);
-                    const icon_frame = geometry.RectF.init(
-                        widget.frame.x + widget.frame.width - inset - chevron_size,
-                        widget.frame.y + (widget.frame.height - chevron_size) * 0.5,
-                        chevron_size,
-                        chevron_size,
-                    );
-                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    const icon_frame = control_payloads.frames(.select, widget.frame, .{ chevron_size, inset, 0, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[1];
+                    const color = control_payloads.color(widget, tokens, visual, .search, .placeholder);
                     try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
                 },
                 6 => {
                     const icon_frame = textInputClearButtonRect(widget, tokens).?;
                     const icon = icon_model.resolve("x").?;
-                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    const color = control_payloads.color(widget, tokens, visual, .search, .placeholder);
                     try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
                 },
                 else => unreachable,
@@ -2582,7 +2508,7 @@ fn emitCompiledTooltip(builder: *Builder, widget: Widget, tokens: DesignTokens) 
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = widgetAccentFill(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.accent)),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .tooltip, .fill)),
             });
         },
         .text => {
@@ -2593,7 +2519,7 @@ fn emitCompiledTooltip(builder: *Builder, widget: Widget, tokens: DesignTokens) 
                 .font_id = tokens.typography.font_id,
                 .size = text_size,
                 .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
-                .color = widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
+                .color = control_payloads.color(widget, tokens, visual, .tooltip, .ink),
                 .text = widget.text,
                 .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
             });
@@ -2605,18 +2531,14 @@ fn emitCompiledTooltip(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 fn emitCompiledMenuItem(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.sm);
-    const wash = menuItemWashColor(widget, tokens, visual);
+    const wash = control_payloads.color(widget, tokens, visual, .menu_item, .attention);
     const text_size = widgetBodyTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
-    const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const content_color = control_payloads.color(widget, tokens, visual, .menu_item, .ink);
     const check_extent = widgetRowIconExtent(widget, tokens);
     const check_gap = widgetRowIconGap(widget, tokens);
-    var text_frame = geometry.RectF.init(
-        widget.frame.x,
-        widget.frame.y,
-        @max(1, widget.frame.width - check_extent - check_gap),
-        widget.frame.height,
-    );
+    const content = control_payloads.frames(.menu, widget.frame, .{ check_extent, text_inset, check_gap, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens);
+    var text_frame = content[0];
     const icon = icon_model.resolveOrMissing(widget.icon);
     var facts = controlCommandFacts(widget);
     facts.icon = icon != null;
@@ -2629,38 +2551,21 @@ fn emitCompiledMenuItem(builder: *Builder, widget: Widget, tokens: DesignTokens)
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .radius = radius,
-                .fill = widgetBackgroundFill(widget, wash),
+                .fill = colorFill(control_payloads.color(widget, tokens, visual, .menu_item, .fill)),
             });
         },
         .icon => {
             if (command.variant == 5) {
                 const check_icon = icon_model.resolve("check").?;
 
-                const check_frame = geometry.RectF.init(
-                    widget.frame.maxX() - text_inset - check_extent,
-                    widget.frame.y + (widget.frame.height - check_extent) * 0.5,
-                    check_extent,
-                    check_extent,
-                );
+                const check_frame = content[2];
                 try emitVectorIcon(builder, widget.id, command.slot, check_frame, content_color, check_icon);
             } else {
                 const resolved = icon.?;
 
-                const icon_extent = widgetRowIconExtent(widget, tokens);
-                const icon_frame = geometry.RectF.init(
-                    widget.frame.x + text_inset,
-                    widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
-                    icon_extent,
-                    icon_extent,
-                );
+                const icon_frame = content[1];
                 try emitVectorIcon(builder, widget.id, command.slot, icon_frame, content_color, resolved);
-                const shift = icon_extent + widgetRowIconGap(widget, tokens);
-                text_frame = geometry.RectF.init(
-                    text_frame.x + shift,
-                    text_frame.y,
-                    @max(1, text_frame.width - shift),
-                    text_frame.height,
-                );
+                text_frame = control_payloads.frames(.shifted_label, text_frame, .{ check_extent, 0, check_gap, 0 }, geometry.RectF.init(0, 0, 0, 0), tokens)[0];
             }
         },
         .text => {
@@ -2681,10 +2586,10 @@ fn emitCompiledMenuItem(builder: *Builder, widget: Widget, tokens: DesignTokens)
 fn emitCompiledListItem(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
-    const fill = listItemFillColor(widget, tokens, widget.state);
+    const fill = control_payloads.color(widget, tokens, visual, .list_item, .fill);
     const text_size = widgetBodyTextSize(widget, tokens);
     const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
-    const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const content_color = control_payloads.color(widget, tokens, visual, .list_item, .ink);
     var text_frame = widget.frame;
     const icon = icon_model.resolveOrMissing(widget.icon);
     var facts = controlCommandFacts(widget);
@@ -2704,20 +2609,10 @@ fn emitCompiledListItem(builder: *Builder, widget: Widget, tokens: DesignTokens)
             const resolved = icon.?;
 
             const icon_extent = widgetRowIconExtent(widget, tokens);
-            const icon_frame = geometry.RectF.init(
-                text_frame.x + text_inset,
-                widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
-                icon_extent,
-                icon_extent,
-            );
+            const content = control_payloads.frames(.list, text_frame, .{ icon_extent, text_inset, widgetRowIconGap(widget, tokens), 0 }, geometry.RectF.init(0, 0, 0, 0), tokens);
+            const icon_frame = content[1];
             try emitVectorIcon(builder, widget.id, command.slot, icon_frame, content_color, resolved);
-            const shift = icon_extent + widgetRowIconGap(widget, tokens);
-            text_frame = geometry.RectF.init(
-                text_frame.x + shift,
-                widget.frame.y,
-                @max(1, text_frame.width - shift),
-                widget.frame.height,
-            );
+            text_frame = content[0];
         },
         .text => {
             try builder.drawText(.{
@@ -2739,7 +2634,7 @@ fn emitCompiledListItem(builder: *Builder, widget: Widget, tokens: DesignTokens)
 
 fn emitCompiledCellChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = listItemControlVisualTokens(widget, tokens);
-    const state_fill = listItemFillColor(widget, tokens, widget.state);
+    const state_fill = control_payloads.color(widget, tokens, visual, .cell_chrome, .fill);
     const wants_stroke = widget.style.border != null or visual.border != null or widget.style.stroke_width != null or visual.stroke_width != null;
     var facts = controlCommandFacts(widget);
     facts.wash_alpha = state_fill.a;
@@ -2758,7 +2653,7 @@ fn emitCompiledCellChrome(builder: *Builder, widget: Widget, tokens: DesignToken
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .stroke = .{
-                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .cell_chrome, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
                 },
             }));
@@ -2772,7 +2667,7 @@ fn emitCompiledCellChrome(builder: *Builder, widget: Widget, tokens: DesignToken
 
 fn emitCompiledCell(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = listItemControlVisualTokens(widget, tokens);
-    const state_fill = listItemFillColor(widget, tokens, widget.state);
+    const state_fill = control_payloads.color(widget, tokens, visual, .cell, .fill);
     const wants_stroke = widget.style.border != null or visual.border != null or widget.style.stroke_width != null or visual.stroke_width != null;
     var facts = controlCommandFacts(widget);
     facts.wash_alpha = state_fill.a;
@@ -2791,7 +2686,7 @@ fn emitCompiledCell(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
                 .id = widgetPartId(widget.id, command.slot),
                 .rect = widget.frame,
                 .stroke = .{
-                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .cell, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
                 },
             }));
@@ -2807,7 +2702,7 @@ fn emitCompiledCell(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
                 .font_id = tokens.typography.font_id,
                 .size = text_size,
                 .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
-                .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+                .color = control_payloads.color(widget, tokens, visual, .cell, .ink),
                 .text = widget.text,
                 .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, widget.text_alignment, .none, widget.text_overflow, tokens),
             });
@@ -2817,17 +2712,11 @@ fn emitCompiledCell(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 }
 
 fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const selected = widget.state.selected or widget.value >= 0.5;
     const visual = selectionControlVisualTokens(widget, tokens);
     const radius = segmentedTriggerRadius(widget, visual, tokens);
     const text_size = widgetTabTriggerTextSize(widget, tokens);
     const text_inset = widgetTabTriggerInset(widget, tokens);
-    const active_ink = if (tokens.controls.tabs_indicator == .underline)
-        widget.style.foreground orelse visual.foreground orelse tokens.colors.text
-    else
-        widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
-    const hover_preview = tokens.controls.tabs_indicator == .underline and widget.state.hovered and !widget.state.disabled;
-    const content_color = if (selected or hover_preview) active_ink else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+    const content_color = control_payloads.color(widget, tokens, visual, .segmented, .ink);
     var text_frame = widget.frame;
     var facts = controlCommandFacts(widget);
     facts.icon = widget.icon.len > 0;
@@ -2843,16 +2732,15 @@ fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = widget.frame,
                         .radius = radius,
-                        .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.surface)),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .segmented, .fill)),
                     });
                 },
                 0 => {
-                    const background = (widget.style.background orelse visual.background).?;
                     try builder.fillRoundedRect(.{
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = widget.frame,
                         .radius = radius,
-                        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), background))),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .segmented, .active)),
                     });
                 },
                 3 => {
@@ -2860,7 +2748,7 @@ fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens
                     try builder.fillRect(.{
                         .id = widgetPartId(widget.id, command.slot),
                         .rect = bar,
-                        .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.text)),
+                        .fill = colorFill(control_payloads.color(widget, tokens, visual, .segmented, .knob)),
                     });
                 },
                 else => unreachable,
@@ -2872,7 +2760,7 @@ fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens
                 .rect = widget.frame,
                 .radius = radius,
                 .stroke = .{
-                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .fill = colorFill(control_payloads.color(widget, tokens, visual, .segmented, .border)),
                     .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
                 },
             }));
