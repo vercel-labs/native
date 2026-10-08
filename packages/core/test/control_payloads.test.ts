@@ -34,6 +34,7 @@ test("geometry reserves menu marks and copies raw frame words",()=>{
   const saved=b.slice(),out=payload(b);assert.deepEqual(b,saved);assert.deepEqual(read(out).slice(2,14),[10,-0,84,32,18,10,12,12,90,10,12,12]);assert.ok(out.slice(56).every(v=>v===0));b.fill(255);assert.deepEqual(read(out).slice(2,6),[10,-0,84,32]);
   const raw=new Uint8Array(128),r=new DataView(raw.buffer);raw.set([46,1,4,0]);r.setUint32(48,0x7f812345,true);
   const copied=new DataView(payload(raw).buffer);for(const at of [32,36,48,52])assert.equal(copied.getUint32(at,true),0x7f812345);
+  raw[2]=8;raw[4]=2;assert.equal(new DataView(payload(raw).buffer).getUint32(8,true),0x7fc12345);raw[4]=0;assert.equal(new DataView(payload(raw).buffer).getFloat32(8,true),0);
 });
 test("payload packets reject malformed versions lengths flags and reserved fields",()=>{
   for(const at of [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,556]) {const b=color(16,0);b[at]=255;assert.throws(()=>payload(b),/invalid/);}

@@ -30,6 +30,7 @@ pub fn color(widget: widgets.Widget, tokens: tokens_model.DesignTokens, visual: 
 pub fn frames(op: Operation, frame: geometry.RectF, values: [4]f32, auxiliary: geometry.RectF, tokens: tokens_model.DesignTokens) [3]geometry.RectF {
     var request: [128]u8 = @splat(0);
     request[0..4].* = .{ 46, 1, @intFromEnum(op), @import("render_plan_policy.zig").numericFlags() };
+    request[4] = @import("control_geometry_policy.zig").signalingFlags();
     inline for (.{ "x", "y", "width", "height" }, 0..) |name, i| {
         put(&request, 16 + i * 4, @field(frame, name));
         put(&request, 32 + i * 4, @field(auxiliary, name));

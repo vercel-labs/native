@@ -65,13 +65,17 @@ function nscvControlPayloads(request: Uint8Array): Uint8Array {
 }
 
 function nscvControlPayloadGeometry(request: Uint8Array): Uint8Array {
-  if (request.length !== 128 || request[2]! > 11 || request[3]! > 15) throw new Error("invalid control payload geometry");
-  for (let i = 4; i < 16; i++) if (request[i] !== 0) throw new Error("invalid control payload geometry reserved bytes");
+  if (request.length !== 128 || request[2]! > 11 || request[3]! > 15 || request[4]! > 31) throw new Error("invalid control payload geometry");
+  for (let i = 5; i < 16; i++) if (request[i] !== 0) throw new Error("invalid control payload geometry reserved bytes");
   for (let i = 64; i < 128; i++) if (request[i] !== 0) throw new Error("invalid control payload geometry tail");
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength), op = request[2]!, f = Math.fround;
   const v = (at: number): number => w.getFloat32(at, true), numeric = request[3]!;
   const max = (a: number, b: number): number => nscvRenderExtreme(a, b, numeric, true);
   const min = (a: number, b: number): number => nscvRenderExtreme(a, b, numeric, false);
+  const signaling = (at: number): boolean => { const word = w.getUint32(at, true); return (word & 0x7f800000) === 0x7f800000 && (word & 0x007fffff) !== 0 && (word & 0x00400000) === 0; };
+  // Reuse the native target's existing signaling-operand numeric capability.
+  const rawMin = (at: number, other: number): number => signaling(at) && (request[4]! & 2) !== 0 ? v(at) : min(v(at), other);
+  const pairMin = (a: number, b: number): number => signaling(a) && (request[4]! & 2) !== 0 ? v(a) : signaling(b) && (request[4]! & 4) !== 0 ? v(b) : min(v(a), v(b));
   const x = v(16), y = v(20), width = v(24), height = v(28), size = v(48), inset = v(52), gap = v(56), stroke = v(60);
   const result = new Uint8Array(64), out = new DataView(result.buffer); out.setUint32(0, 1, true);
   const rect = (slot: number, a: number, b: number, c: number, d: number): void => {
@@ -98,8 +102,8 @@ function nscvControlPayloadGeometry(request: Uint8Array): Uint8Array {
     rect(2, f(x + f(width * f(0.76))), f(y + f(height * f(0.32))), 0, 0);
   } else if (op === 7) {
     const dot = max(0, f(height * 0.5)); rect(0, f(x + f(f(width - dot) * 0.5)), f(y + f(f(height - dot) * 0.5)), dot, dot);
-  } else if (op === 8) rect(0, min(size, f(height * 0.5)), 0, 0, 0);
-  else if (op === 9) rect(0, f(height * 0.5), f(min(v(40), v(44)) * 0.5), 0, 0);
+  } else if (op === 8) rect(0, rawMin(48, f(height * 0.5)), 0, 0, 0);
+  else if (op === 9) rect(0, f(height * 0.5), f(pairMin(40, 44) * 0.5), 0, 0);
   else rect(0, f(f(x + width) + inset), 0, 0, 0);
   if (op === 1) { result.set(request.subarray(20, 24), 12); result.set(request.subarray(28, 32), 20); }
   // Uncomputed extents retain their original words, including signaling NaNs.

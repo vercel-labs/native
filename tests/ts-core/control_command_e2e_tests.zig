@@ -139,8 +139,8 @@ test "compiled widget metric payload geometry preserves native float words acros
     var tokens: c.DesignTokens = .{};
     tokens.control_command_policy = core.nativeWindowPolicy;
     const payload = c.control_payload_policy;
-    for (std.enums.values(payload.Operation)) |op| for ([_]u32{ 0, 0x80000000, 1, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345 }) |word| for (0..8) |channel| {
-        var inputs = [_]f32{ -3.25, 2.5, 113.25, 31.25, 12.25, 8.5, 4.25, 0.5 };
+    for (std.enums.values(payload.Operation)) |op| for ([_]u32{ 0, 0x80000000, 1, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345 }) |word| for (0..12) |channel| {
+        var inputs = [_]f32{ -3.25, 2.5, 113.25, 31.25, 12.25, 8.5, 4.25, 0.5, -4.25, 1.5, 9.25, 10.5 };
         inputs[channel] = @bitCast(word);
         const x = inputs[0];
         const y = inputs[1];
@@ -151,7 +151,7 @@ test "compiled widget metric payload geometry preserves native float words acros
         const gap = inputs[6];
         const stroke = inputs[7];
         const frame = sdk.geometry.RectF.init(x, y, width, height);
-        const aux = sdk.geometry.RectF.init(-4.25, 1.5, 9.25, 10.5);
+        const aux = sdk.geometry.RectF.init(inputs[8], inputs[9], inputs[10], inputs[11]);
         var expected = [_]sdk.geometry.RectF{ .init(0, 0, 0, 0), .init(0, 0, 0, 0), .init(0, 0, 0, 0) };
         switch (op) {
             .seam => {
