@@ -695,3 +695,15 @@ export function windows(model: Model): readonly WindowDescriptor[] {
     onCloseCommand: asciiBytes("core.close-settings:payload"),
   })];
 }
+
+
+// A bounded host projection; the committed graph remains in TypeScript.
+export interface HostViewState {
+  readonly ticks: number;
+  readonly failures: number;
+  readonly status: Uint8Array;
+  readonly polling: boolean;
+}
+export function hostViewState(model: Model): HostViewState {
+  return { ticks: model.ticks, failures: model.failures, status: model.status, polling: model.polling };
+}

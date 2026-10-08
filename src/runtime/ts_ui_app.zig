@@ -4,7 +4,8 @@
 //! immutable committed graph plus a pure `update` returning the next
 //! root — this adapter closes that gap with no per-app glue:
 //!
-//!   Model    = core.Model — the emitted struct itself. Markup views
+//!   Model    = the full source model for native markup, or the generated
+//!              stateless handle for compiled views. Markup views
 //!              (`canvas.CompiledMarkupView(core.Model, core.Msg, src)`)
 //!              and Zig builder views bind its fields directly; the
 //!              binding names are the TS interface's own field names
@@ -15,7 +16,7 @@
 //!   update   = the bridge (`TsCoreHost(core)`): every Msg runs the
 //!              core's dispatch cycle — update, commit, command walk,
 //!              subscription reconcile — and the UiApp-held root is
-//!              refreshed to the committed value. Every pointer inside
+//!              refreshed to the committed value. Full reference pointers inside
 //!              it IS the committed graph (valid until the next
 //!              dispatch, exactly a view build's lifetime).
 //!   init     = the core's `initialModel`: the boot model commits at
@@ -114,12 +115,13 @@ pub fn TsUiApp(comptime core: type) type {
 /// apps keep the runtime markup interpreter for hot reload, while release and
 /// mobile apps compile it out after installing the same comptime view.
 pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppFeatures) type {
+    if (features.compiled_model and features.runtime_markup) @compileError("compiled_model requires a compiled view; runtime markup reads the full source model");
     return struct {
-        /// The effect bridge — shared with any direct `TsCoreHost(core)`
-        /// instantiation (comptime memoization), so harnesses can read
+        /// The effect bridge shares its selected representation by comptime
+        /// memoization, so harnesses can read
         /// `Host.model()` and tests can name the bridge's key bases.
-        pub const Host = ts_core_host.TsCoreHost(core);
-        pub const Model = core.Model;
+        pub const Host = ts_core_host.TsCoreHostWithRuntimeModel(core, features.compiled_model);
+        pub const Model = Host.Model;
         pub const Msg = core.Msg;
         pub const view_backend = if (@hasDecl(core, "nativeView")) "typescript" else "zig";
         pub const App = ui_app.UiAppWithFeatures(Model, Msg, features);
@@ -363,14 +365,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             const stamped = stampOptions(options);
             Host.boot();
             applyCoreOptions(core_options);
-            return App.init(backing, Host.model().*, stamped);
+            return App.init(backing, Host.runtimeModel().*, stamped);
         }
 
         /// Mobile counterpart of `init`/`create`: the embed host
         /// (`native_sdk.embed.UiAppHost`) owns App construction, so this
         /// resolves the adapter's stamped options and applies the core
         /// options — the boot model commits here, and the generated mobile
-        /// wiring's `initModel` reads `Host.model()` afterwards. The embed
+        /// wiring's `initModel` reads `Host.runtimeModel()` afterwards. The embed
         /// host then drives the same stamped `init_fx`/`update_fx` seams
         /// the desktop wiring gets.
         pub fn mobileOptions(core_options: CoreOptions, options: Options) Options {
@@ -390,7 +392,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             applyCoreOptions(core_options);
             const self = try backing.create(App);
             App.initInPlace(self, backing, stamped);
-            self.model = Host.model().*;
+            self.model = Host.runtimeModel().*;
             return self;
         }
 
@@ -1539,7 +1541,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             Host.performBoot(fx);
             if (persist_outcome) |outcome| dispatchPersistOutcome(fx, outcome);
             dispatchEnvValues(fx);
-            model.* = Host.model().*;
+            model.* = Host.runtimeModel().*;
         }
 
         fn compiledInitFx(model: *Model, fx: *Effects) void {
@@ -1564,7 +1566,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                     dispatchPersistOutcome(fx, value);
                 },
                 9 => dispatchEnvValues(fx),
-                10 => model.* = Host.model().*,
+                10 => model.* = Host.runtimeModel().*,
                 else => @panic("invalid compiled installation action"),
             };
         }
@@ -1844,7 +1846,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                     @as(f64, @floatFromInt(frame.frame_interval_ns)) / std.time.ns_per_ms;
                 @field(arg, field.name) = channelNum(field.type, value);
             }
-            return core.frameMsg(model, arg);
+            return if (comptime features.compiled_model and @hasDecl(core, "RuntimeModel")) core.runtimeFrameMsg(model, arg) else core.frameMsg(model, arg);
         }
 
         /// `Options.on_key` over the core's `keyMsg(key)` export: the
@@ -2093,7 +2095,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// the authoritative one, so it is overwritten, never read.
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
-            model.* = Host.model().*;
+            model.* = Host.runtimeModel().*;
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 const plan = compiledFlush(5, false);
                 lifecycle_flush_after_update = plan[0] == 1;
@@ -2232,7 +2234,7 @@ test "lifecycle host consumes flush plans and retains independent instance state
     A.Host.boot();
     var effects = A.Effects.init(std.testing.allocator);
     defer effects.deinit();
-    var model = A.Host.model().*;
+    var model = A.Host.runtimeModel().*;
     A.updateFx(&model, .increment, &effects);
     try std.testing.expectEqual(@as(usize, 2), model.count);
     try std.testing.expectEqual(@as(usize, 1), carrier.sends);

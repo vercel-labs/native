@@ -11,6 +11,7 @@ assert.ok(process.argv[2], "run with the compiled corewire path (zig build test-
 const corewire = path.resolve(process.argv[2]);
 // Exact diagnostics and complete generated-file hashes captured from the
 // independent native implementation before replacing its admission rules.
+// Mirror hashes include the reviewed stateless-runtime API addition.
 const goldens = JSON.parse(fs.readFileSync(new URL("core_goldens.json", import.meta.url), "utf8")) as Record<string, {
   status: number; diagnostics: string; hashes: Record<string, string>;
   check_status: number; check_diagnostics: string;
@@ -58,6 +59,9 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
     const mirror = fs.readFileSync(path.join(dir, "mirror"), "utf8"), facade = fs.readFileSync(path.join(dir, "facade"), "utf8");
     assert.match(mirror, /pub fn rows\(self: \*const Model, p0: Range, p1: \?\[\]const u8, arena: std.mem.Allocator\)/);
+    assert.match(mirror, /pub fn rows\(self: \*const RuntimeModel, p0: Range, p1: \?\[\]const u8, arena: std.mem.Allocator\)/);
+    assert.match(mirror, /pub fn snapshotModel/);
+    assert.match(mirror, /decoded_model = null/);
     assert.match(mirror, /const args_tuple = \.\{ p0, p1 \}/);
     assert.match(mirror, /pub fn virtualExtentHelper/);
     assert.match(mirror, /pub fn virtualExtentEstimate/);
@@ -65,7 +69,7 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     assert.match(mirror, /@bitCast\(@as\(u64, @intCast\(index\)\)\)/);
     assert.match(facade, /rows\(nscfCommitted,/);
     assert.match(facade, /estimate\(nscfCommitted,/);
-    for (const name of ["virtualExtentHelper", "virtualExtentEstimate"]) {
+    for (const name of ["virtualExtentHelper", "virtualExtentEstimate", "RuntimeModel", "RuntimeResult", "decoded_model", "restoreCommittedModel"]) {
       const conflicting = structuredClone(contract);
       conflicting.model_helpers[1].name = name;
       conflicting.integer_slots.find(slot => slot.slot === "helpers.estimate.params[0]")!.slot = `helpers.${name}.params[0]`;
@@ -75,6 +79,7 @@ test("parameterized arena helpers and retained integer estimators keep the attes
       assert.ifError(refused.error); assert.equal(refused.status, 1, refused.stderr);
       assert.match(refused.stderr, /collides with a declaration the generated shim/);
       assert.equal(fs.readFileSync(path.join(dir, "mirror"), "utf8"), "retain");
+      if (name !== "virtualExtentHelper" && name !== "virtualExtentEstimate") continue;
       const fieldConflict = structuredClone(contract);
       fieldConflict.types.structs[0].fields.push({ name, type: { kind: "f64" } });
       fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(fieldConflict, (key, value) => (key === "origin" || key === "member") && value === null ? undefined : value));

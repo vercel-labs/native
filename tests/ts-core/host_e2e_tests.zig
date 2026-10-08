@@ -25,7 +25,7 @@ const native_sdk = @import("native_sdk");
 const fixture = @import("ts_core_fixture");
 
 const runtime_ns = native_sdk.runtime;
-const Adapter = native_sdk.TsUiApp(fixture);
+const Adapter = native_sdk.TsUiAppWithFeatures(fixture, .{ .runtime_markup = false, .compiled_model = true });
 /// The same instantiation the adapter drives (comptime memoization):
 /// assertions may read the committed model straight off the bridge.
 const Bridge = Adapter.Host;
@@ -50,16 +50,17 @@ const App = Adapter.App;
 /// parameter is the UiApp-held root the adapter refreshes each
 /// dispatch, so this view (and the replay fingerprints derived from
 /// what it renders) pins the compiled core's state directly.
-fn e2eView(ui: *App.Ui, model: *const fixture.Model) App.Ui.Node {
+fn e2eView(ui: *App.Ui, model: *const Adapter.Model) App.Ui.Node {
+    const state = model.hostViewState(ui.arena);
     return ui.column(.{ .gap = 4, .padding = 8 }, .{
-        ui.text(.{}, ui.fmt("ticks {d} failures {d}", .{ model.ticks, model.failures })),
-        ui.text(.{}, ui.fmt("status {s}", .{model.status})),
+        ui.text(.{}, ui.fmt("ticks {d} failures {d}", .{ state.ticks, state.failures })),
+        ui.text(.{}, ui.fmt("status {s}", .{state.status})),
     });
 }
 
-fn e2eWindowView(ui: *App.Ui, model: *const fixture.Model, label: []const u8) App.Ui.Node {
+fn e2eWindowView(ui: *App.Ui, model: *const Adapter.Model, label: []const u8) App.Ui.Node {
     std.debug.assert(std.mem.eql(u8, label, "settings"));
-    return ui.text(.{}, if (model.polling) "settings polling" else "settings paused");
+    return ui.text(.{}, if (model.hostViewState(ui.arena).polling) "settings polling" else "settings paused");
 }
 
 fn e2eCommand(name: []const u8) ?fixture.Msg {
@@ -424,8 +425,8 @@ test "the compiled core boots through init_fx: boot request and subscription tim
     // committed value (the adapter's refresh), not a shim.
     try std.testing.expect(Bridge.model().polling);
     try std.testing.expectEqual(@as(i64, 0), Bridge.model().ticks);
-    try std.testing.expect(h.app_state.model.polling);
-    try std.testing.expectEqual(@as(i64, 0), h.app_state.model.ticks);
+    try std.testing.expect(Bridge.model().polling);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().ticks);
 }
 
 test "the compiled core's statusItem helper installs and updates title and menu" {
@@ -507,7 +508,7 @@ test "requests round-trip, replace, and cancel through the real dispatch path" {
     try fx.feedHostResult(status_request_key, true, "ready");
     try h.wake();
     try std.testing.expectEqualStrings("ready", Bridge.model().status);
-    try std.testing.expectEqualStrings("ready", h.app_state.model.status);
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
 
     // refresh re-issues the same wire key: the stub sees a second
     // request under the SAME engine key (replace, not a new slot).
@@ -2196,4 +2197,23 @@ test "a recorded mixed-rejection session replays with identical cross-family ord
     try std.testing.expect(report.ok());
     try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
     try std.testing.expectEqualDeep(recorded, MixSnapshot.take());
+}
+
+test "compiled host projects views windows status and subscriptions without model decoding" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    try h.menu("core.disable");
+    try std.testing.expect(!h.tickArmed());
+    try h.menu("core.open-settings");
+    try h.menu("core.enable");
+    try std.testing.expect(h.tickArmed());
+    try std.testing.expect(try h.fireTick(2_000_000));
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    const model = Bridge.model();
+    try std.testing.expect(model.settingsOpen);
+    try std.testing.expect(model.polling);
+    try std.testing.expectEqual(@as(i64, 1), model.ticks);
+    try std.testing.expectEqual(@as(usize, 1), fixture.rt.snapshotDecodeCount());
 }

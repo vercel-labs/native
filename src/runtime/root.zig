@@ -181,6 +181,7 @@ pub const max_terminal_sessions = runtime_terminal_session.max_sessions;
 
 const runtime_ts_core_host = @import("ts_core_host.zig");
 pub const TsCoreHost = runtime_ts_core_host.TsCoreHost;
+pub const TsCoreHostWithRuntimeModel = runtime_ts_core_host.TsCoreHostWithRuntimeModel;
 pub const ts_core_request_key_base = runtime_ts_core_host.request_key_base;
 pub const ts_core_timer_key_base = runtime_ts_core_host.timer_key_base;
 pub const ts_core_effect_key_base = runtime_ts_core_host.effect_key_base;

@@ -79,7 +79,7 @@ pub const Model = core.Model;
 pub const Msg = core.Msg;
 
 const dev = builtin.mode == .Debug;
-const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled });
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled });
 const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
@@ -135,10 +135,10 @@ fn appOptions(io: ?std.Io) Adapter.Options {
         .theme = comptime runner.manifestThemePack(),
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
-    if (comptime ts_view.enabled) options.view = ts_view.build else if (comptime !dev) options.view = CompiledAppView.build;
+    if (comptime ts_view.enabled) options.view = ts_view.buildRuntime else if (comptime !dev) options.view = CompiledAppView.build;
     if (comptime @hasDecl(core.Model, "windows")) {
         if (comptime ts_view.enabled) {
-            options.window_view = ts_view.buildWindow;
+            options.window_view = ts_view.buildRuntimeWindow;
         } else {
             options.window_view = window_views.build;
             if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };

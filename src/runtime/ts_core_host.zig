@@ -457,8 +457,18 @@ pub const max_now_chain: usize = 64;
 pub const max_nows_per_cmd: usize = 16;
 
 pub fn TsCoreHost(comptime core: type) type {
+    return TsCoreHostWithRuntimeModel(core, false);
+}
+
+/// Compiled views use a stateless handle. Reference views retain the full
+/// source model; commands, subscriptions and restoration share one bridge.
+pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: bool) type {
+    const use_runtime_model = compiled_model and @hasDecl(core, "RuntimeModel");
     return struct {
-        pub const Model = core.Model;
+        pub const Model = if (use_runtime_model) core.RuntimeModel else core.Model;
+        const initialModel = if (use_runtime_model) core.initialRuntimeModel else core.initialModel;
+        const updateModel = if (use_runtime_model) core.updateRuntimeModel else core.update;
+        const commitModel = if (use_runtime_model) core.commitRuntimeModel else core.commitModelRoot;
         pub const Msg = core.Msg;
         pub const Fx = runtime_effects.Effects(Msg);
 
@@ -473,8 +483,8 @@ pub fn TsCoreHost(comptime core: type) type {
 
         const msg_arms = @typeInfo(Msg).@"union".fields;
 
-        const update_returns_cmd = @typeInfo(@TypeOf(core.update)).@"fn".return_type.? != *const Model;
-        const init_returns_cmd = @typeInfo(@TypeOf(core.initialModel)).@"fn".return_type.? != *const Model;
+        const update_returns_cmd = @typeInfo(@TypeOf(updateModel)).@"fn".return_type.? != *const Model;
+        const init_returns_cmd = @typeInfo(@TypeOf(initialModel)).@"fn".return_type.? != *const Model;
         const has_subscriptions = @hasDecl(core, "subscriptions");
         pub const environment_messages = if (@hasDecl(core, "envMsgs")) core.envMsgs else .{};
 
@@ -830,8 +840,8 @@ pub fn TsCoreHost(comptime core: type) type {
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
             swallow_next_dispatch = false;
-            const initial = core.initialModel();
-            model_root = core.commitModelRoot(if (comptime init_returns_cmd) initial.model else initial);
+            const initial = initialModel();
+            model_root = commitModel(if (comptime init_returns_cmd) initial.model else initial);
             core.rt.frameReset();
         }
 
@@ -850,18 +860,24 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         /// The committed model root (valid until the next dispatch).
-        pub fn model() *const Model {
+        pub fn runtimeModel() *const Model {
             return model_root;
         }
 
-        /// Replace the committed core model from canonical snapshot bytes and
-        /// refresh the host mirror. Generated external cores expose the inverse
+        /// Complete source state for diagnostics and replay. Compiled apps
+        /// decode only here; returned roots follow the shim snapshot lifetime.
+        pub fn model() *const core.Model {
+            return if (comptime use_runtime_model) core.snapshotModel() else model_root;
+        }
+
+        /// Replace the committed core model from canonical snapshot bytes.
+        /// Reference mode refreshes its mirror; compiled mode keeps its handle. Generated external cores expose the inverse
         /// of `modelSnapshot`; hand-written test cores intentionally do not.
         pub fn restoreSnapshot(snapshot: []const u8) void {
             if (comptime !@hasDecl(core, "restoreModel")) {
                 @panic("ts core host: this core exposes no restoreModel entry - regenerate it with core ABI version 2");
             } else {
-                model_root = core.restoreModel(snapshot);
+                model_root = if (comptime use_runtime_model) core.restoreRuntimeModel(snapshot) else core.restoreModel(snapshot);
             }
         }
 
@@ -968,11 +984,11 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: more than 64 chained Cmd.now dispatches from one event - update is requesting timestamps in a loop");
             }
             if (comptime update_returns_cmd) {
-                const result = core.update(model_root, msg);
-                model_root = core.commitModelRoot(result.model);
+                const result = updateModel(model_root, msg);
+                model_root = commitModel(result.model);
                 finishCycle(fx, result.cmd, depth);
             } else {
-                model_root = core.commitModelRoot(core.update(model_root, msg));
+                model_root = commitModel(updateModel(model_root, msg));
                 finishCycle(fx, "", depth);
             }
         }
@@ -4433,7 +4449,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// everywhere, so record/replay walk identical tables.
         fn reconcileSubscriptions(fx: *Fx) void {
             if (comptime !has_subscriptions) return;
-            const borrowed_subs = core.subscriptions(model_root);
+            const borrowed_subs = if (comptime use_runtime_model) core.runtimeSubscriptions(model_root) else core.subscriptions(model_root);
             // A cycle policy may allocate in the compiler frame. Keep the
             // stream in the shim arena, and reset both only in finishCycle.
             const subs = if (comptime @hasDecl(core, "nativeTimerPolicy") or @hasDecl(core, "nativeDbPolicy") or @hasDecl(core, "nativeEffectPolicy")) blk: {

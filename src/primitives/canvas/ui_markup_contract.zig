@@ -1936,7 +1936,8 @@ pub fn writeArtifact(contract: Contract, writer: *std.Io.Writer) !void {
 /// no-op for them.
 pub fn emitMain(comptime app: type, comptime specials: Specials, init: std.process.Init) !void {
     if (comptime !(@hasDecl(app, "Model") and @hasDecl(app, "Msg"))) return;
-    if (comptime (@typeInfo(app.Model) != .@"struct" or @typeInfo(app.Msg) != .@"union")) return;
+    const SourceModel = if (@hasDecl(app, "SourceModel")) app.SourceModel else app.Model;
+    if (comptime (@typeInfo(SourceModel) != .@"struct" or @typeInfo(app.Msg) != .@"union")) return;
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     var src_root: []const u8 = default_source_root;
@@ -1951,7 +1952,7 @@ pub fn emitMain(comptime app: type, comptime specials: Specials, init: std.proce
             out_path = args[index];
         }
     }
-    var contract = comptime describe(app.Model, app.Msg, specials);
+    var contract = comptime describe(SourceModel, app.Msg, specials);
     // The registered icon vocabulary rides the same artifact: one
     // `pub const app_icons` declaration feeds boot-time registration and
     // this reflection, so `native check` verifies `app:` markup

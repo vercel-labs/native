@@ -51,3 +51,22 @@ test "mixed bare-model and effect-tuple returns commit through the ABI" {
     try std.testing.expectEqual(@as(i64, 0), model.n);
     core.rt.frameReset();
 }
+
+test "stateless runtime retains boot effects and mixed return command bytes" {
+    core.rt.resetAll();
+    const initial = core.initialRuntimeModel();
+    const boot = try std.testing.allocator.dupe(u8, initial.cmd);
+    defer std.testing.allocator.free(boot);
+    try std.testing.expectEqual(@as(usize, 0), core.rt.snapshotDecodeCount());
+    const reference = core.initialModel();
+    try std.testing.expectEqualSlices(u8, boot, reference.cmd);
+    core.rt.frameReset();
+    const decodes = core.rt.snapshotDecodeCount();
+    try std.testing.expectEqualSlices(u8, "", core.updateRuntimeModel(initial.model, .{ .tick = -1 }).cmd);
+    const result = core.updateRuntimeModel(initial.model, .{ .tick = 1000 });
+    const cmd = try std.testing.allocator.dupe(u8, result.cmd);
+    defer std.testing.allocator.free(cmd);
+    core.rt.frameReset();
+    try std.testing.expectEqual(decodes, core.rt.snapshotDecodeCount());
+    try std.testing.expectEqualSlices(u8, cmd, core.update(reference.model, .{ .tick = 1000 }).cmd);
+}

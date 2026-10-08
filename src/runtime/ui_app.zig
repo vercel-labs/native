@@ -100,6 +100,9 @@ pub const UiAppFeatures = struct {
     /// `canvas.CompiledMarkupView` so no parser code (or its diagnostics)
     /// ships in the binary; the markup machinery then compiles to nothing.
     runtime_markup: bool = true,
+    /// Generated TypeScript views observe compiled state directly. This
+    /// selects their stateless host handle instead of a decoded model mirror.
+    compiled_model: bool = false,
 };
 
 pub fn UiApp(comptime ModelT: type, comptime MsgT: type) type {

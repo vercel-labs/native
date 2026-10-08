@@ -234,8 +234,24 @@ fn virtualView(ui: *Ui, label: []const u8, video: []const u8) !Ui.Node {
     return decodeVirtual(ui, core.nativeVirtualView(label, context, video, ui.arena), resolved);
 }
 
+/// Concrete callbacks for generated compiled-model apps; the legacy builders
+/// retain their full Model signature for independent reference fixtures.
+pub fn buildRuntime(ui: *Ui, model: *const core.RuntimeModel) Ui.Node {
+    _ = model;
+    return buildCommitted(ui);
+}
+
+pub fn buildRuntimeWindow(ui: *Ui, model: *const core.RuntimeModel, label: []const u8) Ui.Node {
+    _ = model;
+    return buildCommittedWindow(ui, label);
+}
+
 pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
     _ = model;
+    return buildCommitted(ui);
+}
+
+fn buildCommitted(ui: *Ui) Ui.Node {
     var context: [20]u8 = undefined;
     if (comptime @hasDecl(core, "nativeVirtualRequests")) return virtualView(ui, "", videoContext(ui, &context)) catch @panic("invalid compiled virtual view data");
     const bytes = if (comptime @hasDecl(core, "nativeMediaView")) core.nativeMediaView(videoContext(ui, &context), ui.arena) else core.nativeView(ui.arena);
@@ -244,6 +260,10 @@ pub fn build(ui: *Ui, model: *const core.Model) Ui.Node {
 
 pub fn buildWindow(ui: *Ui, model: *const core.Model, label: []const u8) Ui.Node {
     _ = model;
+    return buildCommittedWindow(ui, label);
+}
+
+fn buildCommittedWindow(ui: *Ui, label: []const u8) Ui.Node {
     var context: [20]u8 = undefined;
     if (comptime @hasDecl(core, "nativeVirtualRequests")) return virtualView(ui, label, videoContext(ui, &context)) catch @panic("invalid compiled virtual window view data");
     const bytes = if (comptime @hasDecl(core, "nativeMediaWindowView")) core.nativeMediaWindowView(label, videoContext(ui, &context), ui.arena) else core.nativeWindowView(label, ui.arena);

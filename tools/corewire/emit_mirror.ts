@@ -28,7 +28,7 @@ class MirrorEmitter extends CodeWriter {
     this.inlined = projectionPlan(this.s).inlined;
   }
   run(): void {
-    this.header(); this.mirrorTypes(); this.modelStruct(); this.msgUnion(); this.wiringAliases();
+    this.header(); this.mirrorTypes(); this.modelStruct(); this.modelStruct(true); this.msgUnion(); this.wiringAliases();
     this.tagTable(); this.entryPoints(); this.channels(); this.helperPlumbing(); this.snapshotPlumbing();
   }
   header(): void {
@@ -97,21 +97,22 @@ class MirrorEmitter extends CodeWriter {
     }
     return out + " }";
   }
-  modelStruct(): void {
+  modelStruct(runtime = false): void {
     const model = findRecord(this.s, this.s.model);
     if (model === null) throw new Error("validated model missing");
-    this.print("\npub const {f} = struct {{", [zigIdent(model.name)]);
-    for (const f of model.fields) this.print("\n    {f}: {s},", [zigIdent(f.name), this.spellRef(f.type, model.name, f.name, this.slotPath(model.name, f.name))]);
+    const name = runtime ? "RuntimeModel" : zigIdent(model.name);
+    this.print("\npub const {f} = struct {{", [name]);
+    for (const f of runtime ? [] : model.fields) this.print("\n    {f}: {s},", [zigIdent(f.name), this.spellRef(f.type, model.name, f.name, this.slotPath(model.name, f.name))]);
     if (this.s.model_helpers.length > 0) this.raw("\n");
     for (let i = 0; i < this.s.model_helpers.length; i++) {
       const h = this.s.model_helpers[i];
       const returns = this.spellRef(h.returns, "helpers", h.name, "helpers." + h.name + ".return");
       if (h.arena && h.params.length === 0) {
         this.print("\n    pub fn {f}(self: *const {f}, arena: std.mem.Allocator) {s} {{\n        _ = self;\n        return callHelper({s}, {d}, &.{{}}, arena);\n    }}",
-          [zigIdent(h.name), zigIdent(model.name), returns, returns, String(i)]);
+          [zigIdent(h.name), name, returns, returns, String(i)]);
       } else if (h.params.length === 0) {
         this.print("\n    pub fn {f}(self: *const {f}) {s} {{\n        _ = self;\n        return callHelper({s}, {d}, &.{{}}, shim_rt.frameAllocator());\n    }}",
-          [zigIdent(h.name), zigIdent(model.name), returns, returns, String(i)]);
+          [zigIdent(h.name), name, returns, returns, String(i)]);
       } else {
         let params = "", tuple = "";
         for (let j = 0; j < h.params.length; j++) {
@@ -122,7 +123,7 @@ class MirrorEmitter extends CodeWriter {
         }
         if (h.arena) params += ", arena: std.mem.Allocator";
         this.print("\n    pub fn {f}(self: *const {f}{s}) {s} {{\n        _ = self;\n        const args_tuple = .{{ {s} }};\n        const args = shim_rt.encodeAlloc(@TypeOf(args_tuple), args_tuple, shim_rt.frameAllocator());\n        return callHelper({s}, {d}, args, {s});\n    }}",
-          [zigIdent(h.name), zigIdent(model.name), params, returns, tuple, returns, String(i), h.arena ? "arena" : "shim_rt.frameAllocator()"]);
+          [zigIdent(h.name), name, params, returns, tuple, returns, String(i), h.arena ? "arena" : "shim_rt.frameAllocator()"]);
       }
     }
     // Native markup and its Debug interpreter need the same stable helpers
@@ -187,11 +188,18 @@ class MirrorEmitter extends CodeWriter {
     this.print(this.s.init_returns_cmd ? text.bootWithCommand : text.bootModel, [model]);
     this.print(this.s.update_returns_cmd ? text.updateWithCommand : text.updateModel,
       this.s.update_returns_cmd ? [model, model, msg] : [model, msg, model]);
-    this.raw(text.dispatchPrelude);
+    this.raw("    _ = model;\n    const cmd = dispatchMessage(msg);\n");
+    this.raw(this.s.update_returns_cmd ? "    return .{ .model = snapshotModel(), .cmd = cmd };\n}\n" : "    _ = cmd;\n    return snapshotModel();\n}\n");
+    this.print(text.runtimeEntries, [msg]);
+    this.print("\nfn dispatchMessage(msg: {f}) rt.Cmd {{\n", [msg]);
+    this.raw(text.dispatchPrelude.replace("    _ = model;\n", ""));
     for (let i = 0; i < this.s.msg.arms.length; i++) this.dispatchArm(this.s.msg.arms[i], i);
     this.raw("    }\n");
-    this.raw(this.s.update_returns_cmd ? "    return .{ .model = snapshotModel(), .cmd = cmd_ptr[0..cmd_len] };\n}\n" : "    return snapshotModel();\n}\n");
-    if (this.s.has_subscriptions) this.print(text.subscriptions, [model]);
+    this.raw("    return cmd_ptr[0..cmd_len];\n}\n");
+    if (this.s.has_subscriptions) {
+      this.print(text.subscriptions, [model]);
+      this.raw(text.runtimeSubscriptions);
+    }
     this.print(text.commitModelRoot, [model, model]);
   }
   dispatchArm(arm: MsgArm, tag: number): void {
@@ -253,7 +261,10 @@ class MirrorEmitter extends CodeWriter {
     ];
     for (const e of extensions) if (this.s.abi.exports.includes(e.name)) this.raw(e.code);
     if (c.command_msg) this.print(text.commandChannel, [msg]);
-    if (c.frame_msg) this.print(text.frameChannel, [model, msg]);
+    if (c.frame_msg) {
+      this.print(text.frameChannel, [model, msg]);
+      this.print(text.runtimeFrameChannel, [msg]);
+    }
     if (c.key_msg) this.print(text.keyChannel, [msg]);
     if (c.pinch_msg) this.print(text.pinchChannel, [msg]);
     if (c.drop_msg) this.print(text.dropChannel, [msg]);
@@ -275,5 +286,5 @@ class MirrorEmitter extends CodeWriter {
     }
   }
   helperPlumbing(): void { if (this.s.model_helpers.length > 0) this.raw(text.helperPlumbing); }
-  snapshotPlumbing(): void { this.print(text.snapshotPlumbing, [this.input.snapshot_text, zigIdent(this.s.model), zigIdent(this.s.model), zigIdent(this.s.model)]); }
+  snapshotPlumbing(): void { this.print(text.snapshotPlumbing, [this.input.snapshot_text, zigIdent(this.s.model), zigIdent(this.s.model), zigIdent(this.s.model), zigIdent(this.s.model)]); }
 }

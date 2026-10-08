@@ -24,7 +24,7 @@ test {
     _ = @import("widget_metric_e2e_tests.zig");
 }
 
-const Adapter = native_sdk.TsUiApp(core);
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = false, .compiled_model = true });
 const Bridge = Adapter.Host;
 const App = Adapter.App;
 
@@ -97,8 +97,8 @@ test "compiled app lifecycle plans preserve complete native decisions and exact 
     }
 }
 
-fn view(ui: *App.Ui, model: *const core.Model) App.Ui.Node {
-    return ui.text(.{}, ui.fmt("value {d}", .{model.value}));
+fn view(ui: *App.Ui, model: *const Adapter.Model) App.Ui.Node {
+    return @import("persist_decoder").buildRuntime(ui, model);
 }
 
 fn command(name: []const u8) ?core.Msg {
@@ -1013,4 +1013,43 @@ test "compiled alpha arithmetic matches native exceptional and signed zero input
         try expectAppearanceEqual(appearance_style.staticTextSelectionFillColor(widget, tokens), appearance_style.staticTextSelectionFillColor(compiled, tokens));
         core.rt.frameReset();
     };
+}
+
+test "compiled runtime model remains undecoded across boot dispatch restore and view" {
+    core.rt.resetAll();
+    const initial = core.initialRuntimeModel();
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(core.RuntimeModel));
+    try std.testing.expectEqual(@as(usize, 0), core.rt.snapshotDecodeCount());
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const boot = try alloc.dupe(u8, core.persistenceSnapshot());
+    const bytes = "\x00\xff\xc0";
+    _ = core.updateRuntimeModel(initial.model, .{ .launch_value = bytes });
+    const update = core.updateRuntimeModel(initial.model, .increment_and_persist);
+    const cmd = try alloc.dupe(u8, update.cmd);
+    const persisted = try alloc.dupe(u8, core.persistenceSnapshot());
+    core.rt.frameReset();
+    var ui = App.Ui.init(alloc);
+    _ = try ui.finalize(view(&ui, initial.model));
+    try std.testing.expectEqual(@as(usize, 0), core.rt.snapshotDecodeCount());
+    const decoded = core.snapshotModel();
+    try std.testing.expectEqual(@as(i64, 1), decoded.value);
+    try std.testing.expectEqualStrings("initial" ++ bytes, decoded.label);
+    try std.testing.expectEqual(@as(usize, 1), core.rt.snapshotDecodeCount());
+    _ = core.restoreRuntimeModel(boot);
+    try std.testing.expectEqual(@as(usize, 1), core.rt.snapshotDecodeCount());
+    // The independently decoded reference exercises the same event sequence.
+    var reference = core.snapshotModel();
+    reference = core.update(reference, .{ .launch_value = bytes }).model;
+    const expected = core.update(reference, .increment_and_persist);
+    try std.testing.expectEqualSlices(u8, cmd, expected.cmd);
+    try std.testing.expectEqualSlices(u8, persisted, core.persistenceSnapshot());
+    const expected_model = expected.model.*;
+    const restores = core.rt.snapshotDecodeCount();
+    _ = core.restoreRuntimeModel(persisted);
+    core.rt.frameReset();
+    try std.testing.expectEqual(restores, core.rt.snapshotDecodeCount());
+    const restored = core.snapshotModel();
+    try std.testing.expectEqualDeep(expected_model, restored.*);
 }

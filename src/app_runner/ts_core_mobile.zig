@@ -44,12 +44,13 @@ const app_markup_root = @import("app_markup_root");
 
 /// Shared with the embed host: its UiApp type must use the same feature set
 /// as this module's TypeScript adapter or their Options types are distinct.
-pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false };
+pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false, .compiled_model = ts_view.enabled };
 const Adapter = native_sdk.TsUiAppWithFeatures(core, features);
 
-/// Re-exported for the embed host's AppDef contract (and any test that
-/// reflects the core's real surface).
-pub const Model = core.Model;
+/// The embed host stores the selected runtime representation. Contract
+/// reflection continues to use the complete source state.
+pub const Model = Adapter.Model;
+pub const SourceModel = core.Model;
 pub const Msg = core.Msg;
 
 const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
@@ -96,7 +97,7 @@ var data_root_env_count: usize = 0;
 /// The embed host calls `mobileOptions()` first (UiAppHost.create), so the
 /// boot model is committed by the time `initModel` reads it.
 pub fn initModel() Model {
-    return Adapter.Host.model().*;
+    return Adapter.Host.runtimeModel().*;
 }
 
 pub fn mobileOptions() Adapter.Options {
@@ -107,7 +108,7 @@ pub fn mobileOptions() Adapter.Options {
         .name = manifest.name,
         .scene = mobile_scene,
         .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
-        .view = CompiledAppView.build,
+        .view = if (ts_view.enabled) ts_view.buildRuntime else CompiledAppView.build,
         // app.zon's theme pack and one-accent override, same as desktop.
         .theme = comptime manifestThemePack(),
         .theme_accent = comptime manifestThemeAccent(),

@@ -44,6 +44,13 @@
 //! an unaligned little-endian load.
 
 const std = @import("std");
+const builtin = @import("builtin");
+var snapshot_decodes: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {};
+
+/// Diagnostic instrumentation compiles away from shipped apps.
+pub fn snapshotDecodeCount() usize {
+    return if (builtin.is_test) snapshot_decodes else 0;
+}
 
 // ---------------------------------------------------------- the arena
 
@@ -75,6 +82,7 @@ pub fn frameReset() void {
 /// Full reset (the deterministic re-init seam): every arena; the
 /// core's own state resets through its init entry.
 pub fn resetAll() void {
+    if (builtin.is_test) snapshot_decodes = 0;
     _ = arena_state.reset(.retain_capacity);
     for (&model_arenas) |*arena| _ = arena.reset(.retain_capacity);
 }
@@ -115,6 +123,7 @@ fn typeScanQuota(comptime T: type) u32 {
 /// anything older is gone (the host holds exactly one committed root at
 /// a time, the shipped bridge contract).
 pub fn decodeSnapshot(comptime T: type, bytes: []const u8) *const T {
+    if (builtin.is_test) snapshot_decodes += 1;
     model_arena_index +%= 1;
     const arena = &model_arenas[model_arena_index];
     _ = arena.reset(.retain_capacity);
