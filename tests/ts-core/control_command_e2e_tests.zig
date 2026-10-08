@@ -133,3 +133,74 @@ test "compiled widget metric payload results survive nested policy calls and fra
     try std.testing.expectEqual(64, core.nativeWindowPolicy(&request, &result));
     try std.testing.expect(std.mem.allEqual(u8, result[64..], 0xa5));
 }
+
+test "compiled widget metric payload geometry preserves native float words across every operation" {
+    _ = core.initialModel();
+    var tokens: c.DesignTokens = .{};
+    tokens.control_command_policy = core.nativeWindowPolicy;
+    const payload = c.control_payload_policy;
+    for (std.enums.values(payload.Operation)) |op| for ([_]u32{ 0, 0x80000000, 1, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345 }) |word| for (0..8) |channel| {
+        var inputs = [_]f32{ -3.25, 2.5, 113.25, 31.25, 12.25, 8.5, 4.25, 0.5 };
+        inputs[channel] = @bitCast(word);
+        const x = inputs[0];
+        const y = inputs[1];
+        const width = inputs[2];
+        const height = inputs[3];
+        const size = inputs[4];
+        const inset = inputs[5];
+        const gap = inputs[6];
+        const stroke = inputs[7];
+        const frame = sdk.geometry.RectF.init(x, y, width, height);
+        const aux = sdk.geometry.RectF.init(-4.25, 1.5, 9.25, 10.5);
+        var expected = [_]sdk.geometry.RectF{ .init(0, 0, 0, 0), .init(0, 0, 0, 0), .init(0, 0, 0, 0) };
+        switch (op) {
+            .seam => {
+                const left = aux.x + size * 0.5;
+                expected[0] = .init(left, y - stroke, @max(0, x + width + stroke - left), height + stroke * 2);
+            },
+            .select => {
+                expected[0] = .init(x + inset, y, @max(1, width - inset * 2 - (size + inset)), height);
+                expected[1] = .init(x + width - inset - size, y + (height - size) * 0.5, size, size);
+            },
+            .centered_icon => {
+                expected[0] = .init(x + (width - size) * 0.5, y + (height - size) * 0.5, size, size);
+            },
+            .search_icon => {
+                const extent = @max(8, size - 2);
+                expected[0] = .init(x + inset, y + @max(0, (height - extent) * 0.5), extent, extent);
+            },
+            .menu => {
+                expected[0] = .init(x, y, @max(1, width - size - gap), height);
+                expected[1] = .init(x + inset, y + (height - size) * 0.5, size, size);
+                expected[2] = .init(x + width - inset - size, y + (height - size) * 0.5, size, size);
+            },
+            .list, .shifted_label => {
+                const shift = size + gap;
+                expected[0] = .init(x + shift, y, @max(1, width - shift), height);
+                if (op == .list) expected[1] = .init(x + inset, y + (height - size) * 0.5, size, size);
+            },
+            .checkmark => {
+                expected[0] = .init(x + width * 0.26, y + height * 0.54, 0, 0);
+                expected[1] = .init(x + width * 0.43, y + height * 0.70, 0, 0);
+                expected[2] = .init(x + width * 0.76, y + height * 0.32, 0, 0);
+            },
+            .radio_dot => {
+                const dot = @max(0, height * 0.5);
+                expected[0] = .init(x + (width - dot) * 0.5, y + (height - dot) * 0.5, dot, dot);
+            },
+            .progress_radius => {
+                expected[0] = .init(@min(size, height * 0.5), 0, 0, 0);
+            },
+            .slider_radius => {
+                expected[0] = .init(height * 0.5, @min(aux.width, aux.height) * 0.5, 0, 0);
+            },
+            .label_x => {
+                expected[0] = .init(x + width + inset, 0, 0, 0);
+            },
+        }
+        exact(expected, payload.frames(op, frame, .{ size, inset, gap, stroke }, aux, tokens)) catch |err| {
+            std.debug.print("payload geometry mismatch op={t} word={x} channel={d}\n", .{ op, word, channel });
+            return err;
+        };
+    };
+}

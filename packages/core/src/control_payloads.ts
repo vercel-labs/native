@@ -102,6 +102,11 @@ function nscvControlPayloadGeometry(request: Uint8Array): Uint8Array {
   else if (op === 9) rect(0, f(height * 0.5), f(min(v(40), v(44)) * 0.5), 0, 0);
   else rect(0, f(f(x + width) + inset), 0, 0, 0);
   if (op === 1) { result.set(request.subarray(20, 24), 12); result.set(request.subarray(28, 32), 20); }
+  // Uncomputed extents retain their original words, including signaling NaNs.
+  // A float read/write would quiet those words before the native consumer.
+  if (op === 2) { result.set(request.subarray(48, 52), 16); result.set(request.subarray(48, 52), 20); }
+  if (op === 1 || op === 4 || op === 5) { result.set(request.subarray(48, 52), 32); result.set(request.subarray(48, 52), 36); }
+  if (op === 4) { result.set(request.subarray(48, 52), 48); result.set(request.subarray(48, 52), 52); }
   if (op === 4 || op === 5 || op === 11) {
     result.set(request.subarray(20, 24), 12); result.set(request.subarray(28, 32), 20);
     if (op === 4) result.set(request.subarray(16, 20), 8);
