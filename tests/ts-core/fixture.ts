@@ -13,7 +13,7 @@
 // tests/ts-core/host_e2e_tests.zig.
 
 import { Cmd, Sub, asciiBytes, utf8Bytes, windowDescriptor } from "@native-sdk/core";
-import { type AudioState, type StatusItemState, type WindowDescriptor } from "@native-sdk/core/events";
+import { type AudioState, type FrameEvent, type StatusItemState, type WindowDescriptor } from "@native-sdk/core/events";
 
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
@@ -706,4 +706,13 @@ export interface HostViewState {
 }
 export function hostViewState(model: Model): HostViewState {
   return { ticks: model.ticks, failures: model.failures, status: model.status, polling: model.polling };
+}
+
+// A distinct surface size isolates presented-frame probes from timer tests.
+export function frameMsg(model: Model, frame: FrameEvent): Msg | null {
+  if (frame.width === 731 && frame.height === 257 && frame.intervalMs === 16) {
+    if (frame.timestampMs === 23 && model.polling) return { kind: "disable" };
+    if (frame.timestampMs === 24 && !model.polling) return { kind: "enable" };
+  }
+  return null;
 }

@@ -2217,3 +2217,30 @@ test "compiled host projects views windows status and subscriptions without mode
     try std.testing.expectEqual(@as(i64, 1), model.ticks);
     try std.testing.expectEqual(@as(usize, 1), fixture.rt.snapshotDecodeCount());
 }
+
+test "compiled host projects frame channels through stateless models and preserves idle behavior" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const frame: native_sdk.platform.GpuSurfaceFrameEvent = .{
+        .label = canvas_label,
+        .size = native_sdk.geometry.SizeF.init(731, 257),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 23_000_000,
+        .frame_interval_ns = 16_000_000,
+    };
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = frame });
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    try std.testing.expect(!h.tickArmed());
+    try std.testing.expect(!Bridge.model().polling);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = frame });
+    try std.testing.expect(!h.tickArmed());
+    try std.testing.expect(!Bridge.model().polling);
+    var next = frame;
+    next.frame_index = 3;
+    next.timestamp_ns = 24_000_000;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = next });
+    try std.testing.expect(h.tickArmed());
+    try std.testing.expect(Bridge.model().polling);
+}

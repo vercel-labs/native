@@ -1828,7 +1828,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// exactly like a Zig `on_frame` (null while idle keeps the idle
         /// law: no Msg, no rebuild, the frame channel starves on its own).
         fn frameMsgAdapter(model: *const Model, frame: platform.GpuFrame) ?Msg {
-            const params = @typeInfo(@TypeOf(core.frameMsg)).@"fn".params;
+            const channel = if (comptime features.compiled_model and @hasDecl(core, "RuntimeModel")) core.runtimeFrameMsg else core.frameMsg;
+            const params = @typeInfo(@TypeOf(channel)).@"fn".params;
             if (comptime (params.len != 2 or params[0].type != *const Model)) {
                 @compileError("TsUiApp: frameMsg must take (model: Model, frame: FrameEvent) - regenerate the core");
             }
@@ -1846,7 +1847,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                     @as(f64, @floatFromInt(frame.frame_interval_ns)) / std.time.ns_per_ms;
                 @field(arg, field.name) = channelNum(field.type, value);
             }
-            return if (comptime features.compiled_model and @hasDecl(core, "RuntimeModel")) core.runtimeFrameMsg(model, arg) else core.frameMsg(model, arg);
+            return channel(model, arg);
         }
 
         /// `Options.on_key` over the core's `keyMsg(key)` export: the
