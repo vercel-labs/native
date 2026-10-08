@@ -8,6 +8,7 @@ const text_layout_hash = @import("text_layout_hash.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
 const text_metrics = @import("text_metrics.zig");
 const compiled_run = @import("text_run_policy.zig");
+const compiled_query = @import("text_query_policy.zig");
 
 const Error = canvas.Error;
 const FontId = canvas.FontId;
@@ -323,6 +324,11 @@ pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextL
 
 pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []TextLine) Error!TextLayoutPlan {
     const effective_options = textLayoutOptionsForDrawText(options, text);
+    if (effective_options.text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, effective_options, .{ .mode = 0, .lines = output });
+        if (result.line_capacity_failed) return error.TextLayoutLineListFull;
+        return .{ .key = textLayoutKey(text, effective_options), .layout = .{ .lines = output[0..result.len], .bounds = result.bounds } };
+    }
     var len: usize = 0;
     var bounds: ?geometry.RectF = null;
     var lines = TextLineIterator.init(text, effective_options);
@@ -439,9 +445,7 @@ fn textInkInsets(size: f32) geometry.InsetsF {
 
 pub fn textBounds(value: DrawText) ?geometry.RectF {
     const run_options = textLayoutOptionsForDrawText(.{}, value);
-    if (value.text_layout == null) if (run_options.text_run_policy) |policy| {
-        return if (compiled_run.execute(policy, 8, value, run_options, 0, 0, false, .{}, 0, 0).line) |line| line.bounds else null;
-    };
+    if (run_options.text_run_policy) |policy| return compiled_query.execute(policy, value, run_options, .{ .mode = 1 }).bounds;
     if (value.text_layout) |options| {
         var lines: [max_text_bounds_layout_lines]TextLine = undefined;
         if (layoutTextRun(value, options, &lines)) |layout| {
@@ -570,6 +574,7 @@ pub fn layoutTextCaretRectWithAffinity(
     offset: usize,
     affinity: canvas.TextCaretAffinity,
 ) ?geometry.RectF {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| return compiled_query.execute(policy, text, options, .{ .mode = 2, .offset = offset, .affinity = affinity }).bounds;
     const line = streamTextLineForOffset(text, options, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
@@ -584,6 +589,7 @@ pub fn textCaretRectForLayoutWithAffinity(
     offset: usize,
     affinity: canvas.TextCaretAffinity,
 ) ?geometry.RectF {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| return compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 5, .offset = offset, .affinity = affinity, .prepared = layout.lines }).bounds;
     const line = textLineForOffset(layout, text.text.len, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
@@ -604,6 +610,11 @@ pub fn layoutTextSelectionRects(
     range: TextRange,
     output: []TextSelectionRect,
 ) []const TextSelectionRect {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, options, .{ .mode = 3, .range = range, .selections = output });
+        return output[0..result.len];
+    }
+
     const normalized = snapTextRange(text.text, range);
     if (normalized.isCollapsed(text.text.len)) return output[0..0];
 
@@ -616,6 +627,11 @@ pub fn layoutTextSelectionRects(
 }
 
 pub fn textSelectionRectsForLayout(text: DrawText, layout: TextLayout, range: TextRange, output: []TextSelectionRect) []const TextSelectionRect {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 6, .range = range, .prepared = layout.lines, .selections = output });
+        return output[0..result.len];
+    }
+
     const normalized = snapTextRange(text.text, range);
     if (normalized.isCollapsed(text.text.len)) return output[0..0];
 
@@ -678,6 +694,8 @@ pub fn layoutTextCaretPositionForPoint(
     options: TextLayoutOptions,
     point: geometry.PointF,
 ) ?canvas.TextCaretPosition {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| return compiled_query.execute(policy, text, options, .{ .mode = 4, .point = point }).position;
+
     var lines = TextLineIterator.init(text, options);
     var candidate: ?TextLine = null;
     var previous: ?TextLine = null;
@@ -702,6 +720,8 @@ pub fn textCaretPositionForLayoutPoint(
     layout: TextLayout,
     point: geometry.PointF,
 ) ?canvas.TextCaretPosition {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| return compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 7, .point = point, .prepared = layout.lines }).position;
+
     var previous: ?TextLine = null;
     for (layout.lines) |line| {
         if (point.y < line.bounds.y + line.bounds.height) {

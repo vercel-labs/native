@@ -7,8 +7,9 @@ const exact = @import("component_construction_e2e_tests.zig").exact;
 const policy = c.text_run_policy;
 fn compare(text: c.DrawText, options: c.TextLayoutOptions, capacity: usize) !void {
     errdefer std.debug.print("text run case bytes={any} glyphs={d} size={d} width={d} wrap={s} align={s} overflow={s} capacity={d}\n", .{ text.text, text.glyphs.len, text.size, options.max_width, @tagName(options.wrap), @tagName(options.alignment), @tagName(options.overflow), capacity });
-    var expected_lines: [400]c.TextLine = undefined;
-    var actual_lines: [400]c.TextLine = undefined;
+    const sentinel: c.TextLine = .{ .text_start = 0x123456, .bounds = .{ .x = -777, .height = 333 }, .elided_text_len = 17 };
+    var expected_lines: [400]c.TextLine = @splat(sentinel);
+    var actual_lines: [400]c.TextLine = @splat(sentinel);
     var compiled_text = text;
     compiled_text.text_run_policy = core.nativeWindowPolicy;
     var compiled_options = options;
@@ -21,6 +22,8 @@ fn compare(text: c.DrawText, options: c.TextLayoutOptions, capacity: usize) !voi
         core.rt.frameReset();
         try exact(layout, try actual);
     } else |err| try std.testing.expectError(err, actual);
+    // Capacity failures preserve the exact prefix and untouched suffix.
+    try exact(expected_lines, actual_lines);
     var a = c.TextLineIterator.init(text, options);
     var b = c.TextLineIterator.init(compiled_text, compiled_options);
     while (true) {
@@ -34,14 +37,23 @@ fn compare(text: c.DrawText, options: c.TextLayoutOptions, capacity: usize) !voi
     // Streaming queries retain their original lack of a line-count cap.
     for ([_]usize{ 0, 1, text.text.len / 2, text.text.len, text.text.len + 3 }) |offset| {
         for (std.enums.values(c.TextCaretAffinity)) |affinity| try exact(c.layoutTextCaretRectWithAffinity(text, options, offset, affinity), c.layoutTextCaretRectWithAffinity(compiled_text, compiled_options, offset, affinity));
+        if (expected) |layout| {
+            for (std.enums.values(c.TextCaretAffinity)) |affinity| try exact(c.textCaretRectForLayoutWithAffinity(text, layout, offset, affinity), c.textCaretRectForLayoutWithAffinity(compiled_text, try actual, offset, affinity));
+        } else |_| {}
     }
     for ([_]sdk.geometry.PointF{ .{}, .{ .x = 5, .y = 20 }, .{ .x = 60, .y = 31 }, .{ .x = 1000, .y = 10000 } }) |point| {
         try exact(c.layoutTextCaretPositionForPoint(text, options, point), c.layoutTextCaretPositionForPoint(compiled_text, compiled_options, point));
+        if (expected) |layout| {
+            try exact(c.textCaretPositionForLayoutPoint(text, layout, point), c.textCaretPositionForLayoutPoint(compiled_text, try actual, point));
+        } else |_| {}
     }
     for ([_]usize{ 0, 1, 4, 400 }) |budget| {
         var ar: [400]c.TextSelectionRect = undefined;
         var br: [400]c.TextSelectionRect = undefined;
         try exact(c.layoutTextSelectionRects(text, options, .{ .start = 1, .end = text.text.len }, ar[0..budget]), c.layoutTextSelectionRects(compiled_text, compiled_options, .{ .start = 1, .end = text.text.len }, br[0..budget]));
+        if (expected) |layout| {
+            try exact(c.textSelectionRectsForLayout(text, layout, .{ .start = text.text.len, .end = 1 }, ar[0..budget]), c.textSelectionRectsForLayout(compiled_text, try actual, .{ .start = text.text.len, .end = 1 }, br[0..budget]));
+        } else |_| {}
     }
 }
 fn run(bytes: []const u8) c.DrawText {
@@ -243,4 +255,115 @@ test "portable text planner context survives command copies without changing con
     try exact(try old_list.textLayoutPlan(.{}, &old_plans, &lines_a), try new_list.textLayoutPlan(.{}, &new_plans, &lines_b));
     core.rt.frameReset();
     try exact(expected, actual);
+}
+
+test "compiled text query preserves prepared gaps empty layouts and complete output suffixes" {
+    _ = core.initialModel();
+    const text = run("é🙂 gap\nlast");
+    var compiled = text;
+    compiled.text_run_policy = core.nativeWindowPolicy;
+    const lines = [_]c.TextLine{
+        .{ .text_start = 0, .text_len = 2, .bounds = .{ .x = 3, .y = 0, .width = 11, .height = 14 }, .baseline = 10 },
+        .{ .text_start = 2, .text_len = 4, .bounds = .{ .x = -5, .y = 14, .width = 17, .height = 12 }, .baseline = 24 },
+        .{ .text_start = 10, .text_len = 4, .bounds = .{ .x = 9, .y = 35, .width = 20, .height = 0 }, .baseline = 45 },
+    };
+    for ([_][]const c.TextLine{ &.{}, lines[0..1], &lines }) |prepared| {
+        const layout: c.TextLayout = .{ .lines = prepared };
+        for (0..text.text.len + 3) |offset| for (std.enums.values(c.TextCaretAffinity)) |affinity| {
+            try exact(c.textCaretRectForLayoutWithAffinity(text, layout, offset, affinity), c.textCaretRectForLayoutWithAffinity(compiled, layout, offset, affinity));
+        };
+        for ([_]sdk.geometry.PointF{ .{ .x = -20, .y = -20 }, .{ .x = 3, .y = 15 }, .{ .x = 999, .y = 999 } }) |point| {
+            try exact(c.textCaretPositionForLayoutPoint(text, layout, point), c.textCaretPositionForLayoutPoint(compiled, layout, point));
+        }
+        for (0..4) |capacity| {
+            const sentinel: c.TextSelectionRect = .{ .range = .{ .start = 1234, .end = 5678 }, .rect = .{ .x = 777, .height = -5 } };
+            var a: [4]c.TextSelectionRect = @splat(sentinel);
+            var b = a;
+            try exact(c.textSelectionRectsForLayout(text, layout, .{ .start = text.text.len + 100, .end = 1 }, a[0..capacity]), c.textSelectionRectsForLayout(compiled, layout, .{ .start = text.text.len + 100, .end = 1 }, b[0..capacity]));
+            try exact(a, b);
+            core.rt.frameReset();
+            try exact(a, b);
+        }
+    }
+}
+
+test "compiled text query preserves complete streaming and prepared font capability order" {
+    _ = core.initialModel();
+    for ([_]bool{ false, true }) |batched| for (std.enums.values(c.TextWrap)) |wrap| {
+        var a: Trace = .{ .batched = batched };
+        var b: Trace = .{ .batched = batched };
+        const ap: c.TextMeasureProvider = .{ .context = &a, .measure_fn = Trace.width, .measure_advances_fn = Trace.advances };
+        const bp: c.TextMeasureProvider = .{ .context = &b, .measure_fn = Trace.width, .measure_advances_fn = Trace.advances };
+        var ta = run("lead words  tail\n next\xff");
+        ta.measure = &ap;
+        var tb = ta;
+        tb.measure = &bp;
+        tb.text_run_policy = core.nativeWindowPolicy;
+        const oa: c.TextLayoutOptions = .{ .max_width = 17, .measure = &ap, .wrap = wrap };
+        var ob = oa;
+        ob.measure = &bp;
+        ob.text_run_policy = core.nativeWindowPolicy;
+        var storage: [100]c.TextLine = undefined;
+        const prepared = try c.layoutTextRun(ta, oa, &storage);
+        for (0..6) |query| {
+            a.len = 0;
+            b.len = 0;
+            var ar: [2]c.TextSelectionRect = undefined;
+            var br: [2]c.TextSelectionRect = undefined;
+            c.bumpTextMeasureGeneration();
+            switch (query) {
+                0, 1 => {
+                    const expected = if (query == 0) c.layoutTextCaretRectWithAffinity(ta, oa, 10, .downstream) else c.textCaretRectForLayoutWithAffinity(ta, prepared, 10, .downstream);
+                    c.bumpTextMeasureGeneration();
+                    const actual = if (query == 0) c.layoutTextCaretRectWithAffinity(tb, ob, 10, .downstream) else c.textCaretRectForLayoutWithAffinity(tb, prepared, 10, .downstream);
+                    try exact(expected, actual);
+                },
+                2, 3 => {
+                    const expected = if (query == 2) c.layoutTextSelectionRects(ta, oa, .{ .end = ta.text.len }, &ar) else c.textSelectionRectsForLayout(ta, prepared, .{ .end = ta.text.len }, &ar);
+                    c.bumpTextMeasureGeneration();
+                    const actual = if (query == 2) c.layoutTextSelectionRects(tb, ob, .{ .end = tb.text.len }, &br) else c.textSelectionRectsForLayout(tb, prepared, .{ .end = tb.text.len }, &br);
+                    try exact(expected, actual);
+                },
+                4, 5 => {
+                    const point: sdk.geometry.PointF = .{ .x = 9, .y = 10000 };
+                    const expected = if (query == 4) c.layoutTextCaretPositionForPoint(ta, oa, point) else c.textCaretPositionForLayoutPoint(ta, prepared, point);
+                    c.bumpTextMeasureGeneration();
+                    const actual = if (query == 4) c.layoutTextCaretPositionForPoint(tb, ob, point) else c.textCaretPositionForLayoutPoint(tb, prepared, point);
+                    try exact(expected, actual);
+                },
+                else => unreachable,
+            }
+            try exact(a.calls[0..a.len], b.calls[0..b.len]);
+        }
+    };
+}
+
+test "text query copied transport rejects unsafe output indices and malformed capabilities" {
+    _ = core.initialModel();
+    var packet: [1039]u8 = @splat(0);
+    policy.initialize(packet[512..], 512, 0, run("abc"), .{ .max_width = 20 }, 0, 0, false, .{}, 0, 0);
+    packet[0..6].* = .{ 55, 1, 0, 0, 0, 0 };
+    std.mem.writeInt(u32, packet[8..12], 2, .little);
+    std.mem.writeInt(u32, packet[12..16], packet.len, .little);
+    std.mem.writeInt(u32, packet[40..44], packet.len, .little);
+    std.mem.writeInt(u32, packet[520..524], packet.len - 3, .little);
+    std.mem.writeInt(u32, packet[524..528], packet.len, .little);
+    var result: [1024]u8 = undefined;
+    try std.testing.expectEqual(result.len, core.nativeWindowPolicy(&packet, &result));
+    const query = c.text_query_policy;
+    try std.testing.expect(query.resultValid(&packet, &result));
+    for ([_]usize{ 0, 8, 12, 40, 44, 80, 92, 96, 100, 124, 316, 440, 512, 515, 520, 524, 548, 556, 564, 612, 616, 620, 888 }) |at| {
+        var corrupt = result;
+        corrupt[at] ^= 0xff;
+        try std.testing.expect(!query.resultValid(&packet, &corrupt));
+    }
+    // Even a structurally plausible store cannot escape the caller's
+    // line capacity or be substituted for a font capability reply.
+    var corrupt = result;
+    std.mem.writeInt(u32, corrupt[80..84], 2, .little);
+    std.mem.writeInt(u32, corrupt[84..88], 2, .little);
+    std.mem.writeInt(u32, corrupt[100..104], 0, .little);
+    std.mem.writeInt(u32, corrupt[124..128], 3, .little);
+    try std.testing.expect(!query.resultValid(&packet, &corrupt));
+    try std.testing.expect(!query.resultValid(&packet, result[0..1023]));
 }

@@ -2,14 +2,20 @@
 // advances are capabilities; cursor, overflow and geometry decisions are
 // portable. No result borrows a compiler frame or a host pointer.
 function nscvTextRunLayout(request: Uint8Array): Uint8Array {
-  if (request.length < 512 || request[0] !== 54 || request[1] !== 1 || request[2]! > 8 || request[3]! > 1 || request[4]! > 2 || request[5]! > 2 || request[6]! > 1 || request[7]! > 3)
+  return nscvTextRunLayoutFacts(request.subarray(0, 512), request, 512);
+}
+
+// The enclosing query reuses these immutable facts across all line and
+// font continuations, with a separate copied line-planner state.
+function nscvTextRunLayoutFacts(header: Uint8Array, request: Uint8Array, factsStart: number): Uint8Array {
+  if (header.length !== 512 || request.length < factsStart || header[0] !== 54 || header[1] !== 1 || header[2]! > 8 || header[3]! > 1 || header[4]! > 2 || header[5]! > 2 || header[6]! > 1 || header[7]! > 3)
     throw new Error("invalid text run header");
   // Only the fixed continuation is returned. Immutable text/glyph facts
   // stay in the caller-owned request rather than being copied per query.
-  const out = request.slice(0, 512), w = new DataView(out.buffer);
+  const out = header.slice(), w = new DataView(out.buffer);
   const facts = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const u = (at: number): number => w.getUint32(at, true);
-  const f = (at: number): number => (at < 512 ? w : facts).getFloat32(at, true);
+  const f = (at: number): number => at < 512 ? w.getFloat32(at, true) : facts.getFloat32(at + factsStart - 512, true);
   const put = (at: number, value: number): void => { w.setUint32(at, value, true); };
   const float = (at: number, value: number): void => { w.setFloat32(at, value, true); };
   const add = (a: number, b: number): number => Math.fround(a + b);
@@ -20,10 +26,10 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
   const max = (a: number, b: number): number => nscvShellMax(a, b);
   const mode = out[2]!, size = f(16), ox = f(20), oy = f(24), width = f(28);
   const textLength = u(36), glyphCount = u(40), advancesAt = 512 + glyphCount * 32, textAt = advancesAt + textLength * 4;
-  if (u(8) !== textAt || u(12) !== request.length || textAt + textLength !== request.length || u(52) > 1 || u(44) > (glyphCount > 0 && mode === 0 ? glyphCount : textLength))
+  if (u(8) !== textAt + factsStart - 512 || u(12) !== request.length || textAt + factsStart - 512 + textLength !== request.length || u(52) > 1 || u(44) > (glyphCount > 0 && mode === 0 ? glyphCount : textLength))
     throw new Error("invalid text run storage");
-  const text = request.subarray(textAt), hasMeasure = (out[7]! & 1) !== 0, drawMeasure = (out[7]! & 2) !== 0;
-  for (let n = 0; n < glyphCount; n++) for (let at = 512 + n * 32 + 20; at < 512 + (n + 1) * 32; at++) if (request[at] !== 0) throw new Error("invalid text glyph reserved byte");
+  const text = request.subarray(textAt + factsStart - 512), hasMeasure = (out[7]! & 1) !== 0, drawMeasure = (out[7]! & 2) !== 0;
+  for (let n = 0; n < glyphCount; n++) for (let at = 512 + n * 32 + 20; at < 512 + (n + 1) * 32; at++) if (request[at + factsStart - 512] !== 0) throw new Error("invalid text glyph reserved byte");
   if (u(356) > 1 || u(364) > 1) throw new Error("invalid text line flags");
   for (let at = 376; at < 512; at++) if (out[at] !== 0) throw new Error("invalid text reserved byte");
   if (out[3] === 0) {
@@ -31,7 +37,7 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
     if (mode === 0 || mode === 1) for (let at = 320; at < 376; at++) if (out[at] !== 0) throw new Error("invalid initial text line");
   }
   const glyph = (n: number, field: number): number => { if (n >= glyphCount) throw new Error("invalid text glyph index"); return f(512 + n * 32 + field); };
-  const glyphWord = (n: number, field: number): number => { if (n >= glyphCount) throw new Error("invalid text glyph index"); return facts.getUint32(512 + n * 32 + field, true); };
+  const glyphWord = (n: number, field: number): number => { if (n >= glyphCount) throw new Error("invalid text glyph index"); return facts.getUint32(factsStart + n * 32 + field, true); };
   const advance = (n: number): number => max(mul(size, 0.25), glyph(n, 8));
   const seq = (byte: number): number => (byte & 128) === 0 ? 1 : (byte & 224) === 192 ? 2 : (byte & 240) === 224 ? 3 : (byte & 248) === 240 ? 4 : 1;
   const snap = (offset: number): number => { let p = Math.min(offset, textLength); while (p > 0 && p < textLength && (text[p]! & 192) === 128) p--; return p; };

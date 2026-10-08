@@ -13,7 +13,7 @@ pub const Result = struct {
     scalar: f32,
     offset: usize,
 };
-fn capabilityKind(mode: u8, phase: u32, draw_measure: bool) ?u32 {
+pub fn capabilityKind(mode: u8, phase: u32, draw_measure: bool) ?u32 {
     return switch (mode) {
         0 => switch (phase) {
             1, 12 => 3,
@@ -65,7 +65,7 @@ fn put(bytes: []u8, at: usize, value: usize) void {
 fn setFloat(bytes: []u8, at: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(value), .little);
 }
-fn writeLine(bytes: []u8, line: types.TextLine) void {
+pub fn writeLine(bytes: []u8, line: types.TextLine) void {
     put(bytes, 320, line.text_start);
     put(bytes, 324, line.text_len);
     put(bytes, 328, line.glyph_start);
@@ -81,7 +81,7 @@ fn writeLine(bytes: []u8, line: types.TextLine) void {
     put(bytes, 368, line.elided_glyph_len orelse 0);
     setFloat(bytes, 372, line.ellipsis_advance);
 }
-fn readLine(bytes: []const u8) types.TextLine {
+pub fn readLine(bytes: []const u8) types.TextLine {
     return .{
         .text_start = word(bytes, 320),
         .text_len = word(bytes, 324),
@@ -97,13 +97,16 @@ fn readLine(bytes: []const u8) types.TextLine {
 /// Reject altered source, invalid ranges, malformed result flags and
 /// unrecognized capability continuations before any host callback runs.
 pub fn resultValid(request: []const u8, result: []const u8) bool {
+    return resultValidFacts(request[0..@min(request.len, 512)], request.len, 512, result);
+}
+pub fn resultValidFacts(request: []const u8, source_len: usize, facts_start: usize, result: []const u8) bool {
     if (request.len < 512 or result.len != 512 or result[3] < 1 or result[3] > 2 or
         !std.mem.eql(u8, request[0..3], result[0..3]) or !std.mem.eql(u8, request[4..80], result[4..80])) return false;
     const text_len = word(request, 36);
     const glyph_count = word(request, 40);
-    const advance_at: u64 = 512 + @as(u64, glyph_count) * 32;
+    const advance_at: u64 = facts_start + @as(u64, glyph_count) * 32;
     const text_at: u64 = advance_at + @as(u64, text_len) * 4;
-    if (text_at > request.len or word(request, 8) != text_at or word(request, 12) != request.len or text_at + text_len != request.len) return false;
+    if (text_at > source_len or word(request, 8) != text_at or word(request, 12) != source_len or text_at + text_len != source_len) return false;
     for (result[376..512]) |byte| if (byte != 0) return false;
     if (word(result, 296) > 1 or word(result, 300) > 1 or word(result, 356) > 1 or word(result, 364) > 1) return false;
     if (request[2] == 2 or request[2] == 3) if (!std.mem.eql(u8, request[320..384], result[320..384])) return false;
@@ -151,11 +154,35 @@ pub fn execute(
     const request = if (total <= small_request.len) small_request[0..total] else allocator.alloc(u8, total) catch @panic("text run request allocation");
     defer if (total > small_request.len) allocator.free(request);
     var result: [512]u8 = undefined;
+    initialize(request, 512, mode, text, options, cursor, index, finished, line, offset, x);
+    const quota = std.math.mul(usize, total, 8) catch @panic("text run continuation range");
+    var calls: usize = 0;
+    while (true) {
+        calls += 1;
+        if (calls > quota) @panic("text run continuation did not finish");
+        @memset(&result, 0xa5);
+        if (policy(request, &result) != result.len or !resultValid(request, &result)) @panic("invalid text run continuation");
+        if (result[3] == 2) break;
+        @memcpy(request[0..512], &result);
+        supplyCapability(request, request[0..512], 512, text, options);
+    }
+    return .{
+        .line = if (word(&result, 300) != 0 or mode == 4) readLine(&result) else null,
+        .cursor = word(&result, 288),
+        .index = word(&result, 292),
+        .finished = word(&result, 296) != 0,
+        .scalar = float(&result, 304),
+        .offset = word(&result, 308),
+    };
+}
+
+pub fn initialize(request: []u8, facts_start: usize, mode: u8, text: types.DrawText, options: types.TextLayoutOptions, cursor: usize, index: usize, finished: bool, line: types.TextLine, offset: usize, x: f32) void {
+    const text_at = facts_start + text.glyphs.len * 32 + text.text.len * 4;
     const draw_measure = if (text.text_layout) |o| o.measure orelse text.measure else text.measure;
     @memset(request, 0);
     request[0..8].* = .{ 54, 1, mode, 0, @intFromEnum(options.wrap), @intFromEnum(options.alignment), @intFromEnum(options.overflow), @as(u8, @intFromBool(options.measure != null)) | (@as(u8, @intFromBool(draw_measure != null)) << 1) };
     put(request, 8, text_at);
-    put(request, 12, total);
+    put(request, 12, request.len);
     setFloat(request, 16, text.size);
     setFloat(request, 20, text.origin.x);
     setFloat(request, 24, text.origin.y);
@@ -171,7 +198,7 @@ pub fn execute(
     std.mem.writeInt(u64, request[64..72], text.font_id, .little);
     writeLine(request, line);
     for (text.glyphs, 0..) |glyph, n| {
-        const at = 512 + n * 32;
+        const at = facts_start + n * 32;
         setFloat(request, at, glyph.x);
         setFloat(request, at + 4, glyph.y);
         setFloat(request, at + 8, glyph.advance);
@@ -179,52 +206,39 @@ pub fn execute(
         put(request, at + 16, glyph.text_len);
     }
     @memcpy(request[text_at..], text.text);
-    const quota = std.math.mul(usize, total, 8) catch @panic("text run continuation range");
-    var calls: usize = 0;
-    while (true) {
-        calls += 1;
-        if (calls > quota) @panic("text run continuation did not finish");
-        @memset(&result, 0xa5);
-        if (policy(request, &result) != result.len or !resultValid(request, &result)) @panic("invalid text run continuation");
-        if (result[3] == 2) break;
-        const kind = word(&result, 100);
-        const start = word(&result, 104);
-        const end = word(&result, 108);
-        const phase = word(&result, 96);
-        @memcpy(request[0..512], &result);
-        switch (kind) {
-            1 => {
-                const measure = if (phase == 32 or phase == 40 or phase == 42 or phase == 43 or phase == 50) draw_measure else options.measure;
-                setFloat(request, 116, metrics.measureTextWidthForFont(measure, text.font_id, text.text[start..end], text.size));
-            },
-            2 => setFloat(request, 116, metrics.estimateTextAdvanceForBytes(text.font_id, text.text[start..end], text.size)),
-            3, 4 => {
-                const provider = if (kind == 3) options.measure else draw_measure;
-                const advances = if (provider) |p| if (kind == 3) cache.textRunAdvances(p, text.font_id, text.size, text.text) else cache.cachedTextRunAdvances(p, text.font_id, text.size, text.text) else null;
-                put(request, 120, @intFromBool(advances != null));
-                if (advances) |values| for (values, 0..) |value, n| setFloat(request, advance_at + n * 4, value);
-            },
-            5 => setFloat(request, 116, if (options.measure) |p| p.measureWidth(text.font_id, text.size, "\u{2026}") else metrics.estimatedTextEllipsisAdvance(text.font_id, text.size)),
-            6, 7 => {
-                const ink = if (draw_measure) |p| p.measureInk(text.font_id, text.size, if (kind == 7) "\u{2026}" else text.text[start..end]) else null;
-                put(request, 120, @intFromBool(ink != null));
-                if (ink) |value| {
-                    setFloat(request, 124, value.min_x);
-                    setFloat(request, 128, value.min_y);
-                    setFloat(request, 132, value.max_x);
-                    setFloat(request, 136, value.max_y);
-                }
-            },
-            else => unreachable,
-        }
-        put(request, 112, 1);
+}
+
+pub fn supplyCapability(packet: []u8, header: []u8, facts_start: usize, text: types.DrawText, options: types.TextLayoutOptions) void {
+    const draw_measure = if (text.text_layout) |o| o.measure orelse text.measure else text.measure;
+    const advance_at = facts_start + text.glyphs.len * 32;
+    const kind = word(header, 100);
+    const start = word(header, 104);
+    const end = word(header, 108);
+    const phase = word(header, 96);
+    switch (kind) {
+        1 => {
+            const measure = if (phase == 32 or phase == 40 or phase == 42 or phase == 43 or phase == 50) draw_measure else options.measure;
+            setFloat(header, 116, metrics.measureTextWidthForFont(measure, text.font_id, text.text[start..end], text.size));
+        },
+        2 => setFloat(header, 116, metrics.estimateTextAdvanceForBytes(text.font_id, text.text[start..end], text.size)),
+        3, 4 => {
+            const provider = if (kind == 3) options.measure else draw_measure;
+            const advances = if (provider) |p| if (kind == 3) cache.textRunAdvances(p, text.font_id, text.size, text.text) else cache.cachedTextRunAdvances(p, text.font_id, text.size, text.text) else null;
+            put(header, 120, @intFromBool(advances != null));
+            if (advances) |values| for (values, 0..) |value, n| setFloat(packet, advance_at + n * 4, value);
+        },
+        5 => setFloat(header, 116, if (options.measure) |p| p.measureWidth(text.font_id, text.size, "\u{2026}") else metrics.estimatedTextEllipsisAdvance(text.font_id, text.size)),
+        6, 7 => {
+            const ink = if (draw_measure) |p| p.measureInk(text.font_id, text.size, if (kind == 7) "\u{2026}" else text.text[start..end]) else null;
+            put(header, 120, @intFromBool(ink != null));
+            if (ink) |value| {
+                setFloat(header, 124, value.min_x);
+                setFloat(header, 128, value.min_y);
+                setFloat(header, 132, value.max_x);
+                setFloat(header, 136, value.max_y);
+            }
+        },
+        else => unreachable,
     }
-    return .{
-        .line = if (word(&result, 300) != 0 or mode == 4) readLine(&result) else null,
-        .cursor = word(&result, 288),
-        .index = word(&result, 292),
-        .finished = word(&result, 296) != 0,
-        .scalar = float(&result, 304),
-        .offset = word(&result, 308),
-    };
+    put(header, 112, 1);
 }
