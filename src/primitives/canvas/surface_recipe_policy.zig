@@ -71,7 +71,7 @@ pub const Plan = struct {
                     const transform: drawing.Affine = .{ .a = float(&self.bytes, at + 96), .b = float(&self.bytes, at + 100), .c = float(&self.bytes, at + 104), .d = float(&self.bytes, at + 108), .tx = float(&self.bytes, at + 112), .ty = float(&self.bytes, at + 116) };
                     const flipped = read(&self.bytes, at + 80) == 1;
                     if (flipped) try builder.transform(transform);
-                    try @import("widget_render_controls.zig").emitVectorIcon(builder, widget.id, read(&self.bytes, at + 4), bounds, ink, registry);
+                    try @import("widget_render_controls.zig").emitVectorIconWithTokens(builder, widget.id, read(&self.bytes, at + 4), bounds, ink, registry, tokens);
                     if (flipped) try builder.transform(transform);
                 },
                 6 => try builder.fillRect(.{ .id = id, .rect = bounds, .fill = .{ .color = ink } }),

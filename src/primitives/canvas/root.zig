@@ -918,6 +918,9 @@ pub const layout_coordination_policy = @import("layout_coordination_policy.zig")
 pub const render_coordination_policy = @import("render_coordination_policy.zig");
 pub const control_command_policy = @import("control_command_policy.zig");
 pub const control_payload_policy = @import("control_payload_policy.zig");
+pub const control_primitive_policy = @import("control_primitive_policy.zig");
+/// Draw caller-owned vector paths using the configured portable primitive owner.
+pub const emitVectorIcon = @import("widget_render_controls.zig").emitVectorIconWithTokens;
 pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;

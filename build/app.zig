@@ -1265,6 +1265,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/render_coordination.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_commands.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_payloads.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/control_primitives.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");

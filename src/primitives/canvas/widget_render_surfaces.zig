@@ -146,7 +146,7 @@ pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, fr
     // blur 12. Slots are 4-bit (`widgetPartId` packs id*16+slot), so
     // they must stay below 16.
     const icon = icon_model.resolve(if (widget.variant == .destructive) "alert" else "info") orelse return;
-    try widget_render_controls.emitVectorIcon(builder, widget.id, 3, normalized, color_value, icon);
+    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 3, normalized, color_value, icon, tokens);
 }
 
 pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
@@ -601,10 +601,10 @@ pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTok
             .ty = normalized.y * 2 + normalized.height,
         };
         try builder.transform(flip);
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, normalized, color, icon);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, normalized, color, icon, tokens);
         try builder.transform(flip);
     } else {
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, normalized, color, icon);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, normalized, color, icon, tokens);
     }
 }
 

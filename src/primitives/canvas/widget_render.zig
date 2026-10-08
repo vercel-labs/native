@@ -2944,7 +2944,7 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
 /// widget's foreground color token.
 fn emitVectorIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, icon: *const icon_model.Icon) Error!void {
     const color = widgetForegroundColor(widget, tokens, tokens.colors.text);
-    try widget_render_controls.emitVectorIcon(builder, widget.id, 1, widget.frame, color, icon);
+    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 1, widget.frame, color, icon, tokens);
 }
 
 fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
@@ -3328,11 +3328,11 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
                 icon_extent,
                 icon_extent,
             );
-            try widget_render_controls.emitVectorIcon(builder, widget.id, 4, icon_frame, content_color, resolved);
+            try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, icon_frame, content_color, resolved, tokens);
             return;
         }
         const icon_frame = geometry.RectF.init(widget.frame.x + text_inset, icon_y, icon_extent, icon_extent);
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, icon_frame, content_color, resolved);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, icon_frame, content_color, resolved, tokens);
         const shift = icon_extent + widget_metrics.widgetBadgeIconGap(widget, tokens);
         const text_frame = geometry.RectF.init(
             widget.frame.x + shift,
