@@ -1743,6 +1743,13 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         .use_llvm = useLlvmWorkaround(target),
     });
 
+    if (options.ts_core != null) {
+        // The compiled view decodes JSON numbers through Zig's f128
+        // helpers. C/Objective-C hosts link this archive directly rather
+        // than through Zig, so it must carry its compiler runtime too.
+        lib.bundle_compiler_rt = true;
+    }
+
     const lib_step = b.step("lib", "Build the mobile embed static library");
     if (options.ts_core != null and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
         // Android's ELF archive contains nested TypeScript archives that
