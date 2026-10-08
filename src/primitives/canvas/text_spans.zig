@@ -30,6 +30,7 @@ const token_model = @import("tokens.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
 const text_metrics = @import("text_metrics.zig");
 const text_interaction = @import("text_interaction.zig");
+const query_policy = @import("text_span_query_policy.zig");
 
 const FontId = canvas.FontId;
 const Color = @import("drawing.zig").Color;
@@ -215,7 +216,7 @@ pub fn textSpansWrappedHeight(spans: []const TextSpan, options: TextSpanLayoutOp
     return layout.size.height;
 }
 
-fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions) f32 {
+pub fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions) f32 {
     if (slice.len == 0) return 0;
     const first_cr = std.mem.indexOfScalar(u8, slice, '\r') orelse
         return measureSpanSliceExact(span, slice, options);
@@ -257,7 +258,7 @@ fn measureSpanSliceExact(span: TextSpan, slice: []const u8, options: TextSpanLay
 /// `slice` does not alias `span.text` (hand-built spans). The slice
 /// aliases threadlocal cache storage: consumed immediately by the one
 /// caller above.
-fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions, font_id: FontId, size: f32) ?[]const f32 {
+pub fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions, font_id: FontId, size: f32) ?[]const f32 {
     const provider = options.measure orelse return null;
     if (provider.measure_advances_fn == null) return null;
     const base = @intFromPtr(span.text.ptr);
@@ -397,6 +398,10 @@ pub fn textSpanRunVisibleSlice(
     min_x: f32,
     max_x: f32,
 ) ?TextSpanRunVisibleSlice {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 0, .clip_span = span, .clip_run = run, .min_x = min_x, .max_x = max_x });
+        return if (result.present) .{ .text = run.text[result.first..result.last], .x = result.x } else null;
+    }
     if (run.text.len == 0) return null;
     if (!std.math.isFinite(min_x) or
         !std.math.isFinite(max_x) or
@@ -1234,6 +1239,12 @@ pub fn textSpanBounds(layout: TextSpanLayout, span_index: usize) ?geometry.RectF
     return bounds;
 }
 
+/// Aggregate with the selected portable owner while retaining the standalone
+/// native reference for callers that supply no compiled policy.
+pub fn textSpanBoundsWithPolicy(layout: TextSpanLayout, span_index: usize, policy: ?query_policy.Policy) ?geometry.RectF {
+    return if (policy) |p| query_policy.bounds(p, layout, span_index) else textSpanBounds(layout, span_index);
+}
+
 /// Bounds of a single run (relative to the paragraph origin), spanning
 /// the full line box height so hit areas cover the whole line.
 pub fn textSpanRunBounds(layout: TextSpanLayout, run: TextSpanRun) geometry.RectF {
@@ -1268,6 +1279,10 @@ pub fn textSpanOffsetForPoint(
     options: TextSpanLayoutOptions,
     point: geometry.PointF,
 ) ?usize {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 1, .paragraph = paragraph, .spans = spans, .point = point });
+        return if (result.present) result.first else null;
+    }
     var runs: [max_text_span_runs_per_paragraph]TextSpanRun = undefined;
     var layout = layoutTextSpans(spans, options, &runs);
     if (layout.line_count == 0 or layout.line_height <= 0) return null;
@@ -1457,6 +1472,10 @@ pub fn textSpanSelectionRects(
     range: text_interaction.TextRange,
     output: []text_interaction.TextSelectionRect,
 ) []const text_interaction.TextSelectionRect {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 2, .paragraph = paragraph, .spans = spans, .range = range, .output = output });
+        return output[0..result.len];
+    }
     const normalized = text_interaction.snapTextRange(paragraph, range);
     if (normalized.isCollapsed(paragraph.len)) return output[0..0];
     if (output.len == 0) return output[0..0];

@@ -248,6 +248,8 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 53) return nscvParagraphLayout(request);
   if (request[0] === 54) return nscvTextRunLayout(request);
   if (request[0] === 55) return nscvTextQueryLayout(request);
+  if (request[0] === 56) return nscvTextSpanQueries(request);
+  if (request[0] === 57) return nscvTextSpanBounds(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

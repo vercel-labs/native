@@ -1358,6 +1358,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/paragraph_layout.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_run_layout.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_query_layout.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -1383,6 +1384,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-control-content", "Compare compiled control content and editing chrome with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.control_content).step);
         b.step("test-ts-paragraph-layout", "Compare complete compiled paragraph layout and font measurement continuations").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-paragraph-layout-tests", &.{ "compiled widget metric paragraphs", "paragraph copied transport" })).step);
         b.step("test-ts-text-query-layout", "Compare complete compiled text traversal, bounds, selection and neighbor queries").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-query-layout-tests", &.{ "compiled text runs", "compiled text bounds", "compiled text query", "text query copied transport", "text run copied transport", "portable text planner context" })).step);
+        b.step("test-ts-text-span-queries", "Compare rich-text clipping, point mapping and complete paged selection").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-span-query-tests", &.{ "compiled span query", "span query copied transport" })).step);
         b.step("test-ts-text-run-layout", "Compare compiled ordinary text lines, elision and caret geometry").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-run-layout-tests", &.{ "compiled text runs", "compiled text bounds", "text run copied transport", "portable text planner context" })).step);
         b.step("test-ts-widget-metrics", "Compare complete compiled widget metrics and leaf dimensions with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_metrics).step);
         b.step("test-ts-surface-recipes", "Compare compiled surface chrome recipes with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.surface_recipes).step);
@@ -5445,6 +5447,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/paragraph_layout.ts"));
     stage_run.addFileInput(b.path("packages/core/src/text_run_layout.ts"));
     stage_run.addFileInput(b.path("packages/core/src/text_query_layout.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/text_span_queries.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));

@@ -1332,7 +1332,7 @@ fn layoutTextSpanLinkChildren(
             const result = plan.run();
             if (result.action() == .done) break;
             if (result.action() != .bounds) @panic("unexpected span child capability");
-            plan.replyBounds(result, text_spans_model.textSpanBounds(layout, result.span()));
+            plan.replyBounds(result, text_spans_model.textSpanBoundsWithPolicy(layout, result.span(), tokens.paragraph_policy));
         }
         try applyReadyLayoutChildren(plan, widget.children, parent_index, depth, output, len, .init(0, 0, 0, 0), tokens);
         return;

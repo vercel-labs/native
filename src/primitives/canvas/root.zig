@@ -177,6 +177,7 @@ pub const TextLineIterator = text_model.TextLineIterator;
 pub const textLineCaretX = text_model.textLineCaretX;
 pub const text_run_policy = @import("text_run_policy.zig");
 pub const text_query_policy = @import("text_query_policy.zig");
+pub const text_span_query_policy = @import("text_span_query_policy.zig");
 pub const TextMeasureProvider = text_model.TextMeasureProvider;
 pub const TextInkMetrics = text_model.TextInkMetrics;
 /// Batched-measurement invalidation seam (see text_measure_cache.zig):
