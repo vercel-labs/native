@@ -50,3 +50,17 @@ test("leaf packets reject malformed shapes flags phases tags and reserved tails"
   for (const at of [0, 1, 2, 3, 4, 5, 6, 7, 80, 111]) { const b = geometry(1, [0, 0, 1, 1], []); b[at] = 255; assert.throws(() => leaf(b), /invalid/); }
   assert.throws(() => leaf(new Uint8Array(23)), /invalid/);
 });
+
+test("active divider extrema quiet signaling NaNs while passthrough thickness preserves storage", () => {
+  for (const word of [0x7f812345, 0xff812345]) {
+    for (const op of [3, 4]) for (const active of [false, true]) for (const targetFlags of [0, 16]) {
+      const b = geometry(op, [1.25, 2.5, 40.25, 31.5], [], active ? 2 : 0), input = new DataView(b.buffer);
+      input.setUint32(24, word, true); b[5] = targetFlags;
+      const out = new DataView(leaf(b).buffer), extrema = op === 4 && active;
+      const expected = extrema ? targetFlags === 16 ? (word | 0x00400000) >>> 0 : 0x40000000 : word;
+      assert.equal(out.getUint32(op === 3 ? 20 : 16, true), expected, `${op}/${active}/${targetFlags}/${word.toString(16)}`);
+      if (extrema) assert.equal(out.getUint32(64, true), expected);
+      assert.equal(input.getUint32(24, true), word);
+    }
+  }
+});

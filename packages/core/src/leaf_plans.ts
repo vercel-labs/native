@@ -106,7 +106,14 @@ function nscvLeafGeometry(request: Uint8Array): Uint8Array {
   if (!snappedGeometry && (op === 3 || op === 4)) {
     const horizontal = op === 3 && normalized.width >= normalized.height;
     const word = w.getUint32(24, true), signaling = (word & 0x7f800000) === 0x7f800000 && (word & 0x007fffff) !== 0 && (word & 0x00400000) === 0;
-    if (op === 3 || (flags & 2) === 0 || signaling && (request[5]! & 16) !== 0) result.set(request.subarray(24, 28), horizontal ? 20 : 16);
+    if (op === 3 || (flags & 2) === 0) result.set(request.subarray(24, 28), horizontal ? 20 : 16);
+    // The active divider computes an extremum rather than copying thickness.
+    // Targets that propagate a signaling operand quiet its payload on that operation.
+    else if (signaling && (request[5]! & 16) !== 0) out.setUint32(16, word | 0x00400000, true);
+  }
+  if (op === 4 && (flags & 2) !== 0 && (request[5]! & 16) !== 0) {
+    const word = w.getUint32(24, true);
+    if ((word & 0x7f800000) === 0x7f800000 && (word & 0x007fffff) !== 0 && (word & 0x00400000) === 0) out.setUint32(64, word | 0x00400000, true);
   }
   return result;
 }

@@ -147,7 +147,7 @@ test "compiled widget metric leaf copied plans survive nested calls frame reset 
 test "compiled widget metric leaf payloads preserve custom scalar words and raw image color style fields" {
     _ = core.initialModel();
     defer Trace.scalar_word = null;
-    for ([_]u32{ 0, 0x80000000, 0xc1200000, 0x3f800000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345 }) |bits| {
+    for ([_]u32{ 0, 0x80000000, 0xc1200000, 0x3f800000, 0x7f800000, 0xff800000, 0x7fc12345, 0x7f812345, 0xff812345 }) |bits| {
         Trace.scalar_word = bits;
         for ([_]c.WidgetKind{ .avatar, .badge, .separator, .split_divider, .skeleton }) |kind| {
             const widget: c.Widget = .{ .id = std.math.maxInt(u64), .kind = kind, .frame = .init(1.25, 2.5, 40.25, 31.5), .text = "", .image_id = 3, .image_opacity = @bitCast(bits), .appearance_policy = Trace.callback, .state = .{ .hovered = true }, .style = .{ .radius = 3.5, .stroke_width = 0.625, .background = c.Color.rgba(@bitCast(bits), -0.0, 0.75, 1) } };
