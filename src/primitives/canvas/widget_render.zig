@@ -25,6 +25,7 @@ const icon_model = @import("icons.zig");
 const chart_model = @import("chart.zig");
 const presentation_policy = @import("widget_presentation_policy.zig");
 const paint_walk_policy = @import("widget_paint_walk_policy.zig");
+const leaves = @import("leaf_plan_policy.zig");
 const emission = @import("render_coordination_policy.zig");
 
 const Error = canvas.Error;
@@ -588,7 +589,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
             }
         },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
-        .image => try emitImageWidget(builder, paint_widget),
+        .image => try emitImageWidget(builder, paint_widget, tokens),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
         .terminal => try emitTerminalWidget(builder, paint_widget, tokens, paint_widget.state.focused),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
@@ -1000,7 +1001,7 @@ fn emitWidgetLayoutNodeContent(
             }
         },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
-        .image => try emitImageWidget(builder, paint_widget),
+        .image => try emitImageWidget(builder, paint_widget, tokens),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
         .terminal => try emitTerminalWidget(builder, paint_widget, tokens, if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy).logical_focus else widgetHasLogicalFocus(paint_widget, state)),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
@@ -1079,7 +1080,7 @@ fn emitPlannedDraw(builder: *Builder, widget: Widget, tokens: DesignTokens, draw
             try emitVisibleTextSpansWidget(builder, widget, tokens, bounds);
         },
         .icon => try emitIconWidget(builder, widget, tokens),
-        .image => try emitImageWidget(builder, widget),
+        .image => try emitImageWidget(builder, widget, tokens),
         .media => try emitMediaSurfaceWidget(builder, widget),
         .terminal => try emitTerminalWidget(builder, widget, tokens, logical_focus),
         .avatar => try emitAvatarWidget(builder, widget, tokens),
@@ -2947,7 +2948,8 @@ fn emitVectorIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 1, widget.frame, color, icon, tokens);
 }
 
-fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
+fn emitImageWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledImage(builder, widget, tokens);
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
     const clips_image = widget.image_fit == .cover;
     if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 2), .rect = widget.frame });
@@ -3228,6 +3230,7 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
 }
 
 fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledAvatar(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
     const background = widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle);
@@ -3290,6 +3293,7 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 }
 
 fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledBadge(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
     const text_size = widget_metrics.widgetBadgeTextSize(widget, tokens);
@@ -3365,6 +3369,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
 }
 
 fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSeparator(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
@@ -3385,6 +3390,7 @@ fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 /// the hit target, so the affordance appears as the pointer reaches
 /// it); keyboard focus draws the standard focus ring around the band.
 fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledDivider(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
@@ -3422,6 +3428,7 @@ fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 fn emitStatusBarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledStatus(builder, widget, tokens);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
@@ -3485,6 +3492,7 @@ pub fn skeletonWidgetFillCommandId(id: ObjectId) ObjectId {
 }
 
 fn emitSkeletonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSkeleton(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -3498,6 +3506,7 @@ fn emitSkeletonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 /// edge to edge (the table register's row hover), square-cornered so
 /// adjacent rows tile. Rows at rest draw nothing.
 fn emitDataRowWidgetWash(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledWash(builder, widget, tokens);
     const fill = listItemFillColor(widget, tokens, widget.state);
     if (fill.a <= 0) return;
     try builder.fillRect(.{
@@ -3512,6 +3521,7 @@ fn emitDataRowWidgetWash(builder: *Builder, widget: Widget, tokens: DesignTokens
 /// is a part of the ROW above it (stable command id per row), drawn by
 /// the table so the last row can stay open-edged.
 fn emitTableRowSeparators(builder: *Builder, children: []const Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTableRows(builder, children, tokens);
     var last_row_index: ?usize = null;
     for (children, 0..) |child, index| {
         if (child.kind == .data_row and !child.semantics.hidden) last_row_index = index;
@@ -3524,6 +3534,7 @@ fn emitTableRowSeparators(builder: *Builder, children: []const Widget, tokens: D
 }
 
 fn emitTableRowSeparatorsLayout(builder: *Builder, layout: anytype, table_index: usize, tokens: DesignTokens, table: Widget, clip_to_table: bool) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTableRowsLayout(builder, layout, table_index, tokens, table, clip_to_table);
     if (clip_to_table) try builder.pushClip(.{ .id = widgetPartId(table.id, 9), .rect = table.frame });
     var last_row_index: ?usize = null;
     for (layout.nodes, 0..) |node, index| {
@@ -4693,4 +4704,183 @@ pub fn inversePaintTransform(transform: Affine) ?Affine {
         if (!std.math.isFinite(@field(transform, name))) return @call(.never_inline, Affine.inverse, .{transform});
     }
     return transform.inverse();
+}
+
+fn leafFacts(widget: Widget) leaves.Facts {
+    return .{ .text = widget.text.len != 0, .image = widget.image_id != 0, .cover = widget.image_fit == .cover, .focused = widget.state.focused, .hovered = widget.state.hovered, .pressed = widget.state.pressed };
+}
+fn leafText(builder: *Builder, widget: Widget, tokens: DesignTokens, id: ObjectId, frame: geometry.RectF, size: f32, inset: f32, color: Color) Error!void {
+    const p = leaves.payload(tokens, .text, frame, .{ size, inset, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+    try builder.drawText(.{ .id = id, .font_id = tokens.typography.font_id, .size = size, .origin = p.points[0], .color = color, .text = widget.text, .text_layout = .{ .max_width = p.max_width, .line_height = p.line_height, .alignment = .center, .wrap = .none, .measure = tokens.text_measure } });
+}
+fn leafImage(builder: *Builder, widget: Widget, tokens: DesignTokens, id: ObjectId, radius: Radius) Error!void {
+    const p = leaves.payload(tokens, .raw, widget.frame, @splat(0), if (widget.image_src != null) 4 else 0, widget.image_sampling);
+    try builder.drawImage(.{ .id = id, .image_id = widget.image_id, .src = widget.image_src, .dst = p.rects[0], .opacity = widget.image_opacity, .fit = widget.image_fit, .sampling = p.sampling, .radius = radius });
+}
+fn emitCompiledImage(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const program = leaves.Program.init(tokens, .image, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame) }),
+        .image => try leafImage(builder, widget, tokens, command.id, .{}),
+        .unclip => try builder.popClip(),
+        else => @panic("unsupported image drawing capability"),
+    };
+}
+fn emitCompiledAvatar(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, leaves.pillFallback(tokens, widget.frame));
+    const background = widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle);
+    const program = leaves.Program.init(tokens, .avatar, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .fill = colorFill(background) }),
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius }),
+        .image => try leafImage(builder, widget, tokens, command.id, radius),
+        .unclip => try builder.popClip(),
+        .text => {
+            const size = widgetLabelTextSize(widget, tokens);
+            try leafText(builder, widget, tokens, command.id, widget.frame, size, 0, widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted));
+        },
+        .stroke => try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .stroke = .{ .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border), .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline) } })),
+        else => @panic("unsupported avatar drawing capability"),
+    };
+}
+fn emitCompiledBadge(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, leaves.pillFallback(tokens, widget.frame));
+    const size = widget_metrics.widgetBadgeTextSize(widget, tokens);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+    const program = leaves.Program.init(tokens, .badge, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .fill = colorFill(badgeBackgroundColor(widget, tokens, visual)) }),
+        .border_query => {
+            const width = badgeStrokeWidth(widget, tokens, visual);
+            const border = leaves.Program.init(tokens, .badge, 1, widget, .{ .scalar = width });
+            for (border.commands[0..border.count]) |stroke| {
+                if (stroke.opcode != .stroke) @panic("unsupported badge border capability");
+                try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = stroke.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .stroke = .{ .fill = colorFill(badgeBorderColor(widget, tokens, visual)), .width = width } }));
+            }
+        },
+        .content_query => {
+            const ink = badgeTextColor(widget, tokens, visual);
+            const icon = icon_model.resolveOrMissing(widget.icon);
+            var facts = leafFacts(widget);
+            facts.icon = icon != null;
+            const content = leaves.Program.init(tokens, .badge, 2, widget, facts);
+            var text_frame = widget.frame;
+            for (content.commands[0..content.count]) |item| switch (item.opcode) {
+                .icon => {
+                    const extent = widget_metrics.widgetBadgeIconExtent(widget, tokens);
+                    // The gap is queried after drawing the icon, exactly as in
+                    // the independent reference, including buffer failures.
+                    const geometry_ = leaves.payload(tokens, .badge_content, widget.frame, .{ extent, inset, 0, 0, 0, 0, 0, 0 }, @intFromBool(facts.text), .nearest);
+                    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, item.slot, geometry_.rects[0], ink, icon.?, tokens);
+                    if (facts.text) {
+                        const gap = widget_metrics.widgetBadgeIconGap(widget, tokens);
+                        text_frame = leaves.payload(tokens, .badge_content, widget.frame, .{ extent, inset, gap, 0, 0, 0, 0, 0 }, 1, .nearest).rects[1];
+                    }
+                },
+                .text => try leafText(builder, widget, tokens, item.id, text_frame, size, inset, ink),
+                else => @panic("unsupported badge content capability"),
+            };
+        },
+        else => @panic("unsupported badge drawing capability"),
+    };
+}
+fn emitCompiledSeparator(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .separator, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported separator drawing capability");
+        const width = controlStrokeWidth(widget, visual, tokens.stroke.hairline);
+        const p = leaves.payload(tokens, .separator, widget.frame, .{ width, 0, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+        try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse visual.border orelse tokens.colors.border)) });
+    }
+}
+fn emitCompiledDivider(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .divider, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill, .accent_fill => {
+            const width = controlStrokeWidth(widget, visual, tokens.stroke.hairline);
+            const active = command.opcode == .accent_fill;
+            const p = leaves.payload(tokens, .divider, widget.frame, .{ width, 0, 0, 0, 0, 0, 0, 0 }, if (active) 2 else 0, .nearest);
+            const ink = if (active) widgetAccentColor(widget, tokens.colors.accent) else widgetBorderColor(widget, visual.border orelse tokens.colors.border);
+            try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = colorFill(ink) });
+        },
+        .focus => {
+            const p = leaves.payload(tokens, .divider, widget.frame, @splat(0), 0, .nearest);
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = command.id, .rect = p.rects[1], .radius = Radius.all(tokens.radius.sm), .stroke = .{ .fill = widget_render_style.widgetFocusRingFill(widget, tokens), .width = tokens.stroke.focus } }));
+        },
+        else => @panic("unsupported divider drawing capability"),
+    };
+}
+fn emitCompiledStatus(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const program = leaves.Program.init(tokens, .status, 0, widget, leafFacts(widget));
+    // Normalization is a payload operation rather than host-side arithmetic.
+    const normalized = leaves.payload(tokens, .divider, widget.frame, @splat(0), 0, .nearest).rects[1];
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRect(.{ .id = command.id, .rect = normalized, .fill = colorFill(widgetBackgroundColor(widget, tokens.colors.surface)) }),
+        .status_separator => {
+            const p = leaves.payload(tokens, .status_separator, widget.frame, .{ tokens.stroke.hairline, widget.style.stroke_width orelse tokens.stroke.hairline, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+            try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = widgetBorderFill(widget, tokens.colors.border) });
+        },
+        .status_text => {
+            const size = widgetBodyTextSize(widget, tokens);
+            const pad = widget.layout.padding;
+            const p = leaves.payload(tokens, .status_text, widget.frame, .{ size, pad.top, pad.right, pad.bottom, pad.left, 0, 0, 0 }, 0, .nearest);
+            if (p.admitted) try builder.drawText(.{ .id = command.id, .font_id = tokens.typography.font_id, .size = size, .origin = p.points[0], .color = widgetForegroundColor(widget, tokens, tokens.colors.text), .text = widget.text, .text_layout = .{ .max_width = p.max_width, .line_height = p.line_height, .wrap = .none, .alignment = widget.text_alignment, .overflow = widget.text_overflow, .measure = tokens.text_measure } });
+        },
+        else => @panic("unsupported status drawing capability"),
+    };
+}
+fn emitCompiledSkeleton(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .skeleton, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported skeleton drawing capability");
+        try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = controlRadius(widget, visual, tokens.radius.md), .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)) });
+    }
+}
+fn emitCompiledWash(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const fill = listItemFillColor(widget, tokens, widget.state);
+    const program = leaves.Program.init(tokens, .wash, 0, widget, .{ .scalar = fill.a });
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported row wash capability");
+        try builder.fillRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .fill = colorFill(fill) });
+    }
+}
+fn emitCompiledRowLine(builder: *Builder, id: ObjectId, frame: geometry.RectF, tokens: DesignTokens) Error!void {
+    const widget: Widget = .{ .id = id, .kind = .data_row, .frame = frame };
+    const program = leaves.Program.init(tokens, .row_line, 0, widget, .{});
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .line) @panic("unsupported row line capability");
+        const p = leaves.payload(tokens, .row_line, frame, @splat(0), 0, .nearest);
+        try builder.drawLine(.{ .id = command.id, .from = p.points[0], .to = p.points[1], .stroke = .{ .fill = colorFill(tokens.colors.border), .width = tokens.stroke.hairline } });
+    }
+}
+fn emitCompiledTableRows(builder: *Builder, children: []const Widget, tokens: DesignTokens) Error!void {
+    const plan = leaves.RowPlan.init(std.heap.page_allocator, tokens, children, null) catch @panic("leaf row plan allocation failed");
+    defer plan.deinit();
+    for (0..plan.count) |i| {
+        const child = children[plan.index(i)];
+        try emitCompiledRowLine(builder, child.id, child.frame, tokens);
+    }
+}
+fn emitCompiledTableRowsLayout(builder: *Builder, layout: anytype, index: usize, tokens: DesignTokens, table: Widget, clip: bool) Error!void {
+    var facts: leaves.Facts = .{};
+    facts.cover = clip;
+    const program = leaves.Program.init(tokens, .table, 0, table, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, table.frame) }),
+        .rows => {
+            const plan = leaves.RowPlan.init(std.heap.page_allocator, tokens, layout.nodes, index) catch @panic("leaf row plan allocation failed");
+            defer plan.deinit();
+            for (0..plan.count) |i| {
+                const node = layout.nodes[plan.index(i)];
+                try emitCompiledRowLine(builder, node.widget.id, node.frame, tokens);
+            }
+        },
+        .unclip => try builder.popClip(),
+        else => @panic("unsupported table drawing capability"),
+    };
 }

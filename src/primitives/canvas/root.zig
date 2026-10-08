@@ -945,3 +945,6 @@ pub const binary_packet_load_action_patch = serialization.binary_packet_load_act
 test {
     _ = @import("tests.zig");
 }
+
+/// Copied portable leaf command and geometry plans.
+pub const leaf_plan_policy = @import("leaf_plan_policy.zig");
