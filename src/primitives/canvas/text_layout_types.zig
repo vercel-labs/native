@@ -20,6 +20,8 @@ pub const DrawText = struct {
     /// Process-local measurement context used for host-aware ink bounds.
     /// Excluded from equality, hashing, and serialization.
     measure: ?*const text_metrics.TextMeasureProvider = null,
+    /// Process-local portable planner, excluded from content identity.
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
     text_layout: ?TextLayoutOptions = null,
 };
 
@@ -63,6 +65,7 @@ pub const TextLayoutOptions = struct {
     /// Deliberately excluded from equality, hashing, and serialization:
     /// it is process-local layout context, not drawn content.
     measure: ?*const text_metrics.TextMeasureProvider = null,
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
 };
 
 pub const TextLine = struct {

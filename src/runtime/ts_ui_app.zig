@@ -452,6 +452,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.code_content_policy = core.nativeWindowPolicy;
                 if (options.paragraph_policy != null) @panic("TsUiApp owns paragraph_policy - remove custom paragraph wiring");
                 stamped.paragraph_policy = core.nativeWindowPolicy;
+                if (options.text_run_policy != null) @panic("TsUiApp owns text_run_policy - remove custom text run wiring");
+                stamped.text_run_policy = core.nativeWindowPolicy;
                 if (options.chart_content_policy != null) @panic("TsUiApp owns chart_content_policy - remove custom chart content wiring");
                 stamped.chart_content_policy = core.nativeWindowPolicy;
                 if (options.markdown_content_policy != null) @panic("TsUiApp owns markdown_content_policy - remove custom Markdown content wiring");

@@ -174,6 +174,9 @@ fn activePaintWalk(layout: anytype) ?paint_walk_policy.Plan {
 threadlocal var tree_visible_bounds: ?geometry.RectF = null;
 
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const saved_policy = builder.text_run_policy;
+    builder.text_run_policy = tokens.text_run_policy;
+    defer builder.text_run_policy = saved_policy;
     scrim_viewport = widget.frame.normalized();
     tree_visible_bounds = widget.frame.normalized();
     defer tree_visible_bounds = null;
@@ -185,6 +188,9 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const saved_policy = builder.text_run_policy;
+    builder.text_run_policy = tokens.text_run_policy;
+    defer builder.text_run_policy = saved_policy;
     const saved_copy = painting_drag_copy;
     painting_drag_copy = false;
     defer painting_drag_copy = saved_copy;

@@ -288,6 +288,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
             .line_height = line_height,
             .wrap = .none,
             .alignment = widget.text_alignment,
+            .text_run_policy = tokens.text_run_policy,
             .measure = tokens.text_measure,
         });
         line_count += 1;

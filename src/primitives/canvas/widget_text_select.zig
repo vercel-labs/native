@@ -122,6 +122,7 @@ fn staticTextLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32)
         .wrap = .none,
         .alignment = widget.text_alignment,
         .overflow = widget.text_overflow,
+        .text_run_policy = tokens.text_run_policy,
         .measure = tokens.text_measure,
     };
 }

@@ -1242,6 +1242,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/view_components.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/runtime_policy.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/paragraph_layout.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/text_run_layout.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_motion.ts"));

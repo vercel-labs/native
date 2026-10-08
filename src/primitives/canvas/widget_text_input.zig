@@ -183,7 +183,7 @@ pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_s
         if (widget.text_no_wrap) request.flags(8);
         request.bytes[8] = if (widget.kind == .textarea) 2 else if (widget.kind == .text_field) 1 else 0;
         const result = request.run(tokens);
-        return .{ .max_width = result.scalar, .line_height = result.auxiliary, .wrap = result.wrap, .overflow = .clip, .measure = tokens.text_measure };
+        return .{ .max_width = result.scalar, .line_height = result.auxiliary, .wrap = result.wrap, .overflow = .clip, .text_run_policy = tokens.text_run_policy, .measure = tokens.text_measure };
     }
     return .{
         .max_width = @max(1, widget.frame.width - inset - trailing_inset),
@@ -194,6 +194,7 @@ pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_s
         // so the honest treatment is the frame clip, not an ellipsis
         // hiding the caret's own neighborhood.
         .overflow = .clip,
+        .text_run_policy = tokens.text_run_policy,
         .measure = tokens.text_measure,
     };
 }

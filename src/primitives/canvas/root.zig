@@ -173,6 +173,9 @@ pub const text_ellipsis = text_model.text_ellipsis;
 pub const textEllipsisAdvance = text_model.textEllipsisAdvance;
 pub const textLayoutKeysEqual = text_model.textLayoutKeysEqual;
 pub const TextLayoutOptions = text_model.TextLayoutOptions;
+pub const TextLineIterator = text_model.TextLineIterator;
+pub const textLineCaretX = text_model.textLineCaretX;
+pub const text_run_policy = @import("text_run_policy.zig");
 pub const TextMeasureProvider = text_model.TextMeasureProvider;
 pub const TextInkMetrics = text_model.TextInkMetrics;
 /// Batched-measurement invalidation seam (see text_measure_cache.zig):

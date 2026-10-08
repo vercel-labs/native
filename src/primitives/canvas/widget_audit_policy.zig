@@ -101,6 +101,7 @@ fn measure(widget: widgets.Widget, raw_frame: geometry.RectF, tokens: tokens_mod
             .line_height = line_height,
             .wrap = .none,
             .alignment = widget.text_alignment,
+            .text_run_policy = tokens.text_run_policy,
             .measure = tokens.text_measure,
         });
         measured.lines += 1;

@@ -7,6 +7,7 @@ const text_layout_cache = @import("text_layout_cache.zig");
 const text_layout_hash = @import("text_layout_hash.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
 const text_metrics = @import("text_metrics.zig");
+const compiled_run = @import("text_run_policy.zig");
 
 const Error = canvas.Error;
 const FontId = canvas.FontId;
@@ -359,6 +360,13 @@ pub const TextLineIterator = struct {
 
     pub fn next(self: *TextLineIterator) ?TextLine {
         if (self.finished) return null;
+        if (self.options.text_run_policy orelse self.text.text_run_policy) |policy| {
+            const result = compiled_run.execute(policy, 0, self.text, self.options, self.cursor, self.index, self.finished, .{}, 0, 0);
+            self.cursor = result.cursor;
+            self.index = result.index;
+            self.finished = result.finished;
+            return result.line;
+        }
         if (self.text.glyphs.len > 0) return self.nextGlyphLine();
         return self.nextPlainLine();
     }
@@ -430,6 +438,10 @@ fn textInkInsets(size: f32) geometry.InsetsF {
 }
 
 pub fn textBounds(value: DrawText) ?geometry.RectF {
+    const run_options = textLayoutOptionsForDrawText(.{}, value);
+    if (value.text_layout == null) if (run_options.text_run_policy) |policy| {
+        return if (compiled_run.execute(policy, 8, value, run_options, 0, 0, false, .{}, 0, 0).line) |line| line.bounds else null;
+    };
     if (value.text_layout) |options| {
         var lines: [max_text_bounds_layout_lines]TextLine = undefined;
         if (layoutTextRun(value, options, &lines)) |layout| {
@@ -446,7 +458,7 @@ pub fn textBounds(value: DrawText) ?geometry.RectF {
         while (iterator.next()) |line| {
             bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
         }
-        if (bounds) |value_bounds| return value_bounds.inflate(textInkInsets(value.size));
+        if (bounds) |value_bounds| return inflateTextBounds(value, value_bounds);
     }
 
     const metric = metricTextBounds(value) orelse return null;
@@ -471,10 +483,17 @@ fn textBoundsForLines(value: DrawText, lines: []const TextLine) ?geometry.RectF 
     for (lines) |line| {
         bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
     }
-    return if (bounds) |value_bounds| value_bounds.inflate(textInkInsets(value.size)) else null;
+    return if (bounds) |value_bounds| inflateTextBounds(value, value_bounds) else null;
+}
+fn inflateTextBounds(text: DrawText, bounds: geometry.RectF) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 7, text, options, 0, 0, false, .{ .bounds = bounds }, 0, 0).line.?.bounds;
+    return bounds.inflate(textInkInsets(text.size));
 }
 
 fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, value);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 6, value, options, 0, 0, false, line, 0, 0).line.?.bounds;
     var bounds = line.bounds;
     if (value.glyphs.len > 0) return bounds;
     if (drawTextMeasure(value)) |provider| {
@@ -505,6 +524,8 @@ fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
 }
 
 fn metricTextBounds(value: DrawText) ?geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, value);
+    if (options.text_run_policy) |policy| return if (compiled_run.execute(policy, 5, value, options, 0, 0, false, .{}, 0, 0).line) |line| line.bounds else null;
     if (value.glyphs.len == 0 and value.text.len == 0) return null;
 
     var min_x = value.origin.x;
@@ -738,6 +759,7 @@ fn streamTextLineForOffset(
 }
 
 pub fn nextTextLineEnd(text: []const u8, start: usize, font_id: FontId, size: f32, options: TextLayoutOptions) usize {
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 1, .{ .font_id = font_id, .size = size, .origin = .{}, .color = .{}, .text = text, .measure = options.measure }, options, start, 0, false, .{}, 0, 0).offset;
     const max_width = if (options.max_width > 0) options.max_width else std.math.inf(f32);
     if (options.wrap == .none or max_width == std.math.inf(f32)) {
         return nextExplicitLineEnd(text, start);
@@ -936,6 +958,8 @@ fn textLineRangeForLength(text_len: usize, line: TextLine) TextRange {
 }
 
 pub fn textLineCaretX(text: DrawText, line: TextLine, offset: usize) f32 {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 2, text, options, 0, 0, false, line, offset, 0).scalar;
     const range = textLineRange(text, line);
     const snapped = clampTextOffsetToRange(text.text, range, offset);
     const x = if (line.glyph_len > 0 and line.glyph_start < text.glyphs.len)
@@ -972,6 +996,8 @@ fn textLineGlyphCaretX(text: DrawText, line: TextLine, range: TextRange, offset:
 }
 
 fn textLineOffsetForX(text: DrawText, line: TextLine, x: f32) usize {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 3, text, options, 0, 0, false, line, 0, x).offset;
     const range = textLineRange(text, line);
     if (x <= line.bounds.x) return range.start;
     // Elided lines: the hidden tail has no painted geometry, so a point
@@ -1042,6 +1068,8 @@ fn lineHeight(text: DrawText, options: TextLayoutOptions) f32 {
 }
 
 pub fn textLineBounds(text: DrawText, text_start: usize, text_len: usize, glyph_start: usize, glyph_len: usize, baseline: f32, line_height_value: f32) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 4, text, options, 0, 0, false, .{ .text_start = text_start, .text_len = text_len, .glyph_start = glyph_start, .glyph_len = glyph_len, .baseline = baseline, .bounds = .{ .height = line_height_value } }, 0, 0).line.?.bounds;
     if (glyph_len > 0 and glyph_start < text.glyphs.len) {
         const glyphs = text.glyphs[glyph_start..@min(text.glyphs.len, glyph_start + glyph_len)];
         const origin_x = glyphs[0].x;
