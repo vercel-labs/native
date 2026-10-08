@@ -48,8 +48,8 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
     const result = nscvSemanticDivide(product, nscvFlowSmall(denominator));
     return result.quotient.low + result.quotient.high * 4294967296 + (ceil && (result.remainder.low !== 0 || result.remainder.high !== 0) ? 1 : 0);
   };
-  const range = (start: number, length: number): { start: number; end: number } => {
-    if (textLength === 0 || glyphCount === 0) return { start: 0, end: 0 };
+  const range = (start: number, length: number): { run_first_byte: number; run_last_byte: number } => {
+    if (textLength === 0 || glyphCount === 0) return { run_first_byte: 0, run_last_byte: 0 };
     const end = Math.min(glyphCount, start + length), count = scalarCount(0, textLength);
     let a = textLength, b = 0, explicit = length > 0 && start < glyphCount;
     if (explicit) for (let n = start; n < end; n++) {
@@ -57,11 +57,11 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
       const at = glyphWord(n, 12), first = snap(at), last = snap(at + size);
       a = Math.min(a, first); b = Math.max(b, last);
     }
-    if (explicit) return { start: a, end: b };
-    if (count === 0) return { start: 0, end: 0 };
-    return { start: scalarOffset(0, textLength, Math.min(count, ratioIndex(start, count, glyphCount, false))), end: scalarOffset(0, textLength, Math.min(count, ratioIndex(end, count, glyphCount, true))) };
+    if (explicit) return { run_first_byte: a, run_last_byte: b };
+    if (count === 0) return { run_first_byte: 0, run_last_byte: 0 };
+    return { run_first_byte: scalarOffset(0, textLength, Math.min(count, ratioIndex(start, count, glyphCount, false))), run_last_byte: scalarOffset(0, textLength, Math.min(count, ratioIndex(end, count, glyphCount, true))) };
   };
-  const glyphBreak = (n: number): boolean => { const r = range(n, 1); return r.start < r.end && isBreak(r.start); };
+  const glyphBreak = (n: number): boolean => { const r = range(n, 1); return r.run_first_byte < r.run_last_byte && isBreak(r.run_first_byte); };
   const trim = (a: number, b: number): number => { let p = b; while (p > a && isBreak(p - 1)) p--; return p === a ? b : p; };
   const done = (): Uint8Array => { out[3] = 2; put(96, 0); put(100, 0); put(112, 0); return out; };
   const ask = (phase: number, kind: number, a: number, b: number): Uint8Array => {
@@ -122,7 +122,7 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
     if (total <= sub(width, f(372))) { put(172, n); float(176, total); }
     put(152, n); phase = 18;
   };
-  const lineRange = (): { start: number; end: number } => { const start = Math.min(u(320), textLength); return { start, end: Math.min(textLength, start + u(324)) }; };
+  const lineRange = (): { run_first_byte: number; run_last_byte: number } => { const start = Math.min(u(320), textLength); return { run_first_byte: start, run_last_byte: Math.min(textLength, start + u(324)) }; };
   const explicitLine = (): boolean => { if (u(332) === 0 || u(328) >= glyphCount) return false; for (let n = u(328); n < Math.min(glyphCount, u(328) + u(332)); n++) if (glyphWord(n, 16) === 0) return false; return true; };
   const savedRawGlyphBounds = (): { dx: number; first: number } => {
     const x = f(336), bh = f(348), saved = out.slice(336, 352);
@@ -164,7 +164,7 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
           if (value > width) { end = index === start ? index + 1 : out[4] === 1 && last > start ? last : index; break; }
           total = value; index++;
         }
-        const r = range(start, end - start); setLine(r.start, r.end - r.start, start, end - start);
+        const r = range(start, end - start); setLine(r.run_first_byte, r.run_last_byte - r.run_first_byte, start, end - start);
         put(288, end); put(292, u(48) + 1); put(296, 0);
         if (!(out[4] === 0 && out[6] === 0 && width > 0 && width !== Infinity && end > start)) { phase = 30; continue; }
         total = 0; for (let n = start; n < end; n++) total = add(total, advance(n));
@@ -235,7 +235,7 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
       let end = u(328), total = 0; const limit = u(328) + u(332);
       while (end < limit) { const value = add(total, advance(end)); if (value > sub(width, f(372))) break; total = value; end++; }
       while (end > u(328) && glyphBreak(end - 1)) end--;
-      const r = range(u(328), end - u(328)); put(360, Math.max(0, r.end - u(320))); put(368, end - u(328)); phase = 30;
+      const r = range(u(328), end - u(328)); put(360, Math.max(0, r.run_last_byte - u(320))); put(368, end - u(328)); phase = 30;
     }
     if (phase === 0 && mode === 4) phase = 30;
     if (phase === 30) {
@@ -253,23 +253,23 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
     }
     if (phase === 32) { float(344, f(116)); return finishBounds(); }
     if (phase === 0 && mode === 2) {
-      const r = lineRange(), offset = Math.max(r.start, Math.min(r.end, snap(u(56))));
-      if (u(332) === 0 || u(328) >= glyphCount) return ask(40, 1, r.start, offset);
+      const r = lineRange(), offset = Math.max(r.run_first_byte, Math.min(r.run_last_byte, snap(u(56))));
+      if (u(332) === 0 || u(328) >= glyphCount) return ask(40, 1, r.run_first_byte, offset);
       let x = f(336);
-      if (r.end > r.start && offset > r.start) {
-        if (offset >= r.end) x = add(f(336), f(344));
+      if (r.run_last_byte > r.run_first_byte && offset > r.run_first_byte) {
+        if (offset >= r.run_last_byte) x = add(f(336), f(344));
         else {
           const raw = savedRawGlyphBounds();
           if (explicitLine()) {
             x = add(f(336), f(344));
             for (let n = u(328); n < Math.min(glyphCount, u(328) + u(332)); n++) {
-              const gr = range(n, 1); if (gr.end <= r.start || gr.start >= r.end) continue;
+              const gr = range(n, 1); if (gr.run_last_byte <= r.run_first_byte || gr.run_first_byte >= r.run_last_byte) continue;
               const gx = glyphX(n, raw.first, raw.dx);
-              if (offset <= gr.start) { x = gx; break; }
-              if (offset < gr.end) { const count = scalarCount(gr.start, gr.end); let p = gr.start, index = 0; while (p < snap(offset)) { p = next(p); index++; } x = add(gx, mul(div(Math.fround(Math.min(index, count)), Math.fround(count)), max(1, advance(n)))); break; }
+              if (offset <= gr.run_first_byte) { x = gx; break; }
+              if (offset < gr.run_last_byte) { const count = scalarCount(gr.run_first_byte, gr.run_last_byte); let p = gr.run_first_byte, index = 0; while (p < snap(offset)) { p = next(p); index++; } x = add(gx, mul(div(Math.fround(Math.min(index, count)), Math.fround(count)), max(1, advance(n)))); break; }
             }
           } else {
-            const count = scalarCount(r.start, r.end); let p = r.start, index = 0; while (p < offset) { p = next(p); index++; }
+            const count = scalarCount(r.run_first_byte, r.run_last_byte); let p = r.run_first_byte, index = 0; while (p < offset) { p = next(p); index++; }
             const relative = count === 0 ? 0 : Math.min(u(332), ratioIndex(index, u(332), count, false));
             x = relative === 0 ? f(336) : relative >= u(332) || u(328) + relative >= glyphCount ? add(f(336), f(344)) : glyphX(u(328) + relative, raw.first, raw.dx);
           }
@@ -280,30 +280,30 @@ function nscvTextRunLayout(request: Uint8Array): Uint8Array {
     if (phase === 40) { const x = add(f(336), f(116)); float(304, u(356) !== 0 || u(364) !== 0 ? min(x, add(f(336), f(344))) : x); return done(); }
     if (phase === 0 && mode === 3) {
       const r = lineRange(), x = f(60), right = add(f(336), f(344));
-      if (x <= f(336)) { put(308, r.start); return done(); }
+      if (x <= f(336)) { put(308, r.run_first_byte); return done(); }
       if (u(356) !== 0 || u(364) !== 0) {
-        if (x >= right) { put(308, r.end); return done(); }
-        if (x >= sub(right, f(372))) { put(308, snap(Math.min(r.end, u(320) + (u(356) !== 0 ? u(360) : u(324))))); return done(); }
+        if (x >= right) { put(308, r.run_last_byte); return done(); }
+        if (x >= sub(right, f(372))) { put(308, snap(Math.min(r.run_last_byte, u(320) + (u(356) !== 0 ? u(360) : u(324))))); return done(); }
       }
       if (u(332) > 0 && u(328) < glyphCount) {
         const raw = savedRawGlyphBounds(), explicit = explicitLine();
         for (let n = u(328); n < Math.min(glyphCount, u(328) + u(332)); n++) {
           const gx = glyphX(n, raw.first, raw.dx), step = max(1, advance(n)), gr = range(n, 1);
           if (explicit) {
-            if (gr.end <= r.start || gr.start >= r.end) continue;
-            if (x <= gx) { put(308, Math.max(r.start, gr.start)); return done(); }
+            if (gr.run_last_byte <= r.run_first_byte || gr.run_first_byte >= r.run_last_byte) continue;
+            if (x <= gx) { put(308, Math.max(r.run_first_byte, gr.run_first_byte)); return done(); }
             if (x < add(gx, step)) {
-              const count = scalarCount(gr.start, gr.end), value = div(sub(x, gx), step), clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-              const index = Math.floor(add(mul(clamped, Math.fround(count)), 0.5)); put(308, scalarOffset(gr.start, gr.end, Math.min(index, count))); return done();
+              const count = scalarCount(gr.run_first_byte, gr.run_last_byte), value = div(sub(x, gx), step), clamped = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+              const index = Math.floor(add(mul(clamped, Math.fround(count)), 0.5)); put(308, scalarOffset(gr.run_first_byte, gr.run_last_byte, Math.min(index, count))); return done();
             }
-          } else if (x < add(gx, mul(step, 0.5))) { put(308, Math.max(r.start, Math.min(r.end, snap(gr.start)))); return done(); }
+          } else if (x < add(gx, mul(step, 0.5))) { put(308, Math.max(r.run_first_byte, Math.min(r.run_last_byte, snap(gr.run_first_byte)))); return done(); }
         }
-        put(308, r.end); return done();
+        put(308, r.run_last_byte); return done();
       }
-      put(152, r.start); float(164, f(336)); phase = 41;
+      put(152, r.run_first_byte); float(164, f(336)); phase = 41;
     }
-    if (phase === 41) { const r = lineRange(); if (u(152) >= r.end) { put(308, r.end); return done(); } return ask(42, drawMeasure ? 1 : 2, drawMeasure ? r.start : u(152), next(u(152))); }
-    if (phase === 42) { float(176, f(116)); if (drawMeasure) return ask(43, 1, lineRange().start, u(152)); phase = 44; }
+    if (phase === 41) { const r = lineRange(); if (u(152) >= r.run_last_byte) { put(308, r.run_last_byte); return done(); } return ask(42, drawMeasure ? 1 : 2, drawMeasure ? r.run_first_byte : u(152), next(u(152))); }
+    if (phase === 42) { float(176, f(116)); if (drawMeasure) return ask(43, 1, lineRange().run_first_byte, u(152)); phase = 44; }
     if (phase === 43) { float(176, max(0, sub(f(176), f(116)))); phase = 44; }
     if (phase === 44) { const step = max(1, f(176)); if (f(60) < add(f(164), mul(step, 0.5))) { put(308, u(152)); return done(); } float(164, add(f(164), step)); put(152, next(u(152))); phase = 41; continue; }
     if (phase === 0 && (mode === 5 || mode === 8)) {
