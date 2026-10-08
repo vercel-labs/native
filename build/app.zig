@@ -1263,6 +1263,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/flow_measurement.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/layout_coordination.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/render_coordination.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/control_commands.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/stream_policy.ts"));
     if (typescript_view) {
         stage_run.addArg("--view-markup");

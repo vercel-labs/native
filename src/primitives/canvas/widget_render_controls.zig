@@ -1,6 +1,7 @@
 const std = @import("std");
 const control_content = @import("control_content_policy.zig");
 const control_geometry = @import("control_geometry_policy.zig");
+const control_commands = @import("control_command_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -145,6 +146,7 @@ pub fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry
 }
 
 pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledButton(builder, widget, tokens);
     const visual = buttonControlVisualTokens(widget, tokens);
     const radius = buttonGroupSegmentRadius(widget, visual, tokens);
     const text_size = widgetButtonTextSize(widget, tokens);
@@ -198,6 +200,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
 }
 
 pub fn emitIconButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledIconButton(builder, widget, tokens);
     const visual = buttonControlVisualTokens(widget, tokens);
     const radius = buttonGroupSegmentRadius(widget, visual, tokens);
     try builder.fillRoundedRect(.{
@@ -366,6 +369,7 @@ fn iconPaintColor(paint: svg_icon_model.Paint, current: Color) ?Color {
 }
 
 pub fn emitSelectWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSelect(builder, widget, tokens);
     const visual = selectControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetBodyTextSize(widget, tokens);
@@ -434,6 +438,7 @@ fn emitSelectChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, vi
 }
 
 pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTextField(builder, widget, tokens);
     const visual = textInputControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetTextInputSize(widget, tokens);
@@ -520,6 +525,7 @@ pub fn emitTextFieldWidget(builder: *Builder, widget: Widget, tokens: DesignToke
 /// rings the whole field. Children (the chrome-dissolved entry and the
 /// accessory row) flow on top through the ordinary child pass.
 pub fn emitInputGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledInputGroup(builder, widget, tokens);
     const visual = textInputControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     try builder.fillRoundedRect(.{
@@ -541,6 +547,7 @@ pub fn emitInputGroupWidget(builder: *Builder, widget: Widget, tokens: DesignTok
 }
 
 pub fn emitSearchFieldWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSearch(builder, widget, tokens);
     const visual = textInputControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const text_size = widgetTextInputSize(widget, tokens);
@@ -670,6 +677,7 @@ fn emitSearchFieldIcon(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 }
 
 pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTooltip(builder, widget, tokens);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const shadow_token = tokens.shadow.sm;
@@ -713,6 +721,7 @@ pub fn emitTooltipWidget(builder: *Builder, widget: Widget, tokens: DesignTokens
 /// committed) stay independent: arrowing away from the committed row
 /// moves the wash while its checkmark stays put.
 pub fn emitMenuItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledMenuItem(builder, widget, tokens);
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.sm);
     const wash = menuItemWashColor(widget, tokens, visual);
@@ -797,6 +806,7 @@ fn menuItemWashColor(widget: Widget, tokens: DesignTokens, visual: ControlVisual
 }
 
 pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledListItem(builder, widget, tokens);
     const visual = listItemControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.md);
     const fill = listItemFillColor(widget, tokens, widget.state);
@@ -847,6 +857,7 @@ pub fn emitListItemWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 pub fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledCell(builder, widget, tokens);
     const visual = try emitDataCellWidgetChrome(builder, widget, tokens);
     if (widget.text.len > 0) {
         const text_size = widgetBodyTextSize(widget, tokens);
@@ -871,6 +882,10 @@ pub fn emitDataCellWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 /// paragraph emitter draws). Returns the visual tokens so callers can
 /// reuse the resolved foreground.
 pub fn emitDataCellWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!ControlVisualTokens {
+    if (tokens.control_command_policy != null) {
+        try emitCompiledCellChrome(builder, widget, tokens);
+        return listItemControlVisualTokens(widget, tokens);
+    }
     const visual = listItemControlVisualTokens(widget, tokens);
     const state_fill = listItemFillColor(widget, tokens, widget.state);
     if (state_fill.a > 0) {
@@ -953,6 +968,7 @@ pub fn segmentedControlUnderlineRect(widget: Widget, tokens: DesignTokens) ?geom
 }
 
 pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSegmented(builder, widget, tokens);
     const selected = widget.state.selected or widget.value >= 0.5;
     const visual = selectionControlVisualTokens(widget, tokens);
     const radius = segmentedTriggerRadius(widget, visual, tokens);
@@ -1063,6 +1079,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
 }
 
 pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledCheckbox(builder, widget, tokens);
     const visual = selectionControlVisualTokens(widget, tokens);
     const box = checkboxWidgetBoxRect(widget, tokens);
     const selected = booleanControlSelected(widget);
@@ -1138,6 +1155,7 @@ pub fn emitCheckboxWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledRadio(builder, widget, tokens);
     const visual = selectionControlVisualTokens(widget, tokens);
     const circle = radioWidgetCircleRect(widget, tokens);
     const selected = booleanControlSelected(widget);
@@ -1195,6 +1213,7 @@ pub fn emitRadioWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 }
 
 pub fn emitToggleWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledToggle(builder, widget, tokens);
     const selected = booleanControlSelected(widget);
     const visual = selectionControlVisualTokens(widget, tokens);
     const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .toggle) else null;
@@ -1288,6 +1307,7 @@ fn selectionShapeRadius(widget: Widget, visual: ControlVisualTokens, fallback: f
 }
 
 pub fn emitSliderWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSlider(builder, widget, tokens);
     const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .slider) else null;
     const value = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
@@ -1442,6 +1462,7 @@ pub fn sliderWidgetKnobRect(widget: Widget, tokens: DesignTokens) geometry.RectF
 }
 
 pub fn emitProgressWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledProgress(builder, widget, tokens);
     const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .progress) else null;
     const progress = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
     const visual = selectionControlVisualTokens(widget, tokens);
@@ -1744,4 +1765,1153 @@ pub fn compositionLineRect(rect: geometry.RectF, tokens: DesignTokens) geometry.
     if (tokens.control_geometry_policy != null) return control_content.rect(.composition, rect, tokens);
     const snapped = pixelSnapGeometryRect(tokens, rect);
     return pixelSnapGeometryRect(tokens, .init(snapped.x, snapped.maxY() - tokens.stroke.regular, snapped.width, tokens.stroke.regular));
+}
+
+// The compiled programs decide primitive admission, order and part slots.
+// Each executor supplies drawing/font/icon capabilities; the independent
+// native reference bodies above remain selectable without these programs.
+fn controlCommandFacts(widget: Widget) control_commands.Facts {
+    return .{ .focused = widget.state.focused, .text = widget.text.len > 0, .placeholder = widgetPlaceholder(widget).len > 0, .selected = widget.state.selected, .value = widget.value };
+}
+fn emitCompiledCheckbox(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const box = checkboxWidgetBoxRect(widget, tokens);
+    const selected = booleanControlSelected(widget);
+    const radius = controlRadius(widget, visual, 4);
+    const box_rest = if (selected)
+        widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
+    else
+        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
+    const facts = controlCommandFacts(widget);
+
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .checkbox, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = box,
+                .radius = radius,
+                .fill = colorFill(selectionDisabledBackground(widget, visual, box_rest, tokens)),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = box,
+                .radius = radius,
+                .stroke = .{
+                    .fill = colorFill(selectionDisabledNeutral(
+                        widget,
+                        visual,
+                        if (selected) widgetAccentColor(widget, visual.border orelse visual.active_background orelse tokens.colors.accent) else widgetBorderColor(widget, visual.border orelse tokens.colors.border),
+                        tokens,
+                    )),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, box, radius);
+        },
+        .mark => {
+            const check_color = selectionDisabledForeground(
+                widget,
+                visual,
+                widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text,
+                tokens,
+            );
+            const left = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.26, box.y + box.height * 0.54));
+            const mid = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.43, box.y + box.height * 0.70));
+            const right = pixelSnapGeometryPoint(tokens, geometry.PointF.init(box.x + box.width * 0.76, box.y + box.height * 0.32));
+            const elements = try builder.allocPathElements(3);
+            elements[0] = .{ .verb = .move_to, .points = .{ left, geometry.PointF.zero(), geometry.PointF.zero() } };
+            elements[1] = .{ .verb = .line_to, .points = .{ mid, geometry.PointF.zero(), geometry.PointF.zero() } };
+            elements[2] = .{ .verb = .line_to, .points = .{ right, geometry.PointF.zero(), geometry.PointF.zero() } };
+            try builder.strokePath(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .elements = elements,
+                .stroke = .{ .fill = colorFill(check_color), .width = 2 },
+                .cap = .round,
+            });
+        },
+        .text => {
+            try emitControlLabelWithColor(
+                builder,
+                widget,
+                tokens,
+                box.x + box.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                command.slot,
+                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+            );
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledRadio(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const circle = radioWidgetCircleRect(widget, tokens);
+    const radius = selectionShapeRadius(widget, visual, circle.height * 0.5);
+    const circle_rest = widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface));
+    const facts = controlCommandFacts(widget);
+
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .radio, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = circle,
+                .radius = radius,
+                .fill = colorFill(selectionDisabledBackground(widget, visual, circle_rest, tokens)),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = circle,
+                .radius = radius,
+                .stroke = .{
+                    .fill = colorFill(selectionDisabledNeutral(widget, visual, widgetBorderColor(widget, visual.border orelse tokens.colors.border), tokens)),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, circle, radius);
+        },
+        .mark => {
+            const dot_size = @max(0, circle.height * 0.5);
+            const dot = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                circle.x + (circle.width - dot_size) * 0.5,
+                circle.y + (circle.height - dot_size) * 0.5,
+                dot_size,
+                dot_size,
+            ));
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = dot,
+                .radius = Radius.all(dot.height * 0.5),
+                .fill = colorFill(selectionDisabledForeground(
+                    widget,
+                    visual,
+                    widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent),
+                    tokens,
+                )),
+            });
+        },
+        .text => {
+            try emitControlLabelWithColor(
+                builder,
+                widget,
+                tokens,
+                circle.x + circle.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                command.slot,
+                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+            );
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledToggle(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const selected = booleanControlSelected(widget);
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .toggle) else null;
+    const knob_inset = widgetSizedDensityValue(widget, tokens, 2);
+    const track = if (plan) |v| v.rects[0] else toggleWidgetTrackRect(widget, tokens);
+    const track_radius = selectionShapeRadius(widget, visual, track.height * 0.5);
+    const knob_size = @max(0, track.height - knob_inset * 2);
+    const knob_x = if (selected)
+        track.x + track.width - knob_size - knob_inset
+    else
+        track.x + knob_inset;
+    const knob = if (plan) |v| v.rects[if (selected) @as(usize, 2) else 1] else pixelSnapGeometryRect(tokens, geometry.RectF.init(knob_x, track.y + knob_inset, knob_size, knob_size));
+
+    const track_rest = if (selected)
+        widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)
+    else
+        widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), tokens.colors.surface_pressed));
+    const wants_track_stroke = widget.style.border != null or visual.border != null;
+    const track_stroke_width = controlStrokeWidth(widget, visual, if (wants_track_stroke) tokens.stroke.regular else 0);
+    var facts = controlCommandFacts(widget);
+    facts.stroke_width = track_stroke_width;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .toggle, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            if (command.variant < 4) {
+                try builder.fillRoundedRect(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .rect = track,
+                    .radius = track_radius,
+                    .fill = colorFill(selectionDisabledBackground(widget, visual, track_rest, tokens)),
+                });
+            } else {
+                try builder.fillRoundedRect(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .rect = knob,
+                    .radius = selectionShapeRadius(widget, visual, knob.height * 0.5),
+                    .fill = colorFill(selectionDisabledForeground(
+                        widget,
+                        visual,
+                        widget.style.accent_foreground orelse visual.foreground orelse tokens.colors.accent_text,
+                        tokens,
+                    )),
+                });
+            }
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = track,
+                .radius = track_radius,
+                .stroke = .{
+                    .fill = colorFill(selectionDisabledNeutral(widget, visual, widgetBorderColor(widget, visual.border orelse tokens.colors.border), tokens)),
+                    .width = track_stroke_width,
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, track, track_radius);
+        },
+        .text => {
+            try emitControlLabelWithColor(
+                builder,
+                widget,
+                tokens,
+                track.x + track.width + widgetControlInset(widget, tokens, tokens.spacing.sm),
+                command.slot,
+                selectionDisabledForeground(widget, visual, widget.style.foreground orelse visual.foreground orelse tokens.colors.text, tokens),
+            );
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledSlider(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .slider) else null;
+    const value = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const track = if (plan) |v| v.rects[0] else sliderWidgetTrackRect(widget, tokens);
+    const active = if (plan) |v| v.rects[2] else pixelSnapGeometryRect(tokens, geometry.RectF.init(track.x, track.y, track.width * value, track.height));
+    const knob = if (plan) |v| v.rects[1] else sliderWidgetKnobRect(widget, tokens);
+    const track_radius = Radius.all(track.height * 0.5);
+    const knob_radius = controlRadius(widget, visual, @min(knob.width, knob.height) * 0.5);
+
+    const swap_disabled = visual.disabled_background != null or visual.disabled_foreground != null;
+    const washed = widget.state.disabled and !swap_disabled;
+
+    const active_rest = widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent);
+    var facts = controlCommandFacts(widget);
+    facts.bar = if (plan) |v| v.flags & 8 != 0 else value > 0;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .slider, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            switch (command.variant) {
+                0 => {
+                    try builder.fillRoundedRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = track,
+                        .radius = track_radius,
+                        .fill = colorFill(disabledWash(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle), washed, tokens.states.disabled_alpha)),
+                    });
+                },
+                3 => {
+                    try builder.fillRoundedRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = active,
+                        .radius = track_radius,
+                        .fill = colorFill(if (widget.state.disabled)
+                            visual.disabled_background orelse disabledWash(active_rest, true, tokens.states.disabled_alpha)
+                        else
+                            active_rest),
+                    });
+                },
+                4 => {
+                    const knob_rest = widgetBackgroundColor(widget, visual.foreground orelse Color.rgb8(255, 255, 255));
+                    try builder.fillRoundedRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = knob,
+                        .radius = knob_radius,
+                        .fill = colorFill(if (widget.state.disabled)
+                            visual.disabled_foreground orelse disabledWash(knob_rest, washed, tokens.states.disabled_alpha)
+                        else
+                            knob_rest),
+                    });
+                },
+                else => unreachable,
+            }
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = knob,
+                .radius = knob_radius,
+                .stroke = .{
+                    .fill = widgetBorderFill(widget, disabledWash(visual.border orelse tokens.colors.focus_ring, washed, tokens.states.disabled_alpha)),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, knob, knob_radius);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledProgress(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const plan = if (tokens.control_geometry_policy != null) control_geometry.controls(widget, tokens, .progress) else null;
+    const progress = if (plan) |v| v.scalar else std.math.clamp(widget.value, 0, 1);
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, @min(tokens.radius.md, widget.frame.height * 0.5));
+    var facts = controlCommandFacts(widget);
+    facts.background = if (plan) |v| v.flags & 16 != 0 else progress < 1;
+    facts.bar = if (plan) |v| v.flags & 8 != 0 else progress > 0;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .progress, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            if (command.variant == 0) {
+                try builder.fillRoundedRect(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .rect = widget.frame,
+                    .radius = radius,
+                    .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)),
+                });
+            } else {
+                try builder.fillRoundedRect(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .rect = if (plan) |v| v.rects[0] else pixelSnapGeometryRect(tokens, geometry.RectF.init(widget.frame.x, widget.frame.y, widget.frame.width * progress, widget.frame.height)),
+                    .radius = radius,
+                    .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.accent)),
+                });
+            }
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledButton(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = buttonControlVisualTokens(widget, tokens);
+    const radius = buttonGroupSegmentRadius(widget, visual, tokens);
+    const text_size = widgetButtonTextSize(widget, tokens);
+    const text_inset = widgetButtonInset(widget, tokens);
+    const stroke_width = buttonStrokeWidth(widget, tokens);
+    const border = snapHairlineStrokeRect(tokens, .{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = buttonBorderFill(widget, tokens),
+            .width = stroke_width,
+        },
+    });
+    const content_color = buttonTextColorForWidget(widget, tokens);
+    const icon = icon_model.resolveOrMissing(widget.icon);
+    var text_frame = widget.frame;
+    var facts = controlCommandFacts(widget);
+    facts.icon = icon != null;
+    facts.stroke_width = stroke_width;
+    facts.seam = !widget_render_style.buttonInDetachedGroup(widget, tokens) and (widget.group_segment == .middle or widget.group_segment == .last);
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .button, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = buttonFill(widget, tokens),
+            });
+        },
+        .stroke => {
+            var stroke = border;
+            stroke.id = widgetPartId(widget.id, command.slot);
+            try builder.strokeRect(stroke);
+        },
+        .seam_clip => {
+            const band_inner_x = border.rect.x + border.stroke.width * 0.5;
+            try builder.pushClip(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = geometry.RectF.init(
+                    band_inner_x,
+                    widget.frame.y - stroke_width,
+                    @max(0, widget.frame.maxX() + stroke_width - band_inner_x),
+                    widget.frame.height + stroke_width * 2,
+                ),
+            });
+        },
+        .seam_unclip => {
+            try builder.popClip();
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .icon => {
+            const resolved = icon.?;
+            const icon_extent = widgetButtonIconExtent(widget, tokens);
+            const gap = widgetButtonIconGap(widget, tokens);
+            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, text_size);
+            const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, true);
+            try emitVectorIcon(builder, widget.id, command.slot, content.icon, content_color, resolved);
+            text_frame = content.label;
+        },
+        .text => {
+            if (command.variant == 1) {
+                try builder.drawText(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .font_id = tokens.typography.buttonFontId(),
+                    .size = text_size,
+                    .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
+                    .color = content_color,
+                    .text = widget.text,
+                    .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
+                });
+            } else {
+                try builder.drawText(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .font_id = tokens.typography.buttonFontId(),
+                    .size = text_size,
+                    .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
+                    .color = content_color,
+                    .text = widget.text,
+                    .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none, widget.text_overflow, tokens),
+                });
+            }
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledIconButton(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = buttonControlVisualTokens(widget, tokens);
+    const radius = buttonGroupSegmentRadius(widget, visual, tokens);
+    const stroke_width = buttonStrokeWidth(widget, tokens);
+    const border = snapHairlineStrokeRect(tokens, .{
+        .id = widgetPartId(widget.id, 2),
+        .rect = widget.frame,
+        .radius = radius,
+        .stroke = .{
+            .fill = buttonBorderFill(widget, tokens),
+            .width = stroke_width,
+        },
+    });
+    const icon = if (widget.icon.len > 0) icon_model.resolveOrMissing(widget.icon) else if (widget.text.len > 0) icon_model.resolve(widget.text) else null;
+    var facts = controlCommandFacts(widget);
+    facts.icon = icon != null;
+    facts.stroke_width = stroke_width;
+    facts.seam = !widget_render_style.buttonInDetachedGroup(widget, tokens) and (widget.group_segment == .middle or widget.group_segment == .last);
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .icon_button, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = buttonFill(widget, tokens),
+            });
+        },
+        .stroke => {
+            var stroke = border;
+            stroke.id = widgetPartId(widget.id, command.slot);
+            try builder.strokeRect(stroke);
+        },
+        .seam_clip => {
+            const band_inner_x = border.rect.x + border.stroke.width * 0.5;
+            try builder.pushClip(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = geometry.RectF.init(
+                    band_inner_x,
+                    widget.frame.y - stroke_width,
+                    @max(0, widget.frame.maxX() + stroke_width - band_inner_x),
+                    widget.frame.height + stroke_width * 2,
+                ),
+            });
+        },
+        .seam_unclip => {
+            try builder.popClip();
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .icon => {
+            const resolved = icon.?;
+
+            const size = iconGlyphSize(widget, tokens);
+            const icon_frame = geometry.RectF.init(
+                widget.frame.x + (widget.frame.width - size) * 0.5,
+                widget.frame.y + (widget.frame.height - size) * 0.5,
+                size,
+                size,
+            );
+            try emitVectorIcon(builder, widget.id, command.slot, icon_frame, buttonTextColorForWidget(widget, tokens), resolved);
+        },
+        .text => {
+            const size = iconGlyphSize(widget, tokens);
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = size,
+                .origin = pixelSnapTextPoint(tokens, centeredTextOrigin(widget.frame, widget.text, size, tokens)),
+                .color = buttonTextColorForWidget(widget, tokens),
+                .text = widget.text,
+                .measure = tokens.text_measure,
+            });
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledInputGroup(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const facts = controlCommandFacts(widget);
+
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .input_group, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = textInputFill(widget, tokens, visual),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .stroke = .{
+                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledSelect(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = selectControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const chevron_size = widgetRowIconExtent(widget, tokens);
+    const chevron_extent = chevron_size + inset;
+    const text_frame = geometry.RectF.init(
+        widget.frame.x + inset,
+        widget.frame.y,
+        @max(1, widget.frame.width - inset * 2 - chevron_extent),
+        widget.frame.height,
+    );
+    const placeholder = widgetPlaceholder(widget);
+    const visible_text = if (widget.text.len > 0) widget.text else placeholder;
+    var facts = controlCommandFacts(widget);
+    facts.chevron = icon_model.resolve("chevron-down") != null;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .select, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed, washHovered(widget), tokens.colors.surface))),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .stroke = .{
+                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .text => {
+            const text_color = if (command.variant == 2) widgetForegroundColor(widget, tokens, tokens.colors.text_muted) else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = text_size,
+                .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
+                .color = text_color,
+                .text = visible_text,
+                .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
+            });
+        },
+        .icon => {
+            const icon = icon_model.resolve("chevron-down").?;
+            const icon_frame = geometry.RectF.init(
+                widget.frame.x + widget.frame.width - inset - chevron_size,
+                widget.frame.y + (widget.frame.height - chevron_size) * 0.5,
+                chevron_size,
+                chevron_size,
+            );
+            const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+            try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledTextField(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const text_size = widgetTextInputSize(widget, tokens);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
+    const clip_rect = widgetTextInputClipRect(widget, tokens, text_size, text_inset, layout_options);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
+    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
+    const selection_range = widgetTextSelectionRange(widget);
+    const composition_range = widgetTextCompositionRange(widget);
+    const clips_text = widgetTextInputClipsText(widget, tokens, text_size, text_inset, layout_options);
+    const placeholder = widgetPlaceholder(widget);
+    var facts = controlCommandFacts(widget);
+    facts.text = widget.text.len > 0 and draw_text.text.len > 0;
+    facts.placeholder = widget.text.len == 0 and placeholder.len > 0;
+    facts.clip = clips_text;
+    facts.selection = selection_range != null;
+    facts.selection_range = if (selection_range) |range| !range.isCollapsed(widget.text.len) else false;
+    facts.composition = composition_range != null;
+    facts.composition_range = if (composition_range) |range| !range.isCollapsed(widget.text.len) else false;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .text_field, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = textInputFill(widget, tokens, visual),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .stroke = .{
+                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .clip => {
+            try builder.pushClip(.{ .id = widgetPartId(widget.id, command.slot), .rect = clip_rect, .radius = radius });
+        },
+        .unclip => {
+            try builder.popClip();
+        },
+        .text => {
+            const visible_text = if (command.variant == 2) placeholder else draw_text.text;
+
+            var draw_command = draw_text;
+            draw_command.id = widgetPartId(widget.id, command.slot);
+            draw_command.text = visible_text;
+            if (command.variant == 2) {
+                draw_command.color = widgetForegroundColor(widget, tokens, tokens.colors.text_muted);
+            }
+            try builder.drawText(draw_command);
+        },
+        .selection => {
+            try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, selection_range.?, command.slot, command.variant & 255, command.variant >> 8, tokens);
+        },
+        .selected_glyphs => {
+            try emitWidgetTextSelectedGlyphs(builder, widget, draw_text, layout_options, selection_range.?, command.variant, tokens);
+        },
+        .composition => {
+            try emitWidgetTextCompositionLines(builder, widget, draw_text, layout_options, composition_range.?, command.slot, command.variant & 255, command.variant >> 8, tokens);
+        },
+        .caret => {
+            try emitWidgetTextCaret(builder, widget, draw_text, layout_options, selection_range.?.start, command.slot, tokens);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledSearch(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = textInputControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const text_size = widgetTextInputSize(widget, tokens);
+    const icon_size = @max(8, text_size - 2);
+    const text_inset = widgetTextInputInset(widget, tokens);
+    const layout_options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
+    const clip_rect = widgetTextInputClipRect(widget, tokens, text_size, text_inset, layout_options);
+    const origin = widgetTextInputOrigin(widget, tokens, text_size, text_inset, layout_options);
+    const selection_range = widgetTextSelectionRange(widget);
+    const composition_range = widgetTextCompositionRange(widget);
+    const text_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    var draw_text = widgetTextInputDrawText(widget, tokens, text_size, origin, text_color, layout_options);
+    draw_text.text = widget_text_input.persistWidgetTextInputPresentedText(builder, widget.text, draw_text.text);
+    const clips_text = widgetTextInputClipsText(widget, tokens, text_size, text_inset, layout_options);
+    const placeholder = widgetPlaceholder(widget);
+    var facts = controlCommandFacts(widget);
+    facts.text = widget.text.len > 0 and draw_text.text.len > 0;
+    facts.placeholder = widget.text.len == 0 and placeholder.len > 0;
+    facts.clip = clips_text;
+    facts.selection = selection_range != null;
+    facts.selection_range = if (selection_range) |range| !range.isCollapsed(widget.text.len) else false;
+    facts.composition = composition_range != null;
+    facts.composition_range = if (composition_range) |range| !range.isCollapsed(widget.text.len) else false;
+    facts.combobox = widget.kind == .combobox;
+    facts.search_icon = icon_model.resolve("search") != null;
+    facts.chevron = icon_model.resolve("chevron-down") != null;
+    facts.clear = textInputClearButtonRect(widget, tokens) != null and icon_model.resolve("x") != null;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .search, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = textInputFill(widget, tokens, visual),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .stroke = .{
+                    .fill = textInputBorderFill(widget, visual, tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .clip => {
+            try builder.pushClip(.{ .id = widgetPartId(widget.id, command.slot), .rect = clip_rect, .radius = radius });
+        },
+        .unclip => {
+            try builder.popClip();
+        },
+        .text => {
+            const visible_text = if (command.variant == 2) placeholder else draw_text.text;
+
+            var draw_command = draw_text;
+            draw_command.id = widgetPartId(widget.id, command.slot);
+            draw_command.text = visible_text;
+            draw_command.color = if (command.variant != 2) text_color else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+            try builder.drawText(draw_command);
+        },
+        .selection => {
+            try emitWidgetTextSelectionRects(builder, widget, draw_text, layout_options, selection_range.?, command.slot, command.variant & 255, command.variant >> 8, tokens);
+        },
+        .selected_glyphs => {
+            try emitWidgetTextSelectedGlyphs(builder, widget, draw_text, layout_options, selection_range.?, command.variant, tokens);
+        },
+        .composition => {
+            try emitWidgetTextCompositionLines(builder, widget, draw_text, layout_options, composition_range.?, command.slot, command.variant & 255, command.variant >> 8, tokens);
+        },
+        .caret => {
+            try emitWidgetTextCaret(builder, widget, draw_text, layout_options, selection_range.?.start, command.slot, tokens);
+        },
+        .icon => {
+            switch (command.variant) {
+                2 => {
+                    const icon = icon_model.resolve("search").?;
+                    const left = widget.frame.x + widgetControlInset(widget, tokens, tokens.spacing.md);
+                    const top = widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5);
+                    const icon_frame = geometry.RectF.init(left, top, icon_size, icon_size);
+                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
+                },
+                4 => {
+                    const icon = icon_model.resolve("chevron-down").?;
+                    const inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+                    const chevron_size = widgetRowIconExtent(widget, tokens);
+                    const icon_frame = geometry.RectF.init(
+                        widget.frame.x + widget.frame.width - inset - chevron_size,
+                        widget.frame.y + (widget.frame.height - chevron_size) * 0.5,
+                        chevron_size,
+                        chevron_size,
+                    );
+                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
+                },
+                6 => {
+                    const icon_frame = textInputClearButtonRect(widget, tokens).?;
+                    const icon = icon_model.resolve("x").?;
+                    const color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+                    try emitVectorIcon(builder, widget.id, command.slot, icon_frame, color, icon);
+                },
+                else => unreachable,
+            }
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledTooltip(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = surfaceControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const shadow_token = tokens.shadow.sm;
+    var facts = controlCommandFacts(widget);
+    facts.shadow_y = shadow_token.y;
+    facts.shadow_blur = shadow_token.blur;
+    facts.shadow_spread = shadow_token.spread;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .tooltip, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .shadow => {
+            try builder.shadow(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .offset = .{ .dx = 0, .dy = shadow_token.y },
+                .blur = shadow_token.blur,
+                .spread = shadow_token.spread,
+                .color = tokens.colors.shadow,
+            });
+        },
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = widgetAccentFill(widget, buttonStateBackground(widget, tokens, visual, widget.state.pressed or widget.state.selected, washHovered(widget), tokens.colors.accent)),
+            });
+        },
+        .text => {
+            const text_size = widgetLabelTextSize(widget, tokens);
+            const text_inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = text_size,
+                .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
+                .color = widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
+                .text = widget.text,
+                .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
+            });
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledMenuItem(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = listItemControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.sm);
+    const wash = menuItemWashColor(widget, tokens, visual);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const check_extent = widgetRowIconExtent(widget, tokens);
+    const check_gap = widgetRowIconGap(widget, tokens);
+    var text_frame = geometry.RectF.init(
+        widget.frame.x,
+        widget.frame.y,
+        @max(1, widget.frame.width - check_extent - check_gap),
+        widget.frame.height,
+    );
+    const icon = icon_model.resolveOrMissing(widget.icon);
+    var facts = controlCommandFacts(widget);
+    facts.icon = icon != null;
+    facts.wash_alpha = wash.a;
+    facts.check = icon_model.resolve("check") != null;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .menu_item, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = widgetBackgroundFill(widget, wash),
+            });
+        },
+        .icon => {
+            if (command.variant == 5) {
+                const check_icon = icon_model.resolve("check").?;
+
+                const check_frame = geometry.RectF.init(
+                    widget.frame.maxX() - text_inset - check_extent,
+                    widget.frame.y + (widget.frame.height - check_extent) * 0.5,
+                    check_extent,
+                    check_extent,
+                );
+                try emitVectorIcon(builder, widget.id, command.slot, check_frame, content_color, check_icon);
+            } else {
+                const resolved = icon.?;
+
+                const icon_extent = widgetRowIconExtent(widget, tokens);
+                const icon_frame = geometry.RectF.init(
+                    widget.frame.x + text_inset,
+                    widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
+                    icon_extent,
+                    icon_extent,
+                );
+                try emitVectorIcon(builder, widget.id, command.slot, icon_frame, content_color, resolved);
+                const shift = icon_extent + widgetRowIconGap(widget, tokens);
+                text_frame = geometry.RectF.init(
+                    text_frame.x + shift,
+                    text_frame.y,
+                    @max(1, text_frame.width - shift),
+                    text_frame.height,
+                );
+            }
+        },
+        .text => {
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = text_size,
+                .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset, tokens)),
+                .color = content_color,
+                .text = widget.text,
+                .text_layout = boundedTextLayout(text_frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
+            });
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledListItem(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = listItemControlVisualTokens(widget, tokens);
+    const radius = controlRadius(widget, visual, tokens.radius.md);
+    const fill = listItemFillColor(widget, tokens, widget.state);
+    const text_size = widgetBodyTextSize(widget, tokens);
+    const text_inset = widgetControlInset(widget, tokens, tokens.spacing.md);
+    const content_color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    var text_frame = widget.frame;
+    const icon = icon_model.resolveOrMissing(widget.icon);
+    var facts = controlCommandFacts(widget);
+    facts.icon = icon != null;
+    facts.wash_alpha = fill.a;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .list_item, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRoundedRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .fill = colorFill(fill),
+            });
+        },
+        .icon => {
+            const resolved = icon.?;
+
+            const icon_extent = widgetRowIconExtent(widget, tokens);
+            const icon_frame = geometry.RectF.init(
+                text_frame.x + text_inset,
+                widget.frame.y + (widget.frame.height - icon_extent) * 0.5,
+                icon_extent,
+                icon_extent,
+            );
+            try emitVectorIcon(builder, widget.id, command.slot, icon_frame, content_color, resolved);
+            const shift = icon_extent + widgetRowIconGap(widget, tokens);
+            text_frame = geometry.RectF.init(
+                text_frame.x + shift,
+                widget.frame.y,
+                @max(1, text_frame.width - shift),
+                widget.frame.height,
+            );
+        },
+        .text => {
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = text_size,
+                .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, text_inset, tokens)),
+                .color = content_color,
+                .text = widget.text,
+                .text_layout = boundedTextLayout(text_frame, text_size, text_inset, .start, .none, widget.text_overflow, tokens),
+            });
+        },
+        .focus => {
+            try emitWidgetFocusRing(builder, widget, tokens, command.slot);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledCellChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = listItemControlVisualTokens(widget, tokens);
+    const state_fill = listItemFillColor(widget, tokens, widget.state);
+    const wants_stroke = widget.style.border != null or visual.border != null or widget.style.stroke_width != null or visual.stroke_width != null;
+    var facts = controlCommandFacts(widget);
+    facts.wash_alpha = state_fill.a;
+    facts.border = wants_stroke;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .cell_chrome, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .fill = colorFill(state_fill),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .stroke = .{
+                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRing(builder, widget, tokens, command.slot);
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledCell(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = listItemControlVisualTokens(widget, tokens);
+    const state_fill = listItemFillColor(widget, tokens, widget.state);
+    const wants_stroke = widget.style.border != null or visual.border != null or widget.style.stroke_width != null or visual.stroke_width != null;
+    var facts = controlCommandFacts(widget);
+    facts.wash_alpha = state_fill.a;
+    facts.border = wants_stroke;
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .cell, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            try builder.fillRect(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .fill = colorFill(state_fill),
+            });
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .stroke = .{
+                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRing(builder, widget, tokens, command.slot);
+        },
+        .text => {
+            const text_size = widgetBodyTextSize(widget, tokens);
+            const text_inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+            try builder.drawText(.{
+                .id = widgetPartId(widget.id, command.slot),
+                .font_id = tokens.typography.font_id,
+                .size = text_size,
+                .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
+                .color = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text),
+                .text = widget.text,
+                .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, widget.text_alignment, .none, widget.text_overflow, tokens),
+            });
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
+}
+
+fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const selected = widget.state.selected or widget.value >= 0.5;
+    const visual = selectionControlVisualTokens(widget, tokens);
+    const radius = segmentedTriggerRadius(widget, visual, tokens);
+    const text_size = widgetTabTriggerTextSize(widget, tokens);
+    const text_inset = widgetTabTriggerInset(widget, tokens);
+    const active_ink = if (tokens.controls.tabs_indicator == .underline)
+        widget.style.foreground orelse visual.foreground orelse tokens.colors.text
+    else
+        widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+    const hover_preview = tokens.controls.tabs_indicator == .underline and widget.state.hovered and !widget.state.disabled;
+    const content_color = if (selected or hover_preview) active_ink else widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted);
+    var text_frame = widget.frame;
+    var facts = controlCommandFacts(widget);
+    facts.icon = widget.icon.len > 0;
+    facts.underline = tokens.controls.tabs_indicator == .underline;
+    facts.background = (widget.style.background orelse visual.background) != null;
+    facts.bar = !widget.frame.normalized().isEmpty();
+    const program = control_commands.Program.init(tokens.control_command_policy.?, .segmented, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => {
+            switch (command.variant) {
+                1 => {
+                    try builder.fillRoundedRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = widget.frame,
+                        .radius = radius,
+                        .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.surface)),
+                    });
+                },
+                0 => {
+                    const background = (widget.style.background orelse visual.background).?;
+                    try builder.fillRoundedRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = widget.frame,
+                        .radius = radius,
+                        .fill = colorFill(widgetBackgroundColor(widget, buttonStateBackground(widget, tokens, visual, false, washHovered(widget), background))),
+                    });
+                },
+                3 => {
+                    const bar = segmentedControlUnderlineRect(widget, tokens).?;
+                    try builder.fillRect(.{
+                        .id = widgetPartId(widget.id, command.slot),
+                        .rect = bar,
+                        .fill = colorFill(widgetAccentColor(widget, visual.active_background orelse tokens.colors.text)),
+                    });
+                },
+                else => unreachable,
+            }
+        },
+        .stroke => {
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = widgetPartId(widget.id, command.slot),
+                .rect = widget.frame,
+                .radius = radius,
+                .stroke = .{
+                    .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border),
+                    .width = controlStrokeWidth(widget, visual, tokens.stroke.regular),
+                },
+            }));
+        },
+        .focus => {
+            try emitWidgetFocusRingForRect(builder, widget, tokens, command.slot, widget.frame, radius);
+        },
+        .icon => {
+            const resolved = icon_model.resolveOrMissing(widget.icon).?;
+            const icon_extent = widgetTabTriggerIconExtent(widget, tokens);
+            const gap = widgetTabTriggerIconGap(tokens);
+            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+            const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, false);
+            try emitVectorIcon(builder, widget.id, command.slot, content.icon, content_color, resolved);
+            text_frame = content.label;
+        },
+        .text => {
+            if (command.variant == 1) {
+                try builder.drawText(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .font_id = tokens.typography.font_id,
+                    .size = text_size,
+                    .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(text_frame, text_size, 0, tokens)),
+                    .color = content_color,
+                    .text = widget.text,
+                    .text_layout = boundedTextLayout(text_frame, text_size, 0, .start, .none, widget.text_overflow, tokens),
+                });
+            } else {
+                try builder.drawText(.{
+                    .id = widgetPartId(widget.id, command.slot),
+                    .font_id = tokens.typography.font_id,
+                    .size = text_size,
+                    .origin = pixelSnapTextPoint(tokens, boundedTextOrigin(widget.frame, text_size, text_inset, tokens)),
+                    .color = content_color,
+                    .text = widget.text,
+                    .text_layout = boundedTextLayout(widget.frame, text_size, text_inset, .center, .none, widget.text_overflow, tokens),
+                });
+            }
+        },
+        else => @panic("unsupported control drawing capability"),
+    };
 }

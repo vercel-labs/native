@@ -1917,6 +1917,8 @@ pub const DesignTokens = struct {
     layout_coordination_policy: ?@import("layout_coordination_policy.zig").Policy = null,
     /// Portable paint capability scheduling and direct-tree sibling programs.
     render_coordination_policy: ?@import("render_coordination_policy.zig").Policy = null,
+    /// Portable control primitive scheduling, part slots and editing overlays.
+    control_command_policy: ?@import("control_command_policy.zig").Policy = null,
     intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
     /// Widget motion plans supplied by the compiled app, outside theme overrides.
     widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,

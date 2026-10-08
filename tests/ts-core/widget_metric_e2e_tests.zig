@@ -9,6 +9,7 @@ const layout = c;
 const exact = @import("component_construction_e2e_tests.zig").exact;
 test {
     _ = @import("render_coordination_e2e_tests.zig");
+    _ = @import("control_command_e2e_tests.zig");
 }
 fn owned(tokens: c.DesignTokens) c.DesignTokens {
     var t = tokens;
