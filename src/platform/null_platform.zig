@@ -1528,6 +1528,7 @@ pub const NullPlatform = struct {
         webview.layer = options.layer;
         webview.transparent = options.transparent;
         webview.bridge_enabled = options.bridge_enabled;
+        webview.zoom = 1.0;
         webview.open = true;
         @memcpy(webview.label_storage[0..options.label.len], options.label);
         @memcpy(webview.url_storage[0..options.url.len], options.url);

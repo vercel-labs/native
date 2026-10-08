@@ -75,7 +75,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
+    kind: enum { combobox, bubble, table, data_row, data_cell, progress, skeleton, spinner, column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -112,6 +112,8 @@ const Record = struct {
     scrollback: ?u32 = null,
     terminal: ?u8 = null,
     icon: []const u8 = "",
+    iconBytes: ?ByteText = null,
+    iconPlacement: sdk.canvas.WidgetIconPlacement = .leading,
     label: []const u8 = "",
     labelBytes: ?ByteText = null,
     role: @FieldType(sdk.canvas.WidgetSemantics, "role") = .none,
@@ -120,6 +122,9 @@ const Record = struct {
     borderColor: @FieldType(sdk.canvas.StyleTokenRefs, "border_color") = null,
     focusRing: @FieldType(sdk.canvas.StyleTokenRefs, "focus_ring") = null,
     radius: @FieldType(sdk.canvas.StyleTokenRefs, "radius") = null,
+    accent: @FieldType(sdk.canvas.StyleTokenRefs, "accent") = null,
+    accentForeground: @FieldType(sdk.canvas.StyleTokenRefs, "accent_foreground") = null,
+    quietHover: bool = false,
     windowDrag: bool = false,
     main: @FieldType(Ui.ElementOptions, "main") = .start,
     cross: @FieldType(Ui.ElementOptions, "cross") = .stretch,
@@ -289,6 +294,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     value.text = byteText(value.textBytes, value.text);
     value.label = byteText(value.labelBytes, value.label);
     value.placeholder = byteText(value.placeholderBytes, value.placeholder);
+    value.icon = byteText(value.iconBytes, value.icon);
     if (value.end <= index or value.end > parent_end) return error.InvalidView;
     if (!std.math.isFinite(value.gap) or value.gap < 0 or !std.math.isFinite(value.grow) or value.grow < 0) return error.InvalidView;
     if (value.padding) |padding| if (!std.math.isFinite(padding) or padding < 0) return error.InvalidView;
@@ -314,24 +320,23 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (chart_metadata and value.kind != .chart) return error.InvalidView;
     if (value.kind == .chart and (value.chartSeries == null or value.chartXLabels == null or value.chartSeries.?.len == 0 or value.chartSeries.?.len > 64 or value.text.len != 0 or value.textBytes != null or value.role != .none or value.focusable or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or value.contextMenu.len != 0)) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
-    const container = value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
+    const container = value.kind == .bubble or value.kind == .table or value.kind == .data_row or value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel or value.kind == .list_item) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
+    if (value.kind == .data_row and parent_kind != .table or value.kind == .data_cell and parent_kind != .data_row) return error.InvalidView;
     if (!container and value.end != index + 1) return error.InvalidView;
     if (value.kind == .list_item and value.end != index + 1 and value.text.len != 0) return error.InvalidView;
-    if (value.press != null and !tree_row and value.kind != .button and value.kind != .stack and value.kind != .panel and value.kind != .card and value.kind != .alert and value.kind != .radio and value.kind != .segmented_control and value.kind != .list_item and value.kind != .select and value.kind != .menu_item) return error.InvalidView;
     if (value.dismiss != null and !modal and value.kind != .dropdown_menu) return error.InvalidView;
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
     if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu and value.kind != .tooltip) return error.InvalidView;
     if (value.tooltipDelay) |delay| if (value.kind != .tooltip or value.anchor == null or delay < 0) return error.InvalidView;
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
-    if (value.toggle != null and !tree_row and value.kind != .checkbox and value.kind != .switch_control and value.kind != .toggle and value.kind != .radio and value.kind != .toggle_button and value.kind != .accordion) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
-    if (value.change != null and value.kind != .radio and value.kind != .slider) return error.InvalidView;
+    if (value.change != null and !tree_row and value.kind != .radio and value.kind != .slider and value.kind != .list_item) return error.InvalidView;
     if (value.valueChange != null and (value.kind != .slider or value.change != null)) return error.InvalidView;
     if (value.scroll != null and value.kind != .scroll) return error.InvalidView;
-    const text_entry = value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea or (value.kind == .code and value.codeEditable == true);
+    const text_entry = value.kind == .combobox or value.kind == .text_field or value.kind == .input or value.kind == .search_field or value.kind == .textarea or (value.kind == .code and value.codeEditable == true);
     if ((value.pty != null or value.ptyBytes != null or value.scrollback != null or value.terminal != null) and value.kind != .terminal) return error.InvalidView;
     if (value.pty != null and value.ptyBytes != null) return error.InvalidView;
     if (value.pty) |key| if (key > 9007199254740991) return error.InvalidView;
@@ -452,9 +457,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     };
     if (value.contextMenu.len > 32) return error.InvalidView;
     const non_hit_target = switch (value.kind) {
-        .row, .column, .stack, .list, .grid, .split, .tree, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .badge, .avatar, .tooltip, .separator, .spacer => true,
+        .row, .column, .stack, .list, .grid, .split, .tree, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .badge, .avatar, .tooltip, .separator, .spacer, .table, .data_row, .skeleton, .spinner, .icon => true,
         else => false,
     };
+    if (value.quietHover and non_hit_target) return error.InvalidView;
     if (value.contextMenu.len > 0 and non_hit_target and value.press == null and value.toggle == null and value.hold == null and value.drag == null) return error.InvalidView;
     const context_menu = try ui.arena.alloc(Ui.ContextMenuItem, value.contextMenu.len);
     for (value.contextMenu, context_menu) |raw_item, *slot| {
@@ -465,7 +471,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         slot.* = .{ .label = item.label, .msg = if (item.press) |bytes| try event(ui, bytes) else null, .enabled = item.enabled, .separator = item.separator };
     }
     var result = ui.el(kind, .{
-        .style = .{ .stroke_width = if (value.chartStrokeWidth) |bits| @as(f32, @bitCast(bits)) else null },
+        .style = .{ .quiet_hover = value.quietHover, .stroke_width = if (value.chartStrokeWidth) |bits| @as(f32, @bitCast(bits)) else null },
         .context_menu = context_menu,
         .key = if (value.key) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .str = key }, value.keySlot) else if (value.keyInt) |key| try sdk.canvas.forSlotKey(ui.arena, .{ .int = @bitCast(key) }, value.keySlot) else null,
         .global_key = if (value.globalKey) |key| .{ .str = key } else if (value.globalKeyInt) |key| .{ .int = @bitCast(key) } else null,
@@ -500,9 +506,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .scrollback = value.scrollback orelse 0,
         .on_terminal = if (value.terminal) |tag| try terminalEvent(tag) else null,
         .icon = value.icon,
+        .icon_placement = value.iconPlacement,
         .window_drag = value.windowDrag,
         .semantics = .{ .role = value.role, .label = value.label, .focusable = value.focusable, .list_item_index = value.listItemIndex, .list_item_count = value.listItemCount },
-        .style_tokens = .{ .background = value.background, .foreground = value.foreground, .border_color = value.borderColor, .focus_ring = value.focusRing, .radius = value.radius },
+        .style_tokens = .{ .background = value.background, .foreground = value.foreground, .border_color = value.borderColor, .focus_ring = value.focusRing, .accent = value.accent, .accent_foreground = value.accentForeground, .radius = value.radius },
         .main = value.main,
         .cross = value.cross,
         .size = value.size,
@@ -992,7 +999,7 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"unknown\",\"text\":\"\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"gap\":-1}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"grow\":1e300}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"press\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"input\":0}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"input\":255}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"input\",\"text\":\"\",\"submit\":[0,0]}]}",
@@ -1000,17 +1007,17 @@ test "compiled view refuses bad versions, spans, kinds and geometry" {
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"list_item\",\"text\":\"Mixed\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"role\":\"treeitem\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list\",\"text\":\"\",\"role\":\"tree\"}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"toggle\":[1,0]}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_group\",\"text\":\"\",\"toggle\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"toggle\":[0,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_group\",\"text\":\"\",\"toggle\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle_button\",\"text\":\"\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":2,\"kind\":\"toggle_button\",\"text\":\"Mixed\"},{\"end\":2,\"kind\":\"text\",\"text\":\"child\"}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"checkbox\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"checkbox\",\"text\":\"Setting\",\"press\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"checkbox\",\"text\":\"Setting\",\"change\":[1,0]}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"switch_control\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"switch_control\",\"text\":\"Setting\",\"press\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"switch_control\",\"text\":\"Setting\",\"change\":[1,0]}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle\",\"text\":\"Setting\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle\",\"text\":\"Setting\",\"press\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"toggle\",\"text\":\"Setting\",\"change\":[1,0]}]}",
-            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"press\":[1,0]}]}",
+            "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"press\":[0,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"change\":[1,0]}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"accordion\",\"text\":\"Section\",\"placeholder\":\"Help\"}]}",
             "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"button\",\"text\":\"\",\"dismiss\":[1,0]}]}",
@@ -1248,6 +1255,57 @@ pub fn testContentSurfaceRecords() !void {
             }
         }
     }
+    inline for (@typeInfo(core.Msg).@"union".fields, 0..) |field, tag| {
+        if (field.type == void) {
+            try testAuthoredPrimitiveRecords(@unionInit(core.Msg, field.name, {}), @intCast(tag));
+            return;
+        }
+    }
+}
+
+fn testAuthoredPrimitiveRecords(press: core.Msg, tag: u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ sdk.canvas.WidgetKind.bubble, .table, .data_row, .data_cell, .progress, .skeleton, .spinner, .text, .combobox }) |kind| {
+        var ui = Ui.init(arena.allocator());
+        const quiet = kind == .text or kind == .combobox or kind == .data_cell or kind == .bubble or kind == .progress;
+        const record = try std.fmt.allocPrint(ui.arena, "{{\"end\":END,\"kind\":\"{s}\",\"text\":\"\",\"textBytes\":[65,0,255],\"iconBytes\":[112,0,255],\"iconPlacement\":\"trailing\",\"textAlignment\":\"end\",\"selected\":true,\"radius\":\"xl\",\"accent\":\"success\",\"accentForeground\":\"success_text\",\"quietHover\":{s},\"press\":[1,{d}]}}", .{ @tagName(kind), if (quiet) "true" else "false", tag });
+        const wrapper = switch (kind) {
+            .data_row => "{\"end\":2,\"kind\":\"table\",\"text\":\"\"},",
+            .data_cell => "{\"end\":3,\"kind\":\"table\",\"text\":\"\"},{\"end\":3,\"kind\":\"data_row\",\"text\":\"\"},",
+            else => "",
+        };
+        const count: usize = if (kind == .data_cell) 3 else if (kind == .data_row) 2 else 1;
+        const ordinal = try std.fmt.allocPrint(ui.arena, "{d}", .{count});
+        const resolved = try std.mem.replaceOwned(u8, ui.arena, record, "END", ordinal);
+        const bytes = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{s}{s}]}}", .{ wrapper, resolved });
+        const actual = try decode(&ui, bytes);
+        @memset(bytes, 0);
+        var reference = Ui.init(arena.allocator());
+        var expected = stampCompound(reference.el(kind, .{
+            .text = "A\x00\xff",
+            .icon = "p\x00\xff",
+            .icon_placement = .trailing,
+            .text_alignment = .end,
+            .selected = true,
+            .style_tokens = .{ .radius = .xl, .accent = .success, .accent_foreground = .success_text },
+            .style = .{ .quiet_hover = quiet },
+            .on_press = press,
+        }, .{}));
+        if (kind == .data_cell) expected = stampCompound(reference.el(.data_row, .{}, .{expected}));
+        if (kind == .data_row or kind == .data_cell) expected = stampCompound(reference.el(.table, .{}, .{expected}));
+        try std.testing.expectEqualDeep(expected, actual);
+        const actual_tree = try ui.finalize(actual);
+        const reference_tree = try reference.finalize(expected);
+        try std.testing.expectEqualDeep(reference_tree.root, actual_tree.root);
+        try std.testing.expectEqualDeep(reference_tree.handlers, actual_tree.handlers);
+    }
+    var ui = Ui.init(arena.allocator());
+    for ([_][]const u8{
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"data_row\",\"text\":\"\"}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"data_cell\",\"text\":\"\"}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"spinner\",\"text\":\"\",\"quietHover\":true}]}",
+    }) |invalid| try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
 }
 
 pub fn testInlineParagraphRecords() !void {
@@ -1311,7 +1369,7 @@ pub fn testByteTextRecords() !void {
         var ui = Ui.init(arena.allocator());
         const source =
             \\{"format":2,"nodes":[{"end":4,"kind":"column","text":""},
-            \\{"end":2,"kind":"button","text":"replacement","textBytes":[255,0,120],"label":"replacement","labelBytes":[195,0],"contextMenu":[{"label":"replacement","labelBytes":[254,0],"press":[1,MENU_TAG],"enabled":true,"separator":false}]},
+            \\{"end":2,"kind":"button","text":"replacement","textBytes":[255,0,120],"icon":"replacement","iconBytes":[112,0,255],"label":"replacement","labelBytes":[195,0],"contextMenu":[{"label":"replacement","labelBytes":[254,0],"press":[1,MENU_TAG],"enabled":true,"separator":false}]},
             \\{"end":3,"kind":"textarea","text":"replacement","textBytes":[255],"placeholder":"replacement","placeholderBytes":[128,0]},
             \\{"end":4,"kind":"text","text":"","spans":[{"text":"replacement","textBytes":[255,0]}]}]}
         ;
@@ -1325,6 +1383,7 @@ pub fn testByteTextRecords() !void {
         const result = try ui.finalize(try decode(&ui, bytes));
         @memset(bytes, 0);
         try std.testing.expectEqualStrings("\xff\x00x", result.root.children[0].text);
+        try std.testing.expectEqualStrings("p\x00\xff", result.root.children[0].icon);
         try std.testing.expectEqualStrings("\xc3\x00", result.root.children[0].semantics.label);
         try std.testing.expectEqualStrings("\xfe\x00", result.root.children[0].context_menu[0].label);
         try std.testing.expectEqualStrings("\xff", result.root.children[1].text);
@@ -1332,8 +1391,10 @@ pub fn testByteTextRecords() !void {
         try std.testing.expectEqualStrings("\xff\x00", result.root.children[2].text);
         try std.testing.expectEqualStrings("\xff\x00", result.root.children[2].spans[0].text);
         for ([_][]const u8{ "[256]", "[-1]", "[1.5]", "[true]", "[null]", "\"bad\"" }) |invalid| {
-            const malformed = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"textBytes\":{s}}}]}}", .{invalid});
-            try std.testing.expectError(error.InvalidView, decode(&ui, malformed));
+            for ([_][]const u8{ "textBytes", "iconBytes" }) |field| {
+                const malformed = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"{s}\":{s}}}]}}", .{ field, invalid });
+                try std.testing.expectError(error.InvalidView, decode(&ui, malformed));
+            }
         }
     } else return error.SkipZigTest;
 }

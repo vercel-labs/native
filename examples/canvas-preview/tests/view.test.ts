@@ -21,6 +21,7 @@ test("Canvas Preview retains toolbar, commands, full tray records, frame state a
     const save = (value: NativeSnapshot) => { s = value; snapshots.push(s); };
     assert.ok(s.widgets.some(w => w.name === "URL: https://example.com/"));
     assert.equal(s.webViews.length, 1); assert.equal(s.webViews[0]!.url, "https://example.com/");
+    assert.equal(s.webViews[0]!.zoom, 1);
     assert.equal(s.statusItems.length, 1);
     const tray = s.statusItems[0]!;
     assert.equal(new TextDecoder().decode(new Uint8Array(tray.tooltip)), "Native SDK Canvas Preview");

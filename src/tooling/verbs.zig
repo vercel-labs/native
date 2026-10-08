@@ -145,6 +145,12 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
                 try argv.append(allocator, "-Doptimize=Debug");
                 dev_debug = true;
             }
+            if (core_tree == .ts and !hasTypeScriptViewFlag(options.forwarded_args)) {
+                // The interactive dev loop keeps its model-preserving markup
+                // watcher. Build and test use the compiled view default;
+                // callers can explicitly select either backend for dev.
+                try argv.append(allocator, "-Dtypescript-view=false");
+            }
         },
         .build => {
             try argv.appendSlice(allocator, &.{ "--summary", "all" });
@@ -232,6 +238,14 @@ fn hasOptimizeFlag(args: []const []const u8) bool {
     for (args) |arg| {
         if (std.mem.startsWith(u8, arg, "-Doptimize")) return true;
         if (std.mem.startsWith(u8, arg, "--release")) return true;
+    }
+    return false;
+}
+
+fn hasTypeScriptViewFlag(args: []const []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-Dtypescript-view") or
+            std.mem.startsWith(u8, arg, "-Dtypescript-view=")) return true;
     }
     return false;
 }
@@ -496,6 +510,14 @@ test "optimize flags are detected among forwarded args" {
     try std.testing.expect(hasOptimizeFlag(&.{ "-Dautomation=true", "--release=safe" }));
     try std.testing.expect(!hasOptimizeFlag(&.{"-Dautomation=true"}));
     try std.testing.expect(!hasOptimizeFlag(&.{}));
+}
+
+test "explicit view backend choices override the dev hot-reload default" {
+    try std.testing.expect(hasTypeScriptViewFlag(&.{"-Dtypescript-view=true"}));
+    try std.testing.expect(hasTypeScriptViewFlag(&.{ "-Doptimize=Debug", "-Dtypescript-view=false" }));
+    try std.testing.expect(hasTypeScriptViewFlag(&.{"-Dtypescript-view"}));
+    try std.testing.expect(!hasTypeScriptViewFlag(&.{"-Dtypescript-view-cache=true"}));
+    try std.testing.expect(!hasTypeScriptViewFlag(&.{}));
 }
 
 test "rebuild explanations persist manifest and source hashes" {

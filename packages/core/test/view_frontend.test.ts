@@ -22,7 +22,7 @@ function decodedView(bytes: Uint8Array): any {
   const visit = (item: any): void => {
     if (!item || typeof item !== "object") return;
     if (Array.isArray(item)) { item.forEach(visit); return; }
-    for (const field of ["text", "label", "placeholder"]) if (item[field + "Bytes"] !== undefined) {
+    for (const field of ["text", "label", "placeholder", "icon"]) if (item[field + "Bytes"] !== undefined) {
       item[field] = new TextDecoder().decode(new Uint8Array(item[field + "Bytes"]));
       delete item[field + "Bytes"];
     }
@@ -57,6 +57,81 @@ const evaluate = (markup: string) => {
     nscfPackMsg: (msg: { kind: string }) => Uint8Array.of(1, contract.msg.arms.findIndex(arm => arm.name === msg.kind)) });
   return { model, view: () => decodedView(exports.native_view!()), wire: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
+
+test("compiled views retain byte-valued standalone and inline icon names", () => {
+  const value = evaluate('<column><icon name="{status}"/><button icon="{status}" on-press="increment">Play</button></column>');
+  value.model.status = new TextEncoder().encode("app:wave");
+  const first = value.wire().nodes;
+  assert.deepEqual(first[1].textBytes, [97, 112, 112, 58, 119, 97, 118, 101]);
+  assert.deepEqual(first[2].iconBytes, first[1].textBytes);
+  assert.equal(value.view().nodes[2].icon, "app:wave");
+  value.model.status = new Uint8Array([112, 0, 255]);
+  const second = value.wire().nodes;
+  assert.deepEqual(second[1].textBytes, [112, 0, 255]);
+  assert.deepEqual(second[2].iconBytes, [112, 0, 255]);
+  assert.deepEqual(first[2].iconBytes, [97, 112, 112, 58, 119, 97, 118, 101]);
+  assert.throws(() => compileView('<icon name="{count}"/>', contract), /requires text/);
+  assert.throws(() => compileView('<button icon="{count}"/>', contract), /requires text/);
+});
+
+test("compiled list selection preserves change envelopes and semantic theme tokens", () => {
+  const value = evaluate('<list role="list"><list-item background="accent" foreground="success" border-color="warning" focus-ring="info" on-change="increment" selected="true">Selected</list-item></list>');
+  const nodes = value.view().nodes;
+  assert.equal(nodes[0].role, "list");
+  assert.equal(nodes[1].selected, true);
+  assert.deepEqual(nodes[1].change, [1, contract.msg.arms.findIndex(arm => arm.name === "increment")]);
+  assert.deepEqual([nodes[1].background, nodes[1].foreground, nodes[1].borderColor, nodes[1].focusRing], ["accent", "success", "warning", "info"]);
+  assert.doesNotThrow(() => compileView('<panel role="treeitem" on-change="increment"/>', contract));
+  assert.throws(() => compileView('<text on-change="increment"/>', contract), /unsupported/);
+  assert.throws(() => compileView('<panel background="unknown"/>', contract), /unsupported/);
+});
+
+test("compiled tables, bubbles and indicators preserve native authoring channels", () => {
+  const value = evaluate(`<column>
+    <table><table-row global-key="{count}" selected="true" on-press="increment">
+      <table-cell width="80" text-alignment="end" on-press="reset">{status}</table-cell>
+    </table-row></table>
+    <bubble variant="primary" radius="xl"><text>Message</text><reactions>{status}</reactions></bubble>
+    <progress value="{count}"/><skeleton width="48" height="14"/><spinner/>
+    <list-item quiet-hover="{ticking}" accent="success" accent-foreground="success_text" on-change="reset">Album</list-item>
+    <button icon="chevron-right" icon-placement="trailing">Next</button>
+    <combobox text="{status}" placeholder="Search" on-press="increment"/>
+  </column>`);
+  const nodes = value.view().nodes;
+  assert.deepEqual(nodes.map((node: any) => node.kind), ["column", "table", "data_row", "data_cell", "bubble", "text", "progress", "skeleton", "spinner", "list_item", "button", "combobox"]);
+  assert.equal(nodes[2].globalKeyInt, 7);
+  assert.equal(nodes[2].selected, true);
+  assert.deepEqual(nodes[2].press, [1, 3]);
+  assert.equal(nodes[3].text, "Café\nnotes");
+  assert.equal(nodes[3].textAlignment, "end");
+  assert.deepEqual(nodes[3].press, [1, 5]);
+  assert.equal(nodes[4].end, 6);
+  assert.equal(nodes[4].text, "Café\nnotes");
+  assert.equal(nodes[4].textAlignment, "end");
+  assert.equal(nodes[4].radius, "xl");
+  assert.equal(nodes[6].value, 7);
+  assert.equal(nodes[9].quietHover, true);
+  assert.equal(nodes[9].accent, "success");
+  assert.equal(nodes[9].accentForeground, "success_text");
+  assert.equal(nodes[10].iconPlacement, "trailing");
+  assert.equal(nodes[11].text, "Café\nnotes");
+  value.model.ticking = false;
+  assert.equal(value.view().nodes[9].quietHover, false);
+  for (const markup of ['<row quiet-hover="true"/>', '<bubble text="ignored"/>', '<bubble><reactions on-press="reset">Yes</reactions></bubble>', '<panel><reactions>Yes</reactions></panel>', '<bubble><reactions>A</reactions><reactions>B</reactions></bubble>', '<button icon-placement="unknown"/>'])
+    assert.throws(() => compileView(markup, contract), /compiled TypeScript view/);
+});
+
+test("word boolean operators retain precedence and generic press and toggle envelopes", () => {
+  const value = evaluate('<column><if test="{not ticking or count == 7 and tickCount == 3}"><text on-press="reset" on-toggle="increment">Ready</text></if></column>');
+  assert.equal(value.view().nodes.length, 2);
+  assert.deepEqual(value.view().nodes[1].press, [1, 5]);
+  assert.deepEqual(value.view().nodes[1].toggle, [1, 3]);
+  value.model.count = 8;
+  assert.equal(value.view().nodes.length, 1);
+  value.model.ticking = false;
+  assert.equal(value.view().nodes.length, 2);
+  assert.throws(() => compileView('<text selected="{not count}"/>', contract), /requires boolean/);
+});
 
 test("compiled Markdown accepts complete byte presentation bindings and rejects invalid shapes", () => {
   const input: ViewContract = { ...contract, types: { structs: [
@@ -367,7 +442,7 @@ test("mixer sliders route applied float values separately from static change mes
   const invalid: ViewContract = { ...mixerContract, msg: { ...mixerContract.msg, arms: [...mixerContract.msg.arms,
     { name: "integer_gain", member: "count", payload: { kind: "number", class: "i64" } }] } };
   for (const source of ['<slider on-change="integer_gain"/>', '<slider on-change="master_changed:{master}"/>',
-    '<slider on-press="refresh"/>', '<slider on-toggle="refresh"/>', '<slider on-input="refresh"/>',
+    '<slider on-input="refresh"/>',
     '<slider placeholder="Level"/>', '<slider checked="true"/>', '<slider role="treeitem"/>', '<slider><text>Child</text></slider>']) {
     assert.throws(() => compileView(source, invalid), /compiled TypeScript view:/, source);
   }
@@ -455,7 +530,7 @@ test("unsupported or malformed markup fails with source location before compilat
     ['<constructor/>', /unsupported element/],
     ['<text>{missing}</text>', /unknown binding/], ['<text>{count.constructor}</text>', /unsupported field/], ['<text>{count; process.exit()}</text>', /unsupported expression/],
     ['<switch checked="{count}"/>', /expected boolean/], ['<button on-press="loaded"/>', /scalar Msg payload/],
-    ['<text on-press="reset"/>', /unsupported on text/], ['<else/>', /unsupported element/],
+    ['<else/>', /unsupported element/],
     ['<column><else/></column>', /immediately follow if/], ['<text>unclosed', /unclosed/],
     ['<text></button>', /expected <\/text>/], ['<text/><text/>', /exactly one root/],
     ['<text key="a" key="b"/>', /duplicate attribute/], ['<text>{count</text>', /unbalanced/],
@@ -753,7 +828,7 @@ test("list rows preserve leaf text, composed children, selection and press envel
   assert.equal(nodes[7].kind, "list");
   assert.throws(() => compileView('<list-item>Mixed<text>child</text></list-item>', contract), /mixed content/);
   assert.throws(() => compileView('<list>Mixed</list>', contract), /mixed content/);
-  assert.throws(() => compileView('<list-item on-toggle="reset"/>', contract), /unsupported on list-item/);
+  assert.doesNotThrow(() => compileView('<list-item on-toggle="reset"/>', contract));
   const treeitem = evaluate('<list-item role="treeitem" expanded="false" tree-level="2" on-toggle="reset">Work</list-item>').view().nodes[0];
   assert.equal(treeitem.role, "treeitem"); assert.equal(treeitem.expanded, false);
   assert.equal(treeitem.treeLevel, 2); assert.deepEqual(treeitem.toggle, [1, 5]);
@@ -799,7 +874,7 @@ test("toggle groups preserve independent toggles, model selection and toggle env
   assert.equal(nodes[2].disabled, true);
   assert.deepEqual(nodes[2].toggle, [1, 3]);
   assert.equal(nodes[3].toggle, undefined);
-  assert.throws(() => compileView('<toggle-group on-toggle="reset"/>', contract), /unsupported on toggle-group/);
+  assert.doesNotThrow(() => compileView('<toggle-group on-toggle="reset"/>', contract));
   assert.throws(() => compileView('<toggle-button on-change="reset"/>', contract), /unsupported on toggle-button/);
   assert.throws(() => compileView('<toggle-button>Mixed<text>child</text></toggle-button>', contract), /mixed content/);
   assert.throws(() => compileView('<toggle-button role="treeitem"/>', contract), /compiled treeitem requires/);
@@ -815,7 +890,7 @@ test("accordion headers preserve nested content, expansion and toggle envelopes"
   assert.equal(nodes[0].end, nodes.length);
   assert.equal(nodes[4].kind, "accordion");
   assert.equal(nodes[4].end, 6);
-  assert.throws(() => compileView('<accordion text="Section" on-press="reset"/>', contract), /unsupported on accordion/);
+  assert.doesNotThrow(() => compileView('<accordion text="Section" on-press="reset"/>', contract));
   assert.throws(() => compileView('<accordion text="Section" on-change="reset"/>', contract), /unsupported on accordion/);
   assert.throws(() => compileView('<accordion text="Section" placeholder="Help"/>', contract), /placeholder requires/);
   assert.throws(() => compileView('<accordion text="Section">Mixed<text>child</text></accordion>', contract), /mixed content/);
@@ -835,7 +910,7 @@ test("checkable controls preserve labels, initial state and toggle envelopes", (
   assert.equal(nodes[3].kind, "toggle");
   assert.equal(nodes[3].disabled, true);
   for (const kind of ["checkbox", "switch", "toggle"]) {
-    assert.throws(() => compileView(`<${kind} on-press="reset"/>`, contract), /unsupported on/);
+    assert.doesNotThrow(() => compileView(`<${kind} on-press="reset"/>`, contract));
     assert.throws(() => compileView(`<${kind} on-change="reset"/>`, contract), /unsupported on/);
     assert.throws(() => compileView(`<${kind} placeholder="Help"/>`, contract), /placeholder requires/);
     assert.throws(() => compileView(`<${kind}>Mixed<text>child</text></${kind}>`, contract), /mixed content/);
@@ -870,7 +945,7 @@ test("textarea preserves multiline values, input/submit channels and bound Enter
   assert.equal(node.submitOnEnter, true); assert.equal(node.disabled, true); assert.equal(node.placeholder, "Write");
   assert.deepEqual(node.submit, [1, contract.msg.arms.findIndex(arm => arm.name === "increment")]);
   for (const markup of ['<input submit-on-enter="true"/>', '<textarea submit-on-enter="1"/>',
-    '<textarea on-toggle="increment"/>', '<textarea><text>Child</text></textarea>'])
+    '<textarea><text>Child</text></textarea>'])
     assert.throws(() => compileView(markup, contract), /compiled TypeScript view:/);
 });
 
@@ -1903,7 +1978,7 @@ test("content surfaces preserve captions child boundaries explicit spacing and a
     const empty = evaluate(`<${kind}/>`).view().nodes[0]; assert.equal(empty.text, ""); assert.equal(empty.end, 1); assert.equal(empty.padding, undefined);
     assert.equal(evaluate(`<${kind}>Inline café</${kind}>`).view().nodes[0].text, "Inline café");
     assert.throws(() => compileView(`<${kind}>Caption<text>Body</text></${kind}>`, contract), /mixed content/);
-    assert.throws(() => compileView(`<${kind} on-toggle="increment"/>`, contract), /unsupported/);
+    assert.doesNotThrow(() => compileView(`<${kind} on-toggle="increment"/>`, contract));
     assert.throws(() => compileView(`<${kind} on-dismiss="increment"/>`, contract), /unsupported/);
   }
 });
@@ -2038,7 +2113,7 @@ test("playback context builds owned house chrome independently for primary and s
   const bad = context(0, 0, 0); bad[2] = 1; assert.throws(() => exports.native_media_view!(bad), /playback/);
 });
 
-test("bare media surfaces and closed dynamic icons preserve their binding types", () => {
+test("bare media surfaces and dynamic icons preserve their binding types", () => {
   const input: ViewContract = { ...contract, types: { ...contract.types, enums: [{ name: "PlayIcon", members: ["pause", "play"] }], structs: [{ name: "Model", fields: [{ name: "surface", type: { kind: "i64" } }, { name: "icon", type: { kind: "enum", name: "PlayIcon" } }] }] } };
   const code = compileView('<row><media-surface surface="{surface}" grow="1" label="Frames"/><button icon="{icon}"/></row>', input);
   const exports: { native_view?: () => Uint8Array } = {};
@@ -2047,7 +2122,7 @@ test("bare media surfaces and closed dynamic icons preserve their binding types"
   const nodes = decodedView(exports.native_view!()).nodes;
   assert.equal(nodes[1].kind, "media_surface"); assert.equal(nodes[1].image, 0x7601); assert.equal(nodes[2].icon, "pause");
   assert.throws(() => compileView('<button surface="{surface}"/>', input), /requires media-surface/);
-  assert.throws(() => compileView('<button icon="{count}"/>', contract), /closed union/);
+  assert.throws(() => compileView('<button icon="{count}"/>', contract), /requires text/);
 });
 
 test("compiled empty-list branches preserve keyed rows and outer scope across transitions", () => {

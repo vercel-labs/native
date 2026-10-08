@@ -15,7 +15,7 @@ An app is four things:
 - `Msg` — a tagged union of everything that can happen.
 - `update(model, msg)` — the only place state changes.
 
-The runtime owns installation, presentation, resize, event dispatch, timers, and hot reload. In development, `.native` edits refresh the running view while preserving the model and retained state of widgets whose identity remains stable. Zig views can register embedded fragments in `Options.fragment_watch` through `View.fragment("src/header.native")`. Release builds compile markup at comptime and report invalid views with a line and column. The [compiled TypeScript view preview](/docs/typescript#compiled-typescript-views-preview) requires a rebuild after markup edits.
+The runtime owns installation, presentation, resize, event dispatch, timers, and hot reload. In `native dev`, `.native` edits refresh the running view while preserving the model and retained state of widgets whose identity remains stable. Zig views can register embedded fragments in `Options.fragment_watch` through `View.fragment("src/header.native")`. TypeScript builds and tests use [compiled TypeScript views](/docs/typescript#compiled-typescript-views-preview) by default; direct runs of that backend require a rebuild after markup edits. Zig release builds compile markup at comptime and report invalid views with a line and column.
 
 ## A complete view
 
