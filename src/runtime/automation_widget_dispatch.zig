@@ -326,23 +326,66 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             } });
         }
 
+        /// A keystroke is a PRESS AND A RELEASE, and this verb synthesizes
+        /// both — the `widget-drag` (down/drag/up) and `widget-pinch`
+        /// (begin/change/end) discipline applied to the keyboard, at one
+        /// timestamp because press and release are one gesture.
+        ///
+        /// Emitting only the down left every key-lifetime latch armed
+        /// forever. Those latches exist because a physical chord's release
+        /// carries different modifier flags than its press, so the
+        /// classification is latched on the view at the down and retired
+        /// at the up (`consumeCanvasWidgetTabInputFocusEntry`,
+        /// `consumeCanvasWidgetTerminalPasteKeyLifetime`, and any
+        /// app-level shortcut latch built the same way). With no release
+        /// ever arriving, the SECOND drive of the same chord found the
+        /// latch still held from the first and was swallowed as the
+        /// missing release — `widget-key canvas cmd+g` twice in a row did
+        /// the work once.
+        ///
+        /// Paired here rather than as a new explicit release action: real
+        /// hardware has no press without a release, so a harness that can
+        /// emit an unpaired one is a harness that can reach states no user
+        /// can, and every existing automation script keeps its wire format
+        /// and its meaning (one `widget-key` line is still one keystroke).
+        /// An explicit release verb would have made correctness opt-in and
+        /// left every script written before it driving half a keystroke.
+        ///
+        /// The release carries the chord's modifiers (a user releases G
+        /// while Cmd is still down) but never `text`: committed text
+        /// belongs to the press, and `key_up` is deliberately barren in
+        /// both text paths (`canvasWidgetTextEditEventFromGpuInput` and
+        /// the target-less commit fallback), so a release can never
+        /// double-insert what the press already typed.
         pub fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: runtime_api.App(Runtime), key: AutomationWidgetKey) anyerror!void {
             const view_index = try automationGpuSurfaceViewIndexByLabel(self, key.view_label);
             try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const modifiers: platform.ShortcutModifiers = .{
+                .shift = key.modifiers.shift,
+                .control = key.modifiers.control,
+                .option = key.modifiers.option,
+                .command = key.modifiers.command,
+                .primary = key.modifiers.primary,
+            };
+            const timestamp_ns = automationInputTimestampNs();
             try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
-                .window_id = self.views[view_index].window_id,
-                .label = self.views[view_index].label,
+                .window_id = window_id,
+                .label = label,
                 .kind = .key_down,
-                .timestamp_ns = automationInputTimestampNs(),
+                .timestamp_ns = timestamp_ns,
                 .key = key.key,
                 .text = key.text,
-                .modifiers = .{
-                    .shift = key.modifiers.shift,
-                    .control = key.modifiers.control,
-                    .option = key.modifiers.option,
-                    .command = key.modifiers.command,
-                    .primary = key.modifiers.primary,
-                },
+                .modifiers = modifiers,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .key_up,
+                .timestamp_ns = timestamp_ns,
+                .key = key.key,
+                .modifiers = modifiers,
             } });
         }
 

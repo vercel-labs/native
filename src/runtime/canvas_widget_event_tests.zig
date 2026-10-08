@@ -3297,6 +3297,61 @@ test "runtime resizes retained canvas resizable widgets from pointer drag" {
     }
 }
 
+test "automation widget-key dispatches a complete key lifetime" {
+    const TestApp = struct {
+        key_down_count: u32 = 0,
+        key_up_count: u32 = 0,
+        last_key: []const u8 = "",
+        key_down_timestamp_ns: u64 = 0,
+        last_timestamp_ns: u64 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "automation-widget-key", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .gpu_surface_input => |input| switch (input.kind) {
+                    .key_down => {
+                        self.key_down_count += 1;
+                        self.key_down_timestamp_ns = input.timestamp_ns;
+                    },
+                    .key_up => {
+                        self.key_up_count += 1;
+                        self.last_key = input.key;
+                        self.last_timestamp_ns = input.timestamp_ns;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 180),
+    });
+
+    try harness.runtime.dispatchAutomationCommand(app, "widget-key canvas cmd+g");
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.key_down_count);
+    try std.testing.expectEqual(@as(u32, 1), app_state.key_up_count);
+    try std.testing.expectEqualStrings("g", app_state.last_key);
+    try std.testing.expect(app_state.last_timestamp_ns > 0);
+    try std.testing.expectEqual(app_state.key_down_timestamp_ns, app_state.last_timestamp_ns);
+}
+
 test "runtime dispatches automation canvas widget actions" {
     const TestApp = struct {
         command_count: u32 = 0,
