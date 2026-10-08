@@ -26,6 +26,7 @@ const chart_model = @import("chart.zig");
 const presentation_policy = @import("widget_presentation_policy.zig");
 const paint_walk_policy = @import("widget_paint_walk_policy.zig");
 const leaves = @import("leaf_plan_policy.zig");
+const chart_plans = @import("chart_plan_policy.zig");
 const emission = @import("render_coordination_policy.zig");
 
 const Error = canvas.Error;
@@ -3791,6 +3792,11 @@ pub fn spinnerWidgetSegmentCount(tokens: DesignTokens) usize {
 /// (`chartWidgetPlotRect`) only when opted in, so unlabeled charts
 /// render byte-identically to before.
 fn emitChartWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .render, .zero(), .zero(), null);
+        defer plan.deinit();
+        return executeChartPlan(&plan, builder);
+    }
     const data = widget.chart;
     const plot = chartWidgetPlotRect(widget, tokens);
     if (plot.isEmpty() or plot.width <= 0 or plot.height <= 0) return;
@@ -3868,6 +3874,12 @@ const chart_x_label_min_gap: f32 = 12;
 /// cursor snaps exactly where the ink is. Without labels this is the
 /// padded frame, byte-identical to the pre-label contract.
 pub fn chartWidgetPlotRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .plot, .zero(), .zero(), null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        return plan.plot();
+    }
     const data = widget.chart;
     var plot = widget.frame.inset(widget.layout.padding).normalized();
     if (data.x_labels.len > 0) {
@@ -4250,6 +4262,13 @@ fn chartDetailRowName(series: chart_model.ChartSeries) []const u8 {
 /// position depends only on the snapped index, never the raw pointer,
 /// so a pointer gliding within one sample repaints nothing.
 pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geometry.PointF, bounds: geometry.RectF) ?ChartHoverDetail {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_detail, bounds, point, null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        const detail = plan.detail();
+        return if (plan.admitted()) .{ .index = detail.index, .plot = detail.plot, .sample_x = detail.sample_x, .card = detail.card } else null;
+    }
     if (widget.kind != .chart or !widget.chart.hover_details) return null;
     const data = widget.chart;
     const plot = chartWidgetPlotRect(widget, tokens);
@@ -4301,6 +4320,12 @@ pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geome
 /// The runtime's interaction path uses this to gate repaints: a pointer
 /// gliding within one sample changes nothing, so nothing repaints.
 pub fn chartWidgetHoverIndex(widget: Widget, tokens: DesignTokens, point: geometry.PointF) ?usize {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_index, .zero(), point, null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        return if (plan.admitted()) plan.index() else null;
+    }
     if (widget.kind != .chart or !widget.chart.hover_details) return null;
     const plot = chartWidgetPlotRect(widget, tokens);
     if (plot.isEmpty() or plot.width <= 0 or plot.height <= 0) return null;
@@ -4363,6 +4388,11 @@ fn emitWidgetLayoutChartHoverDetails(builder: *Builder, layout: anytype, tokens:
 /// holding the sample's title over swatch/name/value rows. Values
 /// format deterministically into the frame label scratch.
 fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens, detail: ChartHoverDetail) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_draw, .zero(), .zero(), .{ .index = detail.index, .plot = detail.plot, .sample_x = detail.sample_x, .card = detail.card });
+        defer plan.deinit();
+        return executeChartPlan(&plan, builder);
+    }
     const data = widget.chart;
     const domain = chart_model.chartDomain(data);
     const decimals = chartDetailDecimals(domain);
@@ -4473,6 +4503,71 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .measure = tokens.text_measure,
         });
         row_y += line_height;
+    }
+}
+
+/// Execute explicit font, storage and drawing capabilities. Every returned
+/// continuation is copied before measurement or a nested drawing policy call.
+fn executeChartPlan(plan: *chart_plans.Plan, builder: ?*Builder) Error!void {
+    while (true) {
+        const action = plan.run();
+        const tokens = plan.token;
+        switch (action) {
+            .done => return,
+            .measure => {
+                var text = plan.text();
+                if (plan.allocateText()) {
+                    text = try (builder orelse @panic("chart query requested drawing storage")).allocChartLabelBytes(text);
+                    plan.saved_label = text;
+                }
+                plan.reply(measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, plan.scalar(224)));
+            },
+            .fill_rect => try (builder orelse @panic("chart query requested drawing")).fillRect(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .fill = colorFill(plan.commandColor()),
+            }),
+            .fill_round => try (builder orelse @panic("chart query requested drawing")).fillRoundedRect(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .fill = colorFill(plan.commandColor()),
+            }),
+            .text => {
+                const target = builder orelse @panic("chart query requested drawing");
+                const text = if (plan.allocateText()) try target.allocChartLabelBytes(plan.text()) else plan.text();
+                try target.drawText(.{
+                    .id = plan.commandId(),
+                    .font_id = tokens.typography.font_id,
+                    .size = plan.scalar(224),
+                    .origin = plan.commandOrigin(),
+                    .color = plan.commandColor(),
+                    .text = text,
+                    .measure = tokens.text_measure,
+                });
+            },
+            .fill_path, .stroke_path => {
+                const target = builder orelse @panic("chart query requested drawing");
+                const elements = try target.allocPathElements(plan.count());
+                for (elements, 0..) |*element, i| element.* = plan.pathElement(i);
+                if (action == .fill_path) try target.fillPath(.{ .id = plan.commandId(), .elements = elements, .fill = colorFill(plan.commandColor()) }) else try target.strokePath(.{ .id = plan.commandId(), .elements = elements, .stroke = .{ .fill = colorFill(plan.commandColor()), .width = plan.scalar(228) } });
+            },
+            .shadow => try (builder orelse @panic("chart query requested drawing")).shadow(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .offset = .{ .dx = 0, .dy = tokens.shadow.sm.y },
+                .blur = tokens.shadow.sm.blur,
+                .spread = tokens.shadow.sm.spread,
+                .color = plan.commandColor(),
+            }),
+            .stroke_rect => try (builder orelse @panic("chart query requested drawing")).strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .stroke = .{ .fill = colorFill(plan.commandColor()), .width = plan.scalar(228) },
+            })),
+        }
     }
 }
 

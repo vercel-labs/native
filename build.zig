@@ -1332,6 +1332,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/control_payloads.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/control_primitives.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/leaf_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/chart_plans.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -5432,6 +5433,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/control_payloads.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_primitives.ts"));
     stage_run.addFileInput(b.path("packages/core/src/leaf_plans.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/chart_plans.ts"));
     stage_run.addFileInput(b.path("packages/core/src/stream_policy.ts"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(spec.src_dir);
