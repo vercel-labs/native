@@ -500,6 +500,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// builder copies descriptors into its existing generation arena.
             composition_policy: ?canvas.ComponentCompositionPolicy.Policy = null,
             code_content_policy: ?canvas.CodeContentPolicy.Policy = null,
+            paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
             chart_content_policy: ?canvas.ChartContentPolicy.Policy = null,
             markdown_content_policy: ?canvas.MarkdownContentPolicy.Policy = null,
             construction_policy: ?canvas.ComponentConstructionPolicy.Policy = null,
@@ -2044,6 +2045,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.widget_paint_walk_policy = self.options.widget_paint_walk_policy;
                 tokens.control_geometry_policy = self.options.control_geometry_policy;
                 tokens.code_content_policy = self.options.code_content_policy;
+                tokens.paragraph_policy = self.options.paragraph_policy;
                 return tokens;
             }
             const state = self.currentThemeState();
@@ -2107,6 +2109,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens.widget_paint_walk_policy = self.options.widget_paint_walk_policy;
             tokens.control_geometry_policy = self.options.control_geometry_policy;
             tokens.code_content_policy = self.options.code_content_policy;
+            tokens.paragraph_policy = self.options.paragraph_policy;
             return tokens;
         }
 

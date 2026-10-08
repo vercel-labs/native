@@ -18,7 +18,8 @@
 //! measurement seam carries the same font id, what is measured always
 //! matches what is drawn.
 //!
-//! Everything here is allocation-free and deterministic. Capacity overflow
+//! The native reference is allocation-free; compiled plans use copied transport
+//! buffers. Both are deterministic. Capacity overflow
 //! never fails: layout truncates (dropping trailing runs) and reports it
 //! via `TextSpanLayout.truncated`.
 
@@ -106,6 +107,8 @@ pub const TextSpanLayoutOptions = struct {
     /// Injected measurement; null falls back to the deterministic
     /// estimator (golden-stable).
     measure: ?*const text_metrics.TextMeasureProvider = null,
+    /// Portable paragraph owner; native supplies font measurements only.
+    paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
 };
 
 /// One laid-out segment: a contiguous slice of one span on one line.
@@ -177,6 +180,7 @@ pub fn textSpanLineHeight(spans: []const TextSpan, options: TextSpanLayoutOption
 /// width seam for widget sizing. Measures per-span with the span's font
 /// while carrying each line across span boundaries.
 pub fn textSpansIntrinsicWidth(spans: []const TextSpan, options: TextSpanLayoutOptions) f32 {
+    if (options.paragraph_policy != null) return compiledParagraph(spans, options, 0, &.{}, true).size.width;
     var width: f32 = 0;
     var max_width: f32 = 0;
     for (spans, 0..) |span, index| {
@@ -462,6 +466,158 @@ pub fn textSpanRunVisibleSlice(
     };
 }
 
+fn paragraphWord(bytes: []const u8, at: usize) u32 {
+    return std.mem.readInt(u32, bytes[at..][0..4], .little);
+}
+fn paragraphPut(bytes: []u8, at: usize, value: usize) void {
+    std.mem.writeInt(u32, bytes[at..][0..4], std.math.cast(u32, value) orelse @panic("paragraph wire range"), .little);
+}
+fn paragraphFloat(bytes: []const u8, at: usize) f32 {
+    return @bitCast(paragraphWord(bytes, at));
+}
+fn paragraphSetFloat(bytes: []u8, at: usize, value: f32) void {
+    std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(value), .little);
+}
+fn paragraphRange(bytes: []const u8, span: usize, start: usize, end: usize) bool {
+    return span < @min(paragraphWord(bytes, 8), max_text_spans_per_paragraph) and start <= end and end <= paragraphWord(bytes, 196 + span * 32);
+}
+fn paragraphCursor(bytes: []const u8, span: usize, offset: usize) bool {
+    const count = @min(paragraphWord(bytes, 8), max_text_spans_per_paragraph);
+    return span <= count and (if (span == count) offset == 0 else offset <= paragraphWord(bytes, 196 + span * 32));
+}
+/// Validate copied output before invoking any capability or rebasing a run.
+fn paragraphResultValid(request: []const u8, result: []const u8) bool {
+    const count = paragraphWord(request, 8);
+    const capacity = paragraphWord(request, 12);
+    const first = paragraphWord(request, 16);
+    const pieces = 192 + @as(usize, count) * 32;
+    const runs = pieces + 512;
+    const data = paragraphWord(request, 20);
+    if (result.len != request.len or result[6] != 0 or result[7] < 1 or result[7] > 2 or
+        !std.mem.eql(u8, result[0..6], request[0..6]) or !std.mem.eql(u8, result[8..36], request[8..36]) or
+        !std.mem.eql(u8, result[192..pieces], request[192..pieces]) or !std.mem.eql(u8, result[data..], request[data..])) return false;
+    for (result[172..184]) |byte| if (byte != 0) return false;
+    const run_count = paragraphWord(result, 56);
+    const piece_count = paragraphWord(result, 96);
+    const line = paragraphWord(result, 52);
+    if (run_count > capacity or paragraphWord(result, 60) > run_count or piece_count > 32 or paragraphWord(result, 112) > piece_count or
+        paragraphWord(result, 72) > 1 or paragraphWord(result, 76) > 1 or line > result.len or
+        !paragraphCursor(result, paragraphWord(result, 44), paragraphWord(result, 48)) or
+        !paragraphCursor(result, paragraphWord(result, 100), paragraphWord(result, 104)) or
+        !paragraphCursor(result, paragraphWord(result, 152), paragraphWord(result, 156)) or paragraphWord(result, 160) > paragraphWord(result, 156)) return false;
+    if (paragraphWord(result, 84) != paragraphWord(result, 88) and !paragraphRange(result, paragraphWord(result, 80), paragraphWord(result, 84), paragraphWord(result, 88))) return false;
+    for (0..piece_count) |n| {
+        const at = pieces + n * 16;
+        if (!paragraphRange(result, paragraphWord(result, at), paragraphWord(result, at + 4), paragraphWord(result, at + 8))) return false;
+    }
+    var previous_line: usize = first;
+    for (0..run_count) |n| {
+        const at = runs + n * 32;
+        const start = paragraphWord(result, at + 4);
+        const length = paragraphWord(result, at + 8);
+        const run_line = paragraphWord(result, at + 12);
+        if (length == 0 or !paragraphRange(result, paragraphWord(result, at), start, @as(usize, start) + length) or
+            run_line < previous_line or run_line > line or @as(u64, run_line) >= @as(u64, first) + 128 or paragraphWord(result, at + 28) != 0) return false;
+        previous_line = run_line;
+    }
+    if (result[7] == 2) return paragraphWord(result, 40) == 0 and paragraphWord(result, 144) <= @as(u64, line) + 1 and
+        (request[1] == 1 or paragraphWord(result, 144) >= line) and (run_count == 0 or previous_line < paragraphWord(result, 144));
+    if (paragraphWord(result, 144) != 0) return false;
+    const phase = paragraphWord(result, 40);
+    const s = paragraphWord(result, 128);
+    const start = paragraphWord(result, 132);
+    const end = paragraphWord(result, 136);
+    if (!paragraphRange(result, s, start, end) or (request[1] == 1) != (phase == 8)) return false;
+    // A repeated query with unchanged state cannot advance the source walk.
+    if (request[7] == 1 and std.mem.eql(u8, result[40..140], request[40..140]) and std.mem.eql(u8, result[144..], request[144..])) return false;
+    return switch (phase) {
+        1 => s == paragraphWord(result, 44) and start == paragraphWord(result, 48),
+        3 => piece_count < 32 and s == paragraphWord(result, 100) and start == paragraphWord(result, 104),
+        6 => blk: {
+            const p = paragraphWord(result, 112);
+            if (p >= piece_count) break :blk false;
+            const at = pieces + @as(usize, p) * 16;
+            const prefix = paragraphWord(result, 120);
+            break :blk s == paragraphWord(result, at) and start == paragraphWord(result, 116) and
+                start >= paragraphWord(result, at + 4) and start <= prefix and prefix < end and end <= paragraphWord(result, at + 8);
+        },
+        8 => s == paragraphWord(result, 152) and start == paragraphWord(result, 160) and end == paragraphWord(result, 156),
+        else => false,
+    };
+}
+/// Native owns the transport and caller storage. A copied continuation asks
+/// for one raw font slice; only the portable owner schedules measurements,
+/// chooses breaks and emits offset-based runs.
+fn compiledParagraph(spans: []const TextSpan, options: TextSpanLayoutOptions, first_line: usize, runs_storage: []TextSpanRun, intrinsic: bool) TextSpanLayout {
+    const allocator = std.heap.page_allocator;
+    const count = spans.len;
+    const capacity = if (intrinsic) 0 else runs_storage.len;
+    const spans_size = std.math.mul(usize, count, 32) catch @panic("paragraph span capacity");
+    const runs_size = std.math.mul(usize, capacity, 32) catch @panic("paragraph run capacity");
+    const runs_at = std.math.add(usize, 192 + 32 * 16, spans_size) catch @panic("paragraph packet capacity");
+    const data_at = std.math.add(usize, runs_at, runs_size) catch @panic("paragraph packet capacity");
+    var total = data_at;
+    for (spans[0..count]) |span| total = std.math.add(usize, total, span.text.len) catch @panic("paragraph text capacity");
+    if (total > std.math.maxInt(u32)) @panic("paragraph packet range");
+    const request = allocator.alloc(u8, total) catch @panic("paragraph request allocation");
+    defer allocator.free(request);
+    const result = allocator.alloc(u8, total) catch @panic("paragraph result allocation");
+    defer allocator.free(result);
+    @memset(request, 0);
+    request[0..6].* = .{ 53, @intFromBool(intrinsic), 1, @intFromEnum(options.wrap), @intFromEnum(options.alignment), @intFromBool(spans.len > max_text_spans_per_paragraph) };
+    paragraphPut(request, 8, count);
+    paragraphPut(request, 12, capacity);
+    paragraphPut(request, 16, @min(first_line, std.math.maxInt(u32)));
+    paragraphPut(request, 20, data_at);
+    paragraphPut(request, 24, total);
+    paragraphSetFloat(request, 28, options.line_height);
+    paragraphSetFloat(request, 32, options.size);
+    paragraphSetFloat(request, 36, options.max_width);
+    paragraphPut(request, 40, 10);
+    var at = data_at;
+    for (spans[0..count], 0..) |span, s| {
+        const base = 192 + s * 32;
+        paragraphPut(request, base, at);
+        paragraphPut(request, base + 4, span.text.len);
+        paragraphSetFloat(request, base + 12, span.scale);
+        paragraphPut(request, base + 16, @intFromBool(span.monospace));
+        @memcpy(request[at..][0..span.text.len], span.text);
+        at += span.text.len;
+    }
+    // Bound the finite source walk, including up to 32 zero-length
+    // CR pieces per word, cluster retries and skipped lines.
+    const quota = std.math.mul(usize, total, 40) catch @panic("paragraph continuation range");
+    var calls: usize = 0;
+    while (true) {
+        calls += 1;
+        if (calls > quota) @panic("paragraph continuation did not finish");
+        @memset(result, 0xa5);
+        if (options.paragraph_policy.?(request, result) != total or !paragraphResultValid(request, result)) @panic("invalid paragraph continuation");
+        if (result[7] == 2) break;
+        const phase = paragraphWord(result, 40);
+        if (phase != 1 and phase != 3 and phase != 6 and phase != 8) @panic("invalid paragraph measurement action");
+        const s = paragraphWord(result, 128);
+        const start = paragraphWord(result, 132);
+        const end = paragraphWord(result, 136);
+        if (s >= count or start > end or end > spans[s].text.len) @panic("invalid paragraph measurement range");
+        @memcpy(request, result);
+        paragraphSetFloat(request, 140, measureSpanSlice(spans[s], spans[s].text[start..end], options));
+        request[6] = 1;
+    }
+    const run_count = paragraphWord(result, 56);
+    for (runs_storage[0..run_count], 0..) |*run, n| {
+        const base = runs_at + n * 32;
+        const s = paragraphWord(result, base);
+        const start = paragraphWord(result, base + 4);
+        const length = paragraphWord(result, base + 8);
+        const line = paragraphWord(result, base + 12);
+        if (s >= count or start > spans[s].text.len or length > spans[s].text.len - start or line < @min(first_line, std.math.maxInt(u32)) or
+            paragraphWord(result, base + 28) != 0) @panic("invalid paragraph emitted run");
+        run.* = .{ .span_index = s, .text = spans[s].text[start..][0..length], .line_index = line, .x = paragraphFloat(result, base + 16), .width = paragraphFloat(result, base + 20), .baseline = paragraphFloat(result, base + 24), .size = textSpanSize(spans[s], options.size), .font_id = textSpanFontId(spans[s], options.typography) };
+    }
+    return .{ .runs = runs_storage[0..run_count], .line_count = paragraphWord(result, 144), .line_height = paragraphFloat(result, 184), .size = geometry.SizeF.init(paragraphFloat(result, 68), paragraphFloat(result, 148)), .truncated = paragraphWord(result, 76) == 1 };
+}
+
 const LayoutState = struct {
     spans: []const TextSpan,
     options: TextSpanLayoutOptions,
@@ -619,6 +775,7 @@ fn layoutTextSpansUncached(
     first_line: usize,
     runs_storage: []TextSpanRun,
 ) TextSpanLayout {
+    if (options.paragraph_policy != null) return compiledParagraph(spans, options, first_line, runs_storage, false);
     var state = LayoutState{
         .spans = spans,
         .options = options,
@@ -740,6 +897,7 @@ const SpanWrapKey = struct {
     mono_font_id: FontId = 0,
     provider_context: usize = 0,
     provider_fn: usize = 0,
+    paragraph_policy: usize = 0,
     generation: u64 = 0,
     used: bool = false,
 };
@@ -822,6 +980,7 @@ fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrap
         .mono_font_id = options.typography.mono_font_id,
         .provider_context = @intFromPtr(provider.context),
         .provider_fn = @intFromPtr(provider.measure_fn),
+        .paragraph_policy = if (options.paragraph_policy) |p| @intFromPtr(p) else 0,
         .generation = text_measure_cache.textMeasureGeneration(),
         .used = true,
     };
@@ -840,6 +999,7 @@ fn spanWrapKeysEqual(a: SpanWrapKey, b: SpanWrapKey) bool {
         a.mono_font_id == b.mono_font_id and
         a.provider_context == b.provider_context and
         a.provider_fn == b.provider_fn and
+        a.paragraph_policy == b.paragraph_policy and
         a.generation == b.generation;
 }
 
@@ -1546,4 +1706,47 @@ pub fn textSpanLinkCount(spans: []const TextSpan) usize {
         if (span.link.len > 0) count += 1;
     }
     return count;
+}
+
+test "paragraph copied transport rejects malformed ownership cursors and runs" {
+    var request: [741]u8 = @splat(0);
+    request[0..6].* = .{ 53, 0, 1, 1, 0, 0 };
+    paragraphPut(&request, 8, 1);
+    paragraphPut(&request, 12, 1);
+    paragraphPut(&request, 20, 736);
+    paragraphPut(&request, 24, request.len);
+    paragraphPut(&request, 40, 10);
+    paragraphPut(&request, 192, 736);
+    paragraphPut(&request, 196, 5);
+    @memcpy(request[736..], "hello");
+    var good = request;
+    good[7] = 1;
+    paragraphPut(&good, 40, 3);
+    paragraphPut(&good, 136, 5);
+    try std.testing.expect(paragraphResultValid(&request, &good));
+    for ([_]usize{ 0, 6, 7, 8, 24, 28, 172, 192, 736 }) |at| {
+        var bad = good;
+        bad[at] +%= 3;
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    for ([_]usize{ 40, 44, 48, 56, 60, 72, 76, 96, 100, 104, 112, 128, 132, 136, 144, 152, 156, 160 }) |at| {
+        var bad = good;
+        paragraphPut(&bad, at, 999);
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    var done = good;
+    done[7] = 2;
+    paragraphPut(&done, 40, 0);
+    paragraphPut(&done, 56, 1);
+    paragraphPut(&done, 144, 1);
+    paragraphPut(&done, 712, 5);
+    try std.testing.expect(paragraphResultValid(&request, &done));
+    for ([_]usize{ 704, 708, 712, 716, 732 }) |at| {
+        var bad = done;
+        paragraphPut(&bad, at, 999);
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    var repeated = good;
+    repeated[6] = 1;
+    try std.testing.expect(!paragraphResultValid(&repeated, &good));
 }

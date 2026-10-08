@@ -1355,6 +1355,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/chart_plans.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/indicator_plans.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/effect_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/paragraph_layout.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
         native_api_tests.has_side_effects = true;
@@ -1378,6 +1379,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-widget-paint-walk", "Compare complete compiled retained paint traversal with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_paint_walk).step);
         b.step("test-ts-control-geometry", "Compare complete compiled control and scroll geometry with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.control_geometry).step);
         b.step("test-ts-control-content", "Compare compiled control content and editing chrome with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.control_content).step);
+        b.step("test-ts-paragraph-layout", "Compare complete compiled paragraph layout and font measurement continuations").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-paragraph-layout-tests", &.{ "compiled widget metric paragraphs", "paragraph copied transport" })).step);
         b.step("test-ts-widget-metrics", "Compare complete compiled widget metrics and leaf dimensions with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_metrics).step);
         b.step("test-ts-surface-recipes", "Compare compiled surface chrome recipes with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.surface_recipes).step);
         b.step("test-ts-widget-presentation", "Compare complete compiled retained presentation with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_presentation).step);
@@ -2516,6 +2518,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
     addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
+    addTestStep(b, "test-paragraph-transport", "Reject malformed copied paragraph plans", filteredTestArtifact(b, canvas_tests.root_module, "paragraph-transport-tests", &.{"paragraph copied transport"}));
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     addTestStep(b, "test-component-consumers", "Verify menu pins recovery fallback and virtual-scroll consumers", filteredTestArtifact(b, desktop_mod, "component-consumer-tests", &.{
         "runtime.ui_app_tests.test.a declared context menu presents",
@@ -5435,6 +5438,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/view_frontend.ts"));
     stage_run.addFileInput(b.path("packages/core/src/view_components.ts"));
     stage_run.addFileInput(b.path("packages/core/src/runtime_policy.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/paragraph_layout.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));

@@ -1934,6 +1934,7 @@ pub const DesignTokens = struct {
     widget_paint_walk_policy: ?*const fn ([]const u8, []u8) usize = null,
     control_geometry_policy: ?*const fn ([]const u8, []u8) usize = null,
     code_content_policy: ?*const fn ([]const u8, []u8) usize = null,
+    paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and

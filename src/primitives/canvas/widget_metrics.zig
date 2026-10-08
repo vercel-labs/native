@@ -115,6 +115,7 @@ pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_wid
         .alignment = widget.text_alignment,
         .typography = tokens.typography,
         .measure = tokens.text_measure,
+        .paragraph_policy = tokens.paragraph_policy,
     };
 }
 
