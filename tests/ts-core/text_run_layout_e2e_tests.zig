@@ -5,6 +5,32 @@ const c = sdk.canvas;
 const core = @import("ts_persist_core");
 const exact = @import("component_construction_e2e_tests.zig").exact;
 const policy = c.text_run_policy;
+var estimator_policy_calls: usize = 0;
+fn countedEstimatorPolicy(request: []const u8, result: []u8) usize {
+    estimator_policy_calls += 1;
+    return core.nativeWindowPolicy(request, result);
+}
+test "compiled text runs keep mono estimator walks bounded with complete native geometry" {
+    _ = core.initialModel();
+    const bytes = "café🙂 \xff\xe2\x80" ** 1000;
+    var text = run(bytes);
+    text.font_id = c.default_mono_font_id;
+    const line: c.TextLine = .{ .text_len = bytes.len };
+    for ([_]f32{ 0, -0.0, 0.125, 13.25, -13.25 }) |size| {
+        text.size = size;
+        estimator_policy_calls = 0;
+        const result = policy.execute(countedEstimatorPolicy, 2, text, .{}, 0, 0, false, line, bytes.len, 0);
+        try std.testing.expectEqual(@as(usize, 1), estimator_policy_calls);
+        try exact(c.textLineCaretX(text, line, bytes.len), result.scalar);
+        core.rt.frameReset();
+    }
+    text.size = 13.25;
+    estimator_policy_calls = 0;
+    const hit = policy.execute(countedEstimatorPolicy, 3, text, .{}, 0, 0, false, line, 0, 1000000);
+    try std.testing.expectEqual(@as(usize, 1), estimator_policy_calls);
+    try std.testing.expectEqual(bytes.len, hit.offset);
+    core.rt.frameReset();
+}
 fn compare(text: c.DrawText, options: c.TextLayoutOptions, capacity: usize) !void {
     errdefer std.debug.print("text run case bytes={any} glyphs={d} size={d} width={d} wrap={s} align={s} overflow={s} capacity={d}\n", .{ text.text, text.glyphs.len, text.size, options.max_width, @tagName(options.wrap), @tagName(options.alignment), @tagName(options.overflow), capacity });
     const sentinel: c.TextLine = .{ .text_start = 0x123456, .bounds = .{ .x = -777, .height = 333 }, .elided_text_len = 17 };

@@ -42,7 +42,7 @@ pub fn resultValid(request: []const u8, result: []const u8) bool {
         return result[3] != 2 or action <= 1;
     }
     if (mode > 2 or slots != length or slots > (std.math.maxInt(usize) - 64) / 9 or request.len != 64 + slots * 9 or count > slots or
-        (mode == 2 and count != @intFromBool(length != 0)) or !std.mem.eql(u8, request[64 + slots * 8 ..], result[64 + slots * 8 ..]) or !std.mem.allEqual(u8, result[40..56], 0)) return false;
+        (mode == 2 and count != @intFromBool(length != 0) and !(result[3] == 2 and count == 0)) or !std.mem.eql(u8, request[64 + slots * 8 ..], result[64 + slots * 8 ..]) or !std.mem.allEqual(u8, result[40..56], 0)) return false;
     if (result[3] == 1 and (action != 3 or count == 0 or request[3] != 0)) return false;
     if (result[3] == 2 and action != 0) return false;
     for (0..count) |i| {
@@ -71,12 +71,10 @@ pub fn estimate(policy: Policy, font: u64, text: []const u8, size: f32, cluster:
     run(policy, packet, result);
     if (result[3] == 2) return float(result, 32);
     @memcpy(packet, result);
-    const face = &font_ttf.geist_regular;
     for (0..word(packet, 36)) |i| {
         const cp = word(packet, 64 + i * 8);
         if (cp == 0xffffffff) continue;
-        const glyph = face.glyphIndex(@intCast(cp));
-        if (glyph != 0) setFloat(packet, 64 + i * 8 + 4, face.advance(glyph) / face.units_per_em);
+        if (metrics.bundledGlyphAdvanceEm(@intCast(cp))) |advance| setFloat(packet, 64 + i * 8 + 4, advance);
     }
     run(policy, packet, result);
     if (result[3] != 2) @panic("scalar text did not finish");

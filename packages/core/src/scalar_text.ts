@@ -1,6 +1,16 @@
 // Scalar text decisions over copied font facts. Font table lookup and OS
 // measurement are explicit capabilities; no host pointer crosses this seam.
 function nscvScalarTextSequence(byte: number): number { return (byte & 128) === 0 ? 1 : (byte & 224) === 192 ? 2 : (byte & 240) === 224 ? 3 : (byte & 248) === 240 ? 4 : 1; }
+// The reserved mono estimator has no font capability. Keep every f32 add,
+// including the distinction between a cluster's -0 and a run's initial +0.
+function nscvScalarTextMonoWidth(text: Uint8Array, first: number, last: number, size: number, cluster: boolean): number {
+  if (first === last) return 0;
+  const advance = Math.fround(size * Math.fround(0.6));
+  if (cluster) return advance;
+  let width = 0;
+  while (first < last) { width = Math.fround(width + advance); first = Math.min(last, first + nscvScalarTextSequence(text[first]!)); }
+  return width;
+}
 function nscvScalarTextCodepoint(text: Uint8Array, first: number, last: number): number {
   const length = last - first, lead = text[first]!;
   if (length === 1) return lead >= 32 && lead < 127 ? lead : -1;
@@ -43,6 +53,13 @@ function nscvScalarText(request: Uint8Array): Uint8Array {
     return out;
   }
   const text = out.subarray(64 + slots * 8), mono = w.getUint32(16, true) === 2 && w.getUint32(20, true) === 0;
+  if (mono) {
+    // No glyph facts are requested or populated for the reserved mono face.
+    // Scan the source directly instead of writing one unused fact per byte.
+    out[3] = 2; w.setUint32(56, 0, true);
+    w.setFloat32(32, nscvScalarTextMonoWidth(text, 0, length, size, mode === 2), true);
+    return out;
+  }
   const font = w.getUint32(20, true) === 0 ? w.getUint32(16, true) : 0;
   const factor = Math.fround(font === 3 ? 1.02 : font === 4 || font === 6 ? 1.04 : 1);
   let count = w.getUint32(36, true);
@@ -56,11 +73,11 @@ function nscvScalarText(request: Uint8Array): Uint8Array {
       count++; first = last;
     }
     w.setUint32(36, count, true);
-    if (!mono && count > 0) { out[3] = 1; w.setUint32(56, 3, true); return out; }
+    if (count > 0) { out[3] = 1; w.setUint32(56, 3, true); return out; }
   }
   let width = 0;
   for (let i = 0; i < count; i++) {
-    const advance = mono ? Math.fround(size * Math.fround(0.6)) : Math.fround(Math.fround(size * w.getFloat32(64 + i * 8 + 4, true)) * factor);
+    const advance = Math.fround(Math.fround(size * w.getFloat32(64 + i * 8 + 4, true)) * factor);
     width = mode === 2 ? advance : Math.fround(width + advance);
   }
   out[3] = 2; w.setUint32(56, 0, true); w.setFloat32(32, width, true); return out;

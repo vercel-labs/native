@@ -175,6 +175,16 @@ fn faceAdvanceEm(face: *const font_ttf.Face, glyph: u16) f32 {
     return face.advance(glyph) / face.units_per_em;
 }
 
+/// Immutable bundled-font primitive for copied scalar requests. Printable
+/// ASCII uses the same comptime hmtx facts as the native reference, avoiding
+/// repeated cmap walks when an editor measures long numeric drafts.
+pub fn bundledGlyphAdvanceEm(codepoint: u21) ?f32 {
+    if (codepoint >= 0x20 and codepoint < 0x7f) return ascii_advance_em[codepoint - 0x20];
+    const face = &font_ttf.geist_regular;
+    const glyph = face.glyphIndex(codepoint);
+    return if (glyph == 0) null else faceAdvanceEm(face, glyph);
+}
+
 pub fn estimateTextAdvanceForBytes(font_id: FontId, bytes: []const u8, size: f32) f32 {
     if (bytes.len == 0) return 0;
     if (font_id == default_mono_font_id) return size * mono_advance_em;

@@ -41,6 +41,7 @@ class NscTextRunContext {
   readonly drawMeasure: boolean;
   phase: number;
   private wholeScalarCount = -1;
+  private localReply = false;
 
   constructor(header: Uint8Array, headerStart: number, request: Uint8Array, factsStart: number, factsEnd: number) {
     this.factsStart = factsStart;
@@ -122,7 +123,14 @@ class NscTextRunContext {
   done(): Uint8Array { this.out[3] = 2; this.w.setUint32(96, 0, true); this.w.setUint32(100, 0, true); this.w.setUint32(112, 0, true); return this.out; }
   ask(phase: number, kind: number, a: number, b: number): Uint8Array {
     if (a > b || b > this.textLength) throw new Error("invalid text capability range");
-    this.w.setUint32(96, phase, true); this.w.setUint32(100, kind, true); this.w.setUint32(104, a, true); this.w.setUint32(108, b, true); this.w.setUint32(112, 0, true); this.w.setFloat32(116, 0, true); this.out[3] = 1; return this.out;
+    this.w.setUint32(96, phase, true); this.w.setUint32(100, kind, true); this.w.setUint32(104, a, true); this.w.setUint32(108, b, true); this.w.setUint32(112, 0, true); this.w.setFloat32(116, 0, true); this.out[3] = 1;
+    const mono = this.w.getUint32(64, true) === 2 && this.w.getUint32(68, true) === 0;
+    const provider = phase === 32 || phase === 40 || phase === 42 || phase === 43 || phase === 50 ? this.drawMeasure : this.hasMeasure;
+    if (mono && (kind === 2 || kind === 1 && !provider || kind === 5 && !this.hasMeasure)) {
+      this.w.setFloat32(116, kind === 5 ? Math.fround(0 + Math.fround(this.size * Math.fround(0.6))) : nscvScalarTextMonoWidth(this.text, a, b, this.size, kind === 2), true);
+      this.w.setUint32(112, 1, true); this.phase = phase; this.localReply = true;
+    }
+    return this.out;
   }
   rawGlyphBounds(start: number, length: number, baseline: number, height: number): void {
     const end = Math.min(this.glyphCount, start + length), firstX = this.glyph(start, 0);
@@ -196,6 +204,17 @@ class NscTextRunContext {
   }
 
   run(): Uint8Array {
+    // Satisfy capability-free estimators in the existing context rather than
+    // copying the whole run through one native continuation per cluster.
+    // Iteration bounds the stack even for arbitrarily long hit-test walks.
+    while (true) {
+      this.localReply = false;
+      const result = this.resume();
+      if (!this.localReply) return result;
+    }
+  }
+
+  resume(): Uint8Array {
     while (true) {
       if (this.phase === 99) return this.done();
       if (this.phase === 0 && (this.mode === 0 || this.mode === 1)) {

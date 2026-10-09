@@ -26,6 +26,7 @@ test("scalar UTF8 rejects controls overlong surrogates invalid continuations and
 });
 test("scalar mono accumulation preserves byte cluster order rather than multiplying counts",()=>{
   const text=new Uint8Array(10001).fill(105),out=checked(packet(1,text,2));assert.equal(out[3],2);let width=0;for(const _ of text)width=Math.fround(width+Math.fround(13.25*Math.fround(0.6)));assert.equal(new DataView(out.buffer).getFloat32(32,true),width);
+  assert.equal(new DataView(out.buffer).getUint32(36,true),0);assert.ok(out.subarray(64,64+text.length*8).every(byte=>byte===0));
   const p=packet(1,new Uint8Array([105]),2);new DataView(p.buffer).setUint32(20,1,true);assert.equal(checked(p)[3],1);
 });
 test("scalar ink admission rejects absent empty declined inverted and nonfinite bounds",()=>{

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
-const source = ["runtime_policy", "text_run_layout", "text_document_width"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
+const source = ["runtime_policy", "scalar_text", "text_run_layout", "text_document_width"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
 const { nscvTextDocumentWidth: plan } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvTextDocumentWidth};").toString("base64")}`);
 function packet(mode: number, text = new Uint8Array(), flags = 3): Uint8Array {
   const slots = mode === 2 ? Math.min(text.length, 65536) : 0, bytes = new Uint8Array(128 + slots * 4 + text.length), w = new DataView(bytes.buffer);

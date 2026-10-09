@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
-const source = ["runtime_policy", "text_run_layout"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
+const source = ["runtime_policy", "scalar_text", "text_run_layout"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
 const { nscvTextRunLayout: plan } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvTextRunLayout};").toString("base64")}`);
 function packet(text: string, width = 20, wrap = 1, mode = 0): Uint8Array {
   const raw = new TextEncoder().encode(text), at = 512 + raw.length * 4;
@@ -73,6 +73,25 @@ test("long text continuations retain caller facts and return fixed owned state",
   assert.equal(r.getUint32(324, true), 5);
   const saved = bytes.slice(); b.fill(0);
   assert.deepEqual(bytes, saved);
+});
+test("mono hit walks stay in one copied planner and preserve exact font identity", () => {
+  const text = "café🙂 ".repeat(1000), b = packet(text, 20, 0, 3), w = new DataView(b.buffer);
+  w.setUint32(64, 2, true); w.setUint32(324, w.getUint32(36, true), true); w.setFloat32(60, 1000000, true);
+  const { result, calls } = execute(b);
+  assert.equal(result.getUint32(308, true), w.getUint32(36, true));
+  assert.deepEqual(calls, []);
+  const opaque = packet("abc", 20, 0, 3), v = new DataView(opaque.buffer);
+  v.setUint32(64, 2, true); v.setUint32(68, 1, true); v.setUint32(324, 3, true); v.setFloat32(60, 1000, true);
+  assert.deepEqual(execute(opaque).calls, [[2, 0, 1], [2, 1, 2], [2, 2, 3]]);
+});
+test("mono run widths retain f32 accumulation and signed zero without scalar crossings", () => {
+  for (const size of [0, -0, 13.25, -13.25]) {
+    const b = packet("i".repeat(10001), 0, 0, 2), w = new DataView(b.buffer);
+    w.setUint32(64, 2, true); w.setFloat32(16, size, true); w.setUint32(324, 10001, true); w.setUint32(56, 10001, true);
+    let expected = 0; for (let n = 0; n < 10001; n++) expected = Math.fround(expected + Math.fround(Math.fround(size) * Math.fround(0.6)));
+    const { result, calls } = execute(b);
+    assert.equal(result.getFloat32(304, true), expected); assert.deepEqual(calls, []);
+  }
 });
 test("text packets reject malformed headers, mutable initial state and missing replies", () => {
   assert.throws(() => plan(new Uint8Array(511)), /invalid/);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
-const source = ["runtime_policy", "text_run_layout", "text_query_layout"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
+const source = ["runtime_policy", "scalar_text", "text_run_layout", "text_query_layout"].map(name => readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8")).join("\n");
 const { nscvTextQueryLayout: plan } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvTextQueryLayout};").toString("base64")}`);
 function packet(text: string, mode: number, capacity = 100, prepared: Uint8Array[] = []): Uint8Array {
   const raw = new TextEncoder().encode(text), end = 1024 + raw.length * 5, count = mode === 1 ? 64 : prepared.length;
