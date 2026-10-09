@@ -763,6 +763,22 @@ pub fn fillGlyphPath(
     clip: ClipRect,
     sink: anytype,
 ) Error!void {
+    return fillGlyphPathWithPolicy(raster, elements, transform, rule, tolerance, clip, sink, null);
+}
+
+/// Explicit static owner for a caller's glyph storage. Set it on every entry,
+/// preserving the native API's support for initially uninitialized scratch.
+pub fn fillGlyphPathWithPolicy(
+    raster: *GlyphRasterizer,
+    elements: []const PathElement,
+    transform: Affine,
+    rule: FillRule,
+    tolerance: f32,
+    clip: ClipRect,
+    sink: anytype,
+    owner: ?raster_policy.Policy,
+) Error!void {
+    raster.policy = owner;
     raster.resetEdges();
     if (raster.policy) |policy| {
         try raster_policy.accumulate(raster, elements, transform, tolerance, max_glyph_curve_segments, null, policy);

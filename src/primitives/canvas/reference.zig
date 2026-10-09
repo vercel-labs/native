@@ -899,8 +899,7 @@ pub const ReferenceRenderSurface = struct {
         // `max_raster_width` (surface-shaped, not font-shaped) and
         // nothing else.
         const raster = &reference_glyph_raster_scratch.get().raster;
-        raster.policy = self.vector_policy;
-        vector.fillGlyphPath(
+        vector.fillGlyphPathWithPolicy(
             raster,
             builder.slice(),
             Affine.identity(),
@@ -908,6 +907,7 @@ pub const ReferenceRenderSurface = struct {
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return false;
         return true;
     }

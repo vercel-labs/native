@@ -151,7 +151,7 @@ test "compiled vector raster glyph budgets crossing failures clipping and comple
         var b = Sink{};
         defer b.deinit();
         const clip = v.ClipRect{ .x0 = 0, .y0 = 0, .x1 = 40, .y1 = 40 };
-        try compareResult(v.fillGlyphPath(left, builder.slice(), .{}, .nonzero, 0.25, clip, &a), v.fillGlyphPath(right, builder.slice(), .{}, .nonzero, 0.25, clip, &b));
+        try compareResult(v.fillGlyphPath(left, builder.slice(), .{}, .nonzero, 0.25, clip, &a), v.fillGlyphPathWithPolicy(right, builder.slice(), .{}, .nonzero, 0.25, clip, &b, observed));
         try compareRaster(left, right);
         try exact(a.values.items, b.values.items);
     };
@@ -199,15 +199,14 @@ test "compiled vector raster admits complete dense glyph geometry at derived bud
     defer std.testing.allocator.destroy(a);
     const b = try std.testing.allocator.create(v.GlyphRasterizer);
     defer std.testing.allocator.destroy(b);
-    a.* = .{};
-    b.* = .{ .policy = observed };
+    // Both entry points own initialization of their otherwise raw heap scratch.
     var left = Sink{};
     defer left.deinit();
     var right = Sink{};
     defer right.deinit();
     const clip = v.ClipRect{ .x0 = 0, .y0 = 0, .x1 = 8, .y1 = 8 };
     try v.fillGlyphPath(a, builder.slice(), .{}, .nonzero, 0.01, clip, &left);
-    try v.fillGlyphPath(b, builder.slice(), .{}, .nonzero, 0.01, clip, &right);
+    try v.fillGlyphPathWithPolicy(b, builder.slice(), .{}, .nonzero, 0.01, clip, &right, observed);
     try std.testing.expect(a.edge_count > v.max_edges and a.edge_count <= v.max_glyph_fill_edges);
     try compareRaster(a, b);
     try exact(left.values.items, right.values.items);
