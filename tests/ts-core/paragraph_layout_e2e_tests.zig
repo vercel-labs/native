@@ -82,9 +82,11 @@ test "compiled widget metric paragraphs preserve exceptional size scale and line
         try compare(&spans, .{ .size = @bitCast(size), .line_height = @bitCast(height), .max_width = 12.25 }, 0, 160);
     };
 }
-var policy_calls: usize = 0;
+var paragraph_calls: usize = 0;
+var cache_calls: [8]usize = @splat(0);
 fn trackedPolicy(request: []const u8, output: []u8) usize {
-    policy_calls += 1;
+    if (request[0] == 53) paragraph_calls += 1;
+    if (request[0] == 58) cache_calls[request[2]] += 1;
     return core.nativeWindowPolicy(request, output);
 }
 test "compiled widget metric paragraphs keep retained cache owners distinct and rebase copied source" {
@@ -99,19 +101,25 @@ test "compiled widget metric paragraphs keep retained cache owners distinct and 
     var compiled = reference_options;
     compiled.paragraph_policy = trackedPolicy;
     const expected = c.text_spans.layoutTextSpans(&spans, reference_options, &a);
-    policy_calls = 0;
+    paragraph_calls = 0;
+    cache_calls = @splat(0);
     const actual = c.text_spans.layoutTextSpans(&spans, compiled, &b);
-    try std.testing.expect(policy_calls > 0);
+    try std.testing.expect(paragraph_calls > 0);
+    for ([_]usize{ 3, 4, 5 }) |mode| try std.testing.expect(cache_calls[mode] > 0);
     try exact(expected, actual);
     core.rt.frameReset();
     var copied: ["unique cache owner words".len]u8 = undefined;
     @memcpy(&copied, spans[0].text);
     const fresh = [_]c.TextSpan{.{ .text = &copied }};
     trace.len = 0;
-    policy_calls = 0;
+    paragraph_calls = 0;
+    cache_calls = @splat(0);
     const hit = c.text_spans.layoutTextSpans(&fresh, compiled, &b);
     try exact(expected, hit);
     try std.testing.expectEqual(@as(usize, 0), trace.len);
-    try std.testing.expectEqual(@as(usize, 0), policy_calls);
+    // A retained hit asks the owner to admit, look up and rebase the entry;
+    // it never reruns the paragraph planner or measures the source.
+    try std.testing.expectEqual(@as(usize, 0), paragraph_calls);
+    try std.testing.expectEqual([8]usize{ 0, 0, 0, 1, 1, 0, 0, 1 }, cache_calls);
     for (hit.runs) |run| try std.testing.expect(@intFromPtr(run.text.ptr) >= @intFromPtr(&copied) and @intFromPtr(run.text.ptr) + run.text.len <= @intFromPtr(&copied) + copied.len);
 }
