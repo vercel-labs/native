@@ -349,8 +349,10 @@ export class NativeApp implements AsyncDisposable {
     return this.#snapshot({ op: "file_result", key: identity(key), file_op: op, bytes: [...bytes], file_outcome: options.outcome ?? "ok", file_total: options.total ?? 0, file_mtime_ms: options.mtimeMs ?? 0, file_exists: options.exists ?? false });
   }
   /** Feed a complete image terminal; dimensions and status pass through the journal. */
-  imageResult(id: string, options: { outcome?: "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "http_status" | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full" | "alloc_failed"; width?: number; height?: number; status?: number } = {}): Promise<NativeSnapshot> {
-    return this.#snapshot({ op: "image_result", key: identity(id), image_outcome: options.outcome ?? "loaded", image_width: options.width ?? 0, image_height: options.height ?? 0, image_status: options.status ?? 0 });
+  /** Deliver a failure terminal. Successful loads use imageBytes so decoded
+   * pixels and their journal blob are installed together. */
+  imageResult(id: string, options: { outcome: "rejected" | "not_found" | "io_failed" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "http_status" | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full" | "alloc_failed"; width?: number; height?: number; status?: number }): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "image_result", key: identity(id), image_outcome: options.outcome, image_width: options.width ?? 0, image_height: options.height ?? 0, image_status: options.status ?? 0 });
   }
   /** Decode and register actual image bytes through the native capability. */
   imageBytes(id: string, bytes: Uint8Array): Promise<NativeSnapshot> {

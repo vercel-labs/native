@@ -27,7 +27,7 @@ const Request = struct {
     file_total: u64 = 0,
     file_mtime_ms: i64 = 0,
     file_exists: bool = false,
-    image_outcome: sdk.EffectImageOutcome = .loaded,
+    image_outcome: sdk.EffectImageOutcome = .decode_failed,
     image_width: u64 = 0,
     image_height: u64 = 0,
     image_status: u16 = 0,
@@ -590,6 +590,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                     if (request.op == .image_bytes) {
                         try value.state.effects.feedImageBytes(id, request.bytes);
                     } else {
+                        if (request.image_outcome == .loaded) return error.LoadedImageResultRequiresBytes;
                         try value.state.effects.feedImageResult(id, request.image_outcome, request.image_width, request.image_height, request.image_status, request.bytes);
                     }
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
