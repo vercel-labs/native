@@ -1,4 +1,5 @@
 test {
+    _ = @import("host_event_pump.zig");
     _ = @import("shell_view_tests.zig");
     _ = @import("canvas_frame_tests.zig");
     _ = @import("canvas_screenshot_tests.zig");

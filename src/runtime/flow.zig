@@ -25,6 +25,7 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const HostEventPump = @import("host_event_pump.zig").HostEventPump;
 const security = @import("../security/root.zig");
 
 const validateCommandName = validation.validateCommandName;
@@ -59,6 +60,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         const RunContext = struct {
             runtime: *Runtime,
             app: App,
+            host_events: HostEventPump,
         };
 
         fn WindowViewMethods() type {
@@ -170,7 +172,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 app.stop(self) catch |err| log(self, "app.stop.failed", @errorName(err), &.{trace.string("app", app.name)});
             };
 
-            var context: RunContext = .{ .runtime = self, .app = app };
+            var context: RunContext = .{ .runtime = self, .app = app, .host_events = .{ .allocator = self.owned_allocator } };
+            defer context.host_events.deinit();
             try self.options.platform.run(handlePlatformEvent, &context);
 
             log(self, "runtime.done", "runtime finished", &.{});
@@ -649,6 +652,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         fn handlePlatformEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
+            const run_context: *RunContext = @ptrCast(@alignCast(context));
+            try run_context.host_events.dispatch(context, dispatchHostEvent, event_value);
+        }
+
+        fn dispatchHostEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
             const run_context: *RunContext = @ptrCast(@alignCast(context));
             try run_context.runtime.dispatchPlatformEvent(run_context.app, event_value);
         }

@@ -275,6 +275,122 @@ const JournalBuffer = struct {
     }
 };
 
+test "synchronous native window callbacks record after creation and replay close and reopen" {
+    const WindowApp = struct {
+        created: u32 = 0,
+        current: platform.WindowId = 0,
+        user_closes: u32 = 0,
+        fn app(self: *@This()) core.App {
+            return .{ .context = self, .name = "causal-windows", .scene_fn = scene, .event_fn = event };
+        }
+        fn scene(_: *anyopaque) !app_manifest.ShellConfig {
+            return session_scene;
+        }
+        fn event(context: *anyopaque, runtime: *core.Runtime, incoming: core.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (incoming == .window_closed) self.user_closes += 1;
+            if (incoming != .command) return;
+            if (std.mem.eql(u8, incoming.command.name, "child.open")) {
+                const info = try runtime.createSourcelessShellWindow(.{ .label = "child", .width = 200, .height = 100 });
+                self.current = info.id;
+                self.created += 1;
+            } else if (std.mem.eql(u8, incoming.command.name, "child.close")) try runtime.closeWindow(self.current);
+        }
+    };
+    const Host = struct {
+        null_platform: platform.NullPlatform,
+        base: platform.Platform = undefined,
+        handler: platform.EventHandler = undefined,
+        handler_context: *anyopaque = undefined,
+        fn value(self: *@This()) platform.Platform {
+            self.base = self.null_platform.platform();
+            var result = self.base;
+            result.context = self;
+            result.run_fn = run;
+            result.services.create_window_fn = create;
+            result.services.close_window_fn = close;
+            return result;
+        }
+        fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.handler = handler;
+            self.handler_context = handler_context;
+            try handler(handler_context, .app_start);
+            for ([_][]const u8{ "child.open", "child.close", "child.open", "child.close" }) |command| {
+                try handler(handler_context, .{ .menu_command = .{ .name = command } });
+                try handler(handler_context, .frame_requested);
+            }
+            try handler(handler_context, .app_shutdown);
+        }
+        fn changed(self: *@This(), info: platform.WindowInfo, open: bool) !void {
+            // Both strings are host-owned borrowed payloads. Reuse their
+            // buffers immediately after the callback, just like a native
+            // delegate returning to its window operation.
+            var label: [platform.max_window_label_bytes]u8 = undefined;
+            var title: [platform.max_window_title_bytes]u8 = undefined;
+            @memcpy(label[0..info.label.len], info.label);
+            @memcpy(title[0..info.title.len], info.title);
+            try self.handler(self.handler_context, .{ .window_frame_changed = .{
+                .id = info.id,
+                .label = label[0..info.label.len],
+                .title = title[0..info.title.len],
+                .frame = info.frame,
+                .scale_factor = info.scale_factor,
+                .open = open,
+                .focused = open and info.focused,
+            } });
+            @memset(&label, 'x');
+            @memset(&title, 'x');
+        }
+        fn create(context: ?*anyopaque, options: platform.WindowOptions) !platform.WindowInfo {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            const self: *@This() = @fieldParentPtr("null_platform", null_platform);
+            const info = try self.base.services.createWindow(options);
+            try self.changed(info, true);
+            return info;
+        }
+        fn close(context: ?*anyopaque, id: platform.WindowId) !void {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            const self: *@This() = @fieldParentPtr("null_platform", null_platform);
+            const info = for (self.null_platform.windows[0..self.null_platform.window_count]) |window| {
+                if (window.id == id) break window;
+            } else return error.WindowNotFound;
+            try self.base.services.closeWindow(id);
+            try self.changed(info, false);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const bytes = try gpa.create(JournalBuffer);
+    defer gpa.destroy(bytes);
+    bytes.* = .{};
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(bytes.sink());
+    recorder.begin(.{ .app_name = "causal-windows", .platform_name = "null" });
+    const host = try gpa.create(Host);
+    defer gpa.destroy(host);
+    host.* = .{ .null_platform = platform.NullPlatform.init(.{}) };
+    host.null_platform.gpu_surfaces = true;
+    defer host.null_platform.deinit();
+    const runtime = try gpa.create(core.Runtime);
+    defer gpa.destroy(runtime);
+    core.Runtime.initAt(runtime, .{ .platform = host.value(), .allocator = gpa, .session_recorder = recorder });
+    defer runtime.deinit();
+    var recorded: WindowApp = .{};
+    try runtime.run(recorded.app());
+    try std.testing.expect(recorder.finished and !recorder.failed);
+    try std.testing.expectEqual(@as(u32, 2), recorded.created);
+    try std.testing.expectEqual(@as(u32, 0), recorded.user_closes);
+    const harness = try core.TestHarness().create(gpa, .{});
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    var replayed: WindowApp = .{};
+    const report = try session_replay.replaySession(&harness.runtime, replayed.app(), bytes.journalBytes(), .{ .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqualDeep(recorded, replayed);
+    try std.testing.expectEqual(runtime.sessionStateFingerprint(), harness.runtime.sessionStateFingerprint());
+}
+
 const RecordedSession = struct {
     model: SessionModel,
     fingerprint: u64,

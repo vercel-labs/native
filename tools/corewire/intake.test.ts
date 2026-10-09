@@ -12,7 +12,9 @@ const corewire = path.resolve(process.argv[2]);
 // Mirror hashes include the reviewed stateless-runtime API addition.
 // Facade hashes include exact u32 image identities, nonreplacing file
 // results and exact-range timers. Removing the reviewed timer encoder
-// addition recovers every previous complete facade pin.
+// addition recovers every previous complete facade pin. The byte-key
+// encoder and bounded 4 MiB view changes are also audited against those
+// complete pins; their removal recovers the earlier generator output.
 const goldens = JSON.parse(fs.readFileSync(new URL("intake_goldens.json", import.meta.url), "utf8")) as Record<string, { status: number; diagnostics: string; hashes: Record<string, string> }>;
 for (const item of intakeCases()) test(item.name, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-intake-"));
