@@ -85,3 +85,18 @@ test("text packets reject malformed headers, mutable initial state and missing r
     assert.throws(() => plan(b), /invalid/, String(at));
   }
 });
+
+test("every reserved storage byte remains rejected independently", () => {
+  for (let at = 80; at < 320; at++) {
+    const input = packet("abc", 20); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 320; at < 376; at++) {
+    const input = packet("abc", 20); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 376; at < 512; at++) {
+    const input = packet("abc", 20); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+});

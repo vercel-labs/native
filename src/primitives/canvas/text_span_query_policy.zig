@@ -40,16 +40,16 @@ pub fn bounds(policy: Policy, layout: spans_model.TextSpanLayout, span_index: us
     if (policy(packet, &result) != result.len or word(&result, 0) > 1) @panic("invalid span bounds result");
     return if (word(&result, 0) != 0) rect(&result, 4) else null;
 }
-fn word(b: []const u8, at: usize) u32 {
+inline fn word(b: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, b[at..][0..4], .little);
 }
-fn float(b: []const u8, at: usize) f32 {
+inline fn float(b: []const u8, at: usize) f32 {
     return @bitCast(word(b, at));
 }
-fn put(b: []u8, at: usize, value: usize) void {
+inline fn put(b: []u8, at: usize, value: usize) void {
     std.mem.writeInt(u32, b[at..][0..4], std.math.cast(u32, value) orelse @panic("span query integer range"), .little);
 }
-fn setFloat(b: []u8, at: usize, value: f32) void {
+inline fn setFloat(b: []u8, at: usize, value: f32) void {
     std.mem.writeInt(u32, b[at..][0..4], @bitCast(value), .little);
 }
 fn offset(source: []const u8, slice: []const u8) ?usize {
@@ -67,7 +67,8 @@ pub fn resultValid(request: []const u8, result: []const u8) bool {
         !std.mem.eql(u8, request[0..3], result[0..3]) or !std.mem.eql(u8, request[4..80], result[4..80]) or
         word(result, 12) != request.len or word(result, 96) != 0 or word(result, 104) > 1 or word(result, 112) > 1 or
         word(result, 152) > 160 or word(result, 156) > 160 or word(result, 164) > word(request, 8)) return false;
-    for (result[344..512]) |b| if (b != 0) return false;
+    const reserved_zero = [_]u8{0} ** 168;
+    if (!std.mem.eql(u8, result[344..512], &reserved_zero)) return false;
     const mode = request[2];
     const source_len = if (mode == 0) word(request, 40) else word(request, 20);
     if (result[3] == 2) return word(result, 80) == 0 and (word(result, 112) == 0 or

@@ -74,3 +74,26 @@ test("query envelopes reject corrupt metadata, reserved state and missing acknow
     assert.throws(() => plan(resumed), /invalid/, String(at));
   }
 });
+
+test("every reserved storage byte remains rejected independently", () => {
+  for (let at = 48; at < 80; at++) {
+    const input = packet("abc", 0); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 80; at < 440; at++) {
+    const input = packet("abc", 0); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 440; at < 512; at++) {
+    const input = packet("abc", 0); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 556; at < 576; at++) {
+    const input = packet("abc", 0); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+  for (let at = 592; at < 1024; at++) {
+    const input = packet("abc", 0); input[at] = 1;
+    assert.throws(() => plan(input), /invalid/, String(at));
+  }
+});

@@ -22,16 +22,16 @@ pub const Query = struct {
     lines: []types.TextLine = &.{},
     selections: []interaction.TextSelectionRect = &.{},
 };
-fn word(bytes: []const u8, at: usize) u32 {
+inline fn word(bytes: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, bytes[at..][0..4], .little);
 }
-fn float(bytes: []const u8, at: usize) f32 {
+inline fn float(bytes: []const u8, at: usize) f32 {
     return @bitCast(word(bytes, at));
 }
-fn put(bytes: []u8, at: usize, value: usize) void {
+inline fn put(bytes: []u8, at: usize, value: usize) void {
     std.mem.writeInt(u32, bytes[at..][0..4], std.math.cast(u32, value) orelse @panic("text query integer range"), .little);
 }
-fn setFloat(bytes: []u8, at: usize, value: f32) void {
+inline fn setFloat(bytes: []u8, at: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(value), .little);
 }
 fn readRect(bytes: []const u8, at: usize) geometry.RectF {
@@ -63,7 +63,8 @@ pub fn resultValid(request: []const u8, result: []const u8) bool {
         word(result, 316) > 64 or result[514] > 8 or result[515] > 2 or
         word(result, 556) > (if (result[514] == 0 and glyph_count > 0) glyph_count else text_len) or
         word(result, 564) > 1) return false;
-    for (result[440..512]) |b| if (b != 0) return false;
+    const reserved_zero = [_]u8{0} ** 72;
+    if (!std.mem.eql(u8, result[440..512], &reserved_zero)) return false;
     if (result[3] == 2) return word(result, 80) == 0 and word(result, 84) == 0 and word(result, 92) == 0 and word(result, 100) == 0 and word(result, 304) <= text_len;
     if (word(result, 92) != 0) return false;
     return switch (word(result, 80)) {

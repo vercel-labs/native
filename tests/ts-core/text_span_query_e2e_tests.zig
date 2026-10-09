@@ -207,6 +207,11 @@ test "span query copied transport rejects writes outside capacity and missing so
     std.mem.writeInt(u32, result[80..84], 2, .little);
     std.mem.writeInt(u32, result[108..112], 1, .little);
     try std.testing.expect(c.text_span_query_policy.resultValid(&request, &result));
+    for (344..512) |at| {
+        var damaged = result;
+        damaged[at] = 1;
+        try std.testing.expect(!c.text_span_query_policy.resultValid(&request, &damaged));
+    }
     std.mem.writeInt(u32, result[108..112], 25, .little);
     try std.testing.expect(!c.text_span_query_policy.resultValid(&request, &result));
     std.mem.writeInt(u32, result[108..112], 1, .little);

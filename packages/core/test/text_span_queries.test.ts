@@ -53,3 +53,10 @@ test("rich-text bounds preserve exact 64-bit line rounding beyond f64 halfway lo
   v.setFloat32(16, 0, true);
   assert.deepEqual(Array.from(new Uint8Array(bounds(b).buffer).subarray(4)), Array(16).fill(0));
 });
+
+test("every reserved span byte is rejected before a capability is emitted", () => {
+  for (let at = 80; at < 512; at++) {
+    const input = clipping("abc", 15, 1, 8); input[at] = 1;
+    assert.throws(() => plan(input), /invalid|reply missing/, String(at));
+  }
+});

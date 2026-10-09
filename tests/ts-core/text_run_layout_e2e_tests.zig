@@ -225,6 +225,11 @@ test "text run copied transport rejects corrupt storage and capability ranges" {
         damaged[at] ^= 0xff;
         try std.testing.expect(!policy.resultValid(&bytes, &damaged));
     }
+    for (376..512) |at| {
+        var damaged = reply;
+        damaged[at] = 1;
+        try std.testing.expect(!policy.resultValid(&bytes, &damaged));
+    }
     // A valid ink capability is invalid in line-planning mode.
     var wrong_mode = reply;
     std.mem.writeInt(u32, wrong_mode[96..100], 60, .little);
@@ -356,6 +361,11 @@ test "text query copied transport rejects unsafe output indices and malformed ca
         var corrupt = result;
         corrupt[at] ^= 0xff;
         try std.testing.expect(!query.resultValid(&packet, &corrupt));
+    }
+    for (440..512) |at| {
+        var damaged = result;
+        damaged[at] = 1;
+        try std.testing.expect(!query.resultValid(&packet, &damaged));
     }
     // Even a structurally plausible store cannot escape the caller's
     // line capacity or be substituted for a font capability reply.
