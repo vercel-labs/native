@@ -1748,6 +1748,42 @@ pub const AudioCaptureFormat = struct {
     }
 };
 
+/// The shape a real-time audio output stream renders in: interleaved
+/// 32-bit float PCM at `sample_rate`, `channels` samples per frame. Hosts
+/// answer a start request with the format they actually opened (the
+/// device's native rate when the request asks for 0), so synthesizers
+/// tune their oscillators to the rate they are really heard at.
+pub const AudioOutputFormat = struct {
+    /// 0 asks for the device's native rate.
+    sample_rate: u32 = 0,
+    channels: u8 = 2,
+
+    pub fn valid(self: AudioOutputFormat) bool {
+        return (self.sample_rate == 0 or (self.sample_rate >= 8_000 and self.sample_rate <= 192_000)) and
+            (self.channels == 1 or self.channels == 2);
+    }
+};
+
+/// Largest render quantum a host asks for in one callback, in frames.
+/// Hosts split bigger device buffers into calls of at most this size, so
+/// a renderer can size its scratch once.
+pub const max_audio_output_frames: u32 = 4096;
+
+/// Fills `frames` interleaved frames of `channels` float samples at
+/// `samples`. Runs on the host's real-time audio thread: it must not
+/// block, allocate, or touch loop-thread state — the renderer owns
+/// whatever it reads, and exchanges state with the app through
+/// lock-free handoffs of its own. Silence is the renderer writing zeros.
+pub const AudioOutputRenderFn = *const fn (context: ?*anyopaque, samples: [*]f32, frames: u32, channels: u32, sample_rate: f64) callconv(.c) void;
+
+/// An app-owned real-time renderer: the callback plus the context it
+/// renders from. The context must outlive the stream — stopping the
+/// stream is the only fence after which no call can be in flight.
+pub const AudioOutputRenderer = struct {
+    context: ?*anyopaque = null,
+    render_fn: AudioOutputRenderFn,
+};
+
 /// Capture reports are small, bounded records. `.data` bytes are interleaved
 /// signed 16-bit little-endian PCM in the requested format. First-party hosts
 /// keep chunks at or below 20 ms so the largest supported packet (48 kHz,
@@ -2850,6 +2886,16 @@ pub const PlatformServices = struct {
     /// Stop and synchronously quiesce one source. No sink call from that source
     /// may occur after this function returns.
     audio_capture_stop_fn: ?*const fn (context: ?*anyopaque, source: AudioCaptureSource) anyerror!void = null,
+    /// Open the default output device and start pulling rendered PCM from
+    /// `renderer` on the host's real-time audio thread — the synthesis
+    /// counterpart of the file player: DAWs, instruments, and scores that
+    /// are computed rather than decoded. One stream per app; a second
+    /// start replaces the first (stopping it fully before the new one
+    /// renders). Answers the format actually opened.
+    audio_output_start_fn: ?*const fn (context: ?*anyopaque, format: AudioOutputFormat, renderer: AudioOutputRenderer) anyerror!AudioOutputFormat = null,
+    /// Stop the output stream and quiesce its render thread: no render
+    /// call may be in flight or start after this returns.
+    audio_output_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     /// Load a local video file into THE app's single video player,
     /// leaving it PAUSED at position zero (transport is a separate
     /// verb, exactly like audio). Loading replaces whatever was loaded
@@ -3539,6 +3585,17 @@ pub const PlatformServices = struct {
     pub fn audioCaptureStop(self: PlatformServices, source: AudioCaptureSource) anyerror!void {
         const stop_fn = self.audio_capture_stop_fn orelse return error.UnsupportedService;
         return stop_fn(self.context, source);
+    }
+
+    pub fn audioOutputStart(self: PlatformServices, format: AudioOutputFormat, renderer: AudioOutputRenderer) anyerror!AudioOutputFormat {
+        if (!format.valid()) return error.InvalidAudioOptions;
+        const start_fn = self.audio_output_start_fn orelse return error.UnsupportedService;
+        return start_fn(self.context, format, renderer);
+    }
+
+    pub fn audioOutputStop(self: PlatformServices) anyerror!void {
+        const stop_fn = self.audio_output_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context);
     }
 
     /// Load a local video file into the app's single video player (see

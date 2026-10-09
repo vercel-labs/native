@@ -581,6 +581,17 @@ int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int so
 int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, int source);
 int native_sdk_appkit_audio_capture_supported(native_sdk_appkit_host_t *host, int source);
 
+/* Real-time synthesized output: the host opens the default output device
+ * and pulls interleaved float32 frames from render_fn on its audio thread
+ * (never more than 4096 frames per call). sample_rate 0 asks for the
+ * device's native rate. Start answers 1 and writes the opened rate and
+ * channel count, or 0 when no stream could be opened; a second start
+ * replaces the first. Stop is a synchronous quiescence fence: render_fn is
+ * never entered after it returns. */
+typedef void (*native_sdk_appkit_audio_output_render_t)(void *context, float *samples, uint32_t frames, uint32_t channels, double sample_rate);
+int native_sdk_appkit_audio_output_start(native_sdk_appkit_host_t *host, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_output_render_t render_fn, void *render_context, uint32_t *opened_rate, uint8_t *opened_channels);
+int native_sdk_appkit_audio_output_stop(native_sdk_appkit_host_t *host);
+
 /* Where the video player delivers decoded frames: one tightly packed,
  * row-major, straight-alpha RGBA8 frame per call (len = width * height
  * * 4), copied before return. Returns 0 when the frame was accepted, 1

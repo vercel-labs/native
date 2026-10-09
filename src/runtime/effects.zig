@@ -387,6 +387,10 @@ pub const SystemServiceBinding = struct {
     open_external_url_fn: *const fn (context: *anyopaque, url: []const u8) anyerror!void,
     reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
     format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
+    open_file_dialog_fn: ?*const fn (context: *anyopaque, title: []const u8, buffer: []u8) anyerror!platform.OpenDialogResult = null,
+    /// The platform save panel, seeded with a suggested file name. Answers
+    /// the chosen path, or null when the user cancelled.
+    save_file_dialog_fn: ?*const fn (context: *anyopaque, default_name: []const u8, buffer: []u8) anyerror!?[]const u8 = null,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -4740,6 +4744,8 @@ pub fn Effects(comptime Msg: type) type {
         /// is fed instead, so replay delivers exactly what the recorded
         /// session delivered, in the same order.
         replay: bool = false,
+        /// Whether `startAudioOutput` opened (or, faked, recorded) a stream.
+        audio_output_active: bool = false,
         /// Journaled wall-clock values queued for replay-mode `wallMs`
         /// reads (FIFO; fed from `.clock` records before the consuming
         /// event dispatches).
@@ -7789,6 +7795,94 @@ pub fn Effects(comptime Msg: type) type {
             capture.platform_started = true;
         }
 
+        /// Claim a media-surface texture channel for an APP-OWNED
+        /// producer — an embedded renderer, a pixel pipeline, a
+        /// compositor thread — and answer the copyable, any-thread frame
+        /// sink it pushes RGBA8 frames through (latest-wins, paced by the
+        /// presented-frame clock; see `media_surface.zig`). `surface_id`
+        /// is the same model-owned u64 a `media_surface` widget binds.
+        /// Loop-thread only. Frame CONTENTS are presentation chrome:
+        /// replay and goldens show the surface's placeholder. Errors:
+        /// `error.UnsupportedService` with no texture-channel host, and
+        /// the runtime's claim errors (invalid id, all channels claimed).
+        pub fn acquireFrameSink(self: *Self, surface_id: u64) anyerror!platform.VideoFrameSink {
+            const binding = self.media_surfaces orelse return error.UnsupportedService;
+            return binding.acquire_fn(binding.context, surface_id);
+        }
+
+        /// End a claim made by `acquireFrameSink`. Idempotent; pushes
+        /// through the released sink (or any copy of it) are refused.
+        /// Loop-thread only.
+        pub fn releaseFrameSink(self: *Self, sink: platform.VideoFrameSink) void {
+            const binding = self.media_surfaces orelse return;
+            binding.release_fn(binding.context, sink);
+        }
+
+        /// Decode encoded image bytes (PNG, JPEG, ... — whatever the
+        /// platform codec reads) into APP-OWNED straight-alpha RGBA8 in
+        /// `buffer`, without registering anything: the path for pixels an
+        /// app processes itself (an editor's source image, a renderer's
+        /// texture). Images larger than `max_pixels` decode
+        /// aspect-preservingly to fit; `buffer` must hold `max_pixels * 4`
+        /// bytes. Synchronous and loop-thread only. Errors:
+        /// `error.UnsupportedService` (no codec), `error.ImageDecodeFailed`,
+        /// `error.ImageTooLarge`.
+        pub fn decodeImage(self: *Self, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform.DecodedImage {
+            const services = self.services orelse return error.UnsupportedService;
+            if (buffer.len / 4 < max_pixels) return error.ImageTooLarge;
+            return services.decodeImage(bytes, buffer, max_pixels);
+        }
+
+        /// Options for the app's real-time synthesized output stream.
+        pub const StartAudioOutputOptions = struct {
+            /// Requested rate; 0 opens the device's native rate. The
+            /// answered format is the rate the renderer must tune to.
+            sample_rate: u32 = 0,
+            channels: u8 = 2,
+            renderer: platform.AudioOutputRenderer,
+        };
+
+        /// Open the platform's real-time output stream and start pulling
+        /// PCM from an app-owned renderer on the host audio thread — the
+        /// synthesis counterpart of `playAudio` for instruments, DAWs,
+        /// and generated scores. Synchronous (not a journaled effect):
+        /// audio is presentation, like media-surface textures, so replay
+        /// and the fake executor never open a device. Both answer the
+        /// requested format (48 kHz when unspecified) without rendering,
+        /// and tests drive the renderer by calling it directly. A second
+        /// start replaces the running stream. Errors:
+        /// `error.UnsupportedService` on hosts without an output path,
+        /// `error.InvalidAudioOptions`, and the host's start failure.
+        pub fn startAudioOutput(self: *Self, options: StartAudioOutputOptions) anyerror!platform.AudioOutputFormat {
+            const format: platform.AudioOutputFormat = .{ .sample_rate = options.sample_rate, .channels = options.channels };
+            if (!format.valid()) return error.InvalidAudioOptions;
+            if (self.executor == .fake or self.replay) {
+                self.audio_output_active = true;
+                return .{ .sample_rate = if (format.sample_rate == 0) 48_000 else format.sample_rate, .channels = format.channels };
+            }
+            const services = self.services orelse return error.UnsupportedService;
+            const opened = try services.audioOutputStart(format, options.renderer);
+            self.audio_output_active = true;
+            return opened;
+        }
+
+        /// Stop the output stream. When this returns, the renderer is
+        /// never entered again, so its context may be released. Idle
+        /// streams no-op.
+        pub fn stopAudioOutput(self: *Self) void {
+            if (!self.audio_output_active) return;
+            self.audio_output_active = false;
+            if (self.executor == .fake or self.replay) return;
+            const services = self.services orelse return;
+            services.audioOutputStop() catch {};
+        }
+
+        /// Whether an output stream is running (for the fake executor and
+        /// replay, whether one was requested).
+        pub fn audioOutputActive(self: *const Self) bool {
+            return self.audio_output_active;
+        }
+
         /// Stop a keyed capture. Accepted PCM already staged drains first,
         /// then exactly one `.stopped` terminal delivers through the channel.
         pub fn stopAudioCapture(self: *Self, key: u64) void {
@@ -9530,6 +9624,8 @@ pub fn Effects(comptime Msg: type) type {
             return std.mem.startsWith(u8, name, "core.store.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
+                std.mem.eql(u8, name, "native-sdk.dialog.openFilePath") or
+                std.mem.eql(u8, name, "native-sdk.dialog.saveFilePath") or
                 std.mem.eql(u8, name, "native-sdk.time.formatLocal");
         }
 
@@ -9563,7 +9659,10 @@ pub fn Effects(comptime Msg: type) type {
                 self.performBoundStoreRequest(name, key, payload);
                 return;
             }
-            if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
+            if (std.mem.eql(u8, name, "native-sdk.time.formatLocal") or
+                std.mem.eql(u8, name, "native-sdk.dialog.openFilePath") or
+                std.mem.eql(u8, name, "native-sdk.dialog.saveFilePath"))
+            {
                 self.performBoundSystemRequest(name, key, payload);
                 return;
             }
@@ -9885,6 +9984,36 @@ pub fn Effects(comptime Msg: type) type {
                 self.feedHostResult(key, false, "unsupported") catch {};
                 return;
             };
+
+            if (std.mem.eql(u8, name, "native-sdk.dialog.openFilePath")) {
+                const open_dialog = binding.open_file_dialog_fn orelse {
+                    self.feedHostResult(key, false, "unsupported") catch {};
+                    return;
+                };
+                var buffer: [platform.max_dialog_paths_bytes]u8 = undefined;
+                const result = open_dialog(binding.context, payload, &buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, if (result.count == 0) "" else result.paths) catch {};
+                return;
+            }
+
+            if (std.mem.eql(u8, name, "native-sdk.dialog.saveFilePath")) {
+                // The payload is the suggested file name; the result is
+                // the chosen path, or empty when the user cancelled.
+                const save_dialog = binding.save_file_dialog_fn orelse {
+                    self.feedHostResult(key, false, "unsupported") catch {};
+                    return;
+                };
+                var buffer: [platform.max_dialog_paths_bytes]u8 = undefined;
+                const chosen = save_dialog(binding.context, payload, &buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, chosen orelse "") catch {};
+                return;
+            }
 
             if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
                 if (payload.len != 16) return self.feedInvalidNativeRequest(key);
