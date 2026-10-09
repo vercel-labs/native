@@ -12,8 +12,9 @@ const corewire = path.resolve(process.argv[2]);
 // Exact diagnostics and complete generated-file hashes captured from the
 // independent native implementation before replacing its admission rules.
 // Mirror hashes include the reviewed stateless-runtime API addition.
-// Facade hashes include exact u32 image identities and nonreplacing file
-// results; restoring only that encoder block reproduces the native pins.
+// Facade hashes include exact u32 image identities, nonreplacing file
+// results and exact-range timers. Removing the reviewed timer encoder
+// addition recovers every previous complete facade pin.
 const goldens = JSON.parse(fs.readFileSync(new URL("core_goldens.json", import.meta.url), "utf8")) as Record<string, {
   status: number; diagnostics: string; hashes: Record<string, string>;
   check_status: number; check_diagnostics: string;

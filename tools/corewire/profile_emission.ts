@@ -137,6 +137,7 @@ const signatures: Signature[] = [
   { suffix: "helper_call", name: "helper_call", params: ["u32", "bytes"] },
   { suffix: "command_msg", name: "abi_command_msg", params: ["bytes"] },
   { suffix: "frame_msg", name: "abi_frame_msg", params: ["f64", "f64", "f64", "f64"] },
+  { suffix: "frame_msg_ns", name: "abi_frame_msg_ns", params: ["f64", "f64", "f64", "f64", "bytes", "bytes"] },
   { suffix: "key_msg", name: "abi_key_msg", params: ["bytes", "u8", "u8", "u8", "u8"] },
   { suffix: "pinch_msg", name: "abi_pinch_msg", params: ["f64", "bytes", "u32", "f64", "f64", "f64"] },
   { suffix: "drop_msg", name: "abi_drop_msg", params: ["bytes"] },

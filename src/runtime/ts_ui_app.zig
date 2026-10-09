@@ -617,6 +617,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 comptime validateWebPanesHelper();
                 stamped.web_panes = webPanesAdapter;
             }
+            if (comptime @hasDecl(Model, "layoutTweens")) {
+                if (options.layout_tweens != null) @panic("TsUiApp owns layout_tweens from layoutTweens - remove custom tween wiring");
+                comptime validateLayoutTweensHelper();
+                stamped.layout_tweens = layoutTweensAdapter;
+            }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
             // teaching compile error in the adapter below). A wiring that
@@ -1838,9 +1843,22 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @compileError("TsUiApp: frameMsg must take (model: Model, frame: FrameEvent) - regenerate the core");
             }
             const FrameArg = params[1].type.?;
-            comptime validateChannelRecord(FrameArg, &.{ "width", "height", "timestampMs", "intervalMs" }, "frameMsg's FrameEvent", &.{});
+            comptime {
+                const fields = @typeInfo(FrameArg).@"struct".fields;
+                if (fields.len != 4 and fields.len != 6) @compileError("TsUiApp: FrameEvent must carry four numbers and optionally exact timestampNs/intervalNs bytes");
+                for (.{ "width", "height", "timestampMs", "intervalMs" }) |name| {
+                    if (!@hasField(FrameArg, name) or !statusItemNumericType(@FieldType(FrameArg, name))) @compileError("TsUiApp: FrameEvent requires width, height, timestampMs and intervalMs numbers");
+                }
+                if (fields.len == 6) for (.{ "timestampNs", "intervalNs" }) |name| {
+                    if (!@hasField(FrameArg, name) or @FieldType(FrameArg, name) != []const u8) @compileError("TsUiApp: exact frame clocks must be Uint8Array bytes");
+                };
+            }
             var arg: FrameArg = undefined;
             inline for (@typeInfo(FrameArg).@"struct".fields) |field| {
+                if (comptime std.mem.eql(u8, field.name, "timestampNs") or std.mem.eql(u8, field.name, "intervalNs")) {
+                    @field(arg, field.name) = exactFrameClock(if (comptime std.mem.eql(u8, field.name, "timestampNs")) frame.timestamp_ns else frame.frame_interval_ns);
+                    continue;
+                }
                 const value: f64 = if (comptime std.mem.eql(u8, field.name, "width"))
                     frame.size.width
                 else if (comptime std.mem.eql(u8, field.name, "height"))
@@ -1852,6 +1870,69 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @field(arg, field.name) = channelNum(field.type, value);
             }
             return channel(model, arg);
+        }
+
+        fn exactFrameClock(value: u64) []const u8 {
+            var buffer: [20]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable;
+            const owned = core.rt.frameAlloc(u8, text.len);
+            @memcpy(owned, text);
+            return owned;
+        }
+
+        fn layoutTweenWidget(widget: canvas.Widget, label: ?[]const u8, remaining: *usize) ?canvas.Widget {
+            if (widget.kind == .split and (label == null or std.mem.eql(u8, widget.semantics.label, label.?))) {
+                if (remaining.* == 0) return widget;
+                remaining.* -= 1;
+            }
+            for (widget.children) |child| if (layoutTweenWidget(child, label, remaining)) |found| return found;
+            return null;
+        }
+
+        fn layoutTweensAdapter(model: *const Model, tree: *const Ui.Tree, out: []canvas.CanvasWidgetLayoutTween) usize {
+            const params = @typeInfo(@TypeOf(Model.layoutTweens)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.layoutTweens() else model.layoutTweens(core.rt.frameAllocator());
+            var count: usize = 0;
+            for (raw) |raw_tween| {
+                if (count == out.len) break;
+                const tween = if (comptime @typeInfo(@TypeOf(raw_tween)) == .pointer) raw_tween.* else raw_tween;
+                const index = paneNumber(tween.index);
+                const duration = paneNumber(tween.durationMs);
+                const to = paneNumber(tween.to);
+                if (!std.math.isFinite(index) or index < 0 or index > 4294967295 or @trunc(index) != index or
+                    !std.math.isFinite(duration) or duration < 0 or duration > 4294967295 or @trunc(duration) != duration or
+                    !std.math.isFinite(to) or @abs(to) > std.math.floatMax(f32)) continue;
+                var remaining: usize = @intFromFloat(index);
+                const widget = layoutTweenWidget(tree.root, tween.label, &remaining) orelse continue;
+                var duplicate = false;
+                for (out[0..count]) |previous| if (previous.id == widget.id) {
+                    duplicate = true;
+                };
+                if (duplicate) continue;
+                out[count] = .{ .id = widget.id, .to = @floatCast(to), .duration_ms = @intFromFloat(duration), .easing = std.meta.stringToEnum(canvas.Easing, @tagName(tween.easing)) orelse unreachable };
+                count += 1;
+            }
+            return count;
+        }
+
+        fn validateLayoutTweensHelper() void {
+            const teaching = "TsUiApp: export layoutTweens(model: Model): readonly LayoutTween[]; import the descriptor from @native-sdk/core/events";
+            const info = @typeInfo(@TypeOf(Model.layoutTweens));
+            if (info != .@"fn") @compileError(teaching);
+            const function = info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type != *const Model) @compileError(teaching);
+            if (function.params.len == 2 and function.params[1].type != std.mem.Allocator) @compileError(teaching);
+            const returned = @typeInfo(function.return_type orelse @compileError(teaching));
+            if (returned != .pointer or returned.pointer.size != .slice or !returned.pointer.is_const) @compileError(teaching);
+            const Tween = statusItemRecordType(returned.pointer.child, teaching);
+            if (@typeInfo(Tween).@"struct".fields.len != 5 or !@hasField(Tween, "label") or @FieldType(Tween, "label") != ?[]const u8) @compileError(teaching);
+            inline for (.{ "index", "to", "durationMs" }) |name| {
+                if (!@hasField(Tween, name) or !statusItemNumericType(@FieldType(Tween, name))) @compileError(teaching);
+            }
+            if (!@hasField(Tween, "easing") or @typeInfo(@FieldType(Tween, "easing")) != .@"enum") @compileError(teaching);
+            const easing = @typeInfo(@FieldType(Tween, "easing")).@"enum";
+            if (easing.fields.len != 4) @compileError(teaching);
+            inline for (.{ "linear", "standard", "emphasized", "spring" }) |name| if (!@hasField(@FieldType(Tween, "easing"), name)) @compileError(teaching);
         }
 
         /// `Options.on_key` over the core's `keyMsg(key)` export: the
@@ -2623,4 +2704,62 @@ test "web pane exact decimal reload tokens retain every u64 and refuse alternate
     try std.testing.expectEqual(std.math.maxInt(u64), try Adapter.paneReloadToken(@as([]const u8, "18446744073709551615")));
     for ([_][]const u8{ "", "+1", "-0", "1.0", "1e2", " 1", "1\x00", "18446744073709551616", "123456789012345678901" }) |text|
         try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(text));
+}
+
+const LayoutTweensAdapterTestCore = struct {
+    const Easing = enum { linear, standard, emphasized, spring };
+    const Tween = struct { label: ?[]const u8 = null, index: f64 = 0, to: f64 = 0.25, durationMs: f64 = 180, easing: Easing = .standard };
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        declarations: []const Tween,
+        pub fn layoutTweens(self: *const Model) []const Tween {
+            return self.declarations;
+        }
+    };
+};
+
+test "TypeScript tween adapter resolves native identities and owns bounded output" {
+    const Adapter = TsUiApp(LayoutTweensAdapterTestCore);
+    comptime Adapter.validateLayoutTweensHelper();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Adapter.Ui.init(arena.allocator());
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.split(.{ .semantics = .{ .label = "one" } }, .{ ui.text(.{}, "A"), ui.text(.{}, "B") }),
+        ui.split(.{ .semantics = .{ .label = "two" } }, .{ ui.text(.{}, "C"), ui.text(.{}, "D") }),
+    }));
+    var declarations = [_]LayoutTweensAdapterTestCore.Tween{
+        .{ .index = 0, .to = 0.125, .durationMs = 0, .easing = .linear },
+        .{ .label = "one", .to = 0.75 }, // First declaration owns the same native id.
+        .{ .label = "two", .to = 0.875, .durationMs = 4294967295, .easing = .spring },
+    };
+    var model = LayoutTweensAdapterTestCore.Model{ .declarations = &declarations };
+    var out: [4]canvas.CanvasWidgetLayoutTween = undefined;
+    try std.testing.expectEqual(@as(usize, 2), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    try std.testing.expectEqual(tree.root.children[0].id, out[0].id);
+    try std.testing.expectEqual(tree.root.children[1].id, out[1].id);
+    try std.testing.expectEqual(@as(f32, 0.125), out[0].to);
+    try std.testing.expectEqual(@as(u32, 0), out[0].duration_ms);
+    try std.testing.expectEqual(canvas.Easing.linear, out[0].easing);
+    try std.testing.expectEqual(std.math.maxInt(u32), out[1].duration_ms);
+    try std.testing.expectEqual(canvas.Easing.spring, out[1].easing);
+    const saved = out;
+    declarations[0].to = 0.5;
+    try std.testing.expectEqual(@as(f32, 0.125), saved[0].to);
+    try std.testing.expectEqual(@as(usize, 1), Adapter.layoutTweensAdapter(&model, &tree, out[0..1]));
+    try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, out[0..0]));
+    var missing = [_]LayoutTweensAdapterTestCore.Tween{ .{ .label = "missing" }, .{ .index = 2 }, .{ .label = "two", .index = 1 } };
+    model.declarations = &missing;
+    try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), -1, 0.5, 4294967296 }) |value| {
+        var bad = [_]LayoutTweensAdapterTestCore.Tween{ .{ .index = value }, .{ .durationMs = value }, .{ .index = 1 } };
+        model.declarations = &bad;
+        try std.testing.expectEqual(@as(usize, 1), Adapter.layoutTweensAdapter(&model, &tree, &out));
+        try std.testing.expectEqual(tree.root.children[1].id, out[0].id);
+    }
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 3.5e38 }) |value| {
+        var bad = [_]LayoutTweensAdapterTestCore.Tween{.{ .to = value }};
+        model.declarations = &bad;
+        try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    }
 }

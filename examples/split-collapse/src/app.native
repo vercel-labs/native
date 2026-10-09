@@ -1,0 +1,10 @@
+<column grow="1" background="background">
+  <row height="48" padding="8" gap="8" cross="center">
+    <button on-press="toggle" label="Toggle sidebar">{toggle_label}</button>
+    <text foreground="text_muted">{mode_label}</text>
+  </row>
+  <split grow="1" value="{split_value}" resize-duration="{resize_duration}" on-resize="split_resized">
+    <column padding="12" gap="8" background="surface"><text>Sidebar</text><text foreground="text_muted">Inbox</text><text foreground="text_muted">Drafts</text><text foreground="text_muted">Archive</text></column>
+    <column padding="16" gap="8"><text size="lg">Content</text><text foreground="text_muted">{content_hint}</text><column grow="1" label="content-web-pane"></column></column>
+  </split>
+</column>

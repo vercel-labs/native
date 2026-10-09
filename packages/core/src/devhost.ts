@@ -1693,11 +1693,15 @@ function performCmd(cmd: Cmdish): void {
       say(`cmd wall_time -> ${cmd.msgKind} @ ${now}`);
       dispatch(bytesMsg(cmd.msgKind as string, encoder.encode(String(Math.trunc(now)))));
       return;
+    case "timer_result_exact":
     case "timer_result": {
-      const key = cmd.key as string, interval = cmd.afterMs as number, kind = cmd.msgKind as string;
+      const exact = cmd.op === "timer_result_exact";
+      const decimal = exact ? new TextDecoder().decode(cmd.afterMs as Uint8Array) : "";
+      const interval = exact ? (/^(0|[1-9][0-9]{0,19})$/.test(decimal) && BigInt(decimal) <= 18446744073709n ? Number(decimal) : 0) : cmd.afterMs as number;
+      const key = cmd.key as string, kind = cmd.msgKind as string;
       const slot = key.length === 0 ? Symbol() : key;
       const blocked = key.length > 0 && (pendingStoreByKey.has(key) || pendingDbByKey.has(key) || liveDbByKey.has(key) || serviceTasksByKey.has(key));
-      if (blocked || !(interval >= 1 && interval <= 31536000000) || (!resultTimers.has(slot) && !(key.length > 0 && delays.has(key)) && resultTimers.size + delays.size >= 16)) {
+      if (blocked || !(interval >= 1 && interval <= (exact ? 18446744073709 : 31536000000)) || (!resultTimers.has(slot) && !(key.length > 0 && delays.has(key)) && resultTimers.size + delays.size >= 16)) {
         dispatch({ kind, key: encoder.encode(key), timestampNs: encoder.encode("0"), outcome: "rejected" });
         return;
       }

@@ -322,7 +322,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
 
 export function native_timer_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 7) return timerCompletionPolicy(request);
-  if (request[0] === 2 || request[0] === 3 || request[0] === 6) return delayDeclaration(request);
+  if (request[0] === 2 || request[0] === 3 || request[0] === 6 || request[0] === 8) return delayDeclaration(request);
   if (request[0] === 4) {
     if (request.length !== 20 || request[1]! >= 16) throw new Error("invalid delay completion request");
     const slot = request[1]!;
@@ -379,7 +379,7 @@ export function native_timer_policy(request: Uint8Array): Uint8Array {
  */
 function delayDeclaration(request: Uint8Array): Uint8Array {
   if (request.length < 2) throw new Error("invalid delay policy request");
-  const rejectable = request[0] === 6;
+  const rejectable = request[0] === 6 || request[0] === 8;
   const arm = request[0] === 2 || rejectable, keyLength = request[1]!;
   let at = 2 + keyLength;
   if (at + (arm ? 10 : 0) > request.length) throw new Error("truncated delay declaration");
@@ -387,7 +387,7 @@ function delayDeclaration(request: Uint8Array): Uint8Array {
   if (arm) {
     after = new DataView(request.buffer, request.byteOffset, request.byteLength).getFloat64(at, true);
     tag = request[at + 8]!;
-    if (!(after >= 1 && after <= 31536000000)) {
+    if (!(after >= 1 && after <= (request[0] === 8 ? 18446744073709 : 31536000000))) {
       if (!rejectable) throw new Error("delay interval must be between 1ms and one year");
       blocked = 1;
     }

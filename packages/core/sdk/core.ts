@@ -1333,6 +1333,7 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "wall_time"; readonly msgKind: string }
   | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
   | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "timer_result_exact"; readonly key: string; readonly afterMs: Uint8Array; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
   | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
@@ -1626,6 +1627,10 @@ export const Cmd = {
   /// the same key; cancellation remains silent, like Cmd.delay.
   timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
     return { op: "timer_result", key, afterMs, mode, msgKind: route.result };
+  },
+  /// Canonical unsigned decimal milliseconds; zero and nanosecond overflow reject.
+  timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
+    return { op: "timer_result_exact", key, afterMs, mode, msgKind: route.result };
   },
 
   host: hostCmd,

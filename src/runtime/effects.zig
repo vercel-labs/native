@@ -9535,10 +9535,15 @@ pub fn Effects(comptime Msg: type) type {
 
         fn isNativeHostSendName(name: []const u8) bool {
             return std.mem.eql(u8, name, "native-sdk.os.openUrl") or
+                std.mem.eql(u8, name, "native-sdk.debug.log") or
                 std.mem.eql(u8, name, "native-sdk.os.revealPath");
         }
 
         fn performNativeHostSend(self: *Self, name: []const u8, payload: []const u8) void {
+            if (std.mem.eql(u8, name, "native-sdk.debug.log")) {
+                if (payload.len <= 4096) std.debug.print("{s}", .{payload});
+                return;
+            }
             const binding = self.system_services orelse return;
             if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) {
                 binding.open_external_url_fn(binding.context, payload) catch |err| {
@@ -10168,7 +10173,7 @@ pub fn Effects(comptime Msg: type) type {
         /// platform without a timer service delivers exactly one Msg
         /// with outcome `.rejected` on the next drain.
         pub fn startTimer(self: *Self, options: StartTimerOptions) void {
-            if (options.interval_ms == 0) return self.rejectTimer(options);
+            if (options.interval_ms == 0 or options.interval_ms > std.math.maxInt(u64) / std.time.ns_per_ms) return self.rejectTimer(options);
             const fake = self.executor == .fake;
             // Services are bound before init_fx/update ever run; a null
             // here means a host without the platform timer arm.

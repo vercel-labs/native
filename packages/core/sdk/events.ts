@@ -295,6 +295,22 @@ export interface FrameEvent {
   readonly height: number;
   readonly timestampMs: number;
   readonly intervalMs: number;
+  /// Exact unsigned nanoseconds, encoded as ASCII decimal bytes. Native
+  /// copies these values into the channel arena before entering the core.
+  readonly timestampNs: Uint8Array;
+  readonly intervalNs: Uint8Array;
+}
+
+/// A model-declared split layout tween. An optional label narrows the
+/// split selector; index selects its zero-based occurrence in tree order.
+/// Native retains widget identities and animation storage.
+export type LayoutTweenEasing = "linear" | "standard" | "emphasized" | "spring";
+export interface LayoutTween {
+  readonly label: Uint8Array | null;
+  readonly index: number;
+  readonly to: number;
+  readonly durationMs: number;
+  readonly easing: LayoutTweenEasing;
 }
 
 /// The key-fallback channel's record (`keyMsg(key)`): the key NAME arrives

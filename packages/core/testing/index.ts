@@ -113,6 +113,9 @@ export interface NativeReplay {
   readonly snapshot: NativeSnapshot;
 }
 export interface NativeAppOptions {
+  /** Explicit values for declared app envMsgs; replay uses their journaled bytes.
+   * Framework-provided app directories use appDataDirectory instead. */
+  readonly environment?: readonly { readonly name: string; readonly value: string }[];
   /** Existing fixture directory delivered through the framework app-data env
    * channel, with native app-scoped file authorization and journaled replay. */
   readonly appDataDirectory?: string;
@@ -202,7 +205,7 @@ export class NativeApp implements AsyncDisposable {
     if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > 2147483647) throw new Error("Invalid native test timeout");
     const app = new NativeApp(executable, timeout);
     try {
-      await app.#snapshot({ op: "start", width: options.width ?? 640, height: options.height ?? 480, wall_ms: options.wallMs ?? 0, app_data_directory: options.appDataDirectory ?? "" });
+      await app.#snapshot({ op: "start", width: options.width ?? 640, height: options.height ?? 480, wall_ms: options.wallMs ?? 0, app_data_directory: options.appDataDirectory ?? "", environment: options.environment ?? [] });
       return app;
     } catch (error) {
       await app.close();

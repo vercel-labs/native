@@ -640,7 +640,7 @@ class ContractEmitter {
       '"dispatch_record", "dispatch_text_input", "dispatch_scroll_state", ' +
       '"subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"';
     if (hasCommand) abiExports += ', "command_msg"';
-    if (hasFrame) abiExports += ', "frame_msg"';
+    if (hasFrame) abiExports += ', "frame_msg", "frame_msg_ns"';
     if (hasKey) abiExports += ', "key_msg"';
     if (hasPinch) abiExports += ', "pinch_msg"';
     if (hasDrop) abiExports += ', "drop_msg"';

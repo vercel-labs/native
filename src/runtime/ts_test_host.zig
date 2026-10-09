@@ -12,6 +12,7 @@ const max_journal_bytes = 8 * 1024 * 1024;
 const Request = struct {
     op: enum { start, snapshot, automation, text_action, input, drop, menu, context_menu, tray, frame, window_close, host_result, db_result, file_result, image_result, image_bytes, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
     app_data_directory: []const u8 = "",
+    environment: []const struct { name: []const u8, value: []const u8 } = &.{},
     width: u32 = 640,
     height: u32 = 480,
     wall_ms: i64 = 0,
@@ -93,6 +94,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
         app_data_directory: []u8 = &.{},
         app_data_roots: [1][]const u8 = .{""},
         env_values: []Adapter.EnvValue = &.{},
+        env_storage: std.heap.ArenaAllocator,
 
         fn create(config: Request, app_options: Adapter.Options, wiring: Adapter.CoreOptions, policy: sdk.SecurityPolicy, replaying: bool) !*@This() {
             if (config.width == 0 or config.width > 8192 or config.height == 0 or config.height > 8192) return error.InvalidSurfaceSize;
@@ -104,7 +106,9 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                 .size = sdk.geometry.SizeF.init(@floatFromInt(config.width), @floatFromInt(config.height)),
                 .harness = undefined,
                 .state = undefined,
+                .env_storage = std.heap.ArenaAllocator.init(gpa),
             };
+            errdefer self.env_storage.deinit();
             errdefer gpa.free(self.app_data_directory);
             errdefer gpa.free(self.env_values);
             self.harness = try sdk.TestHarness().create(gpa, .{ .size = self.size });
@@ -113,6 +117,25 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
             self.harness.null_platform.image_decode = true;
             self.harness.runtime.options.security = policy;
             var core_wiring = wiring;
+            if (!replaying and config.environment.len > 0) {
+                const allocator = self.env_storage.allocator();
+                const entries = try allocator.alloc(Adapter.EnvValue, wiring.env_values.len + config.environment.len);
+                @memcpy(entries[0..wiring.env_values.len], wiring.env_values);
+                for (config.environment, 0..) |entry, index| {
+                    // App-directory capabilities are resolved separately; an
+                    // arbitrary test value must never grant a filesystem root.
+                    if (std.mem.startsWith(u8, entry.name, "NATIVE_SDK_APP_") or std.mem.eql(u8, entry.name, "NATIVE_SDK_TARGET_OS")) return error.ReservedEnvironmentChannel;
+                    for (config.environment[0..index]) |previous| {
+                        if (std.mem.eql(u8, entry.name, previous.name)) return error.DuplicateEnvironmentChannel;
+                    }
+                    var route: ?[]const u8 = null;
+                    inline for (Adapter.Host.environment_messages) |channel| {
+                        if (std.mem.eql(u8, entry.name, channel.env)) route = channel.msg;
+                    }
+                    entries[wiring.env_values.len + index] = .{ .msg = route orelse return error.EnvironmentChannelMissing, .value = try allocator.dupe(u8, entry.value) };
+                }
+                core_wiring.env_values = entries;
+            }
             if (!replaying and config.app_data_directory.len > 0) {
                 if (!std.fs.path.isAbsolute(config.app_data_directory)) return error.InvalidAppDataDirectory;
                 self.app_data_directory = try gpa.dupe(u8, config.app_data_directory);
@@ -128,9 +151,9 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                     if (std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_LEGACY_DATA_DIR")) msg = entry.msg;
                 };
                 const route = msg orelse return error.AppDataEnvironmentChannelMissing;
-                self.env_values = try gpa.alloc(Adapter.EnvValue, wiring.env_values.len + 1);
-                @memcpy(self.env_values[0..wiring.env_values.len], wiring.env_values);
-                self.env_values[wiring.env_values.len] = .{ .msg = route, .value = self.app_data_directory };
+                self.env_values = try gpa.alloc(Adapter.EnvValue, core_wiring.env_values.len + 1);
+                @memcpy(self.env_values[0..core_wiring.env_values.len], core_wiring.env_values);
+                self.env_values[core_wiring.env_values.len] = .{ .msg = route, .value = self.app_data_directory };
                 core_wiring.env_values = self.env_values;
             }
             self.state = try Adapter.create(gpa, core_wiring, app_options);
@@ -144,6 +167,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
             self.state.destroy();
             gpa.free(self.env_values);
             gpa.free(self.app_data_directory);
+            self.env_storage.deinit();
             self.harness.destroy(gpa);
             gpa.destroy(self);
         }

@@ -262,7 +262,7 @@ class MirrorEmitter extends CodeWriter {
     for (const e of extensions) if (this.s.abi.exports.includes(e.name)) this.raw(e.code);
     if (c.command_msg) this.print(text.commandChannel, [msg]);
     if (c.frame_msg) {
-      this.print(text.frameChannel, [model, msg]);
+      this.print(this.s.abi.exports.includes("frame_msg_ns") ? text.frameChannelNs : text.frameChannel, [model, msg]);
       this.print(text.runtimeFrameChannel, [msg]);
     }
     if (c.key_msg) this.print(text.keyChannel, [msg]);

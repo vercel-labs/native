@@ -1094,13 +1094,23 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         nows[now_count.*] = .{ .decimal_clock = .{ .tag = tag, .ms = fx.wallMs() } };
                         now_count.* += 1;
                     },
+                    0x40 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid timer mode");
+                        const decimal = takeLongBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const exact = parseExactTimerInterval(decimal);
+                        const ms: f64 = if (exact) |value| @floatFromInt(value) else 0;
+                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot, true);
+                    },
                     0x3A => {
                         const key = takeShortBytes(cmd, &at);
                         const mode = takeByte(cmd, &at);
                         if (mode > 1) @panic("ts core host: invalid timer mode");
                         const ms: f64 = @bitCast(std.mem.readInt(u64, takeBytes(cmd, &at, 8)[0..8], .little));
                         const tag = takeByte(cmd, &at);
-                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot);
+                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot, false);
                     },
                     // read_file [op][key_len][key][ok][err][path_len u32 LE][path]
                     0x07 => {
@@ -4229,10 +4239,18 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         /// arm; every non-ok outcome routes the err arm with the
         /// outcome's name as bytes. A dropped entry's terminal routes
         /// nothing — the silent drop.
-        fn armResultTimer(fx: *Fx, key: []const u8, ms: f64, tag: u8, mode: runtime_effects.TimerMode) void {
+        fn parseExactTimerInterval(decimal: []const u8) ?u64 {
+            if (decimal.len == 0 or decimal.len > 20 or (decimal.len > 1 and decimal[0] == '0')) return null;
+            for (decimal) |byte| if (byte < '0' or byte > '9') return null;
+            const value = std.fmt.parseInt(u64, decimal, 10) catch return null;
+            if (value > std.math.maxInt(u64) / std.time.ns_per_ms) return null;
+            return value;
+        }
+
+        fn armResultTimer(fx: *Fx, key: []const u8, ms: f64, tag: u8, mode: runtime_effects.TimerMode, native_range: bool) void {
             const blocked = key.len > 0 and (reservedWireKeyOccupiedExcept(key, .delay) or findRequest(key) != null or findEffect(key) != null or findStream(key) != null or findPty(key) != null or findDb(key) != null);
-            const plan: ?DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, ms, tag, blocked, true) else blk: {
-                if (blocked or !std.math.isFinite(ms) or ms < 1 or ms > 31_536_000_000) break :blk null;
+            const plan: ?DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclarationRange(key, ms, tag, blocked, true, native_range) else blk: {
+                if (blocked or !std.math.isFinite(ms) or ms < 1 or ms > (if (native_range) @as(f64, 18_446_744_073_709) else 31_536_000_000)) break :blk null;
                 const slot = (if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex()) orelse break :blk null;
                 break :blk .{ .slot = slot, .tag = tag, .interval_ms = intervalMs(ms) };
             };
@@ -4713,8 +4731,12 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         }
 
         fn compiledDelayDeclaration(key: []const u8, after_ms: f64, tag: u8, blocked: bool, rejectable: bool) ?DelayPlan {
+            return compiledDelayDeclarationRange(key, after_ms, tag, blocked, rejectable, false);
+        }
+
+        fn compiledDelayDeclarationRange(key: []const u8, after_ms: f64, tag: u8, blocked: bool, rejectable: bool, native_range: bool) ?DelayPlan {
             var request: [max_delay_policy_bytes]u8 = undefined;
-            request[0] = if (rejectable) 6 else 2;
+            request[0] = if (native_range) 8 else if (rejectable) 6 else 2;
             request[1] = @intCast(key.len);
             @memcpy(request[2..][0..key.len], key);
             const value_at = 2 + key.len;
@@ -4728,7 +4750,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             if (result[0] == 255) return null;
             if (result[0] >= delays.len) @panic("ts core host: invalid compiled delay declaration slot");
             const rounded: f64 = @bitCast(std.mem.readInt(u64, result[2..10], .little));
-            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > 31_536_000_000 or @floor(rounded) != rounded)
+            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > (if (native_range) @as(f64, 18_446_744_073_709) else 31_536_000_000) or @floor(rounded) != rounded)
                 @panic("ts core host: invalid compiled delay interval result");
             return .{ .slot = result[0], .tag = result[1], .interval_ms = @intFromFloat(rounded) };
         }
@@ -5641,6 +5663,18 @@ const PtyBindingTestCore = struct {
         }
     };
 };
+
+test "exact timer wire admission preserves unsigned decimal ownership and nanosecond limits" {
+    const Host = TsCoreHost(PtyBindingTestCore);
+    for ([_]u64{ 0, 1, 31_536_000_001, std.math.maxInt(u64) / std.time.ns_per_ms }) |value| {
+        var decimal: [20]u8 = undefined;
+        const text = try std.fmt.bufPrint(&decimal, "{d}", .{value});
+        try std.testing.expectEqual(value, Host.parseExactTimerInterval(text).?);
+        @memset(&decimal, 'x');
+    }
+    for ([_][]const u8{ "", "00", "+1", "-0", "1_0", "1.0", "1e2", " 1", "1 ", "1\x00", "18446744073710", "18446744073709551615", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expect(Host.parseExactTimerInterval(text) == null);
+}
 
 test "PTY name bindings own bytes and retain ended identities without restricting unbound reuse" {
     const Core = PtyBindingTestCore;

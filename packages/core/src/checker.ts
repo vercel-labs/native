@@ -513,6 +513,7 @@ export class SubsetChecker {
     this.checkStatusItemsHelper();
     this.checkWindowsHelper();
     this.checkWebPanesHelper();
+    this.checkLayoutTweensHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -1543,6 +1544,22 @@ export class SubsetChecker {
     }
   }
 
+  private checkLayoutTweensHelper(): void {
+    const decl = this.entryExportedFunction("layoutTweens");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "layoutTweens" && candidate.decl === decl && decl.parameters.length === 1);
+    const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
+    const descriptor = returns?.k === "slice" && returns.elem.k === "struct" ? this.table.structs.get(returns.elem.name) : undefined;
+    const fields = descriptor?.fields ?? [];
+    const field = (name: string) => fields.find(candidate => candidate.tsName === name)?.type;
+    const label = field("label"), easing = field("easing");
+    const members = easing?.k === "enum" ? this.table.enums.get(easing.name)?.members.slice().sort().join(",") : "";
+    if (helper === undefined || fields.map(candidate => candidate.tsName).sort().join(",") !== "durationMs,easing,index,label,to" ||
+        label?.k !== "optional" || label.inner.k !== "bytes" || members !== "emphasized,linear,spring,standard" ||
+        !["index", "to", "durationMs"].every(name => ["number", "i64", "f64", "numAlias"].includes(field(name)?.k ?? "")))
+      this.report("NS1033", "`layoutTweens` must be a single-Model helper returning `readonly LayoutTween[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
+  }
+
   private checkWindowsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -2052,7 +2069,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

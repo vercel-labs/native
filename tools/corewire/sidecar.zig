@@ -310,6 +310,7 @@ pub const unconditional_exports = [_][]const u8{
 pub const conditional_exports = [_][]const u8{
     "command_msg",
     "frame_msg",
+    "frame_msg_ns",
     "key_msg",
     "pinch_msg",
     "drop_msg",

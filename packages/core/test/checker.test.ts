@@ -1922,3 +1922,22 @@ export function webPanes(model: Model): readonly WebViewPane[] {
   const parameter = checkOnly(source.replace("webPanes(model: Model)", "webPanes(model: Model, extra: number)"));
   assert.ok(ruleIds(parameter).includes("NS1033"));
 });
+
+test("NS1033 layoutTweens requires the complete Model-derived declaration", () => {
+  const source = `
+import type { LayoutTween } from "@native-sdk/core/events";
+export interface Model { readonly closed: boolean; }
+export type Msg = { readonly kind: "close" } | { readonly kind: "open" };
+export function initialModel(): Model { return { closed: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function layoutTweens(model: Model): readonly LayoutTween[] {
+  return [{ label: null, index: 0, to: model.closed ? 0.06 : 0.35, durationMs: 180, easing: "standard" }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly LayoutTween[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("layoutTweens(model: Model)", "layoutTweens(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
+});

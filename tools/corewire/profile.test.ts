@@ -132,6 +132,28 @@ test("policy text obeys compiler limits and conditional channel signatures are c
   }
 });
 
+test("exact frame ABI adds borrowed decimal clocks and preserves legacy profiles", () => withWork(dir => {
+  const input = currentContract("wide_msg");
+  input.channels.frame_msg = true;
+  input.abi.exports.push("frame_msg", "frame_msg_ns");
+  const result = invoke(dir, input, ["--profile", path.join(dir, "profile.json"), "--out", "mirror.zig", "--facade", path.join(dir, "facade.ts")]);
+  assert.equal(result.status, 0, result.stderr);
+  const output = fs.readFileSync(path.join(dir, "profile.json"), "utf8");
+  assert.equal(output, emitProfile(input, "facade.ts", "").output);
+  assert.deepEqual(JSON.parse(output).exports.at(-1), {
+    export: "abi_frame_msg_ns", symbol: input.abi.prefix + "frame_msg_ns",
+    params: ["f64", "f64", "f64", "f64", "bytes", "bytes"], returns: "bytes",
+  });
+  const mirror = fs.readFileSync(path.join(dir, "mirror.zig"), "utf8");
+  assert.match(mirror, /timestampNs: \[\]const u8/);
+  assert.match(mirror, /abi\.frame_msg_ns\(frame\.width/);
+  assert.doesNotMatch(mirror.match(/pub fn frameMsg\([\s\S]*?\n}/)![0], /frame_reset/);
+  input.channels.frame_msg = false;
+  const refused = invoke(dir, input, ["--check"]);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /frame_msg_ns.*requires a wired frame_msg/);
+}));
+
 test("compiled profiles preserve the optional Native primary and window view signatures", () => withWork(dir => {
   const input = currentContract("wide_msg");
   input.abi.exports.push("native_view", "native_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy");

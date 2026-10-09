@@ -225,6 +225,7 @@ pub fn Bindings(comptime prefix: []const u8) type {
         // above) through the ordinary out-pointer pair.
         pub const command_msg = Symbol(fn (name: [*]const u8, name_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "command_msg");
         pub const frame_msg = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "frame_msg");
+        pub const frame_msg_ns = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, timestamp_ns: [*]const u8, timestamp_ns_len: usize, interval_ns: [*]const u8, interval_ns_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "frame_msg_ns");
         pub const key_msg = Symbol(fn (key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *[*]const u8, out_len: *usize) callconv(.c) void, "key_msg");
         pub const pinch_msg = Symbol(fn (window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "pinch_msg");
         pub const drop_msg = Symbol(fn (event: [*]const u8, event_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "drop_msg");

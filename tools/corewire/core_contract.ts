@@ -257,6 +257,7 @@ function unbound(s: CoreContract, out: Diagnostic[]): void {
   for (let i = 0; i < s.msg.unbound.length; i++) if (findArm(s, s.msg.unbound[i]) === null) flag(out, `msg.unbound[${i}]`, `"${s.msg.unbound[i]}" is not an arm of the message union (V8)`);
 }
 function channels(s: CoreContract, out: Diagnostic[]): void {
+  if (s.abi.exports.includes("frame_msg_ns") && !s.channels.frame_msg) flag(out, "abi.exports", '"frame_msg_ns" requires a wired frame_msg channel (V9)');
   if (s.channels.command_bytes && !s.channels.command_msg) flag(out, "channels.command_bytes", "byte command input requires a wired command_msg channel (V9)");
   for (const channel of [{ name: "appearance_msg", arm: s.channels.appearance_msg }, { name: "chrome_msg", arm: s.channels.chrome_msg }]) {
     const name = channel.arm;
@@ -277,7 +278,7 @@ function channels(s: CoreContract, out: Diagnostic[]): void {
   }
 }
 export const unconditionalExports = ["abi_version", "build_id", "set_panic_sink", "init", "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"];
-export const conditionalExports = ["command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "native_virtual_requests", "native_virtual_view"];
+export const conditionalExports = ["command_msg", "frame_msg", "frame_msg_ns", "key_msg", "pinch_msg", "drop_msg", "native_view", "native_window_view", "native_media_view", "native_media_window_view", "native_radio_policy", "native_tabs_policy", "native_tree_policy", "native_list_policy", "native_menu_policy", "native_toggle_policy", "native_accordion_policy", "native_slider_policy", "native_split_policy", "native_scroll_policy", "native_resizable_policy", "native_text_policy", "native_timer_policy", "native_db_policy", "native_effect_policy", "native_stream_policy", "native_window_policy", "native_theme_policy", "native_status_policy", "native_virtual_requests", "native_virtual_view"];
 function abi(s: CoreContract, out: Diagnostic[]): void {
   let cursor = 0;
   for (const name of unconditionalExports) {

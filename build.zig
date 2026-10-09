@@ -1374,6 +1374,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-feed-e2e", "Compare compiled Feed with complete native model, viewport, and replay behavior").dependOn(&feed_run.step);
         ts_core_e2e_step.dependOn(&feed_run.step);
         test_step.dependOn(&feed_run.step);
+        const split_collapse_run = b.addRunArtifact(ts_core_artifacts.split_collapse);
+        b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
+        ts_core_e2e_step.dependOn(&split_collapse_run.step);
+        test_step.dependOn(&split_collapse_run.step);
         const markdown_viewer_run = b.addRunArtifact(ts_core_artifacts.markdown_viewer);
         b.step("test-ts-markdown-viewer-e2e", "Compare compiled Markdown Viewer with complete native behavior").dependOn(&markdown_viewer_run.step);
         ts_core_e2e_step.dependOn(&markdown_viewer_run.step);
@@ -2512,6 +2516,7 @@ pub fn build(b: *std.Build) void {
         "named effect host applies policy admission slots cancellation routes and dropped terminal retirement",
         "runtime.ts_core_host.test.PTY name bindings",
         "runtime.ts_ui_app.test.web pane exact decimal",
+        "runtime.ts_ui_app.test.TypeScript tween adapter",
         "runtime.ts_ui_app.test.lifecycle host consumes",
         "runtime.ui_app_tests.test.dispatch coordination",
         "runtime.ts_core_host_tests.test.complete subprocess records",
@@ -4233,6 +4238,7 @@ const TsCoreE2eArtifacts = struct {
     effects_probe: *std.Build.Step.Compile,
     notes: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
+    split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
     workbench: *std.Build.Step.Compile,
     video_player: *std.Build.Step.Compile,
@@ -4552,6 +4558,26 @@ fn tsCoreE2eArtifact(
     feed_decoder.addImport("native_sdk", desktop_mod);
     feed_decoder.addImport("core.zig", feed_fixture.module);
     feed_mod.addImport("feed_decoder", feed_decoder);
+
+    const split_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/split-collapse/src/core.ts",
+        .src_dir = b.path("examples/split-collapse/src"),
+        .name = "split_collapse_core",
+        .typescript_view = true,
+    });
+    const split_stage = b.addWriteFiles();
+    const split_root = split_stage.addCopyFile(b.path("tests/ts-core/split_collapse_e2e_tests.zig"), "split_collapse_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "split_collapse.native" }) |file|
+        _ = split_stage.addCopyFile(b.path("tests/ts-core/split-collapse-reference/" ++ file), "split-collapse-reference/" ++ file);
+    _ = split_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = split_stage.addCopyFile(b.path("examples/split-collapse/src/app.native"), "app.native");
+    const split_mod = b.createModule(.{ .root_source_file = split_root, .target = target, .optimize = optimize });
+    split_mod.addImport("native_sdk", desktop_mod);
+    split_mod.addImport("split_core", split_fixture.module);
+    const split_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    split_decoder.addImport("native_sdk", desktop_mod);
+    split_decoder.addImport("core.zig", split_fixture.module);
+    split_mod.addImport("split_decoder", split_decoder);
 
     const markdown_viewer_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/markdown-viewer/src/core.ts",
@@ -5075,6 +5101,7 @@ fn tsCoreE2eArtifact(
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
+        .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
         .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
         .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
         .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),

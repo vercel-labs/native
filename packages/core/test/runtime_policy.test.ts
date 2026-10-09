@@ -171,6 +171,25 @@ function completion(slot: number, used: number): Uint8Array {
   return bytes;
 }
 
+test("exact timer admission retains native nanosecond range and legacy limits", () => {
+  for (const operation of [6, 8]) for (const interval of [1, 31536000000, 31536000001, 18446744073709, 18446744073710, 0, -1, NaN, Infinity]) {
+    const packet = delayRequest(empty(), key("auto"), interval, 255);
+    packet[0] = operation;
+    const before = packet.slice(), result = native_timer_policy(packet), saved = result.slice();
+    const valid = interval >= 1 && interval <= (operation === 8 ? 18446744073709 : 31536000000);
+    assert.equal(result[0], valid ? 0 : 255);
+    if (valid) {
+      assert.equal(result[1], 255);
+      assert.equal(new DataView(result.buffer).getFloat64(2, true), interval);
+    }
+    assert.deepEqual(packet, before);
+    native_timer_policy(delayRequest(empty(), key("other"), 1));
+    assert.deepEqual(result, saved);
+    for (let end = 0; end < packet.length; end++) assert.throws(() => native_timer_policy(packet.subarray(0, end)));
+    assert.throws(() => native_timer_policy(new Uint8Array([...packet, 0])));
+  }
+});
+
 test("delay plans preserve first matching key, independent empty keys and first free slots", () => {
   const slots = empty();
   const names = [key(""), key("reminder"), key("café"), new Uint8Array(255).fill(255), new Uint8Array([0, 255])];

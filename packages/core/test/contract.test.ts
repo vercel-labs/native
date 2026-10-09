@@ -471,6 +471,7 @@ test("Model-first host frame channels stay outside the generic helper surface", 
   `);
   assert.deepEqual((value.model_helpers as { name: string }[]).map(helper => helper.name), ["query"]);
   assert.equal((value.channels as { frame_msg: boolean }).frame_msg, true);
+  assert.ok((value.abi as { exports: string[] }).exports.includes("frame_msg_ns"));
   assert.ok(!(value.types as { unions: { name: string }[] }).unions.some(type => type.name === "Msg"));
   const slots = (value.integer_slots as { slot: string }[]).map(slot => slot.slot);
   assert.ok(!slots.includes("Model.count") && !slots.includes("Msg.resize"));
