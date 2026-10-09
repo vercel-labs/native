@@ -209,6 +209,24 @@ export fn nsc_core_frame_msg(width: f64, height: f64, timestamp_ms: f64, interva
     channelEnvelopeOut(out, out_len);
 }
 
+pub var stub_exact_frame: struct {
+    numbers: [4]f64 = @splat(0),
+    timestamp: [20]u8 = @splat(0),
+    timestamp_len: usize = 0,
+    interval: [20]u8 = @splat(0),
+    interval_len: usize = 0,
+} = .{};
+
+export fn nsc_core_frame_msg_ns(width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, timestamp: [*]const u8, timestamp_len: usize, interval: [*]const u8, interval_len: usize, out: *[*]const u8, out_len: *usize) void {
+    std.debug.assert(timestamp_len <= stub_exact_frame.timestamp.len and interval_len <= stub_exact_frame.interval.len);
+    stub_exact_frame.numbers = .{ width, height, timestamp_ms, interval_ms };
+    @memcpy(stub_exact_frame.timestamp[0..timestamp_len], timestamp[0..timestamp_len]);
+    @memcpy(stub_exact_frame.interval[0..interval_len], interval[0..interval_len]);
+    stub_exact_frame.timestamp_len = timestamp_len;
+    stub_exact_frame.interval_len = interval_len;
+    channelEnvelopeOut(out, out_len);
+}
+
 export fn nsc_core_key_msg(key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *[*]const u8, out_len: *usize) void {
     _ = key;
     _ = key_len;
