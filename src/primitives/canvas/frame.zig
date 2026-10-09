@@ -90,7 +90,8 @@ pub const CanvasFrameProfile = frame_metrics.CanvasFrameProfile;
 pub const canvasFrameProfile = frame_metrics.canvasFrameProfile;
 
 pub const CanvasRenderPass = struct {
-    /// Static compiled owner; payload pointers remain borrowed from this frame.
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
     gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
@@ -298,7 +299,8 @@ pub const CanvasRenderPass = struct {
 };
 
 pub const CanvasFrame = struct {
-    /// Static compiled owner; payload pointers remain borrowed from this frame.
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
     gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,

@@ -115,6 +115,7 @@ pub const ReferenceFont = struct {
 };
 
 pub const ReferenceRenderSurface = struct {
+    vector_policy: ?@import("vector_raster_policy.zig").Policy = null,
     width: usize,
     height: usize,
     pixels: []u8,
@@ -280,7 +281,9 @@ pub const ReferenceRenderSurface = struct {
             .clear => self.clear(clear_color),
             .load => if (scissor) |bounds| self.clearRect(bounds, clear_color),
         }
-        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        var owned = self;
+        owned.vector_policy = pass.gpu_plan_policy;
+        for (pass.commands) |command| try owned.renderCommand(referenceScaleCommand(command, scale), scissor);
     }
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {
@@ -434,13 +437,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.fillPath(
+        vector.fillPathWithPolicy(
             value.elements,
             command.transform,
             .even_odd,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -462,13 +466,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.strokePath(
+        vector.strokePathWithPolicy(
             value.elements,
             command.transform,
             .{ .width = stroke_width, .cap = value.cap, .join = .round },
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -893,8 +898,10 @@ pub const ReferenceRenderSurface = struct {
         // fallback triggers are a clip band wider than
         // `max_raster_width` (surface-shaped, not font-shaped) and
         // nothing else.
+        const raster = &reference_glyph_raster_scratch.get().raster;
+        raster.policy = self.vector_policy;
         vector.fillGlyphPath(
-            &reference_glyph_raster_scratch.get().raster,
+            raster,
             builder.slice(),
             Affine.identity(),
             .nonzero,
@@ -1127,7 +1134,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);

@@ -257,6 +257,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 62) return nscvRegisteredFont(request);
   if (request[0] === 63) return nscvVectorEffects(request);
   if (request[0] === 65) return nscvGpuPlanning(request);
+  if (request[0] === 66) return nscvVectorRaster(request);
   if (request[0] === 64) return nscvRenderResources(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;

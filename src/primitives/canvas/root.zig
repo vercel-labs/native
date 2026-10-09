@@ -965,3 +965,4 @@ pub const text_scalar_policy = @import("text_scalar_policy.zig");
 pub const registered_font_policy = @import("registered_font_policy.zig");
 
 pub const GpuPlanningPolicy = @import("gpu_planning_policy.zig");
+pub const VectorRasterPolicy = @import("vector_raster_policy.zig");

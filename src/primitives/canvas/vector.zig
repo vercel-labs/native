@@ -27,6 +27,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
+const raster_policy = @import("vector_raster_policy.zig");
 
 const PointF = geometry.PointF;
 const Affine = drawing_model.Affine;
@@ -545,6 +546,8 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
         /// stack frame so the glyph instantiation's 145 KiB rides the
         /// same per-thread heap slot as its edges.
         crossings: [crossing_capacity]Crossing = undefined,
+        /// Static process-local owner. Buffers and pixel sinks remain native.
+        policy: ?raster_policy.Policy = null,
 
         const Self = @This();
 
@@ -600,6 +603,7 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
         /// for every pixel inside `clip` with coverage > 0. Coverage is in
         /// (0, 1]; `sub_samples` vertical subsamples, exact horizontal spans.
         pub fn sweep(self: *Self, rule: FillRule, clip: ClipRect, sink: anytype) Error!void {
+            if (self.policy) |policy| return raster_policy.sweep(self, rule, clip, sink, policy);
             if (self.edge_count == 0) return;
             const y_begin = @max(clip.y0, floorI(self.min_y));
             const y_end = @min(clip.y1, ceilI(self.max_y));
@@ -731,7 +735,11 @@ pub fn fillPath(
     clip: ClipRect,
     sink: anytype,
 ) Error!void {
-    var raster: Rasterizer = .{};
+    return fillPathWithPolicy(elements, transform, rule, tolerance, clip, sink, null);
+}
+
+pub fn fillPathWithPolicy(elements: []const PathElement, transform: Affine, rule: FillRule, tolerance: f32, clip: ClipRect, sink: anytype, policy: ?raster_policy.Policy) Error!void {
+    var raster: Rasterizer = .{ .policy = policy };
     try accumulateFillEdges(&raster, elements, transform, tolerance);
     try raster.sweep(rule, clip, sink);
 }
@@ -756,6 +764,10 @@ pub fn fillGlyphPath(
     sink: anytype,
 ) Error!void {
     raster.resetEdges();
+    if (raster.policy) |policy| {
+        try raster_policy.accumulate(raster, elements, transform, tolerance, max_glyph_curve_segments, null, policy);
+        return raster.sweep(rule, clip, sink);
+    }
     var edge_sink = FillEdgeSink(GlyphRasterizer){ .raster = raster };
     try walkPath(elements, transform, tolerance, max_glyph_curve_segments, &edge_sink);
     try raster.sweep(rule, clip, sink);
@@ -770,6 +782,7 @@ pub fn accumulateFillEdges(
     transform: Affine,
     tolerance: f32,
 ) Error!void {
+    if (raster.policy) |policy| return raster_policy.accumulate(raster, elements, transform, tolerance, max_curve_segments, null, policy);
     var sink = FillEdgeSink(Rasterizer){ .raster = raster };
     try walkPath(elements, transform, tolerance, max_curve_segments, &sink);
 }
@@ -815,8 +828,12 @@ pub fn strokePath(
     clip: ClipRect,
     sink: anytype,
 ) Error!void {
+    return strokePathWithPolicy(elements, transform, style, tolerance, clip, sink, null);
+}
+
+pub fn strokePathWithPolicy(elements: []const PathElement, transform: Affine, style: StrokeStyle, tolerance: f32, clip: ClipRect, sink: anytype, policy: ?raster_policy.Policy) Error!void {
     if (!(style.width > 0)) return;
-    var raster: Rasterizer = .{};
+    var raster: Rasterizer = .{ .policy = policy };
     try accumulateStrokeEdges(&raster, elements, transform, style, tolerance);
     try raster.sweep(.nonzero, clip, sink);
 }
@@ -829,6 +846,7 @@ pub fn accumulateStrokeEdges(
     style: StrokeStyle,
     tolerance: f32,
 ) Error!void {
+    if (raster.policy) |policy| return raster_policy.accumulate(raster, elements, transform, tolerance, max_curve_segments, style, policy);
     if (!(style.width > 0)) return;
     var sink = StrokeSink{
         .raster = raster,
