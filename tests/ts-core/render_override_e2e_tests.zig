@@ -161,12 +161,12 @@ test "both Runtime consumers preserve full override frames damage stored overrid
         const options = canvas.CanvasFrameOptions{ .frame_index = huge + phase, .timestamp_ns = 100 + phase * 5_000_000, .surface_size = .{ .width = 160, .height = 120 }, .render_overrides = if (phase == 1) &explicit else &.{}, .full_repaint = phase == 0 };
         resetObserved();
         const diagnostic = try native.runtime.canvasFramePlan(1, "canvas", null, options, a.value);
-        try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value));
+        try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value), observed);
         try exact([_]usize{ 0, 1 }, calls);
         try std.testing.expect(shared_buffers);
         resetObserved();
         const actual = try native.runtime.nextCanvasFrame(1, "canvas", options, a.value);
-        try frameEqual(actual, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value));
+        try frameEqual(actual, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value), observed);
         try exact([_]usize{ 1, 1 }, calls);
         try std.testing.expect(shared_buffers);
         try exact(@as([]const Override, native.runtime.canvas_frame_render_override_samples[0..1]), @as([]const Override, compiled.runtime.canvas_frame_render_override_samples[0..1]));
@@ -188,7 +188,7 @@ test "override owner remains independent and errors preserve all frame storage b
     const list = canvas.DisplayList{ .commands = &.{draw} };
     const expected = try list.framePlan(null, .{ .previous_render_overrides = &previous, .render_overrides = &next }, a.value);
     resetObserved();
-    try frameEqual(expected, try list.framePlan(null, .{ .render_override_policy = observed, .previous_render_overrides = &previous, .render_overrides = &next }, b.value));
+    try frameEqual(expected, try list.framePlan(null, .{ .render_override_policy = observed, .previous_render_overrides = &previous, .render_overrides = &next }, b.value), null);
     try exact([_]usize{ 0, 1 }, calls);
     for ([_]bool{ false, true }) |stack| {
         var sa = a.value;

@@ -177,7 +177,7 @@ test "compiled render resources: both runtime frame consumers preserve complete 
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const diagnostic = try native.runtime.canvasFramePlan(1, "canvas", null, options, a.value);
-        try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value));
+        try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value), observedPolicy);
         try exact([_]usize{1} ** 6, family_calls);
         try exact([_]usize{ 1, 1, 1 }, resource_calls);
         try exact([_]usize{ 1, 1 }, vector_calls);
@@ -187,7 +187,7 @@ test "compiled render resources: both runtime frame consumers preserve complete 
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const presentation = try native.runtime.nextCanvasFrame(1, "canvas", options, a.value);
-        try frameEqual(presentation, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value));
+        try frameEqual(presentation, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value), observedPolicy);
         try exact([_]usize{1} ** 6, family_calls);
         try exact([_]usize{ 1, 1, 1 }, resource_calls);
         try exact([_]usize{ 1, 1 }, vector_calls);
@@ -256,10 +256,10 @@ test "render state batching and six cache cost include frame buffers copying and
     }
 }
 
-pub fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame) !void {
+pub fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame, expected_owner: ?*const fn ([]const u8, []u8) usize) !void {
     // Static owners are process-local capabilities, not frame content.
     try std.testing.expect(a.gpu_plan_policy == null);
-    if (b.gpu_plan_policy) |owner| try std.testing.expect(owner == observedPolicy);
+    try std.testing.expect(b.gpu_plan_policy == expected_owner);
     inline for (@typeInfo(canvas.CanvasFrame).@"struct".fields) |field| {
         if (comptime !std.mem.eql(u8, field.name, "dirty_rects") and !std.mem.eql(u8, field.name, "gpu_plan_policy")) try exact(@field(a, field.name), @field(b, field.name));
     }
@@ -316,7 +316,7 @@ test "compiled vector resources: render planning and resource ownership remain i
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const compiled = try list.framePlan(null, .{ .render_cache_policy = if (plan) null else observedPolicy, .render_plan_policy = if (plan) observedPolicy else null }, b.value);
-        try frameEqual(reference, compiled);
+        try frameEqual(reference, compiled, if (plan) null else observedPolicy);
         try exact([_]usize{if (plan) 0 else 1} ** 6, family_calls);
         try exact([_]usize{if (plan) 0 else 1} ** 2, vector_calls);
         try exact([_]usize{if (plan) 1 else 0} ** 2, planning_calls);

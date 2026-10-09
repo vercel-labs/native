@@ -133,7 +133,7 @@ test "diagnostic damage full frames blur footprints and earliest errors match th
         var owned = options;
         owned.render_damage_policy = observed;
         reset();
-        try frameEqual(try list.framePlan(old, options, a.value), try list.framePlan(old, owned, b.value));
+        try frameEqual(try list.framePlan(old, options, a.value), try list.framePlan(old, owned, b.value), owned.render_cache_policy);
         try std.testing.expectEqual(@as(usize, 1), calls[0]);
         try std.testing.expect(shared);
         core.rt.frameReset();
@@ -218,11 +218,11 @@ test "both runtime damage consumers preserve complete incremental frames retaine
         }
         const options = canvas.CanvasFrameOptions{ .frame_index = 9007199254740993 + phase, .timestamp_ns = 33, .surface_size = .init(160, 120), .scale = 1.3, .full_repaint = phase == 0 };
         reset();
-        try frameEqual(try native.runtime.canvasFramePlan(1, "canvas", .{ .commands = &old }, options, a.value), try compiled.runtime.canvasFramePlan(1, "canvas", .{ .commands = &old }, options, b.value));
+        try frameEqual(try native.runtime.canvasFramePlan(1, "canvas", .{ .commands = &old }, options, a.value), try compiled.runtime.canvasFramePlan(1, "canvas", .{ .commands = &old }, options, b.value), observed);
         try std.testing.expectEqual(@as(usize, 1), calls[0]);
         try std.testing.expect(shared);
         reset();
-        try frameEqual(try native.runtime.nextCanvasFrame(1, "canvas", options, a.value), try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value));
+        try frameEqual(try native.runtime.nextCanvasFrame(1, "canvas", options, a.value), try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value), observed);
         try std.testing.expectEqual(@as(usize, 1), calls[1]);
         if (phase > 0) try std.testing.expectEqual(@as(usize, 1), calls[3]);
         try std.testing.expect(shared);
