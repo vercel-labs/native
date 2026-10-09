@@ -53,16 +53,16 @@ pub fn capabilityKind(mode: u8, phase: u32, draw_measure: bool) ?u32 {
         else => null,
     };
 }
-fn word(bytes: []const u8, at: usize) u32 {
+inline fn word(bytes: []const u8, at: usize) u32 {
     return std.mem.readInt(u32, bytes[at..][0..4], .little);
 }
-fn float(bytes: []const u8, at: usize) f32 {
+inline fn float(bytes: []const u8, at: usize) f32 {
     return @bitCast(word(bytes, at));
 }
-fn put(bytes: []u8, at: usize, value: usize) void {
+inline fn put(bytes: []u8, at: usize, value: usize) void {
     std.mem.writeInt(u32, bytes[at..][0..4], std.math.cast(u32, value) orelse @panic("text run integer range"), .little);
 }
-fn setFloat(bytes: []u8, at: usize, value: f32) void {
+inline fn setFloat(bytes: []u8, at: usize, value: f32) void {
     std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(value), .little);
 }
 pub fn writeLine(bytes: []u8, line: types.TextLine) void {
@@ -107,7 +107,8 @@ pub fn resultValidFacts(request: []const u8, source_len: usize, facts_start: usi
     const advance_at: u64 = facts_start + @as(u64, glyph_count) * 32;
     const text_at: u64 = advance_at + @as(u64, text_len) * 4;
     if (text_at > source_len or word(request, 8) != text_at or word(request, 12) != source_len or text_at + text_len != source_len) return false;
-    for (result[376..512]) |byte| if (byte != 0) return false;
+    const reserved_zero = [_]u8{0} ** 136;
+    if (!std.mem.eql(u8, result[376..512], &reserved_zero)) return false;
     if (word(result, 296) > 1 or word(result, 300) > 1 or word(result, 356) > 1 or word(result, 364) > 1) return false;
     if (request[2] == 2 or request[2] == 3) if (!std.mem.eql(u8, request[320..384], result[320..384])) return false;
     if (result[3] == 2) {
