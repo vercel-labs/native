@@ -990,7 +990,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const path_geometry_plan = if (storage.path_geometries.len == 0)
                 canvas.RenderPathGeometryPlan{}
             else
-                try render_plan.pathGeometryPlan(storage.path_geometries);
+                try render_plan.pathGeometryPlanWithPolicy(storage.path_geometries, frame_options.render_cache_policy);
             const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
                 canvas.RenderPathGeometryCachePlan{}
             else
@@ -1004,7 +1004,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const image_plan = if (storage.images.len == 0)
                 canvas.RenderImagePlan{}
             else
-                try render_plan.imagePlanWithResources(frame_options.image_resources, storage.images);
+                try render_plan.imagePlanWithResourcesAndPolicy(frame_options.image_resources, storage.images, frame_options.render_cache_policy);
             const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
                 canvas.RenderImageCachePlan{}
             else
@@ -1018,7 +1018,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const layer_plan = if (storage.layers.len == 0)
                 canvas.RenderLayerPlan{}
             else
-                try render_plan.layerPlan(storage.layers);
+                try render_plan.layerPlanWithPolicy(storage.layers, frame_options.render_cache_policy);
             const layer_cache_plan = if (storage.layer_cache_entries.len == 0 and storage.layer_cache_actions.len == 0)
                 canvas.RenderLayerCachePlan{}
             else
@@ -1029,7 +1029,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     storage.layer_cache_entries,
                     storage.layer_cache_actions,
                 );
-            const resource_plan = try display_list.resourcePlan(storage.resources);
+            const resource_plan = try display_list.resourcePlanWithPolicy(storage.resources, frame_options.render_cache_policy);
             const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
                 cache_owner,
                 frame_options.previous_resource_cache,
@@ -1040,7 +1040,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const visual_effect_plan = if (storage.visual_effects.len == 0)
                 canvas.VisualEffectPlan{}
             else
-                try display_list.visualEffectPlan(storage.visual_effects);
+                try display_list.visualEffectPlanWithPolicy(storage.visual_effects, frame_options.render_cache_policy);
             const visual_effect_cache_plan = if (storage.visual_effect_cache_entries.len == 0 and storage.visual_effect_cache_actions.len == 0)
                 canvas.VisualEffectCachePlan{}
             else

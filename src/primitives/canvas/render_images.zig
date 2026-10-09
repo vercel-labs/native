@@ -115,6 +115,10 @@ pub const RenderImagePlanner = struct {
         self.len = 0;
     }
 
+    pub fn buildCompiled(self: *RenderImagePlanner, plan: anytype, policy: @import("render_resource_policy.zig").Policy) Error!RenderImagePlan {
+        return @import("render_resource_policy.zig").images(self, plan, policy);
+    }
+
     pub fn build(self: *RenderImagePlanner, render_plan: anytype) Error!RenderImagePlan {
         self.reset();
         for (render_plan.commands, 0..) |command, index| {

@@ -396,6 +396,12 @@ pub const RenderPlan = struct {
         return planner.build(self);
     }
 
+    pub fn pathGeometryPlanWithPolicy(self: RenderPlan, output: []RenderPathGeometry, policy: ?compiled_cache.Policy) Error!RenderPathGeometryPlan {
+        var planner = RenderPathGeometryPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
     pub fn imagePlan(self: RenderPlan, output: []RenderImage) Error!RenderImagePlan {
         return self.imagePlanWithResources(&.{}, output);
     }
@@ -403,6 +409,19 @@ pub const RenderPlan = struct {
     pub fn imagePlanWithResources(self: RenderPlan, image_resources: []const ReferenceImage, output: []RenderImage) Error!RenderImagePlan {
         var planner = RenderImagePlanner.init(output);
         planner.image_resources = image_resources;
+        return planner.build(self);
+    }
+
+    pub fn imagePlanWithResourcesAndPolicy(self: RenderPlan, image_resources: []const ReferenceImage, output: []RenderImage, policy: ?compiled_cache.Policy) Error!RenderImagePlan {
+        var planner = RenderImagePlanner.init(output);
+        planner.image_resources = image_resources;
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
+    pub fn layerPlanWithPolicy(self: RenderPlan, output: []RenderLayer, policy: ?compiled_cache.Policy) Error!RenderLayerPlan {
+        var planner = RenderLayerPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 

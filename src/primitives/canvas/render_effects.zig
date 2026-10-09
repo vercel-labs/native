@@ -85,6 +85,10 @@ pub const VisualEffectPlanner = struct {
         return .{ .effects = self.effects[0..self.len] };
     }
 
+    pub fn buildCompiled(self: *VisualEffectPlanner, list: anytype, policy: compiled_cache.Policy) Error!VisualEffectPlan {
+        return @import("vector_effect_policy.zig").effects(self, list, policy);
+    }
+
     fn consume(self: *VisualEffectPlanner, command: anytype, index: usize) Error!void {
         switch (command) {
             .shadow => |value| try self.append(.{

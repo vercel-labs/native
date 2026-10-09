@@ -74,6 +74,10 @@ pub const RenderResourcePlanner = struct {
         self.len = 0;
     }
 
+    pub fn buildCompiled(self: *RenderResourcePlanner, plan: anytype, policy: @import("render_resource_policy.zig").Policy) Error!RenderResourcePlan {
+        return @import("render_resource_policy.zig").resources(self, plan, policy);
+    }
+
     pub fn build(self: *RenderResourcePlanner, display_list: anytype) Error!RenderResourcePlan {
         self.reset();
         for (display_list.commands, 0..) |command, index| {

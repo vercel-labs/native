@@ -79,6 +79,10 @@ pub const RenderLayerPlanner = struct {
         self.len = 0;
     }
 
+    pub fn buildCompiled(self: *RenderLayerPlanner, plan: anytype, policy: @import("render_resource_policy.zig").Policy) Error!RenderLayerPlan {
+        return @import("render_resource_policy.zig").layers(self, plan, policy);
+    }
+
     pub fn build(self: *RenderLayerPlanner, render_plan: anytype) Error!RenderLayerPlan {
         self.reset();
         for (render_plan.commands, 0..) |command, index| {
