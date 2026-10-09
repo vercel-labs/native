@@ -741,13 +741,24 @@ export class SubsetChecker {
     if (!ts.isPropertyAccessExpression(node.parent) || node.parent.expression !== node) return false;
     let cur: ts.Node = node;
     while (cur.parent && !ts.isReturnStatement(cur.parent)) {
-      if (
-        ts.isFunctionDeclaration(cur.parent) ||
-        ts.isArrowFunction(cur.parent) ||
-        ts.isFunctionExpression(cur.parent)
-      ) {
-        return false;
+      if (ts.isArrowFunction(cur.parent)) {
+        // An array map consumed immediately by Cmd.batch cannot retain its
+        // callback or commands. Keep this exception local to the returned
+        // command expression; stored maps and arbitrary callbacks still fail.
+        const arrow = cur.parent;
+        const map = arrow.parent;
+        const batch = map.parent;
+        if (!tupleSlot || !ts.isCallExpression(map) || map.arguments.length !== 1 || map.arguments[0] !== arrow ||
+            !ts.isPropertyAccessExpression(map.expression) || map.expression.name.text !== "map" ||
+            !this.tast.isArrayLikeType(this.tast.typeOf(map.expression.expression)) ||
+            !ts.isCallExpression(batch) || batch.arguments.length !== 1 || batch.arguments[0] !== map ||
+            !ts.isPropertyAccessExpression(batch.expression) || batch.expression.name.text !== "batch" ||
+            !ts.isIdentifier(batch.expression.expression) || !this.cmdNames.has(batch.expression.expression.text) ||
+            !this.isSdkReference(batch.expression.expression)) return false;
+        cur = map;
+        continue;
       }
+      if (ts.isFunctionDeclaration(cur.parent) || ts.isFunctionExpression(cur.parent)) return false;
       cur = cur.parent;
     }
     const ret = cur.parent;

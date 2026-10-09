@@ -660,6 +660,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Optional mapping from shell command events (menus, shortcuts,
             /// native controls) into messages.
             on_command: ?*const fn (name: []const u8) ?MsgT = null,
+            /// A source window's label is input context, reduced before its event.
+            on_window_context: ?*const fn (model: *const ModelT, label: []const u8) ?MsgT = null,
             /// Optional mapping from app lifecycle events into messages.
             /// A single-window app can use activate/deactivate as its
             /// keyboard-focus signal for custom canvas chrome whose
@@ -1584,6 +1586,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// image registry, window verbs, and — while a session is being
         /// recorded — the recorder's result journal.
         fn bindEffectsChannel(self: *Self, runtime: *Runtime) void {
+            self.effects.defer_desktop_capabilities = true;
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
             if (runtime.options.record_store) |binding| {
@@ -1626,6 +1629,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .open_external_url_fn = effectsOpenExternalUrl,
                 .reveal_path_fn = effectsRevealPath,
                 .format_local_time_fn = effectsFormatLocalTime,
+                .execute_capability_fn = effectsExecuteCapability,
+                .replay_window_result_fn = effectsRestoreWindowResult,
             });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
@@ -1893,6 +1898,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .hover => self.drainHoverMsgs(runtime) catch |err| self.selectDispatchError(first, err),
                 else => @panic("unexpected dispatch tail action"),
             };
+            if (self.hover_msg_event_depth == 0 and !self.hover_msg_draining) self.effects.flushDesktopCapabilities();
             if (first.*) |err| return err;
         }
 
@@ -2223,6 +2229,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// window converges within the same rebuild instead of waiting
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
+            for (runtime.windows[0..runtime.window_count]) |window| {
+                if (window.info.id == window_id and !window.info.open) {
+                    // The app and secondary windows survive a closed primary
+                    // canvas. Continue declaration reconciliation without
+                    // installing a tree into the removed native surface.
+                    self.tree = null;
+                    self.main_tree_current = false;
+                    self.releaseContextMenuSnapshotForWindow(window_id);
+                    try self.refreshThemeState();
+                    self.applyStatusItem(runtime);
+                    self.applyWindows(runtime);
+                    return;
+                }
+            }
             self.syncModel(runtime, window_id);
             try self.refreshThemeState();
             if (comptime features.runtime_markup) {
@@ -4551,6 +4571,25 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn eventFn(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(context));
+            if (self.options.on_window_context) |map| {
+                const source_id: ?platform.WindowId = switch (event_value) {
+                    inline .command, .shortcut, .canvas_widget_pointer, .canvas_widget_keyboard,
+                    .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag,
+                    .canvas_widget_context_menu, .canvas_widget_context_menu_shown,
+                    .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request,
+                    .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize,
+                    .canvas_widget_change, .window_closed, .automation_provenance => |event| event.window_id,
+                    else => null,
+                };
+                if (source_id) |id| {
+                    var storage: [platform.max_windows]platform.WindowInfo = undefined;
+                    for (runtime.listWindows(&storage)) |window| {
+                        if (window.id != id) continue;
+                        if (map(&self.model, window.label)) |msg| self.applyMsg(msg);
+                        break;
+                    }
+                }
+            }
             self.hover_msg_event_depth += 1;
             defer self.hover_msg_event_depth -= 1;
             var first_error: ?anyerror = null;
@@ -4574,6 +4613,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .hover => self.drainHoverMsgs(runtime) catch |err| self.selectDispatchError(&first_error, err),
                 else => @panic("unexpected event tail action"),
             };
+            if (self.hover_msg_event_depth == 1) self.effects.flushDesktopCapabilities();
             if (first_error) |err| return err;
         }
 
@@ -4793,12 +4833,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         fn handleFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+            // A secondary surface can be the only surviving frame source.
+            try self.drainEffects(runtime);
+            for (runtime.windows[0..runtime.window_count]) |window| {
+                if (window.info.id == frame_event.window_id and !window.info.open) return;
+            }
             if (!std.mem.eql(u8, frame_event.label, self.options.canvas_label)) {
                 return self.handleWindowSlotFrame(runtime, frame_event);
             }
             // Host-pumped embeds deliver no `.wake`; drain pending effect
             // results with the frame tick so this frame presents them.
-            try self.drainEffects(runtime);
             self.canvas_window_id = frame_event.window_id;
             self.frame_timestamp_ns = frame_event.timestamp_ns;
             const scale = normalizedSurfaceScale(frame_event.scale_factor);
@@ -6780,3 +6824,50 @@ const ContextMenuPin = struct {
     window_id: ?platform.WindowId,
     arena_index: usize,
 };
+
+fn effectsRestoreWindowResult(context: *anyopaque, label: []const u8, closed: bool) void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    runtime.restoreWindowCapabilityResult(label, closed);
+}
+
+fn effectsExecuteCapability(context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const desktop_files = @import("desktop_files.zig");
+    var reader = try desktop_files.request(payload);
+    if (std.mem.eql(u8, name, "native-sdk.window.focusResult") or std.mem.eql(u8, name, "native-sdk.window.closeResult")) {
+        const label = try reader.field();
+        try reader.finish();
+        if (label.len == 0 or label.len > 255 or std.mem.indexOfScalar(u8, label, 0) != null) return error.InvalidRequest;
+        const window_id = effectsWindowIdByLabel(runtime, label) orelse
+            return output[0..try desktop_files.replyHeaderFor(output, payload, "WindowNotFound")];
+        if (std.mem.eql(u8, name, "native-sdk.window.focusResult")) {
+            runtime.focusWindow(window_id) catch |err| return output[0..try desktop_files.replyHeaderFor(output, payload, @errorName(err))];
+        } else {
+            runtime.closeWindow(window_id) catch |err| return output[0..try desktop_files.replyHeaderFor(output, payload, @errorName(err))];
+        }
+        return output[0..try desktop_files.replyHeaderFor(output, payload, "")];
+    }
+    if (std.mem.eql(u8, name, "native-sdk.dialog.openDirectory")) {
+        if (!security.hasPermission(runtime.options.security.permissions, security.permission_dialog)) return error.PermissionDenied;
+        const title = try reader.field();
+        const path = try reader.field();
+        try reader.finish();
+        if (title.len > 255 or path.len > desktop_files.max_path_bytes or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidRequest;
+        var storage: [platform.max_dialog_paths_bytes]u8 = undefined;
+        const result = runtime.showOpenDialog(.{ .title = title, .default_path = path, .allow_directories = true, .allow_multiple = false }, &storage) catch |err| {
+            return output[0..try desktop_files.replyHeaderFor(output, payload, @errorName(err))];
+        };
+        const selected = if (result.count == 0) "" else result.paths;
+        const header = try desktop_files.replyHeaderFor(output, payload, "");
+        if (selected.len > 65535 or output.len - header < 2 or selected.len > output.len - header - 2) return error.OverBound;
+        std.mem.writeInt(u16, output[header..][0..2], @intCast(selected.len), .little);
+        @memcpy(output[header + 2 ..][0..selected.len], selected);
+        return output[0 .. header + 2 + selected.len];
+    }
+    if (!security.hasPermission(runtime.options.security.permissions, security.permission_filesystem)) return error.PermissionDenied;
+    if (comptime builtin.os.tag == .macos or builtin.os.tag == .linux or builtin.os.tag == .windows) {
+        var threaded = std.Io.Threaded.init(runtime.owned_allocator, .{});
+        defer threaded.deinit();
+        return desktop_files.execute(threaded.io(), name, payload, output);
+    } else return error.Unsupported;
+}

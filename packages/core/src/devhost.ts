@@ -1719,8 +1719,17 @@ function performCmd(cmd: Cmdish): void {
       say(`cmd delay ${rearmed ? "re-arm" : "arm"} ${key} +${cmd.afterMs}ms -> ${cmd.msgKind}`);
       return;
     }
-    case "cancel": {
-      const key = cmd.key as string;
+    case "cancel":
+    case "cancel_key": {
+      // Named operations use byte identity in the native host. Decode only
+      // canonical UTF-8; malformed octets cannot name a virtual string key.
+      const raw = cmd.key;
+      const key = raw instanceof Uint8Array ? decoder.decode(raw) : raw as string;
+      const encoded = raw instanceof Uint8Array ? encoder.encode(key) : null;
+      if (encoded !== null && raw instanceof Uint8Array && (encoded.length !== raw.length || !encoded.every((byte, index) => byte === raw[index]))) {
+        say("cmd cancel_key (no matching virtual operation)");
+        return;
+      }
       if (cancelPendingStore(key)) {
         say(`cmd cancel ${key} (store result dropped)`);
       } else if (cancelPendingDb(key)) {
@@ -1838,8 +1847,10 @@ function performCmd(cmd: Cmdish): void {
       return;
     case "read_file_result":
     case "write_file_result":
+    case "read_file_result_key":
+    case "write_file_result_key":
       say(`cmd ${cmd.op} (rejected by the virtual host; native filesystem IO is required)`);
-      dispatch({ kind: cmd.resultKind, key: encoder.encode(cmd.key as string), operation: cmd.op === "read_file_result" ? "read" : "write", event: "terminal", outcome: "rejected", bytes: new Uint8Array(0), totalBytes: encoder.encode("0"), mtimeMs: encoder.encode("0"), exists: false, droppedBefore: 0 });
+      dispatch({ kind: cmd.resultKind, key: cmd.key instanceof Uint8Array ? cmd.key.slice() : encoder.encode(cmd.key as string), operation: cmd.op === "read_file_result" || cmd.op === "read_file_result_key" ? "read" : "write", event: "terminal", outcome: "rejected", bytes: new Uint8Array(0), totalBytes: encoder.encode("0"), mtimeMs: encoder.encode("0"), exists: false, droppedBefore: 0 });
       return;
     case "read_file":
     case "write_file":

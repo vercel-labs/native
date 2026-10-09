@@ -657,6 +657,24 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.ok(ids.includes("NS1017"), `got ${ids}`);
 });
 
+test("Cmd.batch consumes returned array maps without escaping commands", () => {
+  const returned = `return [model, Cmd.batch([1, 2].map(at => Cmd.batch([at > 0 ? Cmd.persist() : Cmd.none])))];`;
+  assert.deepEqual(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${returned} }
+`))), []);
+  for (const body of [
+    `const commands = [1, 2].map(at => Cmd.persist()); return [model, Cmd.batch(commands)];`,
+    `const make = () => Cmd.persist(); return [model, Cmd.batch([1, 2].map(make))];`,
+    `return [model, Cmd.batch([1, 2].filter(at => Cmd.persist()))];`,
+    `return [[1, 2].map(at => Cmd.persist())[0], Cmd.none];`,
+    `const consume = { map: (fn: (at: number) => Cmd<Msg>): Cmd<Msg>[] => [] }; return [model, Cmd.batch(consume.map(at => Cmd.persist()))];`,
+  ]) {
+    assert.ok(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${body} }
+`))).includes("NS1017"), body);
+  }
+});
+
 test("NS1017 Cmd built in a helper", () => {
   const ids = ruleIds(
     checkOnly(

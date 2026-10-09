@@ -642,7 +642,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     const textSource = node.name === "icon" ? node.attrs.get("name")! : node.text.trim();
     const rawText = byteText(textSource, node, scope);
     const props: string[] = [`kind: ${JSON.stringify(kinds[node.name])}`, `text: ${rawText === null ? text(textSource, node, scope) : '""'}`];
-    if (rawText !== null) props.push(`textBytes: ${rawText}`);
+    if (node.name === "icon" && (textSource.startsWith("{") || textSource.startsWith("app:"))) {
+      props[1] = 'text: ""';
+      props.push(rawText === null ? `icon: ${text(textSource, node, scope)}` : `iconBytes: ${rawText}`);
+    } else if (rawText !== null) props.push(`textBytes: ${rawText}`);
     if (reactions.length) {
       const pill = reactions[0]!;
       if (pill.children.length || !pill.text.trim()) fail(pill, "reactions requires a nonempty text run");
@@ -656,7 +659,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     }
     if (menus.length) {
       const menu = menus[0]!;
-      if (nonHitTargetNames.includes(node.name) && !["on-press", "on-toggle", "on-hold", "on-drag"].some(name => node.attrs.has(name))) fail(menu, "context-menu requires an interactive host");
+      if (nonHitTargetNames.includes(node.name) && !["on-press", "on-double-press", "on-toggle", "on-hold", "on-drag"].some(name => node.attrs.has(name))) fail(menu, "context-menu requires an interactive host");
       if (menu.attrs.size || menu.text.trim()) fail(menu, "context-menu accepts only item declarations");
       const menuId = next++, menuName = `nscvContext${menuId}`;
       output.push(`const ${menuName}: NscContextMenuItem[] = [];`);
@@ -743,12 +746,12 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     }
     if (node.name === "code") {
       const editable = node.attrs.get("editable") ?? "false", wrap = node.attrs.get("wrap") ?? "true";
-      for (const [name, value] of [["editable", editable], ["wrap", wrap]])
-        if (value !== "true" && value !== "false") fail(node, `code ${name} requires a literal boolean`);
+      const editableCode = bound(editable, "boolean", node, scope);
+      if (wrap !== "true" && wrap !== "false") fail(node, "code wrap requires a literal boolean");
       if (editable === "false" && node.attrs.has("on-input")) fail(node, "read-only code cannot declare on-input");
       if (editable !== "true" || wrap !== "false") {
         props[0] = 'kind: "code"';
-        props.push(`codeEditable: ${editable}`, `wrap: ${wrap}`);
+        props.push(`codeEditable: ${editableCode}`, `wrap: ${wrap}`);
       }
       if (!node.attrs.has("source") || node.text.trim()) fail(node, "code requires a source binding and no element text");
       const expr = binding(node.attrs.get("source")!, node, scope);
@@ -762,9 +765,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       props.push(`codeLanguage: ${JSON.stringify(canonical)}`);
       const attrs = ["source", "language", "editable", "line-numbers", "added-lines", "removed-lines", "wrap", "width", "height", "min-width", "grow", "label", "key", "global-key", "on-input"];
       for (const name of node.attrs.keys()) if (!attrs.includes(name)) fail(node, `unsupported compiled code attribute ${name}`);
+      if (node.attrs.has("on-input")) props.push(`input: (${editableCode}) ? ${event(node.attrs.get("on-input")!, "input", node, scope)} : undefined`);
     }
     for (const [name, value] of node.attrs) {
-      if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers", "added-lines", "removed-lines"].includes(name)) continue;
+      if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers", "added-lines", "removed-lines", "on-input"].includes(name)) continue;
       if (name === "gap" && node.name === "resizable") fail(node, "resizable is a stacking surface; put gap on a row or column inside");
       if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
       else if (name === "surface") {
@@ -891,7 +895,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         }
       }
       else if (["main", "cross", "size", "variant", "role", "background", "foreground", "border-color", "focus-ring", "accent", "accent-foreground", "radius"].includes(name)) {
-        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["list", "listitem", "tree", "treeitem"], background: colorTokenNames, foreground: colorTokenNames, "border-color": colorTokenNames, "focus-ring": colorTokenNames, accent: colorTokenNames, "accent-foreground": colorTokenNames, radius: ["sm", "md", "lg", "xl", "none"] };
+        const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["list", "listitem", "tree", "treeitem", "tab"], background: colorTokenNames, foreground: colorTokenNames, "border-color": colorTokenNames, "focus-ring": colorTokenNames, accent: colorTokenNames, "accent-foreground": colorTokenNames, radius: ["sm", "md", "lg", "xl", "none"] };
         if (name === "variant" && value.startsWith("{")) {
           const expr = binding(value, node, scope);
           const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
@@ -902,16 +906,16 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);
         if (name === "size" && (value === "heading" || value === "display") && node.name !== "text") fail(node, `${value} size requires text`);
         props.push(`${name === "border-color" ? "borderColor" : name === "focus-ring" ? "focusRing" : name === "accent-foreground" ? "accentForeground" : name}: ${JSON.stringify(value)}`);
-      } else if (["on-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-terminal", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
+      } else if (["on-press", "on-double-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-terminal", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
         if (channel === "change" && !treeRow && !["radio", "slider", "list-item"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
-        if (["input", "submit"].includes(channel) && !["input", "text-field", "search-field", "textarea", "combobox", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
+        if ((channel === "input" || channel === "submit" && !treeRow) && !["input", "text-field", "search-field", "textarea", "combobox", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (channel === "terminal" && node.name !== "terminal") fail(node, "on-terminal requires terminal");
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");
         if (channel === "change" && node.name === "slider" && contract.msg.arms.find(arm => arm.name === value)?.payload.kind !== "void") {
           props.push(`valueChange: ${event(value, "value", node, scope)}`);
-        } else props.push(`${channel === "hover-enter" ? "hoverEnter" : channel === "hover-leave" ? "hoverLeave" : channel}: ${event(value, channel, node, scope)}`);
+        } else props.push(`${channel === "double-press" ? "doublePress" : channel === "hover-enter" ? "hoverEnter" : channel === "hover-leave" ? "hoverLeave" : channel}: ${event(value, channel, node, scope)}`);
       } else fail(node, `unsupported attribute ${name}`);
     }
     const id = next++;

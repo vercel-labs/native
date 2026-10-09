@@ -155,6 +155,7 @@ const Record = struct {
     codeRemovedLines: ?[]const u8 = null,
     contextMenu: []const ContextMenuRecord = &.{},
     press: ?[]const u8 = null,
+    doublePress: ?[]const u8 = null,
     hold: ?[]const u8 = null,
     hoverEnter: ?[]const u8 = null,
     hoverLeave: ?[]const u8 = null,
@@ -292,7 +293,9 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
         ui.chart_content_policy = core.nativeWindowPolicy;
         ui.markdown_content_policy = core.nativeMarkdownPolicy;
     }
-    if (bytes.len > 1024 * 1024) return error.ViewTooLarge;
+    // Numeric JSON byte arrays need up to four transport bytes per source
+    // byte. Preserve the native retained-text budget at the decoder boundary.
+    if (bytes.len > 4 * 1024 * 1024) return error.ViewTooLarge;
     const tree = std.json.parseFromSliceLeaky(Tree, ui.arena, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return error.InvalidView,
@@ -363,7 +366,8 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.kind == .terminal and (value.text.len != 0 or value.textBytes != null)) return error.InvalidView;
     if (value.autofocus and !text_entry and value.kind != .terminal) return error.InvalidView;
     if (value.submitOnEnter and value.kind != .textarea) return error.InvalidView;
-    if ((value.input != null or value.submit != null) and !text_entry) return error.InvalidView;
+    if (value.input != null and !text_entry) return error.InvalidView;
+    if (value.submit != null and !text_entry and !tree_row) return error.InvalidView;
     if (value.placeholder.len != 0 and !text_entry and value.kind != .select) return error.InvalidView;
     if (value.wrap != null and value.kind != .text and value.kind != .code) return error.InvalidView;
     const legacy_paragraph = value.spanWeight != null or value.spanColor != null or value.spanScale != null;
@@ -397,7 +401,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
             paragraph or value.placeholder.len != 0 or value.submitOnEnter or value.submit != null or value.contextMenu.len != 0 or value.autofocus or
             value.disabled or value.selected or value.checked or value.padding != null or value.gap != 0 or value.maxWidth != 0 or
             value.role != .none or value.focusable or value.windowDrag or value.image != 0 or value.icon.len != 0 or value.command.len != 0 or
-            value.press != null or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or
+            value.press != null or value.doublePress != null or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or
             value.background != null or value.foreground != null or value.borderColor != null or value.focusRing != null or value.radius != null)
             return error.InvalidView;
     } else if (value.codeEditable != null or value.codeNumbered != null) return error.InvalidView;
@@ -481,7 +485,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         else => false,
     };
     if (value.quietHover and non_hit_target) return error.InvalidView;
-    if (value.contextMenu.len > 0 and non_hit_target and value.press == null and value.toggle == null and value.hold == null and value.drag == null) return error.InvalidView;
+    if (value.contextMenu.len > 0 and non_hit_target and value.press == null and value.doublePress == null and value.toggle == null and value.hold == null and value.drag == null) return error.InvalidView;
     const context_menu = try ui.arena.alloc(Ui.ContextMenuItem, value.contextMenu.len);
     for (value.contextMenu, context_menu) |raw_item, *slot| {
         var item = raw_item;
@@ -540,6 +544,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .expanded = value.expanded,
         .tree_level = value.treeLevel,
         .on_press = if (value.press) |bytes| try event(ui, bytes) else null,
+        .on_double_press = if (value.doublePress) |bytes| try event(ui, bytes) else null,
         .on_hold = if (value.hold) |bytes| try event(ui, bytes) else null,
         .on_hover_enter = if (value.hoverEnter) |bytes| try event(ui, bytes) else null,
         .on_hover_leave = if (value.hoverLeave) |bytes| try event(ui, bytes) else null,

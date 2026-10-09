@@ -133,6 +133,21 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             self.invalidated = true;
         }
 
+        /// Replay a successful native window capability without entering the
+        /// platform. The journal supplies the outcome; native retains view
+        /// ownership and applies the corresponding bookkeeping transition.
+        pub fn restoreWindowCapabilityResult(self: *Runtime, label: []const u8, closed: bool) void {
+            const index = Self.findWindowIndexByLabel(self, label) orelse return;
+            if (!self.windows[index].info.open) return;
+            self.windows[index].info.hidden = false;
+            if (closed) {
+                self.windows[index].info.open = false;
+                self.windows[index].info.focused = false;
+                Self.removeWindowRuntimeViews(self, self.windows[index].info.id);
+            } else Self.setFocusedIndex(self, index) catch return;
+            self.invalidated = true;
+        }
+
         /// The real OS minimize verb for a tracked window (app-drawn
         /// window controls on chromeless windows). No runtime
         /// bookkeeping moves: a minimized window stays open and keeps

@@ -663,6 +663,10 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 stamped.on_chrome = chromeMsgAdapter;
             }
+            if (comptime @hasDecl(Model, "windowContext")) {
+                if (options.on_window_context != null) @panic("TsUiApp owns windowContext wiring");
+                stamped.on_window_context = windowContextAdapter;
+            }
             return stamped;
         }
 
@@ -2046,12 +2050,21 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return core.dropMsg(arg);
         }
 
-        /// `Options.on_appearance` over the core's `appearanceMsg` arm
-        /// export: the appearance record — `colorScheme` (a declared
-        /// light/dark enum, matched by member name), `reduceMotion`,
-        /// `highContrast` — built by field NAME (emitted fields keep
-        /// their TS names), always dispatched (the channel exists so the
-        /// MODEL owns appearance state).
+        /// Reduce the core's source-window context before its input message.
+        fn windowContextAdapter(model: *const Model, label: []const u8) ?Msg {
+            const params = @typeInfo(@TypeOf(Model.windowContext)).@"fn".params;
+            const value = (if (comptime params.len == 3)
+                model.windowContext(label, core.rt.frameAllocator())
+            else
+                model.windowContext(label)) orelse return null;
+            // A dedicated subset union avoids exporting the whole dispatch
+            // union through a helper. Payloads retain their exact root shape.
+            switch (value) {
+                inline else => |payload, tag| return @unionInit(Msg, @tagName(tag), payload),
+            }
+        }
+
+        /// Map the complete host appearance record into the declared Msg arm.
         fn appearanceMsgAdapter(appearance: platform.Appearance) ?Msg {
             const arm_index = comptime channelArmIndex(core.appearanceMsg, "appearanceMsg");
             const arm = @typeInfo(Msg).@"union".fields[arm_index];

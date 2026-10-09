@@ -857,7 +857,12 @@ export class IntInference {
       }
     }
     if (ts.isConditionalExpression(expr)) {
-      this.contribute(expr.whenTrue, c);
+      // A positive, finite, safe range makes truncation whole, including
+      // the NaN/Infinity and negative-zero corners that unguarded Math
+      // calls must retain. Only this branch gains the proof; the fallback
+      // still contributes its own class normally.
+      if (this.positiveBoundedTruncation(expr.condition, expr.whenTrue)) c.intSource = true;
+      else this.contribute(expr.whenTrue, c);
       this.contribute(expr.whenFalse, c);
       return;
     }
@@ -907,7 +912,7 @@ export class IntInference {
             for (const arg of expr.arguments) this.contribute(arg, c);
             return;
           }
-          if (method === "round" || method === "sqrt") {
+          if (method === "round" || method === "sqrt" || method === "fround") {
             // Definitely-float sources: round/sqrt of NaN/Infinity is not an
             // integer (and sqrt is irrational off perfect squares), so these
             // live in f64 slots and an index use is a taught conflict. The
@@ -990,6 +995,42 @@ export class IntInference {
       return;
     }
     c.unknown = true;
+  }
+
+  private positiveBoundedTruncation(condition: ts.Expression, branch: ts.Expression): boolean {
+    const isTruncation = (node: ts.Expression): node is ts.CallExpression => {
+      if (!ts.isCallExpression(node) || node.arguments.length !== 1 ||
+          !ts.isPropertyAccessExpression(node.expression) ||
+          !ts.isIdentifier(node.expression.expression) || node.expression.expression.text !== "Math" ||
+          node.expression.name.text !== "trunc" || !ts.isIdentifier(node.arguments[0])) return false;
+      const math = this.tast.declarationOf(node.expression.expression);
+      return math === undefined || !this.fileSet.has(math.getSourceFile());
+    };
+    if (!isTruncation(branch)) return false;
+    const declaration = this.tast.declarationOf(branch.arguments[0]!);
+    if (!declaration) return false;
+    const sameValue = (node: ts.Expression): boolean => ts.isIdentifier(node) && this.tast.declarationOf(node) === declaration;
+    let positive = false, bounded = false;
+    const visit = (node: ts.Expression): boolean => {
+      if (ts.isParenthesizedExpression(node)) return visit(node.expression);
+      if (!ts.isBinaryExpression(node)) return false;
+      if (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return visit(node.left) && visit(node.right);
+      if (!sameValue(node.left)) return false;
+      // This optional whole-value check is pure. All other terms are refused:
+      // an intervening call or assignment could invalidate an earlier bound.
+      if (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+          isTruncation(node.right) && sameValue(node.right.arguments[0]!)) return true;
+      // Literal bounds require no execution and cannot hide a shadowed Math.
+      if (!ts.isNumericLiteral(node.right)) return false;
+      const bound = Number(node.right.text), op = node.operatorToken.kind;
+      if (!Number.isFinite(bound)) return false;
+      if (op === ts.SyntaxKind.GreaterThanToken && bound >= 0 ||
+          op === ts.SyntaxKind.GreaterThanEqualsToken && bound > 0) { positive = true; return true; }
+      if ((op === ts.SyntaxKind.LessThanToken || op === ts.SyntaxKind.LessThanEqualsToken) &&
+          bound > 0 && Number.isSafeInteger(bound)) { bounded = true; return true; }
+      return false;
+    };
+    return visit(condition) && positive && bounded;
   }
 
   private flowInto(target: ts.Node | undefined, expr: ts.Expression): void {

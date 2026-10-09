@@ -106,3 +106,37 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     assert.deepEqual(last, { fired: 16, rejected: 2 });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("virtual byte-key file commands retain complete terminals and cancellation uses exact bytes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-byte-key-devhost-"));
+  try {
+    const entry = path.join(dir, "core.ts"), script = path.join(dir, "script.ndjson");
+    fs.writeFileSync(entry, `
+import { Cmd, asciiBytes, type FileResultArm } from "@native-sdk/core";
+export interface Model { readonly fired: number; readonly last: FileResultArm | null; }
+export type Msg = { readonly kind: "arm" } | { readonly kind: "bad_cancel" } | { readonly kind: "good_cancel" } | { readonly kind: "tick" } | { readonly kind: "read" } | { readonly kind: "write" } | ({ readonly kind: "done" } & FileResultArm);
+export function initialModel(): Model { return { fired: 0, last: null }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "arm": return [model, Cmd.batch([Cmd.delay("�", 10, "tick"), Cmd.delay("slot", 10, "tick")])];
+    case "bad_cancel": return [model, Cmd.cancelKey(new Uint8Array([255]))];
+    case "good_cancel": return [model, Cmd.cancelKey(asciiBytes("slot"))];
+    case "tick": return { ...model, fired: model.fired + 1 };
+    case "read": return [model, Cmd.readFileResultKey(asciiBytes("read-key"), asciiBytes("notes.txt"), { result: "done" })];
+    case "write": return [model, Cmd.writeFileResultKey(asciiBytes("write-key"), asciiBytes("notes.txt"), asciiBytes("body"), { result: "done" })];
+    case "done": return { ...model, last: msg };
+  }
+}
+`);
+    fs.writeFileSync(script, '{"kind":"arm"}\n{"kind":"bad_cancel"}\n{"kind":"good_cancel"}\n{"advance":10}\n{"kind":"read"}\n{"kind":"write"}\n');
+    const run = spawnSync(process.execPath, [path.join(packageDir, "src/devhost.ts"), entry, "--script", script], { cwd: dir, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    const models = run.stdout.split("\n").filter(line => line.startsWith("model ")).map(line => JSON.parse(line.slice(6)));
+    assert.equal(models.at(-1).fired, 1);
+    for (const [key, operation] of [["read-key", "read"], ["write-key", "write"]]) {
+      const reply = models.find(model => model.last?.key?.$bytes === key)?.last;
+      assert.deepEqual(reply, { kind: "done", key: { $bytes: key }, operation, event: "terminal", outcome: "rejected", bytes: { $bytes: "" }, totalBytes: { $bytes: "0" }, mtimeMs: { $bytes: "0" }, exists: false, droppedBefore: 0 });
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

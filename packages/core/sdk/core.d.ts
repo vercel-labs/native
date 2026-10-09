@@ -534,6 +534,22 @@ export type Cmd<M extends Msgish> = {
     readonly op: "wall_time";
     readonly msgKind: string;
 } | {
+    readonly op: "read_file_result_key";
+    readonly replace: boolean;
+    readonly key: Uint8Array;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_result_key";
+    readonly replace: boolean;
+    readonly key: Uint8Array;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "cancel_key";
+    readonly key: Uint8Array;
+} | {
     readonly op: "read_file_result";
     readonly replace: boolean;
     readonly key: string;
@@ -546,6 +562,12 @@ export type Cmd<M extends Msgish> = {
     readonly resultKind: string;
     readonly path: Uint8Array;
     readonly bytes: Uint8Array;
+} | {
+    readonly op: "timer_result_exact";
+    readonly key: string;
+    readonly afterMs: Uint8Array;
+    readonly mode: "one_shot" | "repeating";
+    readonly msgKind: string;
 } | {
     readonly op: "timer_result";
     readonly key: string;
@@ -723,9 +745,13 @@ export declare const Cmd: {
     persist(): Cmd<never>;
     now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M>;
     wallTime<M extends Msgish>(msgKind: BytesKind<M>): Cmd<M>;
+    readFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    writeFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    cancelKey(key: Uint8Array): Cmd<never>;
     readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
     writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
     timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M>;
+    timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M>;
     host: typeof hostCmd;
     request<M extends Msgish>(name: string, payload: Uint8Array | HostRecord, route: RequestRoute<M>): Cmd<M>;
     serviceRequest<M extends Msgish, P>(name: string, payload: Uint8Array, route: ServiceRoute<M, P>): Cmd<M>;

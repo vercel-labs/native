@@ -387,6 +387,10 @@ pub const SystemServiceBinding = struct {
     open_external_url_fn: *const fn (context: *anyopaque, url: []const u8) anyerror!void,
     reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
     format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
+    execute_capability_fn: ?*const fn (context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 = null,
+    /// Restore only runtime window bookkeeping from a journaled successful
+    /// capability, without invoking native window focus or close services.
+    replay_window_result_fn: ?*const fn (context: *anyopaque, label: []const u8, closed: bool) void = null,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -4600,6 +4604,9 @@ pub fn Effects(comptime Msg: type) type {
             /// credential slots or letting an older set finish last.
             credentials_waiting: bool = false,
             credentials_sequence: u64 = 0,
+            // Desktop calls can enter AppKit or remove runtime views. UiApp
+            // executes them only after its current rebuild has settled.
+            desktop_waiting: bool = false,
             // ---- image-only fields (kind == .image) ----
             on_image: ?ImageMsgFn = null,
             /// The local source path (the URL rides `url_storage`, a
@@ -4973,6 +4980,8 @@ pub fn Effects(comptime Msg: type) type {
         fetch_start_rejections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         next_generation: u32 = 1,
         next_credentials_sequence: u64 = 1,
+        defer_desktop_capabilities: bool = false,
+        flushing_desktop_capabilities: bool = false,
         /// The channel family's OWN generation counter — u64 and
         /// monotonic for the process's lifetime, never the shared u32
         /// `next_generation` above: channel handles live on app-owned
@@ -9481,6 +9490,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_file = null;
             slot.on_clipboard = null;
             slot.on_host = options.on_result;
+            slot.desktop_waiting = false;
             slot.on_credentials = credentials_fn;
             slot.cancel_requested.store(false, .release);
             // `cancelled_generation` stays sticky, exactly as in `spawn`.
@@ -9519,6 +9529,10 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             }
             if (native_request) {
+                if (self.defer_desktop_capabilities and @import("desktop_files.zig").isName(slot.hostName())) {
+                    slot.desktop_waiting = true;
+                    return;
+                }
                 self.performNativeHostRequest(slot.hostName(), options.key, slot.fetchPayload());
                 return;
             }
@@ -9527,7 +9541,7 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn isNativeHostRequestName(name: []const u8) bool {
-            return std.mem.startsWith(u8, name, "core.store.") or
+            return @import("desktop_files.zig").isName(name) or std.mem.startsWith(u8, name, "core.store.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
                 std.mem.eql(u8, name, "native-sdk.time.formatLocal");
@@ -9558,7 +9572,68 @@ pub fn Effects(comptime Msg: type) type {
             }
         }
 
+        /// Execute a captured batch in issue order after the view transaction.
+        /// Slots own copied payloads; cancellation and replacement invalidate
+        /// captured generations. Calls queued by a nested native event belong
+        /// to the next batch, and fake/replay executors never reach the OS.
+        pub fn flushDesktopCapabilities(self: *Self) void {
+            if (self.executor == .fake or self.flushing_desktop_capabilities) return;
+            self.flushing_desktop_capabilities = true;
+            defer self.flushing_desktop_capabilities = false;
+            const Pending = struct { index: usize, generation: u32 };
+            var pending: [total_effect_slots]Pending = undefined;
+            var count: usize = 0;
+            const boundary = self.next_generation;
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.kind != .host or slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running) continue;
+                var at = count;
+                while (at > 0 and boundary -% pending[at - 1].generation < boundary -% slot.generation) : (at -= 1) {
+                    pending[at] = pending[at - 1];
+                }
+                pending[at] = .{ .index = index, .generation = slot.generation };
+                count += 1;
+            }
+            for (pending[0..count]) |entry| {
+                const slot = &self.slots[entry.index];
+                if (slot.generation != entry.generation or slot.kind != .host or slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running) continue;
+                slot.desktop_waiting = false;
+                self.performDesktopCapability(entry.index);
+            }
+        }
+
+        fn feedDesktopResult(self: *Self, index: usize, generation: u32, ok: bool, bytes: []const u8) void {
+            const slot = &self.slots[index];
+            if (slot.kind != .host or slot.generation != generation or slot.state.load(.acquire) != .running) return;
+            self.feedHostResult(slot.key, ok, bytes) catch {};
+        }
+
+        fn performDesktopCapability(self: *Self, index: usize) void {
+            const slot = &self.slots[index];
+            const generation = slot.generation;
+            const binding = self.system_services orelse return self.feedDesktopResult(index, generation, false, "unsupported");
+            const execute = binding.execute_capability_fn orelse return self.feedDesktopResult(index, generation, false, "unsupported");
+            // A modal native call can reenter the event loop and replace or
+            // cancel this slot. Keep its arguments alive independently and
+            // deliver only to the original occupancy when the call returns.
+            var name_storage: [max_effect_host_name_bytes]u8 = undefined;
+            const name = name_storage[0..slot.url_len];
+            @memcpy(name, slot.hostName());
+            const payload = self.allocator.dupe(u8, slot.fetchPayload()) catch return self.feedDesktopResult(index, generation, false, "unsupported");
+            defer self.allocator.free(payload);
+            const output = self.allocator.alloc(u8, max_effect_host_result_bytes) catch return self.feedDesktopResult(index, generation, false, "unsupported");
+            defer self.allocator.free(output);
+            const result = execute(binding.context, name, payload, output) catch |err| {
+                self.feedDesktopResult(index, generation, false, @errorName(err));
+                return;
+            };
+            self.feedDesktopResult(index, generation, true, result);
+        }
+
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            if (@import("desktop_files.zig").isName(name)) {
+                self.performDesktopCapability(self.findActiveSlot(key) orelse return);
+                return;
+            }
             if (std.mem.startsWith(u8, name, "core.store.")) {
                 self.performBoundStoreRequest(name, key, payload);
                 return;
@@ -9592,6 +9667,10 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn feedUnsupportedNativeRequest(self: *Self, key: u64) void {
+            self.feedHostResult(key, false, "unsupported") catch {};
         }
 
         fn performBoundStoreRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
@@ -13561,6 +13640,7 @@ pub fn Effects(comptime Msg: type) type {
                 delivered_ok = false;
                 delivered = "host result over budget";
             }
+            if (slot.fake and delivered_ok) self.restoreDesktopWindowResult(slot, delivered);
             @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
             slot.body_len = delivered.len;
             var entry: Entry = .{
@@ -13591,6 +13671,23 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             self.wakeHost();
+        }
+
+        fn restoreDesktopWindowResult(self: *Self, slot: *Slot, bytes: []const u8) void {
+            const closed = std.mem.eql(u8, slot.hostName(), "native-sdk.window.closeResult");
+            if (!closed and !std.mem.eql(u8, slot.hostName(), "native-sdk.window.focusResult")) return;
+            const binding = self.system_services orelse return;
+            const restore = binding.replay_window_result_fn orelse return;
+            const desktop = @import("desktop_files.zig");
+            var request = desktop.request(slot.fetchPayload()) catch return;
+            var reply = desktop.request(bytes) catch return;
+            if (request.at != reply.at or !std.mem.eql(u8, request.bytes[0..request.at], bytes[0..reply.at])) return;
+            const label = request.field() catch return;
+            request.finish() catch return;
+            const failure = reply.field() catch return;
+            reply.finish() catch return;
+            if (failure.len != 0 or label.len == 0 or label.len > 255 or std.mem.indexOfScalar(u8, label, 0) != null) return;
+            restore(binding.context, label, closed);
         }
 
         /// Replay one redacted credential result. A successful get receives a
@@ -14589,6 +14686,7 @@ pub fn Effects(comptime Msg: type) type {
                 slot.line_buffer = null;
             }
             if (slot.kind == .credentials) slot.credentials_waiting = false;
+            slot.desktop_waiting = false;
             slot.state.store(.idle, .release);
         }
 

@@ -168,6 +168,16 @@ export interface FrameEvent {
     readonly height: number;
     readonly timestampMs: number;
     readonly intervalMs: number;
+    readonly timestampNs: Uint8Array;
+    readonly intervalNs: Uint8Array;
+}
+export type LayoutTweenEasing = "linear" | "standard" | "emphasized" | "spring";
+export interface LayoutTween {
+    readonly label: Uint8Array | null;
+    readonly index: number;
+    readonly to: number;
+    readonly durationMs: number;
+    readonly easing: LayoutTweenEasing;
 }
 export interface KeyEvent {
     readonly key: string;

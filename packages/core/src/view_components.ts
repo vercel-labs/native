@@ -34,7 +34,7 @@ type NscViewNode = {
   chartYMin?: number; chartYMax?: number; chartGridLines?: number; chartBaseline?: boolean;
   chartYLabels?: boolean; chartHoverDetails?: boolean; chartStrokeWidth?: number;
   contextMenu?: readonly NscContextMenuItem[];
-  press?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
+  press?: number[]; doublePress?: number[]; hold?: number[]; toggle?: number[]; change?: number[]; drag?: number[]; scroll?: number;
   input?: number; valueChange?: number; resize?: number; submit?: number[]; dismiss?: number[];
   hoverEnter?: number[]; hoverLeave?: number[]; reachEnd?: number[]; reachStart?: number[];
   anchor?: string; anchorAlignment?: string; anchorOffset?: number; tooltipDelay?: number;

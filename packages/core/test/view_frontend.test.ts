@@ -58,19 +58,41 @@ const evaluate = (markup: string) => {
   return { model, view: () => decodedView(exports.native_view!()), wire: () => JSON.parse(new TextDecoder().decode(exports.native_view!())) };
 };
 
+test("compiled explorer rows retain rename submission and independent double presses", () => {
+  for (const element of ["column", "row", "panel", "list-item"]) {
+    const { view } = evaluate(`<${element} role="treeitem" label="File" on-press="increment" on-double-press="reset" on-submit="decrement"/>`);
+    assert.deepEqual(view().nodes[0].press, [1, 3]);
+    assert.deepEqual(view().nodes[0].doublePress, [1, 5]);
+    assert.deepEqual(view().nodes[0].submit, [1, 4]);
+    assert.throws(() => compileView(`<${element} on-submit="decrement"/>`, contract), /on-submit is unsupported/);
+    assert.throws(() => compileView(`<${element} role="treeitem" on-input="loaded"/>`, contract), /on-input is unsupported/);
+  }
+  const { view } = evaluate('<stack role="tab" label="File" on-double-press="reset"><context-menu><menu-item on-press="increment">Pin</menu-item></context-menu></stack>');
+  assert.equal(view().nodes[0].role, "tab");
+  assert.deepEqual(view().nodes[0].doublePress, [1, 5]);
+  assert.deepEqual(view().nodes[0].contextMenu[0].press, [1, 3]);
+  assert.throws(() => compileView('<stack role="tab" on-submit="reset"/>', contract), /on-submit is unsupported/);
+});
+
 test("compiled views retain byte-valued standalone and inline icon names", () => {
   const value = evaluate('<column><icon name="{status}"/><button icon="{status}" on-press="increment">Play</button></column>');
   value.model.status = new TextEncoder().encode("app:wave");
   const first = value.wire().nodes;
-  assert.deepEqual(first[1].textBytes, [97, 112, 112, 58, 119, 97, 118, 101]);
-  assert.deepEqual(first[2].iconBytes, first[1].textBytes);
+  assert.equal(first[1].text, "");
+  assert.deepEqual(first[1].iconBytes, [97, 112, 112, 58, 119, 97, 118, 101]);
+  assert.deepEqual(first[2].iconBytes, first[1].iconBytes);
   assert.equal(value.view().nodes[2].icon, "app:wave");
   value.model.status = new Uint8Array([112, 0, 255]);
   const second = value.wire().nodes;
-  assert.deepEqual(second[1].textBytes, [112, 0, 255]);
+  assert.deepEqual(second[1].iconBytes, [112, 0, 255]);
   assert.deepEqual(second[2].iconBytes, [112, 0, 255]);
   assert.deepEqual(first[2].iconBytes, [97, 112, 112, 58, 119, 97, 118, 101]);
   assert.throws(() => compileView('<icon name="{count}"/>', contract), /requires text/);
+  const literals = evaluate('<row><icon name="file-text"/><icon name="app:wave"/></row>').wire().nodes;
+  assert.equal(literals[1].text, "file-text");
+  assert.equal(literals[1].icon, undefined);
+  assert.equal(literals[2].text, "");
+  assert.equal(literals[2].icon, "app:wave");
   assert.throws(() => compileView('<button icon="{count}"/>', contract), /requires text/);
 });
 
@@ -294,7 +316,7 @@ test("editable no-wrap code lowers to owned textarea metadata and bounded line n
   model.ticking = false; model.status = new TextEncoder().encode("x");
   assert.equal(view().nodes[0].codeLineDigits, 0);
   for (const markup of [
-    '<code source="{status}" editable="{ticking}" wrap="false"/>',
+    '<code source="{status}" editable="{count}" wrap="false"/>',
     '<code source="{status}" wrap="{ticking}"/>',
     '<code source="{count}" editable="true" wrap="false"/>',
     '<code source="{status}" language="unknown" editable="true" wrap="false"/>',
@@ -629,6 +651,25 @@ test("scalar and byte event payloads bind the authored Msg member", () => {
 });
 
 const feedContract: ViewContract = JSON.parse(checkFile(new URL("../../../examples/service-feed-reader/src/core.ts", import.meta.url).pathname, { contractEntry: "core_facade.ts" }).contract!);
+
+test("compiled code editable bindings toggle input ownership with exact source bytes", () => {
+  const inputContract: ViewContract = { ...feedContract, types: { ...feedContract.types, structs: feedContract.types.structs.map(record => record.name === feedContract.model ? { ...record, fields: [...record.fields, { name: "editable", type: { kind: "bool" } as const }] } : record) } };
+  const generated = compileView('<code source="{url}" editable="{editable}" wrap="false" on-input="url_edit"/>', inputContract);
+  const exports: { native_view?: () => Uint8Array } = {};
+  const model = { url: new Uint8Array([0, 255, 10, 195, 169]), editable: true };
+  runInNewContext(ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, nscfCommitted: model });
+  const node = () => JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes[0];
+  assert.equal(node().codeEditable, true);
+  assert.equal(node().input, inputContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
+  assert.deepEqual(node().textBytes, [...model.url]);
+  model.editable = false;
+  assert.equal(node().codeEditable, false);
+  assert.equal(node().input, undefined);
+  assert.deepEqual(node().textBytes, [...model.url]);
+  model.editable = true;
+  assert.equal(node().input, inputContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
+});
+
 const feedMarkup = readFileSync(new URL("../../../examples/service-feed-reader/src/app.native", import.meta.url), "utf8");
 
 test("the complete feed view uses native input constructors and committed service records", () => {

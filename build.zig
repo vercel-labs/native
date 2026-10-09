@@ -1378,6 +1378,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
         ts_core_e2e_step.dependOn(&split_collapse_run.step);
         test_step.dependOn(&split_collapse_run.step);
+        const code_editor_run = b.addRunArtifact(ts_core_artifacts.code_editor);
+        b.step("test-ts-code-editor-e2e", "Compare compiled Code Editor with complete native behavior").dependOn(&code_editor_run.step);
+        ts_core_e2e_step.dependOn(&code_editor_run.step);
+        test_step.dependOn(&code_editor_run.step);
         const markdown_viewer_run = b.addRunArtifact(ts_core_artifacts.markdown_viewer);
         b.step("test-ts-markdown-viewer-e2e", "Compare compiled Markdown Viewer with complete native behavior").dependOn(&markdown_viewer_run.step);
         ts_core_e2e_step.dependOn(&markdown_viewer_run.step);
@@ -4237,6 +4241,7 @@ const TsCoreE2eArtifacts = struct {
     inbox: *std.Build.Step.Compile,
     effects_probe: *std.Build.Step.Compile,
     notes: *std.Build.Step.Compile,
+    code_editor: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
     split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
@@ -4578,6 +4583,28 @@ fn tsCoreE2eArtifact(
     split_decoder.addImport("native_sdk", desktop_mod);
     split_decoder.addImport("core.zig", split_fixture.module);
     split_mod.addImport("split_decoder", split_decoder);
+
+    const code_editor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/code-editor/src/core.ts",
+        .src_dir = b.path("examples/code-editor/src"),
+        .name = "code_editor_core",
+        .typescript_view = true,
+        .window_views = &.{ "code-editor-2", "code-editor-3", "code-editor-4", "code-editor-5" },
+    });
+    const code_editor_stage = b.addWriteFiles();
+    const code_editor_root = code_editor_stage.addCopyFile(b.path("tests/ts-core/code_editor_e2e_tests.zig"), "code_editor_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "code-editor.native" }) |file|
+        _ = code_editor_stage.addCopyFile(b.path("tests/ts-core/code-editor-reference/" ++ file), "code-editor-reference/" ++ file);
+    _ = code_editor_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = code_editor_stage.addCopyFile(b.path("src/runtime/desktop_files.zig"), "desktop_files.zig");
+    const code_editor_mod = b.createModule(.{ .root_source_file = code_editor_root, .target = target, .optimize = optimize });
+    code_editor_mod.addImport("native_sdk", desktop_mod);
+    code_editor_mod.addImport("code_editor_core", code_editor_fixture.module);
+    code_editor_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+    const code_editor_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    code_editor_decoder.addImport("native_sdk", desktop_mod);
+    code_editor_decoder.addImport("core.zig", code_editor_fixture.module);
+    code_editor_mod.addImport("code_editor_decoder", code_editor_decoder);
 
     const markdown_viewer_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/markdown-viewer/src/core.ts",
@@ -5102,6 +5129,7 @@ fn tsCoreE2eArtifact(
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
+        .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),
         .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
         .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
         .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
