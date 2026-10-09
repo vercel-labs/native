@@ -1245,6 +1245,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/text_run_layout.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/text_query_layout.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/text_span_queries.ts"));
+    stage_run.addFileInput(dep.path("packages/core/src/text_measurement_cache.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_motion.ts"));

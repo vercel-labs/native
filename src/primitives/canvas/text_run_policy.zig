@@ -224,7 +224,7 @@ pub fn supplyCapability(packet: []u8, header: []u8, facts_start: usize, text: ty
         2 => setFloat(header, 116, metrics.estimateTextAdvanceForBytes(text.font_id, text.text[start..end], text.size)),
         3, 4 => {
             const provider = if (kind == 3) options.measure else draw_measure;
-            const advances = if (provider) |p| if (kind == 3) cache.textRunAdvances(p, text.font_id, text.size, text.text) else cache.cachedTextRunAdvances(p, text.font_id, text.size, text.text) else null;
+            const advances = if (provider) |p| if (kind == 3) cache.textRunAdvancesWithPolicy(p, options.text_run_policy, text.font_id, text.size, text.text) else cache.cachedTextRunAdvancesWithPolicy(p, options.text_run_policy, text.font_id, text.size, text.text) else null;
             put(header, 120, @intFromBool(advances != null));
             if (advances) |values| for (values, 0..) |value, n| setFloat(packet, advance_at + n * 4, value);
         },

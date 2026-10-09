@@ -28,6 +28,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const token_model = @import("tokens.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
+const measured_cache_policy = @import("text_measurement_policy.zig");
 const text_metrics = @import("text_metrics.zig");
 const text_interaction = @import("text_interaction.zig");
 const query_policy = @import("text_span_query_policy.zig");
@@ -266,7 +267,7 @@ pub fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLay
     if (start < base) return null;
     const offset = start - base;
     if (offset + slice.len > span.text.len) return null;
-    const advances = text_measure_cache.textRunAdvances(provider, font_id, size, span.text) orelse return null;
+    const advances = text_measure_cache.textRunAdvancesWithPolicy(provider, options.paragraph_policy, font_id, size, span.text) orelse return null;
     return advances[offset..][0..slice.len];
 }
 
@@ -747,14 +748,16 @@ const LayoutState = struct {
 /// straight to the uncached breaker — that path stays byte-identical
 /// to the pre-cache behavior (goldens, signatures, reference renders).
 pub fn layoutTextSpans(spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) TextSpanLayout {
-    if (options.measure != null and runs_storage.len >= max_text_span_runs_per_paragraph) {
+    const retained = if (options.paragraph_policy) |owner| measured_cache_policy.admission(owner, 3, @intFromBool(options.measure != null), 0, runs_storage.len).kind == 6 else options.measure != null and runs_storage.len >= max_text_span_runs_per_paragraph;
+    if (retained) {
+        if (options.measure == null or runs_storage.len < max_text_span_runs_per_paragraph) @panic("invalid measured paragraph admission");
         const cache = span_wrap_cache.get();
         const key = spanWrapKey(spans, options);
-        if (findSpanWrapEntry(cache, key)) |entry_index| {
+        if (if (options.paragraph_policy) |owner| findSpanWrapEntryCompiled(cache, key, owner) else findSpanWrapEntry(cache, key)) |entry_index| {
             if (rebaseSpanWrapEntry(cache, entry_index, spans, options, runs_storage)) |layout| return layout;
         }
         const layout = layoutTextSpansUncached(spans, options, 0, runs_storage);
-        storeSpanWrapEntry(cache, key, spans, layout);
+        if (options.paragraph_policy) |owner| storeSpanWrapEntryCompiled(cache, key, spans, layout, owner) else storeSpanWrapEntry(cache, key, spans, layout);
         return layout;
     }
     return layoutTextSpansUncached(spans, options, 0, runs_storage);
@@ -1021,6 +1024,34 @@ fn findSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey) ?usize {
     return null;
 }
 
+fn wrapDecision(cache: *SpanWrapCache, key: SpanWrapKey, policy: measured_cache_policy.Policy, store: bool, run_count: usize, valid_offsets: bool) measured_cache_policy.Decision {
+    var request: [measured_cache_policy.facts_at + span_wrap_cache_capacity * measured_cache_policy.fact_bytes]u8 = undefined;
+    measured_cache_policy.header(&request, if (store) 5 else 4, @intFromBool(valid_offsets), span_wrap_cache_capacity, run_count, 0);
+    measured_cache_policy.key(request[32..], key);
+    for (cache.entries, 0..) |entry, i| measured_cache_policy.fact(request[measured_cache_policy.facts_at + i * measured_cache_policy.fact_bytes ..], entry.key, entry.last_used);
+    const decision = measured_cache_policy.execute(policy, &request);
+    if (decision.flags & 1 != 0) cache.use_tick += 1;
+    if (decision.flags & 2 != 0) cache.hit_count += 1;
+    if (decision.flags & 8 != 0) cache.miss_count += 1;
+    return decision;
+}
+fn findSpanWrapEntryCompiled(cache: *SpanWrapCache, key: SpanWrapKey, policy: measured_cache_policy.Policy) ?usize {
+    const decision = wrapDecision(cache, key, policy, false, 0, false);
+    if (decision.slot) |slot| cache.entries[slot].last_used = cache.use_tick;
+    return decision.slot;
+}
+fn storeSpanWrapEntryCompiled(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout, policy: measured_cache_policy.Policy) void {
+    var valid_offsets = true;
+    for (layout.runs) |run| if (spanRunOffset(spans, run) == null) {
+        valid_offsets = false;
+        break;
+    };
+    const decision = wrapDecision(cache, key, policy, true, layout.runs.len, valid_offsets);
+    const victim = decision.slot orelse return;
+    if (layout.runs.len > max_text_span_runs_per_paragraph or !valid_offsets) @panic("invalid measured paragraph store admission");
+    copySpanWrapEntry(cache, victim, key, spans, layout);
+}
+
 fn storeSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
     if (layout.runs.len > max_text_span_runs_per_paragraph) return;
     // Offsets require every run to alias its span's bytes; the breaker
@@ -1040,6 +1071,9 @@ fn storeSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const Te
         }
     }
     cache.use_tick += 1;
+    copySpanWrapEntry(cache, victim, key, spans, layout);
+}
+fn copySpanWrapEntry(cache: *SpanWrapCache, victim: usize, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
     for (layout.runs, 0..) |run, run_index| {
         const offset = spanRunOffset(spans, run).?;
         cache.runs[victim][run_index] = .{
@@ -1082,6 +1116,21 @@ fn spanRunOffset(spans: []const TextSpan, run: TextSpanRun) ?usize {
 /// serving mismatched geometry.
 fn rebaseSpanWrapEntry(cache: *SpanWrapCache, entry_index: usize, spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) ?TextSpanLayout {
     const entry = &cache.entries[entry_index];
+    if (options.paragraph_policy) |owner| {
+        if (entry.run_len > max_text_span_runs_per_paragraph) @panic("measured paragraph run storage overflow");
+        var bytes: [32 + max_text_spans_per_paragraph * 4 + max_text_span_runs_per_paragraph * 12]u8 = undefined;
+        const count = @min(spans.len, max_text_spans_per_paragraph);
+        const request = bytes[0 .. 32 + count * 4 + entry.run_len * 12];
+        measured_cache_policy.header(request, 7, 0, entry.run_len, count, 0);
+        for (spans[0..count], 0..) |span, i| measured_cache_policy.put(request, 32 + i * 4, span.text.len);
+        for (cache.runs[entry_index][0..entry.run_len], 0..) |run, i| {
+            const at = 32 + count * 4 + i * 12;
+            measured_cache_policy.put(request, at, run.span_index);
+            measured_cache_policy.put(request, at + 4, run.text_start);
+            measured_cache_policy.put(request, at + 8, run.text_len);
+        }
+        if (measured_cache_policy.execute(owner, request).kind != 5) return null;
+    }
     for (cache.runs[entry_index][0..entry.run_len]) |cached| {
         if (cached.span_index >= spans.len) return null;
         if (cached.text_start + cached.text_len > spans[cached.span_index].text.len) return null;

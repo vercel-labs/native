@@ -17,6 +17,7 @@ test {
     _ = @import("paragraph_layout_e2e_tests.zig");
     _ = @import("text_run_layout_e2e_tests.zig");
     _ = @import("text_span_query_e2e_tests.zig");
+    _ = @import("text_measurement_cache_e2e_tests.zig");
 }
 fn owned(tokens: c.DesignTokens) c.DesignTokens {
     var t = tokens;

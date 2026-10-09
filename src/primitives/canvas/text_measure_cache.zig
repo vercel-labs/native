@@ -51,6 +51,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const canvas = @import("root.zig");
+const compiled = @import("text_measurement_policy.zig");
 const text_metrics = @import("text_metrics.zig");
 
 const FontId = canvas.FontId;
@@ -247,6 +248,51 @@ pub fn textRunAdvances(provider: *const TextMeasureProvider, font_id: FontId, si
     if (!advancesValid(cache.storage[victim][0..text.len])) return null;
     cache.entries[victim] = .{ .key = key, .last_used = cache.use_tick };
     return cache.storage[victim][0..text.len];
+}
+
+/// The compiled owner decides admission, exact lookup, LRU, fetch accounting
+/// and batch acceptance. This adapter applies those decisions to native storage.
+pub fn textRunAdvancesWithPolicy(provider: *const TextMeasureProvider, policy: ?compiled.Policy, font_id: FontId, size: f32, text: []const u8) ?[]const f32 {
+    const owner = policy orelse return textRunAdvances(provider, font_id, size, text);
+    return compiledAdvances(provider, owner, font_id, size, text, true);
+}
+pub fn cachedTextRunAdvancesWithPolicy(provider: *const TextMeasureProvider, policy: ?compiled.Policy, font_id: FontId, size: f32, text: []const u8) ?[]const f32 {
+    const owner = policy orelse return cachedTextRunAdvances(provider, font_id, size, text);
+    return compiledAdvances(provider, owner, font_id, size, text, false);
+}
+fn compiledAdvances(provider: *const TextMeasureProvider, policy: compiled.Policy, font_id: FontId, size: f32, text: []const u8, fetch: bool) ?[]const f32 {
+    const flags: u8 = @as(u8, @intFromBool(provider.measure_advances_fn != null)) | (if (advance_cache.peek() != null) @as(u8, 2) else 0) | (if (fetch) @as(u8, 4) else 0);
+    const admitted = compiled.admission(policy, 0, flags, text.len, 0);
+    if (admitted.kind == 1) return &.{};
+    if (admitted.kind != 6) return null;
+    // Structural safety guards protect buffers independently of the policy.
+    if (provider.measure_advances_fn == null or text.len == 0 or text.len > max_batched_advance_run_bytes) @panic("invalid measured text admission");
+    const cache = if (fetch) advance_cache.get() else advance_cache.peek() orelse @panic("invalid measured text peek admission");
+    const current = advanceKeyFor(provider, font_id, size, text);
+    const oversize = text.len > max_cached_advance_run_bytes;
+    const count: usize = if (oversize) advance_cache_capacity + 1 else advance_cache_capacity;
+    var storage: [compiled.fact_packet_bytes]u8 = undefined;
+    const request = storage[0 .. compiled.facts_at + count * compiled.fact_bytes];
+    compiled.header(request, if (fetch) 1 else 2, 0, count, text.len, 0);
+    compiled.key(request[32..], current);
+    for (cache.entries, 0..) |entry, i| compiled.fact(request[compiled.facts_at + i * compiled.fact_bytes ..], entry.key, entry.last_used);
+    if (oversize) compiled.fact(request[compiled.facts_at + advance_cache_capacity * compiled.fact_bytes ..], cache.oversize_key, 0);
+    const decision = compiled.execute(policy, request);
+    if (decision.flags & 1 != 0) cache.use_tick += 1;
+    if (decision.flags & 2 != 0) cache.hit_count += 1;
+    if (decision.flags & 4 != 0) cache.fetch_count += 1;
+    const slot = decision.slot orelse return null;
+    if ((oversize and slot != advance_cache_capacity) or (!oversize and slot >= advance_cache_capacity)) @panic("invalid measured text storage family");
+    const values = if (oversize) cache.oversize_storage[0..text.len] else cache.storage[slot][0..text.len];
+    if (decision.kind == 2) {
+        if (!oversize) cache.entries[slot].last_used = cache.use_tick;
+        return values;
+    }
+    if (oversize) cache.oversize_key = .{} else cache.entries[slot].key = .{};
+    if (!provider.measureAdvances(font_id, size, text, values)) return null;
+    if (!compiled.batchValid(policy, values)) return null;
+    if (oversize) cache.oversize_key = current else cache.entries[slot] = .{ .key = current, .last_used = cache.use_tick };
+    return values;
 }
 
 /// Peek: the run's advances IF already retained (or sitting in the

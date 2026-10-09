@@ -249,7 +249,7 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
         if (codeContentWidthCacheCurrent(widget, font_id, text_size))
             widget.code_content_width
         else
-            widestLogicalLineWidth(options.measure, font_id, widget.text, text_size)
+            widestLogicalLineWidth(options.measure, options.text_run_policy, font_id, widget.text, text_size)
     else
         measureTextWidthForFont(options.measure, font_id, widgetTextInputPresentedText(widget), text_size);
     return @max(0, text_width + text_input_caret_reserve - viewport.width);
@@ -529,7 +529,7 @@ pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens
     const text_size = widgetTextInputSize(widget.*, tokens);
     const font_id = widgetTextInputFontId(widget.*, tokens);
     if (codeContentWidthCacheCurrent(widget.*, font_id, text_size)) return;
-    widget.code_content_width = widestLogicalLineWidth(tokens.text_measure, font_id, widget.text, text_size);
+    widget.code_content_width = widestLogicalLineWidth(tokens.text_measure, tokens.text_run_policy, font_id, widget.text, text_size);
     widget.code_content_width_generation = text_measure_cache.textMeasureGeneration();
     widget.code_content_width_font_id = font_id;
     widget.code_content_width_size_bits = @bitCast(text_size);
@@ -537,12 +537,13 @@ pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens
 
 fn widestLogicalLineWidth(
     measure: ?*const text_model.TextMeasureProvider,
+    cache_policy: ?*const fn ([]const u8, []u8) usize,
     font_id: FontId,
     text: []const u8,
     text_size: f32,
 ) f32 {
     if (measure) |provider| {
-        if (widestLogicalLineWidthBatched(provider, font_id, text, text_size)) |width| return width;
+        if (widestLogicalLineWidthBatched(provider, cache_policy, font_id, text, text_size)) |width| return width;
     }
 
     var widest: f32 = 0;
@@ -562,6 +563,7 @@ fn widestLogicalLineWidth(
 /// the common 10,000-line document takes only a handful of batched calls.
 fn widestLogicalLineWidthBatched(
     provider: *const text_model.TextMeasureProvider,
+    cache_policy: ?*const fn ([]const u8, []u8) usize,
     font_id: FontId,
     text: []const u8,
     text_size: f32,
@@ -593,7 +595,7 @@ fn widestLogicalLineWidthBatched(
         }
 
         const chunk = text[chunk_start..chunk_end];
-        const advances = text_measure_cache.textRunAdvances(provider, font_id, text_size, chunk) orelse return null;
+        const advances = text_measure_cache.textRunAdvancesWithPolicy(provider, cache_policy, font_id, text_size, chunk) orelse return null;
         var line_start: usize = 0;
         for (chunk, 0..) |byte, index| {
             if (byte != '\n') continue;
