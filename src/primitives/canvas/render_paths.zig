@@ -89,6 +89,10 @@ pub const RenderPathGeometryPlanner = struct {
         return .{ .geometries = self.geometries[0..self.len] };
     }
 
+    pub fn buildCompiled(self: *RenderPathGeometryPlanner, plan: anytype, policy: compiled_cache.Policy) Error!RenderPathGeometryPlan {
+        return @import("vector_effect_policy.zig").paths(self, plan, policy);
+    }
+
     fn consume(self: *RenderPathGeometryPlanner, command: anytype, index: usize) Error!void {
         switch (command.command) {
             .fill_path => |value| try self.consumePath(.fill, command, index, value.elements, 0),

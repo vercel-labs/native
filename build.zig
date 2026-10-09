@@ -1306,6 +1306,8 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/text_document_width.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/scalar_text.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/glyph_atlas.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/registered_font.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/vector_effects.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -1335,6 +1337,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-text-measurement-cache", "Compare measured advance and retained paragraph cache decisions and complete outputs").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-measurement-cache-tests", &.{ "compiled widget metric measured cache", "measured text copied transport" })).step);
         b.step("test-ts-text-document-width", "Compare compiled document width planning, retained cache decisions and font call traces").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-document-width-tests", &.{ "compiled document width", "document width copied transport" })).step);
         b.step("test-ts-scalar-text", "Compare compiled scalar text fallback, exact arithmetic and font capability traces").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-scalar-text-tests", &.{ "compiled scalar text", "scalar text copied transport" })).step);
+        b.step("test-ts-registered-font", "Compare compiled registered font widths, byte advances and ink bounds").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-registered-font-tests", &.{ "compiled registered font" })).step);
         b.step("test-ts-text-span-queries", "Compare rich-text clipping, point mapping and complete paged selection").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-span-query-tests", &.{ "compiled span query", "span query copied transport" })).step);
         b.step("test-ts-text-run-layout", "Compare compiled ordinary text lines, elision and caret geometry").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-run-layout-tests", &.{ "compiled text runs", "compiled text bounds", "text run copied transport", "portable text planner context" })).step);
         b.step("test-ts-widget-metrics", "Compare complete compiled widget metrics and leaf dimensions with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_metrics).step);
@@ -1452,6 +1455,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&typography_run.step);
         const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
         b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
+        b.step("test-ts-vector-derivation", "Compare compiled vector and effect derivation without runtime frame setup").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-derivation-tests", &.{ "compiled vector resources preserve", "vector resource copied transport" })).step);
+        b.step("test-ts-vector-effects", "Compare complete compiled vector geometry and visual effect resources").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-effects-tests", &.{ "compiled vector resources", "vector resource copied transport" })).step);
         b.step("test-ts-glyph-atlas", "Compare complete compiled glyph atlas construction and cache key ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-glyph-atlas-tests", &.{ "compiled glyph atlas", "compiled text cache", "compiled text and glyph caches" })).step);
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
         test_step.dependOn(&surface_layout_run.step);
@@ -5404,6 +5409,8 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/text_document_width.ts"));
     stage_run.addFileInput(b.path("packages/core/src/scalar_text.ts"));
     stage_run.addFileInput(b.path("packages/core/src/glyph_atlas.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/registered_font.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/vector_effects.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));

@@ -546,7 +546,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const path_geometry_plan = if (storage.path_geometries.len == 0)
         RenderPathGeometryPlan{}
     else
-        try render_plan.pathGeometryPlan(storage.path_geometries);
+        try render_plan.pathGeometryPlanWithPolicy(storage.path_geometries, options.render_cache_policy);
     const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
         RenderPathGeometryCachePlan{}
     else
@@ -596,7 +596,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const visual_effect_plan = if (storage.visual_effects.len == 0)
         VisualEffectPlan{}
     else
-        try next.visualEffectPlan(storage.visual_effects);
+        try next.visualEffectPlanWithPolicy(storage.visual_effects, options.render_cache_policy);
     const visual_effect_cache_plan = if (storage.visual_effect_cache_entries.len == 0 and storage.visual_effect_cache_actions.len == 0)
         VisualEffectCachePlan{}
     else

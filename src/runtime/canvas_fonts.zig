@@ -261,6 +261,7 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// provider-less path.
         fn canvasFontMeasure(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8) f32 {
             const runtime: *Runtime = @ptrCast(@alignCast(context));
+            if (runtime.text_cache_policy) |owner| return canvas.registered_font_policy.measure(owner, registeredCanvasFontFace(runtime, font_id), font_id, text, size, .width, &.{}).width;
             if (findCanvasFontIndex(runtime, font_id)) |index| {
                 return canvas.estimateTextWidthForFace(&runtime.canvas_font_faces[index], text, size);
             }
@@ -277,6 +278,7 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
         /// line to O(L) per run like the host providers.
         fn canvasFontMeasureAdvances(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8, advances: []f32) bool {
             const runtime: *Runtime = @ptrCast(@alignCast(context));
+            if (runtime.text_cache_policy) |owner| return canvas.registered_font_policy.measure(owner, registeredCanvasFontFace(runtime, font_id), font_id, text, size, .advances, advances).accepted;
             const face = if (findCanvasFontIndex(runtime, font_id)) |index| &runtime.canvas_font_faces[index] else null;
             var index: usize = 0;
             while (index < text.len) {
@@ -293,6 +295,11 @@ pub fn RuntimeCanvasFonts(comptime Runtime: type) type {
 
         fn canvasFontMeasureInk(context: ?*anyopaque, font_id: canvas.FontId, size: f32, text: []const u8, metrics: *canvas.TextInkMetrics) bool {
             const runtime: *Runtime = @ptrCast(@alignCast(context));
+            if (runtime.text_cache_policy) |owner| {
+                const answer = canvas.registered_font_policy.measure(owner, registeredCanvasFontFace(runtime, font_id), font_id, text, size, .ink, &.{});
+                if (answer.accepted) metrics.* = answer.ink;
+                return answer.accepted;
+            }
             const index = findCanvasFontIndex(runtime, font_id) orelse return false;
             const face = &runtime.canvas_font_faces[index];
             const scale = size / face.units_per_em;

@@ -177,6 +177,12 @@ pub const DisplayList = struct {
         return planner.build(self);
     }
 
+    pub fn visualEffectPlanWithPolicy(self: DisplayList, output: []VisualEffect, policy: ?@import("vector_effect_policy.zig").Policy) Error!VisualEffectPlan {
+        var planner = VisualEffectPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
     pub fn glyphAtlasPlan(self: DisplayList, output: []GlyphAtlasEntry) Error!GlyphAtlasPlan {
         var planner = GlyphAtlasPlanner.init(output);
         return planner.build(self);

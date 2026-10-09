@@ -396,6 +396,12 @@ pub const RenderPlan = struct {
         return planner.build(self);
     }
 
+    pub fn pathGeometryPlanWithPolicy(self: RenderPlan, output: []RenderPathGeometry, policy: ?compiled_cache.Policy) Error!RenderPathGeometryPlan {
+        var planner = RenderPathGeometryPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
     pub fn imagePlan(self: RenderPlan, output: []RenderImage) Error!RenderImagePlan {
         return self.imagePlanWithResources(&.{}, output);
     }

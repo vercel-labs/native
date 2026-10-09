@@ -135,15 +135,17 @@ const scene = [_]canvas.CanvasCommand{
     .{ .blur = .{ .id = 4, .rect = .init(40, 40, 30, 30), .radius = 2 } },
     .pop_opacity,
 };
+var vector_calls: [2]usize = @splat(0);
 var family_calls: [6]usize = .{0} ** 6;
 var planning_calls: [2]usize = .{0} ** 2;
 fn observedPolicy(request: []const u8, output: []u8) usize {
+    if (request[0] == 63) vector_calls[request[2]] += 1;
     if (request[0] == 12) family_calls[request[1]] += 1;
     if (request[0] == 13) planning_calls[request[1]] += 1;
     return core.nativeWindowPolicy(request, output);
 }
 
-test "both runtime frame consumers use compiled state batching and all six caches and preserve complete warm changed and empty frames" {
+test "compiled vector resources: both runtime frame consumers preserve complete warm changed and empty frames" {
     _ = core.initialModel();
     defer core.rt.frameReset();
     const native = try sdk.runtime.TestHarness().create(std.testing.allocator, .{});
@@ -168,17 +170,21 @@ test "both runtime frame consumers use compiled state batching and all six cache
     for ([_][]const canvas.CanvasCommand{ &scene, &scene, &changed, &.{} }, 0..) |commands, phase| {
         for ([_]@TypeOf(native){ native, compiled }) |h| _ = try h.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = commands });
         const options = canvas.CanvasFrameOptions{ .frame_index = 9007199254740993 + phase, .timestamp_ns = 33, .full_repaint = true };
+        vector_calls = @splat(0);
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const diagnostic = try native.runtime.canvasFramePlan(1, "canvas", null, options, a.value);
         try frameEqual(diagnostic, try compiled.runtime.canvasFramePlan(1, "canvas", null, options, b.value));
         try exact([_]usize{1} ** 6, family_calls);
+        try exact([_]usize{ 1, 1 }, vector_calls);
         try exact([_]usize{ 1, 1 }, planning_calls);
+        vector_calls = @splat(0);
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const presentation = try native.runtime.nextCanvasFrame(1, "canvas", options, a.value);
         try frameEqual(presentation, try compiled.runtime.nextCanvasFrame(1, "canvas", options, b.value));
         try exact([_]usize{1} ** 6, family_calls);
+        try exact([_]usize{ 1, 1 }, vector_calls);
         try exact([_]usize{ 1, 1 }, planning_calls);
         if (phase < 3) {
             try std.testing.expect(presentation.pipeline_cache_plan.entries.len > 0);
@@ -210,6 +216,7 @@ test "frame cache failure preserves action-before-entry storage and prevents dow
     sa.resources = sa.resources[0..0];
     sb.resources = sb.resources[0..0];
     try std.testing.expectError(error.RenderPipelineCacheListFull, list.framePlan(null, .{}, sa));
+    vector_calls = @splat(0);
     family_calls = .{0} ** 6;
     try std.testing.expectError(error.RenderPipelineCacheListFull, list.framePlan(null, .{ .render_cache_policy = observedPolicy }, sb));
     try exact([_]usize{ 1, 0, 0, 0, 0, 0 }, family_calls);
@@ -273,6 +280,7 @@ test "render and batch failures precede every cache and preserve complete frame 
         sb.pipeline_cache_entries = sb.pipeline_cache_entries[0..0];
         const err = if (batch) error.RenderBatchListFull else error.RenderListFull;
         try std.testing.expectError(err, list.framePlan(null, .{}, sa));
+        vector_calls = @splat(0);
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         try std.testing.expectError(err, list.framePlan(null, .{ .render_cache_policy = observedPolicy, .render_plan_policy = observedPolicy }, sb));
@@ -283,7 +291,7 @@ test "render and batch failures precede every cache and preserve complete frame 
     }
 }
 
-test "render planning and cache ownership remain independently selectable" {
+test "compiled vector resources: render planning and resource ownership remain independently selectable" {
     _ = core.initialModel();
     defer core.rt.frameReset();
     var a = try Storage.init();
@@ -293,11 +301,13 @@ test "render planning and cache ownership remain independently selectable" {
     const list = canvas.DisplayList{ .commands = &scene };
     const reference = try list.framePlan(null, .{}, a.value);
     for ([_]bool{ false, true }) |plan| {
+        vector_calls = @splat(0);
         family_calls = .{0} ** 6;
         planning_calls = .{0} ** 2;
         const compiled = try list.framePlan(null, .{ .render_cache_policy = if (plan) null else observedPolicy, .render_plan_policy = if (plan) observedPolicy else null }, b.value);
         try frameEqual(reference, compiled);
         try exact([_]usize{if (plan) 0 else 1} ** 6, family_calls);
+        try exact([_]usize{if (plan) 0 else 1} ** 2, vector_calls);
         try exact([_]usize{if (plan) 1 else 0} ** 2, planning_calls);
         core.rt.frameReset();
     }
