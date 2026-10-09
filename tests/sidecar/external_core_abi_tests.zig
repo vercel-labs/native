@@ -284,7 +284,7 @@ test "channel entries hold the bytes-envelope laws" {
     // produce nothing (the archive's entry returns the two-byte
     // nothing-produced envelope, which the mirror gates to null).
     try testing.expect(shim_core.keyMsg(.{ .key = "space", .shift = false, .control = true, .alt = false, .super = false }) == null);
-    try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16 }) == null);
+    try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16, .timestampNs = "16000000", .intervalNs = "16000000" }) == null);
     try testing.expect(shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .begin, .scale = 0, .x = 1, .y = 2 }) == null);
     const ignored_paths = [_][]const u8{"/tmp/ignored.txt"};
     try testing.expect(shim_core.dropMsg(.{ .windowId = 1, .viewLabel = "ts-markup-canvas", .point = null, .paths = &ignored_paths }) == null);
@@ -293,9 +293,9 @@ test "channel entries hold the bytes-envelope laws" {
     // and the dispatched cycle updates the model so the same frame then
     // gates (the idle law, proven across the round trip).
     {
-        const msg = shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16 }) orelse return error.TestUnexpectedResult;
+        const msg = shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16, .timestampNs = "16000000", .intervalNs = "16000000" }) orelse return error.TestUnexpectedResult;
         shim_model = try singleCycle(arena, shim_model, msg);
-        try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16 }) == null);
+        try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16, .timestampNs = "32000000", .intervalNs = "16000000" }) == null);
         // The raw archive entry receives f64 logical points before the
         // generated mirror narrows its classed width. Compare after
         // truncation so a fractional presentation at the committed
