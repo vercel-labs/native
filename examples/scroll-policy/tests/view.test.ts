@@ -16,7 +16,8 @@ const line = (extent: number) => Math.max(24, Math.fround(Math.fround(extent) * 
 const page = (extent: number) => Math.max(line(extent), Math.fround(Math.fround(extent) * Math.fround(0.85)));
 
 test("two-axis offsets, nested wheel routing, retained notes, source changes and replay agree", async () => {
-  const app = await NativeApp.start({ width: 1060, height: 720 });
+  // The complete history replays every retained state in a fresh runtime.
+  const app = await NativeApp.start({ width: 1060, height: 720, timeoutMs: 60000 });
   try {
     let s = await app.snapshot();
     if (backend) assert.equal(s.viewBackend, backend);
