@@ -51,6 +51,7 @@ test {
     _ = @import("semantic_tree_e2e_tests.zig");
     _ = @import("virtual_extent_e2e_tests.zig");
     _ = @import("text_cache_e2e_tests.zig");
+    _ = @import("glyph_atlas_e2e_tests.zig");
     _ = @import("render_cache_e2e_tests.zig");
 }
 

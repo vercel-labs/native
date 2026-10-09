@@ -607,7 +607,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.visual_effect_cache_entries,
             storage.visual_effect_cache_actions,
         );
-    const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
+    const glyph_atlas_plan = try next.glyphAtlasPlanWithPolicy(storage.glyph_atlas_entries, options.text_cache_policy);
     const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
         options.text_cache_policy,
         options.previous_glyph_atlas_cache,

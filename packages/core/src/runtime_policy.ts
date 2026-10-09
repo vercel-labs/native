@@ -253,6 +253,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 58) return nscvTextMeasurementCache(request);
   if (request[0] === 59) return nscvTextDocumentWidth(request);
   if (request[0] === 60) return nscvScalarText(request);
+  if (request[0] === 61) return nscvGlyphAtlasPlan(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -2039,12 +2040,22 @@ function nscvExtentCorrections(request:Uint8Array):Uint8Array{
  * Native supplies hash buckets and stores resources; equality, admission,
  * retention and eviction belong here. No pointers or arena reset cross this call.
  */
+function nscvGlyphAtlasHash(wire: DataView, at: number): number {
+  let hash = 2166136261;
+  // Equality folds signed zero, but retains all 64 font bits. A NaN key
+  // never compares equal, regardless of which bucket holds its bits.
+  const sizeBits = wire.getFloat32(at, true) === 0 ? 0 : wire.getUint32(at, true);
+  hash = Math.imul(hash ^ sizeBits, 16777619) >>> 0;
+  for (let i = 4; i < 24; i += 4) hash = Math.imul(hash ^ wire.getUint32(at + i, true), 16777619) >>> 0;
+  return hash;
+}
 function nscvTextCachePolicy(request: Uint8Array): Uint8Array {
   if (request.length < 48 || request[1]! > 1 || request[2] !== 0 || request[3] !== 0) throw new Error("invalid text cache request");
   const w = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const current = w.getUint32(4,true), previous = w.getUint32(8,true), capacity = w.getUint32(12,true), actionCapacity = w.getUint32(16,true), total = current + previous;
   if (total > 4294967295 || request.length !== 48 + total * 80 || w.getUint32(20,true)!==0 || w.getUint32(40,true)!==0 || w.getUint32(44,true)!==0) throw new Error("invalid text cache shape");
   const glyph = request[1] === 1, slots = glyph ? 32768 : 8192, indexed = (current >= 64 || previous >= 64) && total <= slots / 2;
+  const bucketFor = (source: number): number => (glyph ? nscvGlyphAtlasHash(w, 48 + source * 80) : w.getUint32(48 + source * 80 + 72, true)) & (slots - 1);
   const equal = (a:number,b:number):boolean => {
     const x=48+a*80,y=48+b*80;
     const floats = glyph ? 1 : 6;
@@ -2057,10 +2068,10 @@ function nscvTextCachePolicy(request: Uint8Array): Uint8Array {
   const prevHeads=new Uint32Array(indexed?slots:0),entryHeads=new Uint32Array(indexed?slots:0),prevNext=new Uint32Array(indexed?previous:0),entryNext=new Uint32Array(indexed?Math.min(capacity,total):0);
   if(indexed) {
     // Reverse insertion retains the lowest original index at each chain head.
-    for(let i=previous-1;i>=0;i--){const source=current+i,bucket=w.getUint32(48+source*80+72,true)&(slots-1);prevNext[i]=prevHeads[bucket]!;prevHeads[bucket]=i+1;}
+    for(let i=previous-1;i>=0;i--){const source=current+i,bucket=bucketFor(source);prevNext[i]=prevHeads[bucket]!;prevHeads[bucket]=i+1;}
   }
   const lookup = (source:number,old:boolean):number => {
-    if(indexed){const heads=old?prevHeads:entryHeads,next=old?prevNext:entryNext,bucket=w.getUint32(48+source*80+72,true)&(slots-1);let match=-1;
+    if(indexed){const heads=old?prevHeads:entryHeads,next=old?prevNext:entryNext,bucket=bucketFor(source);let match=-1;
       for(let stored=heads[bucket]!;stored>0;stored=next[stored-1]!){const i=stored-1;if(equal(source,old?current+i:entries[i]!) && (match<0 || i<match))match=i;}
       return match;
     }
@@ -2069,7 +2080,7 @@ function nscvTextCachePolicy(request: Uint8Array): Uint8Array {
     return -1;
   };
   let failed=false;
-  const appendEntry=(source:number):boolean=>{if(entries.length>=capacity)return false;const index=entries.length;entries.push(source);if(indexed){const bucket=w.getUint32(48+source*80+72,true)&(slots-1);entryNext[index]=entryHeads[bucket]!;entryHeads[bucket]=index+1;}return true;};
+  const appendEntry=(source:number):boolean=>{if(entries.length>=capacity)return false;const index=entries.length;entries.push(source);if(indexed){const bucket=bucketFor(source);entryNext[index]=entryHeads[bucket]!;entryHeads[bucket]=index+1;}return true;};
   const appendAction=(kind:number,source:number,cache:number):boolean=>{if(actions.length/3>=actionCapacity)return false;actions.push(kind,source,cache);return true;};
   for(let i=0;i<current;i++){
     if(lookup(i,false)>=0)continue;

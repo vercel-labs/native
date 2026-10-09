@@ -1051,7 +1051,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     storage.visual_effect_cache_entries,
                     storage.visual_effect_cache_actions,
                 );
-            const glyph_atlas_plan = try display_list.glyphAtlasPlan(storage.glyph_atlas_entries);
+            const glyph_atlas_plan = try display_list.glyphAtlasPlanWithPolicy(storage.glyph_atlas_entries, frame_options.text_cache_policy);
             const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
                 frame_options.text_cache_policy,
                 frame_options.previous_glyph_atlas_cache,

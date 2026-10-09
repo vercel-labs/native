@@ -1,4 +1,5 @@
 const compiled_cache = @import("text_cache_policy.zig");
+const compiled_atlas = @import("glyph_atlas_policy.zig");
 const std = @import("std");
 const canvas = @import("root.zig");
 const text_interaction = @import("text_interaction.zig");
@@ -94,6 +95,89 @@ pub const GlyphAtlasPlanner = struct {
             }
         }
         return .{ .entries = self.entries[0..self.len] };
+    }
+
+    /// Copy raw draw facts into the portable owner. Native supplies storage
+    /// and proves returned source indices before publishing the plan.
+    pub fn buildCompiled(self: *GlyphAtlasPlanner, display_list: anytype, policy: compiled_atlas.Policy) Error!GlyphAtlasPlan {
+        self.reset();
+        var runs: usize = 0;
+        var payload_size: usize = 0;
+        for (display_list.commands) |command| switch (command) {
+            .draw_text => |text| {
+                runs += 1;
+                const glyph_size = std.math.mul(usize, text.glyphs.len, 24) catch @panic("glyph atlas request too large");
+                payload_size = std.math.add(usize, payload_size, glyph_size) catch @panic("glyph atlas request too large");
+                payload_size = std.math.add(usize, payload_size, text.text.len) catch @panic("glyph atlas request too large");
+            },
+            else => {},
+        };
+        const records_size = std.math.mul(usize, runs, 40) catch @panic("glyph atlas request too large");
+        const data_start = std.math.add(usize, 16, records_size) catch @panic("glyph atlas request too large");
+        const request_size = std.math.add(usize, data_start, payload_size) catch @panic("glyph atlas request too large");
+        const result_size = std.math.add(usize, 16, std.math.mul(usize, self.entries.len, 32) catch @panic("glyph atlas result too large")) catch @panic("glyph atlas result too large");
+        const request = std.heap.page_allocator.alloc(u8, request_size) catch @panic("glyph atlas request allocation failed");
+        defer std.heap.page_allocator.free(request);
+        const result = std.heap.page_allocator.alloc(u8, result_size) catch @panic("glyph atlas result allocation failed");
+        defer std.heap.page_allocator.free(result);
+        @memset(request, 0);
+        request[0] = 61;
+        request[1] = 1;
+        compiled_atlas.put(request, 4, runs);
+        compiled_atlas.put(request, 8, self.entries.len);
+        var run: usize = 0;
+        var payload = data_start;
+        for (display_list.commands, 0..) |command, command_index| switch (command) {
+            .draw_text => |text| {
+                const at = 16 + run * 40;
+                compiled_atlas.put(request, at, command_index);
+                compiled_atlas.integer(request, at + 8, text.font_id);
+                compiled_atlas.float(request, at + 16, text.size);
+                compiled_atlas.float(request, at + 20, text.origin.x);
+                compiled_atlas.float(request, at + 24, text.origin.y);
+                compiled_atlas.put(request, at + 28, text.glyphs.len);
+                compiled_atlas.put(request, at + 32, text.text.len);
+                for (text.glyphs) |glyph| {
+                    compiled_atlas.put(request, payload, glyph.id);
+                    compiled_atlas.integer(request, payload + 8, glyph.font_id);
+                    compiled_atlas.float(request, payload + 16, glyph.x);
+                    compiled_atlas.float(request, payload + 20, glyph.y);
+                    payload += 24;
+                }
+                @memcpy(request[payload..][0..text.text.len], text.text);
+                payload += text.text.len;
+                run += 1;
+            },
+            else => {},
+        };
+        const length = policy(request, result);
+        if (length > result.len or !compiled_atlas.resultValid(result[0..length], self.entries.len)) @panic("invalid compiled glyph atlas result");
+        const count: usize = compiled_atlas.word(result, 0);
+        for (0..count) |i| {
+            const at = 16 + i * 32;
+            const command_index: usize = compiled_atlas.word(result, at + 24);
+            const glyph_index: usize = compiled_atlas.word(result, at + 28);
+            if (command_index >= display_list.commands.len) @panic("invalid compiled glyph atlas command");
+            const text = switch (display_list.commands[command_index]) {
+                .draw_text => |text| text,
+                else => @panic("invalid compiled glyph atlas source"),
+            };
+            if (glyph_index >= (if (text.glyphs.len > 0) text.glyphs.len else text.text.len)) @panic("invalid compiled glyph atlas glyph");
+            self.entries[i] = .{
+                .key = .{
+                    .font_id = std.mem.readInt(u64, result[at + 8 ..][0..8], .little),
+                    .glyph_id = compiled_atlas.word(result, at + 4),
+                    .size = compiled_atlas.readFloat(result, at),
+                    .subpixel_x = @intCast(compiled_atlas.word(result, at + 16)),
+                    .subpixel_y = @intCast(compiled_atlas.word(result, at + 20)),
+                },
+                .command_index = command_index,
+                .glyph_index = glyph_index,
+            };
+        }
+        self.len = count;
+        if (compiled_atlas.word(result, 4) == 1) return error.GlyphAtlasListFull;
+        return .{ .entries = self.entries[0..count] };
     }
 
     fn consumeText(self: *GlyphAtlasPlanner, text: anytype, command_index: usize, plan_index: ?*GlyphAtlasIndex) Error!void {
@@ -298,8 +382,8 @@ pub const GlyphAtlasCachePlanner = struct {
         const current = plan.entries;
         var decision = compiled_cache.Plan.init(true, current.len, previous.len, self.entries.len, self.actions.len, frame_index, retention_frames);
         defer decision.deinit();
-        for (current, 0..) |entry, i| decision.fact(i, entry.key, glyphAtlasKeyHash(entry.key), 0);
-        for (previous, 0..) |entry, i| decision.fact(current.len + i, entry.key, glyphAtlasKeyHash(entry.key), entry.last_used_frame);
+        for (current, 0..) |entry, i| decision.fact(i, entry.key, 0, 0);
+        for (previous, 0..) |entry, i| decision.fact(current.len + i, entry.key, 0, entry.last_used_frame);
         decision.run(policy);
         for (0..decision.entry_count) |i| {
             const source = decision.source(i);

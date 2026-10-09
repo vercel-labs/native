@@ -160,6 +160,7 @@ pub const GlyphAtlasKey = text_model.GlyphAtlasKey;
 pub const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 pub const GlyphAtlasPlan = text_model.GlyphAtlasPlan;
 pub const GlyphAtlasPlanner = text_model.GlyphAtlasPlanner;
+pub const glyph_atlas_policy = @import("glyph_atlas_policy.zig");
 pub const GlyphAtlasCacheEntry = text_model.GlyphAtlasCacheEntry;
 pub const GlyphAtlasCacheActionKind = text_model.GlyphAtlasCacheActionKind;
 pub const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;

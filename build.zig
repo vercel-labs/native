@@ -1305,6 +1305,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/text_measurement_cache.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_document_width.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/scalar_text.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/glyph_atlas.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -1451,6 +1452,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&typography_run.step);
         const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
         b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
+        b.step("test-ts-glyph-atlas", "Compare complete compiled glyph atlas construction and cache key ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-glyph-atlas-tests", &.{ "compiled glyph atlas", "compiled text cache", "compiled text and glyph caches" })).step);
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
         test_step.dependOn(&surface_layout_run.step);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
@@ -5401,6 +5403,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/text_measurement_cache.ts"));
     stage_run.addFileInput(b.path("packages/core/src/text_document_width.ts"));
     stage_run.addFileInput(b.path("packages/core/src/scalar_text.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/glyph_atlas.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));

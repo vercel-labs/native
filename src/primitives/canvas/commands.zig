@@ -182,6 +182,12 @@ pub const DisplayList = struct {
         return planner.build(self);
     }
 
+    pub fn glyphAtlasPlanWithPolicy(self: DisplayList, output: []GlyphAtlasEntry, policy: ?@import("glyph_atlas_policy.zig").Policy) Error!GlyphAtlasPlan {
+        var planner = GlyphAtlasPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
     pub fn textLayoutPlan(self: DisplayList, options: TextLayoutOptions, output: []TextLayoutPlan, lines: []TextLine) Error!TextLayoutPlanSet {
         var planner = TextLayoutPlanner.init(output, lines);
         return planner.build(self, options);
