@@ -254,6 +254,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 59) return nscvTextDocumentWidth(request);
   if (request[0] === 60) return nscvScalarText(request);
   if (request[0] === 61) return nscvGlyphAtlasPlan(request);
+  if (request[0] === 62) return nscvRegisteredFont(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
