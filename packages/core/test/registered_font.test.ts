@@ -5,7 +5,7 @@ import { stripTypeScriptTypes } from "node:module";
 const source = ["scalar_text.ts", "registered_font.ts"].map(name => readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")).join("\n");
 const { nscvRegisteredFont: plan, nscvRegisteredMin: min, nscvRegisteredMax: max } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvRegisteredFont,nscvRegisteredMin,nscvRegisteredMax};").toString("base64")}`);
 function packet(mode: number, bytes: Uint8Array, registered = true): Uint8Array {
-  const out = new Uint8Array(128), w = new DataView(out.buffer); out.set([62,1,mode,0,Number(registered)]);
+  const out = new Uint8Array(128), w = new DataView(out.buffer); out.set([62,1,mode,0,Number(registered),5]);
   w.setUint32(8,bytes.length,true); w.setUint32(12,64,true); w.setUint32(16,0xf1234567,true);
   w.setFloat32(20,13.25,true); w.setFloat32(24,1000,true); w.setFloat32(28,600,true); return out;
 }
@@ -48,8 +48,12 @@ test("registered font handles empty results and unavailable ink without capabili
   const absent=checked(packet(2,new Uint8Array([65]),false));assert.equal(absent[3],2);assert.equal(new DataView(absent.buffer).getUint32(124,true),0);
 });
 test("registered font ink extrema preserve later equal values and minNum maxNum admission",()=>{
-  for(const choose of [min,max])for(const a of [0,-0])for(const b of [0,-0])assert.ok(Object.is(choose(a,b),b));
-  for(const choose of [min,max]){assert.equal(choose(NaN,1),1);assert.equal(choose(1,NaN),1);assert.ok(Number.isNaN(choose(NaN,NaN)));}
+  for(const choose of [min,max])for(const a of [0,-0])for(const b of [0,-0])assert.ok(Object.is(choose(a,b,5),b));
+  for(const a of [0,-0])for(const b of [0,-0]){
+    assert.ok(Object.is(min(a,b,3),Math.min(a,b)));
+    assert.ok(Object.is(max(a,b,3),Math.max(a,b)));
+  }
+  for(const choose of [min,max]){assert.equal(choose(NaN,1,5),1);assert.equal(choose(1,NaN,5),1);assert.ok(Number.isNaN(choose(NaN,NaN,5)));}
 });
 test("registered font malformed input follows byte traversal without invalid glyph reads",()=>{
   for(const bytes of [new Uint8Array([0xc0,0x80]),new Uint8Array([0xed,0xa0,0x80]),new Uint8Array([0xf4,0x90,0x80,0x80]),new Uint8Array([0xe2,0x80]),new Uint8Array([0xc2,65])]){

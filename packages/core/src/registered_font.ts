@@ -1,12 +1,18 @@
 // A fixed copied continuation owns registered-face traversal, width, byte
 // advances and ink reduction. Native answers only text and font-table reads.
-function nscvRegisteredMin(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : a < b ? a : b; }
-function nscvRegisteredMax(a: number, b: number): number { return Number.isNaN(a) ? b : Number.isNaN(b) ? a : a > b ? a : b; }
+function nscvRegisteredMin(a: number, b: number, zeroRules: number): number {
+  if (a === 0 && b === 0 && (1 / a < 0) !== (1 / b < 0)) return (zeroRules & (1 / a < 0 ? 2 : 1)) !== 0 ? -0 : 0;
+  return Number.isNaN(a) ? b : Number.isNaN(b) ? a : a < b ? a : b;
+}
+function nscvRegisteredMax(a: number, b: number, zeroRules: number): number {
+  if (a === 0 && b === 0 && (1 / a < 0) !== (1 / b < 0)) return (zeroRules & (1 / a < 0 ? 8 : 4)) !== 0 ? -0 : 0;
+  return Number.isNaN(a) ? b : Number.isNaN(b) ? a : a > b ? a : b;
+}
 class NscRegisteredFont {
   readonly bytes: Uint8Array;
   readonly wire: DataView;
   constructor(request: Uint8Array) {
-    if (request.length !== 128 || request[0] !== 62 || request[1] !== 1 || request[2]! > 2 || request[3]! > 1 || request[4]! > 1 || request[5] !== 0 || request[6] !== 0 || request[7] !== 0)
+    if (request.length !== 128 || request[0] !== 62 || request[1] !== 1 || request[2]! > 2 || request[3]! > 1 || request[4]! > 1 || request[5]! > 15 || request[6] !== 0 || request[7] !== 0)
       throw new Error("invalid registered font header");
     this.bytes = request.slice(); this.wire = new DataView(this.bytes.buffer);
     if (this.u(32) > this.u(8) || this.u(36) > this.u(8) || this.u(72) > 4 || this.u(84) > 1 || this.u(104) > 4 || this.u(124) > 1)
@@ -47,7 +53,7 @@ class NscRegisteredFont {
   }
   ink(a: number, b: number, c: number, d: number): void {
     if (this.u(84) === 0) { this.float(88, a); this.float(92, b); this.float(96, c); this.float(100, d); this.put(84, 1); }
-    else { this.float(88, nscvRegisteredMin(this.f(88), a)); this.float(92, nscvRegisteredMax(this.f(92), b)); this.float(96, nscvRegisteredMin(this.f(96), c)); this.float(100, nscvRegisteredMax(this.f(100), d)); }
+    else { this.float(88, nscvRegisteredMin(this.f(88), a, this.bytes[5]!)); this.float(92, nscvRegisteredMax(this.f(92), b, this.bytes[5]!)); this.float(96, nscvRegisteredMin(this.f(96), c, this.bytes[5]!)); this.float(100, nscvRegisteredMax(this.f(100), d, this.bytes[5]!)); }
   }
   block(): Uint8Array {
     this.ink(this.f(80), Math.fround(this.f(80) + this.f(76)), -this.f(20), 0);
@@ -76,7 +82,7 @@ class NscRegisteredFont {
     if (this.u(52) === 2) { this.put(124, 0); return this.action(0); }
     if (this.u(52) === 1) {
       const scale = Math.fround(this.f(20) / this.f(24)), natural = Math.fround(this.f(48) * scale);
-      const inset = nscvRegisteredMax(0, Math.fround(Math.fround(this.f(76) - natural) * 0.5));
+      const inset = nscvRegisteredMax(0, Math.fround(Math.fround(this.f(76) - natural) * 0.5), this.bytes[5]!);
       const start = Math.fround(this.f(80) + inset);
       this.ink(Math.fround(start + Math.fround(this.f(56) * scale)), Math.fround(start + Math.fround(Math.fround(this.f(56) + this.f(64)) * scale)),
         -Math.fround(Math.fround(this.f(60) + this.f(68)) * scale), -Math.fround(this.f(60) * scale));

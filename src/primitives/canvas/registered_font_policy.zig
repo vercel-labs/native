@@ -5,6 +5,14 @@ const metrics = @import("text_metrics.zig");
 const font_ttf = @import("font_ttf.zig");
 pub const Policy = *const fn ([]const u8, []u8) usize;
 pub const Mode = enum(u8) { width, advances, ink };
+// Supply the target arithmetic fact for the reference's f32 minNum/maxNum
+// lowering: ARM64 resolves opposite zeros canonically; x86 keeps the later
+// operand. Bits encode negative-zero results for min(+,-), min(-,+),
+// max(+,-), max(-,+). TypeScript still owns all extrema decisions.
+const zero_rules: u8 = switch (@import("builtin").cpu.arch) {
+    .aarch64, .aarch64_be => 3,
+    else => 5,
+};
 // The 128-byte continuation contains header/font facts [0,32), traversal
 // [32,44), native glyph replies [44,72), action/cell/pen/ink [72,104),
 // native text window [104,112), byte emission [112,124), and admission.
@@ -51,6 +59,7 @@ pub fn measure(policy: Policy, registered_face: ?*const font_ttf.Face, font: u64
     var request: [128]u8 = @splat(0);
     var result: [128]u8 = undefined;
     request[0..5].* = .{ 62, 1, @intFromEnum(mode), 0, @intFromBool(registered_face != null) };
+    request[5] = zero_rules;
     put(&request, 8, std.math.cast(u32, text.len) orelse @panic("registered font text too large"));
     std.mem.writeInt(u64, request[12..20], font, .little);
     setFloat(&request, 20, size);
