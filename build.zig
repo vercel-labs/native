@@ -1309,6 +1309,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/registered_font.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/vector_effects.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/render_resources.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/gpu_planning.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
@@ -1458,6 +1459,7 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
         b.step("test-ts-vector-derivation", "Compare compiled vector and effect derivation without runtime frame setup").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-derivation-tests", &.{ "compiled vector resources preserve", "vector resource copied transport" })).step);
         b.step("test-ts-render-resources", "Compare complete compiled image layer and resource derivation").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-render-resource-tests", &.{ "compiled render resources", "render resource copied transport" })).step);
+        b.step("test-ts-gpu-planning", "Compare complete compiled GPU packet and encoder planning").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-gpu-planning-tests", &.{ "compiled GPU planning", "GPU planning copied transport" })).step);
         b.step("test-ts-vector-effects", "Compare complete compiled vector geometry and visual effect resources").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-effects-tests", &.{ "compiled vector resources", "vector resource copied transport" })).step);
         b.step("test-ts-glyph-atlas", "Compare complete compiled glyph atlas construction and cache key ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-glyph-atlas-tests", &.{ "compiled glyph atlas", "compiled text cache", "compiled text and glyph caches" })).step);
         ts_core_e2e_step.dependOn(&surface_layout_run.step);
@@ -5414,6 +5416,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/registered_font.ts"));
     stage_run.addFileInput(b.path("packages/core/src/vector_effects.ts"));
     stage_run.addFileInput(b.path("packages/core/src/render_resources.ts"));
+    stage_run.addFileInput(b.path("packages/core/src/gpu_planning.ts"));
     stage_run.addFileInput(b.path("packages/core/src/control_appearance.ts"));
     stage_run.addFileInput(b.path("packages/core/src/component_construction.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_motion.ts"));

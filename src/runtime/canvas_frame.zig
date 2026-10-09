@@ -947,6 +947,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 frame_options.render_overrides.len == 0)
             {
                 const canvas_frame = canvas.CanvasFrame{
+                    .gpu_plan_policy = frame_options.render_cache_policy,
                     .frame_index = frame_options.frame_index,
                     .timestamp_ns = frame_options.timestamp_ns,
                     .surface_size = frame_options.surface_size,
@@ -1218,6 +1219,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             }
 
             const canvas_frame = canvas.CanvasFrame{
+                .gpu_plan_policy = frame_options.render_cache_policy,
                 .frame_index = frame_options.frame_index,
                 .timestamp_ns = frame_options.timestamp_ns,
                 .surface_size = frame_options.surface_size,

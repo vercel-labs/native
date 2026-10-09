@@ -257,8 +257,11 @@ test "render state batching and six cache cost include frame buffers copying and
 }
 
 pub fn frameEqual(a: canvas.CanvasFrame, b: canvas.CanvasFrame) !void {
+    // Static owners are process-local capabilities, not frame content.
+    try std.testing.expect(a.gpu_plan_policy == null);
+    if (b.gpu_plan_policy) |owner| try std.testing.expect(owner == observedPolicy);
     inline for (@typeInfo(canvas.CanvasFrame).@"struct".fields) |field| {
-        if (comptime !std.mem.eql(u8, field.name, "dirty_rects")) try exact(@field(a, field.name), @field(b, field.name));
+        if (comptime !std.mem.eql(u8, field.name, "dirty_rects") and !std.mem.eql(u8, field.name, "gpu_plan_policy")) try exact(@field(a, field.name), @field(b, field.name));
     }
     // The fixed backing array is undefined past the published count.
     try exact(a.dirtyRects(), b.dirtyRects());

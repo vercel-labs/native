@@ -1,3 +1,4 @@
+const gpu_policy = @import("gpu_planning_policy.zig");
 const render_cache = @import("render_cache_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
@@ -89,6 +90,8 @@ pub const CanvasFrameProfile = frame_metrics.CanvasFrameProfile;
 pub const canvasFrameProfile = frame_metrics.canvasFrameProfile;
 
 pub const CanvasRenderPass = struct {
+    /// Static compiled owner; payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -174,7 +177,13 @@ pub const CanvasRenderPass = struct {
         return self.layer_actions.len;
     }
 
+    pub fn encoderCounts(self: CanvasRenderPass) gpu_policy.EncoderCounts {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner);
+        return .{ .commands = self.encoderCommandCount(), .caches = self.encoderCacheActionCount(), .binds = self.encoderBindPipelineCount(), .draws = self.encoderDrawBatchCount() };
+    }
+
     pub fn encoderCommandCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).commands;
         if (!self.requiresRender()) return 0;
         var count: usize = 2 + self.encoderCacheActionCount() + self.encoderBindPipelineCount() + self.encoderDrawBatchCount();
         if (self.scissorBounds() != null) count += 1;
@@ -182,6 +191,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderCacheActionCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).caches;
         if (!self.requiresRender()) return 0;
         return self.pipeline_actions.len +
             self.path_geometry_actions.len +
@@ -194,6 +204,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderBindPipelineCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).binds;
         if (!self.requiresRender()) return 0;
         var count: usize = 0;
         var bound_pipeline: ?RenderPipelineKind = null;
@@ -207,6 +218,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderDrawBatchCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).draws;
         return if (self.requiresRender()) self.batches.len else 0;
     }
 
@@ -254,15 +266,18 @@ pub const CanvasRenderPass = struct {
 
     pub fn encoderPlan(self: CanvasRenderPass, output: []RenderEncoderCommand) Error!RenderEncoderPlan {
         var planner = RenderEncoderPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacket(self: CanvasRenderPass, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
         var planner = CanvasGpuPacketPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacketSummary(self: CanvasRenderPass) CanvasGpuPacketSummary {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.summary(self, owner);
         if (!self.requiresRender()) return .{};
         var summary = CanvasGpuPacketSummary{
             .load_action = self.loadAction(),
@@ -283,6 +298,8 @@ pub const CanvasRenderPass = struct {
 };
 
 pub const CanvasFrame = struct {
+    /// Static compiled owner; payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -343,14 +360,23 @@ pub const CanvasFrame = struct {
     fn diagnosticsWithoutBudgetStatus(self: CanvasFrame) CanvasFrameDiagnostics {
         const render_pass = self.renderPass();
         const gpu_packet_summary = render_pass.gpuPacketSummary();
+        const encoder_counts = render_pass.encoderCounts();
+        return self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts);
+    }
+
+    pub fn budgetStatusFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameBudgetStatus {
+        return self.budget.status(self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts));
+    }
+
+    fn diagnosticsFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameDiagnostics {
         return .{
             .frame_index = self.frame_index,
             .command_count = self.render_plan.commandCount(),
             .batch_count = self.batch_plan.batchCount(),
-            .encoder_command_count = render_pass.encoderCommandCount(),
-            .encoder_cache_action_count = render_pass.encoderCacheActionCount(),
-            .encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount(),
-            .encoder_draw_batch_count = render_pass.encoderDrawBatchCount(),
+            .encoder_command_count = encoder_counts.commands,
+            .encoder_cache_action_count = encoder_counts.caches,
+            .encoder_bind_pipeline_count = encoder_counts.binds,
+            .encoder_draw_batch_count = encoder_counts.draws,
             .pipeline_count = self.pipeline_cache_plan.entryCount(),
             .pipeline_upload_count = self.pipeline_cache_plan.uploadCount(),
             .pipeline_retain_count = self.pipeline_cache_plan.retainCount(),
@@ -418,6 +444,7 @@ pub const CanvasFrame = struct {
 
     pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
         return .{
+            .gpu_plan_policy = self.gpu_plan_policy,
             .frame_index = self.frame_index,
             .timestamp_ns = self.timestamp_ns,
             .surface_size = self.surface_size,
@@ -678,6 +705,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     }
 
     return .{
+        .gpu_plan_policy = options.render_cache_policy,
         .frame_index = options.frame_index,
         .timestamp_ns = options.timestamp_ns,
         .surface_size = options.surface_size,

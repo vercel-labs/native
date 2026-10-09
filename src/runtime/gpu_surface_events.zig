@@ -1107,7 +1107,8 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }, CanvasFrameMethods().canvasFrameScratchStorage(self), false);
             const preview_render_pass = preview_frame.renderPass();
             const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
-            const preview_budget_status = preview_frame.budgetStatus();
+            const preview_encoder_counts = preview_render_pass.encoderCounts();
+            const preview_budget_status = preview_frame.budgetStatusFromPlanningSummaries(preview_gpu_packet_summary, preview_encoder_counts);
             enriched_frame_event.canvas_revision = self.views[index].canvas_revision;
             enriched_frame_event.frame_interval_ns = self.views[index].gpu_frame_interval_ns;
             enriched_frame_event.input_timestamp_ns = self.views[index].gpu_input_timestamp_ns;
@@ -1123,10 +1124,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             enriched_frame_event.canvas_frame_requires_render = preview_frame.requiresRender();
             enriched_frame_event.canvas_frame_full_repaint = preview_frame.full_repaint;
             enriched_frame_event.canvas_frame_batch_count = preview_frame.batch_plan.batchCount();
-            enriched_frame_event.canvas_frame_encoder_command_count = preview_render_pass.encoderCommandCount();
-            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_render_pass.encoderCacheActionCount();
-            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_render_pass.encoderBindPipelineCount();
-            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_render_pass.encoderDrawBatchCount();
+            enriched_frame_event.canvas_frame_encoder_command_count = preview_encoder_counts.commands;
+            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_encoder_counts.caches;
+            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_encoder_counts.binds;
+            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_encoder_counts.draws;
             enriched_frame_event.canvas_frame_pipeline_count = preview_frame.pipeline_cache_plan.entryCount();
             enriched_frame_event.canvas_frame_pipeline_upload_count = preview_frame.pipeline_cache_plan.uploadCount();
             enriched_frame_event.canvas_frame_pipeline_retain_count = preview_frame.pipeline_cache_plan.retainCount();

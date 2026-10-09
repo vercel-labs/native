@@ -927,3 +927,7 @@ test {
 test {
     _ = @import("render_damage_e2e_tests.zig");
 }
+
+test {
+    _ = @import("gpu_planning_e2e_tests.zig");
+}

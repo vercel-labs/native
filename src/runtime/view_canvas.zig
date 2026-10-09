@@ -479,13 +479,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFrame(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             const render_pass = frame.renderPass();
             const gpu_packet_summary = frame.gpuPacketSummary();
+            const encoder_counts = render_pass.encoderCounts();
             self.canvas_frame_requires_render = frame.requiresRender();
             self.canvas_frame_full_repaint = frame.full_repaint;
             self.canvas_frame_batch_count = frame.batch_plan.batchCount();
-            self.canvas_frame_encoder_command_count = render_pass.encoderCommandCount();
-            self.canvas_frame_encoder_cache_action_count = render_pass.encoderCacheActionCount();
-            self.canvas_frame_encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount();
-            self.canvas_frame_encoder_draw_batch_count = render_pass.encoderDrawBatchCount();
+            self.canvas_frame_encoder_command_count = encoder_counts.commands;
+            self.canvas_frame_encoder_cache_action_count = encoder_counts.caches;
+            self.canvas_frame_encoder_bind_pipeline_count = encoder_counts.binds;
+            self.canvas_frame_encoder_draw_batch_count = encoder_counts.draws;
             self.canvas_frame_pipeline_count = frame.pipeline_cache_plan.entryCount();
             self.canvas_frame_pipeline_upload_count = frame.pipeline_cache_plan.uploadCount();
             self.canvas_frame_pipeline_retain_count = frame.pipeline_cache_plan.retainCount();
@@ -533,7 +534,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_frame_gpu_packet_representable = gpu_packet_summary.fullyRepresentable();
             self.canvas_frame_change_count = frame.changes.len;
             self.canvas_frame_budget = frame.budget;
-            self.canvas_frame_budget_status = frame.budgetStatus();
+            self.canvas_frame_budget_status = frame.budgetStatusFromPlanningSummaries(gpu_packet_summary, encoder_counts);
             self.canvas_frame_dirty_bounds = frame.dirty_bounds;
             const profile = frame.profile();
             self.canvas_frame_profile_work_units = profile.work_units;
@@ -546,6 +547,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFramePresentationComplete(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             if (!self.presented_canvas_valid or self.presented_canvas_revision != self.canvas_revision) return;
             self.recordCanvasFrame(.{
+                .gpu_plan_policy = frame.gpu_plan_policy,
                 .frame_index = frame.frame_index,
                 .timestamp_ns = frame.timestamp_ns,
                 .surface_size = frame.surface_size,
