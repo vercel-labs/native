@@ -3688,3 +3688,64 @@ test "recorded audio rejects altered missing unconsumed and wrongly owned delive
         try std.testing.expectError(error.ReplayAudioDivergence, fx.finishReplay());
     }
 }
+
+test "replay closes an adopted startup window before its native notification" {
+    const ClosingApp = struct {
+        closed: bool = false,
+        fn app(self: *@This()) core.App {
+            return .{ .context = self, .name = "adopted-close", .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *core.Runtime, incoming: core.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (incoming == .command) {
+                try runtime.closeWindow(incoming.command.window_id);
+                self.closed = true;
+            }
+        }
+    };
+    const gpa = std.testing.allocator;
+    const bytes = try gpa.create(JournalBuffer);
+    defer gpa.destroy(bytes);
+    bytes.* = .{};
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(bytes.sink());
+    recorder.begin(.{ .app_name = "adopted-close", .platform_name = "null" });
+    const recorded = try core.TestHarness().create(gpa, .{});
+    defer recorded.destroy(gpa);
+    recorded.runtime.options.session_recorder = recorder;
+    const native_window = try recorded.null_platform.platform().services.createWindow(.{ .id = 1, .label = "main", .title = "Main" });
+    var original: ClosingApp = .{};
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .app_start);
+    const notification: platform.WindowState = .{ .id = 1, .label = "main", .title = "Main", .frame = native_window.frame, .scale_factor = 1, .open = true, .focused = true };
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .window_frame_changed = notification });
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .frame_requested);
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .menu_command = .{ .name = "close", .window_id = 1 } });
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .frame_requested);
+    var closed_notification = notification;
+    closed_notification.open = false;
+    closed_notification.focused = false;
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .window_frame_changed = closed_notification });
+    recorder.finish();
+    try std.testing.expect(original.closed and recorder.finished and !recorder.failed);
+    const replayed = try core.TestHarness().create(gpa, .{});
+    defer replayed.destroy(gpa);
+    var fresh: ClosingApp = .{};
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), bytes.journalBytes(), .{ .require_same_platform = false });
+    try std.testing.expect(report.ok() and fresh.closed);
+    try std.testing.expect(report.checkpoints_verified >= 2);
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+    // Missing native ownership remains an error outside replay, and unrelated
+    // native failures preserve all runtime flags even during replay.
+    for ([_]bool{ false, true }) |replay| {
+        const failed = try core.TestHarness().create(gpa, .{});
+        defer failed.destroy(gpa);
+        try failed.runtime.dispatchPlatformEvent(fresh.app(), .{ .window_frame_changed = notification });
+        failed.runtime.replay_window_chrome_active = replay;
+        if (replay) failed.null_platform.fail_next_close_window = true;
+        try std.testing.expectError(if (replay) error.CloseFailed else error.WindowNotFound, failed.runtime.closeWindow(1));
+        var windows: [platform.max_windows]platform.WindowInfo = undefined;
+        const window = failed.runtime.listWindows(&windows)[0];
+        try std.testing.expect(window.open and window.focused and !window.hidden);
+    }
+}

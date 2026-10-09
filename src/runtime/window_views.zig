@@ -124,10 +124,16 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             self.windows[index].info.focused = false;
             self.windows[index].info.hidden = false;
             self.options.platform.services.closeWindow(window_id) catch |err| {
-                self.windows[index].info.open = was_open;
-                self.windows[index].info.focused = was_focused;
-                self.windows[index].info.hidden = was_hidden;
-                return err;
+                // Replay adopts startup windows from recorded host events.
+                // They have runtime ownership but may have no native owner
+                // on the headless host. Preserve the app's close transition
+                // before the later recorded native close notification.
+                if (!self.replay_window_chrome_active or err != error.WindowNotFound) {
+                    self.windows[index].info.open = was_open;
+                    self.windows[index].info.focused = was_focused;
+                    self.windows[index].info.hidden = was_hidden;
+                    return err;
+                }
             };
             Self.removeWindowRuntimeViews(self, window_id);
             self.invalidated = true;
