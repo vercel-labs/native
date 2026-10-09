@@ -451,7 +451,7 @@ pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geom
     if (frame.isEmpty()) return null;
     const text_size = widgetLabelTextSize(widget, tokens);
     const height = widgetLineHeightWithTokens(text_size, tokens) + bubble_reactions_pad_v * 2;
-    const text_width = text_model.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+    const text_width = text_model.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, text_size);
     // The capsule floor: a one-glyph pill stays a circle-ish chip
     // instead of collapsing narrower than it is tall.
     const width = @max(height, @ceil(text_width) + bubble_reactions_pad_h * 2);

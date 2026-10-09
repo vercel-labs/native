@@ -40,6 +40,7 @@ pub const estimatedGlyphAdvance = text_metrics.estimatedGlyphAdvance;
 pub const TextMeasureProvider = text_metrics.TextMeasureProvider;
 pub const TextInkMetrics = text_metrics.TextInkMetrics;
 pub const measureTextWidthForFont = text_metrics.measureTextWidthForFont;
+pub const measureTextWidthForFontWithPolicy = text_metrics.measureTextWidthForFontWithPolicy;
 pub const measureTextAdvance = text_metrics.measureTextAdvance;
 
 /// The measurement provider a DrawText carries via its layout options, if

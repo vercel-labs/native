@@ -334,3 +334,16 @@ fn sansVariantWidthFactor(font_id: FontId) f32 {
 pub fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {
     return @max(size * 0.25, glyph.advance);
 }
+
+pub fn measureTextWidthForFontWithPolicy(provider: ?*const TextMeasureProvider, policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, text: []const u8, size: f32) f32 {
+    const owner = policy orelse return measureTextWidthForFont(provider, font_id, text, size);
+    return @import("text_scalar_policy.zig").width(owner, provider, font_id, text, size);
+}
+pub fn estimateTextAdvanceForBytesWithPolicy(policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, bytes: []const u8, size: f32) f32 {
+    const owner = policy orelse return estimateTextAdvanceForBytes(font_id, bytes, size);
+    return @import("text_scalar_policy.zig").estimate(owner, font_id, bytes, size, true);
+}
+pub fn measureTextInkWithPolicy(provider: *const TextMeasureProvider, policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, size: f32, text: []const u8) ?TextInkMetrics {
+    const owner = policy orelse return provider.measureInk(font_id, size, text);
+    return @import("text_scalar_policy.zig").ink(owner, provider, font_id, text, size);
+}

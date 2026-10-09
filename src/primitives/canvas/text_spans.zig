@@ -111,6 +111,7 @@ pub const TextSpanLayoutOptions = struct {
     measure: ?*const text_metrics.TextMeasureProvider = null,
     /// Portable paragraph owner; native supplies font measurements only.
     paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
 };
 
 /// One laid-out segment: a contiguous slice of one span on one line.
@@ -251,7 +252,7 @@ fn measureSpanSliceExact(span: TextSpan, slice: []const u8, options: TextSpanLay
         for (advances) |advance| width += advance;
         return width;
     }
-    return text_metrics.measureTextWidthForFont(options.measure, font_id, slice, size);
+    return text_metrics.measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy orelse options.paragraph_policy, font_id, slice, size);
 }
 
 /// The batched advances of `slice` within its span, or null when the

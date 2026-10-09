@@ -90,19 +90,19 @@ pub const Request = struct {
             if (capability == 3) {
                 if ((op != .aligned_frame and op != .content_frame) or flags & 64 != 0) @panic("invalid widget paragraph continuation");
                 var runs: [spans.max_text_span_runs_per_paragraph]spans.TextSpanRun = undefined;
-                const laid = spans.layoutTextSpans(widget.spans, .{ .size = size, .max_width = float(&copied.bytes, 12), .wrap = if (widget.text_no_wrap) .none else .word, .alignment = widget.text_alignment, .typography = tokens.typography, .measure = tokens.text_measure }, &runs);
+                const laid = spans.layoutTextSpans(widget.spans, .{ .size = size, .max_width = float(&copied.bytes, 12), .wrap = if (widget.text_no_wrap) .none else .word, .alignment = widget.text_alignment, .typography = tokens.typography, .measure = tokens.text_measure, .text_run_policy = tokens.text_run_policy }, &runs);
                 self.put(148, laid.size.height);
                 word(&self.bytes, 12, flags | 64);
             } else {
                 if (flags & 32 != 0 or (op != .intrinsic and op != .gutter and op != .content_frame) or (capability != 4 and op != .intrinsic)) @panic("invalid widget font continuation");
                 if (capability == 2) {
-                    self.put(144, spans.textSpansIntrinsicWidth(widget.spans, .{ .size = size, .max_width = 0, .wrap = if (widget.text_no_wrap) .none else .word, .alignment = widget.text_alignment, .typography = tokens.typography, .measure = tokens.text_measure }));
+                    self.put(144, spans.textSpansIntrinsicWidth(widget.spans, .{ .size = size, .max_width = 0, .wrap = if (widget.text_no_wrap) .none else .word, .alignment = widget.text_alignment, .typography = tokens.typography, .measure = tokens.text_measure, .text_run_policy = tokens.text_run_policy }));
                     self.put(172, spans.textSpansMaxScale(widget.spans));
                     self.put(168, @import("widget_metrics.zig").widgetCodeLineNumberGutterWidth(widget, tokens));
                 } else {
                     const zeros: [20]u8 = @splat('0');
                     const font = if (capability == 1) tokens.typography.buttonFontId() else if (capability == 4) tokens.typography.mono_font_id else tokens.typography.font_id;
-                    self.put(144, text.measureTextWidthForFont(tokens.text_measure, font, if (capability == 4) zeros[0..count] else widget.text, size));
+                    self.put(144, text.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, font, if (capability == 4) zeros[0..count] else widget.text, size));
                 }
                 word(&self.bytes, 12, flags | 32);
             }

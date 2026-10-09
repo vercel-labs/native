@@ -24,6 +24,7 @@ const snapTextCaretSelection = text_model.snapTextCaretSelection;
 const snapTextOffset = text_model.snapTextOffset;
 const snapTextRange = text_model.snapTextRange;
 const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 const nextTextLineEnd = text_model.nextTextLineEnd;
 const isTextBreakByte = text_model.isTextBreakByte;
 const textLineRange = text_model.textLineRange;
@@ -252,7 +253,7 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
         else
             widestLogicalLineWidth(options.measure, options.text_run_policy, font_id, widget.text, text_size)
     else
-        measureTextWidthForFont(options.measure, font_id, widgetTextInputPresentedText(widget), text_size);
+        measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy, font_id, widgetTextInputPresentedText(widget), text_size);
     return @max(0, text_width + text_input_caret_reserve - viewport.width);
 }
 
@@ -406,8 +407,9 @@ pub fn textInputCaretVisibleScrollOffsetForWidget(widget: Widget, tokens: Design
             @as(usize, @intFromBool(std.mem.lastIndexOfScalar(u8, widget.text[0..caret_offset], '\n') != null))
     else
         0;
-    const caret_x = measureTextWidthForFont(
+    const caret_x = measureTextWidthForFontWithPolicy(
         options.measure,
+        options.text_run_policy,
         widgetTextInputFontId(widget, tokens),
         widgetTextInputPresentedText(widget)[caret_line_start..caret_offset],
         text_size,
@@ -439,7 +441,7 @@ pub fn widgetTextInputClipsText(widget: Widget, tokens: DesignTokens, text_size:
         const placeholder = widgetPlaceholder(widget);
         if (placeholder.len == 0) return false;
         const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-        return measureTextWidthForFont(options.measure, tokens.typography.font_id, placeholder, text_size) > viewport.width;
+        return measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy, tokens.typography.font_id, placeholder, text_size) > viewport.width;
     }
     return false;
 }

@@ -77,7 +77,7 @@ const WidgetRenderState = widget_model.WidgetRenderState;
 const WidgetSize = widget_model.WidgetSize;
 const Widget = widget_model.Widget;
 const estimateTextWidth = text_model.estimateTextWidth;
-const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 const affinesEqual = equality_model.affinesEqual;
 pub const textSelectionFillColor = widget_render_style.textSelectionFillColor;
 pub const textSelectionTextColor = widget_render_style.textSelectionTextColor;
@@ -3995,7 +3995,7 @@ fn chartYLabelGutterWidth(data: chart_model.ChartData, tokens: DesignTokens) f32
     var buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     for (0..lattice.count) |ordinal| {
         const text = chart_model.formatChartValue(&buffer, lattice.value(ordinal), lattice.decimals);
-        widest = @max(widest, measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size));
+        widest = @max(widest, measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, size));
     }
     return @ceil(widest) + chart_axis_label_gap;
 }
@@ -4019,7 +4019,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
             const value = lattice.value(ordinal);
             const formatted = chart_model.formatChartValue(&buffer, value, lattice.decimals);
             const text = try builder.allocChartLabelBytes(formatted);
-            const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
+            const width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, size);
             const line_y = chartMapY(value, domain, plot, 0);
             const top = std.math.clamp(line_y - line_height * 0.5, content.y, @max(content.y, content.maxY() - line_height));
             try builder.drawText(.{
@@ -4041,7 +4041,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         // never touch. Pure over the labels and the plot width.
         var widest: f32 = 0;
         for (data.x_labels) |label| {
-            widest = @max(widest, measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, label, size));
+            widest = @max(widest, measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, label, size));
         }
         const spacing = @max(1, widest + chart_x_label_min_gap);
         const fit: usize = @max(1, @as(usize, @intFromFloat(plot.width / spacing)));
@@ -4051,7 +4051,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         while (ordinal < data.x_labels.len) : (ordinal += @max(1, stride)) {
             const label = data.x_labels[ordinal];
             if (label.len == 0) continue;
-            const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, label, size);
+            const width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, label, size);
             const center_x = chartSampleX(data, count, ordinal, plot);
             const x = std.math.clamp(center_x - width * 0.5, content.x, @max(content.x, content.maxX() - width));
             try builder.drawText(.{
@@ -4367,15 +4367,15 @@ pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geome
     // index) over one row per series that has this sample.
     var buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     const title = chartHoverDetailTitle(data, index, &buffer);
-    var content_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, title, size);
+    var content_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, title, size);
     var rows: usize = 0;
     for (data.series) |series| {
         if (index >= series.values.len) continue;
         rows += 1;
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
-        const name_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, chartDetailRowName(series), size);
+        const name_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, chartDetailRowName(series), size);
         const value_text = chart_model.formatChartValue(&value_buffer, series.values[index], decimals);
-        const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
+        const value_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, value_text, size);
         content_width = @max(content_width, chart_detail_swatch + chart_detail_swatch_gap + name_width + chart_detail_column_gap + value_width);
     }
     if (rows == 0) return null;
@@ -4575,7 +4575,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
         const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
-        const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
+        const value_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, value_text, size);
         try builder.drawText(.{
             .id = chartCommandId(widget.id, chart_hover_row_seed, series_index, 2),
             .font_id = tokens.typography.font_id,
@@ -4603,7 +4603,7 @@ fn executeChartPlan(plan: *chart_plans.Plan, builder: ?*Builder) Error!void {
                     text = try (builder orelse @panic("chart query requested drawing storage")).allocChartLabelBytes(text);
                     plan.saved_label = text;
                 }
-                plan.reply(measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, plan.scalar(224)));
+                plan.reply(measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, plan.scalar(224)));
             },
             .fill_rect => try (builder orelse @panic("chart query requested drawing")).fillRect(.{
                 .id = plan.commandId(),

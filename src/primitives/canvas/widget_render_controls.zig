@@ -64,7 +64,7 @@ const widgetRowIconExtent = widget_metrics.widgetRowIconExtent;
 const widgetRowIconGap = widget_metrics.widgetRowIconGap;
 const widgetButtonIconGap = widget_metrics.widgetButtonIconGap;
 const estimateTextWidth = text_model.estimateTextWidth;
-const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 const layoutTextCaretRect = text_model.layoutTextCaretRect;
 const layoutTextSelectionRects = text_model.layoutTextSelectionRects;
 const textEditingInkColor = widget_render_style.textEditingInkColor;
@@ -170,7 +170,7 @@ pub fn emitButtonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
         // draws the missing-icon fallback (never a silent gap).
         const icon_extent = widgetButtonIconExtent(widget, tokens);
         const gap = widgetButtonIconGap(widget, tokens);
-        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, text_size);
+        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.buttonFontId(), widget.text, text_size);
         const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, true);
         try emitVectorIcon(builder, widget.id, 5, content.icon, content_color, resolved);
         if (widget.text.len == 0) return;
@@ -947,7 +947,7 @@ pub fn segmentedControlUnderlineRect(widget: Widget, tokens: DesignTokens) ?geom
     const frame = widget.frame.normalized();
     const thickness = @min(frame.height, widgetSizedDensityValue(widget, tokens, tokens.metrics.tabs_indicator_thickness));
     const text_size = widgetTabTriggerTextSize(widget, tokens);
-    const text_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+    const text_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, text_size);
     const icon_width = if (widget.icon.len > 0)
         widgetTabTriggerIconExtent(widget, tokens) + (if (widget.text.len > 0) widgetTabTriggerIconGap(tokens) else 0)
     else
@@ -1053,7 +1053,7 @@ pub fn emitSegmentedControlWidget(builder: *Builder, widget: Widget, tokens: Des
         const resolved = icon_model.resolveOrMissing(widget.icon).?;
         const icon_extent = widgetTabTriggerIconExtent(widget, tokens);
         const gap = widgetTabTriggerIconGap(tokens);
-        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+        const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, text_size);
         const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, false);
         try emitVectorIcon(builder, widget.id, 5, content.icon, content_color, resolved);
         if (widget.text.len == 0) return;
@@ -2128,7 +2128,7 @@ fn emitCompiledButton(builder: *Builder, widget: Widget, tokens: DesignTokens) E
             const resolved = icon.?;
             const icon_extent = widgetButtonIconExtent(widget, tokens);
             const gap = widgetButtonIconGap(widget, tokens);
-            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, text_size);
+            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.buttonFontId(), widget.text, text_size);
             const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, true);
             try emitVectorIconWithTokens(builder, widget.id, command.slot, content.icon, content_color, resolved, tokens);
             text_frame = content.label;
@@ -2798,7 +2798,7 @@ fn emitCompiledSegmented(builder: *Builder, widget: Widget, tokens: DesignTokens
             const resolved = icon_model.resolveOrMissing(widget.icon).?;
             const icon_extent = widgetTabTriggerIconExtent(widget, tokens);
             const gap = widgetTabTriggerIconGap(tokens);
-            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+            const text_width = if (widget.text.len == 0) 0 else measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, text_size);
             const content = iconLabelFrames(widget, tokens, icon_extent, gap, text_width, text_inset, false);
             try emitVectorIconWithTokens(builder, widget.id, command.slot, content.icon, content_color, resolved, tokens);
             text_frame = content.label;

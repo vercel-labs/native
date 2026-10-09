@@ -959,3 +959,5 @@ pub const leaf_plan_policy = @import("leaf_plan_policy.zig");
 pub const chart_plan_policy = @import("chart_plan_policy.zig");
 pub const indicator_plan_policy = @import("indicator_plan_policy.zig");
 pub const effect_plan_policy = @import("effect_plan_policy.zig");
+
+pub const text_scalar_policy = @import("text_scalar_policy.zig");

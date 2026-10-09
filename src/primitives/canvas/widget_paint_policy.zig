@@ -138,7 +138,7 @@ pub const Plan = struct {
             const slot = read(measurements, 8 + i * 8);
             const node = if (slot < previous.len) previous[slot] else next[slot - previous.len];
             const size = readFloat(measurements, 12 + i * 8);
-            const width = text_metrics.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, node.widget.text, size);
+            const width = text_metrics.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, node.widget.text, size);
             float(request, header_size + @as(usize, slot) * node_size + 116, width);
         }
         request[1] = mode;

@@ -115,6 +115,7 @@ pub fn widgetTextSpanLayoutOptions(widget: Widget, tokens: DesignTokens, max_wid
         .alignment = widget.text_alignment,
         .typography = tokens.typography,
         .measure = tokens.text_measure,
+        .text_run_policy = tokens.text_run_policy,
         .paragraph_policy = tokens.paragraph_policy,
     };
 }
@@ -138,8 +139,9 @@ pub fn widgetCodeLineNumberGutterWidth(widget: Widget, tokens: DesignTokens) f32
             @max(@as(usize, line_number_digits), min_code_line_number_digits),
             zeros.len,
         );
-    return text_model.measureTextWidthForFont(
+    return text_model.measureTextWidthForFontWithPolicy(
         tokens.text_measure,
+        tokens.text_run_policy,
         tokens.typography.mono_font_id,
         zeros[0..digits],
         widgetBodyTextSize(widget, tokens),

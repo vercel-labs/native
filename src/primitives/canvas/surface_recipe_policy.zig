@@ -168,7 +168,7 @@ pub const Request = struct {
             const pending = read(&copied.bytes, 8) & 8 != 0;
             if (pending) {
                 if (phase != 0 or (self.bytes[2] != @intFromEnum(Operation.pill_rect) and self.bytes[2] != @intFromEnum(Operation.reactions)) or read(&copied.bytes, 8) != 8 or read(&copied.bytes, 4) != 0 or !std.mem.allEqual(u8, copied.bytes[16..], 0)) @panic("invalid surface measurement continuation");
-                self.putFloat(116, text.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, float(&self.bytes, 48)));
+                self.putFloat(116, text.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, float(&self.bytes, 48)));
                 word(&self.bytes, 4, read(&self.bytes, 4) | 128);
                 continue;
             }

@@ -98,7 +98,7 @@ pub fn widest(policy: Policy, provider: ?*const metrics.TextMeasureProvider, fon
             const values = cache.textRunAdvancesWithPolicy(provider.?, policy, font, size, text[first..last]);
             put(packet, 92, @intFromBool(values != null));
             if (values) |advances| for (advances, 0..) |value, i| setFloat(packet, 128 + i * 4, value);
-        } else setFloat(packet, 108, metrics.measureTextWidthForFont(provider, font, text[first..last], size));
+        } else setFloat(packet, 108, metrics.measureTextWidthForFontWithPolicy(provider, policy, font, text[first..last], size));
     }
 }
 

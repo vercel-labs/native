@@ -19,6 +19,7 @@ test {
     _ = @import("text_span_query_e2e_tests.zig");
     _ = @import("text_measurement_cache_e2e_tests.zig");
     _ = @import("text_document_width_e2e_tests.zig");
+    _ = @import("scalar_text_e2e_tests.zig");
 }
 fn owned(tokens: c.DesignTokens) c.DesignTokens {
     var t = tokens;

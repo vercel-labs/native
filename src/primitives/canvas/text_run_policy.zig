@@ -219,18 +219,18 @@ pub fn supplyCapability(packet: []u8, header: []u8, facts_start: usize, text: ty
     switch (kind) {
         1 => {
             const measure = if (phase == 32 or phase == 40 or phase == 42 or phase == 43 or phase == 50) draw_measure else options.measure;
-            setFloat(header, 116, metrics.measureTextWidthForFont(measure, text.font_id, text.text[start..end], text.size));
+            setFloat(header, 116, metrics.measureTextWidthForFontWithPolicy(measure, options.text_run_policy, text.font_id, text.text[start..end], text.size));
         },
-        2 => setFloat(header, 116, metrics.estimateTextAdvanceForBytes(text.font_id, text.text[start..end], text.size)),
+        2 => setFloat(header, 116, metrics.estimateTextAdvanceForBytesWithPolicy(options.text_run_policy, text.font_id, text.text[start..end], text.size)),
         3, 4 => {
             const provider = if (kind == 3) options.measure else draw_measure;
             const advances = if (provider) |p| if (kind == 3) cache.textRunAdvancesWithPolicy(p, options.text_run_policy, text.font_id, text.size, text.text) else cache.cachedTextRunAdvancesWithPolicy(p, options.text_run_policy, text.font_id, text.size, text.text) else null;
             put(header, 120, @intFromBool(advances != null));
             if (advances) |values| for (values, 0..) |value, n| setFloat(packet, advance_at + n * 4, value);
         },
-        5 => setFloat(header, 116, if (options.measure) |p| p.measureWidth(text.font_id, text.size, "\u{2026}") else metrics.estimatedTextEllipsisAdvance(text.font_id, text.size)),
+        5 => setFloat(header, 116, metrics.measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy, text.font_id, "\u{2026}", text.size)),
         6, 7 => {
-            const ink = if (draw_measure) |p| p.measureInk(text.font_id, text.size, if (kind == 7) "\u{2026}" else text.text[start..end]) else null;
+            const ink = if (draw_measure) |p| metrics.measureTextInkWithPolicy(p, options.text_run_policy, text.font_id, text.size, if (kind == 7) "\u{2026}" else text.text[start..end]) else null;
             put(header, 120, @intFromBool(ink != null));
             if (ink) |value| {
                 setFloat(header, 124, value.min_x);

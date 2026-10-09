@@ -20,12 +20,12 @@ const WidgetLayoutStyle = widget_model.WidgetLayoutStyle;
 const WidgetLayoutNode = event_model.WidgetLayoutNode;
 const DesignTokens = token_model.DesignTokens;
 const virtualListRange = token_model.virtualListRange;
-const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 
 /// Text width for intrinsic sizing: the injected provider on `tokens` when
 /// present, the deterministic estimator otherwise.
 fn measuredTextWidth(tokens: DesignTokens, text: []const u8, size: f32) f32 {
-    return measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
+    return measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, size);
 }
 const gridColumnCount = widget_tree.gridColumnCount;
 const gridRowCount = widget_tree.gridRowCount;
@@ -2878,7 +2878,7 @@ fn intrinsicButtonWidgetSize(widget: Widget, tokens: DesignTokens) geometry.Size
         0;
     // Measured with the button-label face (not the body face) so the
     // medium advances the render draws are the widths layout reserves.
-    const text_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.buttonFontId(), widget.text, widgetButtonTextSize(widget, tokens));
+    const text_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.buttonFontId(), widget.text, widgetButtonTextSize(widget, tokens));
     // Ceil to the snap grid (`pixelSnapCeil`): a button or toggle chip
     // sized exactly to its measured label ("PID" in a sort-chip row)
     // must not lose a fraction of a pixel to render-time edge snapping

@@ -252,6 +252,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 57) return nscvTextSpanBounds(request);
   if (request[0] === 58) return nscvTextMeasurementCache(request);
   if (request[0] === 59) return nscvTextDocumentWidth(request);
+  if (request[0] === 60) return nscvScalarText(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {

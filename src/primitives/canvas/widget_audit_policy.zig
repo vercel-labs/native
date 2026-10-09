@@ -105,7 +105,7 @@ fn measure(widget: widgets.Widget, raw_frame: geometry.RectF, tokens: tokens_mod
             .measure = tokens.text_measure,
         });
         measured.lines += 1;
-        measured.width = @max(measured.width, text_metrics.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text[start..end], text_size));
+        measured.width = @max(measured.width, text_metrics.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text[start..end], text_size));
         if (end >= widget.text.len) break;
         start = end;
         if (start < widget.text.len and widget.text[start] == '\n') start += 1;
