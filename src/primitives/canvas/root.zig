@@ -178,6 +178,7 @@ pub const textLineCaretX = text_model.textLineCaretX;
 pub const text_run_policy = @import("text_run_policy.zig");
 pub const text_query_policy = @import("text_query_policy.zig");
 pub const text_measurement_policy = @import("text_measurement_policy.zig");
+pub const text_document_policy = @import("text_document_policy.zig");
 pub const text_measure_cache = @import("text_measure_cache.zig");
 pub const text_span_query_policy = @import("text_span_query_policy.zig");
 pub const TextMeasureProvider = text_model.TextMeasureProvider;

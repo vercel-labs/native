@@ -941,6 +941,7 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./text_query_layout.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./text_span_queries.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./text_measurement_cache.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("./text_document_width.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./control_appearance.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./component_construction.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_motion.ts", import.meta.url), "utf8") +

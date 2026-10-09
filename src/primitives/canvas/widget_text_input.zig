@@ -8,6 +8,7 @@ const widget_model = @import("widgets.zig");
 const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
+const document_policy = @import("text_document_policy.zig");
 
 const FontId = @import("root.zig").FontId;
 const Builder = @import("commands.zig").Builder;
@@ -246,7 +247,7 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
     // single-line extent it draws.
     const font_id = widgetTextInputFontId(widget, tokens);
     const text_width = if (widget.runtime_flags.code_editor)
-        if (codeContentWidthCacheCurrent(widget, font_id, text_size))
+        if (codeContentWidthCacheCurrent(widget, font_id, text_size, options.text_run_policy))
             widget.code_content_width
         else
             widestLogicalLineWidth(options.measure, options.text_run_policy, font_id, widget.text, text_size)
@@ -511,7 +512,8 @@ fn widgetTextInputFontId(widget: Widget, tokens: DesignTokens) FontId {
     return if (widget.runtime_flags.code_editor) tokens.typography.mono_font_id else tokens.typography.font_id;
 }
 
-fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32) bool {
+fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32, policy: ?document_policy.Policy) bool {
+    if (policy) |owner| return document_policy.cacheDecision(owner, widget, font_id, text_size, false) == 1;
     if (widget.hasCodeDiff()) return false;
     return widget.code_content_width_generation == text_measure_cache.textMeasureGeneration() and
         widget.code_content_width_font_id == font_id and
@@ -524,11 +526,15 @@ fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32)
 /// Runtime reconciliation carries this cache across unchanged app rebuilds;
 /// edits invalidate it before caret scrolling recomputes the new document.
 pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens) void {
-    if (widget.kind != .textarea or !widget.runtime_flags.code_editor or !widget.text_no_wrap) return;
-    if (widget.hasCodeDiff()) return;
+    if (tokens.text_run_policy) |owner| {
+        if (document_policy.cacheDecision(owner, widget.*, 0, 0, true) == 0) return;
+    } else {
+        if (widget.kind != .textarea or !widget.runtime_flags.code_editor or !widget.text_no_wrap) return;
+        if (widget.hasCodeDiff()) return;
+    }
     const text_size = widgetTextInputSize(widget.*, tokens);
     const font_id = widgetTextInputFontId(widget.*, tokens);
-    if (codeContentWidthCacheCurrent(widget.*, font_id, text_size)) return;
+    if (codeContentWidthCacheCurrent(widget.*, font_id, text_size, tokens.text_run_policy)) return;
     widget.code_content_width = widestLogicalLineWidth(tokens.text_measure, tokens.text_run_policy, font_id, widget.text, text_size);
     widget.code_content_width_generation = text_measure_cache.textMeasureGeneration();
     widget.code_content_width_font_id = font_id;
@@ -542,6 +548,7 @@ fn widestLogicalLineWidth(
     text: []const u8,
     text_size: f32,
 ) f32 {
+    if (cache_policy) |owner| return document_policy.widest(owner, measure, font_id, text, text_size);
     if (measure) |provider| {
         if (widestLogicalLineWidthBatched(provider, cache_policy, font_id, text, text_size)) |width| return width;
     }
