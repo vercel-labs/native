@@ -103,6 +103,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 .audit_policy = self.widget_tokens.widget_audit_policy,
                 .routing_policy = self.widget_tokens.widget_routing_policy,
                 .change_policy = self.widget_tokens.widget_change_policy,
+                .text_run_policy = self.widget_tokens.text_run_policy,
                 .paint_policy = self.widget_tokens.widget_paint_policy,
                 .presentation_policy = self.widget_tokens.widget_presentation_policy,
                 .paint_walk_policy = self.widget_tokens.widget_paint_walk_policy,
@@ -205,6 +206,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
+                self.widget_tokens.text_run_policy = layout.text_run_policy orelse self.widget_tokens.text_run_policy;
                 self.widget_layout_root_bounds = layout.root_bounds;
                 self.widget_revision += 1;
                 self.canvas_widget_layout_adoptions +%= 1;
@@ -299,6 +301,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // the failure's own drain instead of waiting for the next
             // pointer move.
             self.canvas_widget_layout_adoptions +%= 1;
+            self.widget_tokens.text_run_policy = layout.text_run_policy orelse self.widget_tokens.text_run_policy;
             errdefer self.pruneCanvasWidgetHoverMsgChain();
             self.widget_layout_node_count = 0;
             self.widget_layout_root_bounds = layout.root_bounds;

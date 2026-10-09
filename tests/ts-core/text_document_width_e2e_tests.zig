@@ -131,3 +131,62 @@ test "compiled document width preserves complete horizontal geometry and scalar 
         }
     }
 }
+
+var adoption_calls: [3]usize = @splat(0);
+var adoption_context: u8 = 0;
+fn adoptionOwner(request: []const u8, result: []u8) usize {
+    if (request[0] == 59) adoption_calls[request[2]] += 1;
+    return core.nativeWindowPolicy(request, result);
+}
+fn rejectedAdoptionOwner(_: []const u8, _: []u8) usize {
+    @panic("rejected layout must not invoke its owner");
+}
+fn adoptionApp() sdk.App {
+    return .{ .context = &adoption_context, .name = "document-adoption", .source = sdk.WebViewSource.html("<h1>Document</h1>") };
+}
+test "compiled document width traversal owns first retained adoption before display tokens arrive" {
+    _ = core.initialModel();
+    const Ui = c.Ui(enum { unused });
+    const reference = try sdk.TestHarness().create(std.testing.allocator, .{});
+    defer reference.destroy(std.testing.allocator);
+    const compiled = try sdk.TestHarness().create(std.testing.allocator, .{});
+    defer compiled.destroy(std.testing.allocator);
+    var expected: [2]c.WidgetLayoutNode = undefined;
+    for ([_]?c.text_document_policy.Policy{ null, adoptionOwner }, 0..) |owner, lane| {
+        adoption_calls = @splat(0);
+        const h = if (lane == 0) reference else compiled;
+        h.null_platform.gpu_surfaces = true;
+        try h.start(adoptionApp());
+        _ = try h.runtime.createView(.{ .window_id = 1, .label = "canvas", .kind = .gpu_surface, .frame = .init(0, 0, 320, 100) });
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var ui = Ui.init(arena.allocator());
+        const tree = try ui.finalize(ui.code(.{ .editable = true, .wrap = false, .height = 75 }, "first\na longer line\n"));
+        var nodes: [4]c.WidgetLayoutNode = undefined;
+        const tokens: c.DesignTokens = .{ .text_run_policy = owner };
+        const layout = try c.layoutWidgetTreeWithTokens(tree.root, .init(0, 0, 320, 100), tokens, &nodes);
+        try std.testing.expect(h.runtime.views[0].widget_tokens.text_run_policy == null);
+        var first_traversal_calls: usize = 0;
+        for (0..2) |turn| {
+            _ = try h.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            const retained = h.runtime.views[0].widgetLayoutTree();
+            try std.testing.expectEqual(@as(usize, 1), retained.nodes.len);
+            try std.testing.expectEqual(owner, retained.text_run_policy);
+            try std.testing.expectEqual(owner, h.runtime.views[0].widget_tokens.text_run_policy);
+            if (lane == 0) expected[turn] = retained.nodes[0] else try exact(expected[turn], retained.nodes[0]);
+            if (lane == 0) try std.testing.expectEqual([3]usize{ 0, 0, 0 }, adoption_calls) else {
+                try std.testing.expect(adoption_calls[0] > 0 and adoption_calls[1] > 0 and adoption_calls[2] > 0);
+                if (turn == 0) first_traversal_calls = adoption_calls[2] else try std.testing.expectEqual(first_traversal_calls, adoption_calls[2]);
+            }
+            core.rt.frameReset();
+        }
+        var rejected = layout;
+        rejected.nodes = try arena.allocator().alloc(c.WidgetLayoutNode, h.runtime.views[0].widget_layout_nodes.len + 1);
+        rejected.text_run_policy = rejectedAdoptionOwner;
+        const before_rejection = adoption_calls;
+        try std.testing.expectError(error.WidgetNodeLimitReached, h.runtime.setCanvasWidgetLayout(1, "canvas", rejected));
+        try std.testing.expectEqual(owner, h.runtime.views[0].widget_tokens.text_run_policy);
+        try std.testing.expectEqual(before_rejection, adoption_calls);
+        try exact(expected[1], h.runtime.views[0].widgetLayoutTree().nodes[0]);
+    }
+}

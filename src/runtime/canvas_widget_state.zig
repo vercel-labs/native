@@ -76,7 +76,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const previous_layout = self.views[index].widgetLayoutTree();
             const source_semantics = try layout.collectSemantics(&self.canvas_widget_source_semantics_scratch);
             const reconciled_nodes = &self.canvas_widget_reconcile_nodes;
-            const tokens = self.views[index].widget_tokens;
+            var tokens = self.views[index].widget_tokens;
+            tokens.text_run_policy = layout.text_run_policy orelse tokens.text_run_policy;
             // Reconcile scratch lives on the Runtime, not the stack: at
             // the 1024-node budget these arrays total several hundred
             // KiB, and the single-threaded event loop makes the shared
