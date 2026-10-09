@@ -48,6 +48,17 @@ try {
     const sdkSource = generateCoreSurface(fs.readFileSync(sdkIn!, "utf8"), analysis);
     fs.writeFileSync(sdkOut!, sdkSource);
     const sdkDir = path.dirname(sdkIn!);
+    // Generated core surfaces retain these relative SDK imports. Carry
+    // their complete implementation and declaration siblings with each
+    // projection, including the editor's app-specific relational overlay.
+    const siblingDirs = new Set([path.dirname(sdkOut!), path.dirname(staticOut!), ...(dtsOut ? [path.dirname(dtsOut)] : [])]);
+    for (const destination of siblingDirs) for (const name of ["bytes", "events", "text", "theme", "internal/image_identity", "internal/markdown_policy"]) {
+      for (const extension of [".ts", ".d.ts"]) {
+        const output = path.join(destination, name + extension);
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+        fs.copyFileSync(path.join(sdkDir, name + extension), output);
+      }
+    }
     for (const [source, destination] of [
       ["events.ts", sdkEventsOut!],
       ["text.ts", sdkTextOut!],

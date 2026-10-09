@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
-const source = readFileSync(new URL("../src/markdown_content.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../sdk/internal/markdown_policy.ts", import.meta.url), "utf8");
 const { nscvMarkdownContentPolicy: policy, nscMdFloat: parse, nscMdDecode: decode } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport { nscvMarkdownContentPolicy, nscMdFloat, nscMdDecode };\n").toString("base64")}`);
 const utf8 = (text: string) => new TextEncoder().encode(text);
 function request(bytes: Uint8Array, collect = false, capacity = 16) {

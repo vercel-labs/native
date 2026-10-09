@@ -7,7 +7,67 @@ function nscMdSlot(): NscMdSlot { return { valid: false, from: 0, pos: -1 }; }
 class NscMdCache {
   bracket = nscMdSlot(); paren = nscMdSlot(); angle = nscMdSlot(); space = nscMdSlot(); title = nscMdSlot(); scheme = nscMdSlot(); comment = nscMdSlot(); tick = nscMdSlot();
 }
-function nscMdBytes(text: string): Uint8Array { return new TextEncoder().encode(text); }
+function nscMdBytes(s: string): Uint8Array {
+  let byteLength = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code <= 0x7f) {
+      byteLength += 1;
+    } else if (code <= 0x7ff) {
+      byteLength += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        byteLength += 4;
+        i += 1;
+      } else {
+        byteLength += 3;
+      }
+    } else {
+      byteLength += 3;
+    }
+  }
+
+  const out = new Uint8Array(byteLength);
+  let at = 0;
+  for (let i = 0; i < s.length; i++) {
+    let code = s.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+        i += 1;
+      } else {
+        code = 0xfffd;
+      }
+    } else if (code >= 0xd800 && code <= 0xdfff) {
+      code = 0xfffd;
+    }
+
+    if (code <= 0x7f) {
+      out[at] = code;
+      at += 1;
+    } else if (code <= 0x7ff) {
+      out[at] = 0xc0 | (code >> 6);
+      out[at + 1] = 0x80 | (code & 0x3f);
+      at += 2;
+    } else if (code <= 0xffff) {
+      out[at] = 0xe0 | (code >> 12);
+      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
+      out[at + 2] = 0x80 | (code & 0x3f);
+      at += 3;
+    } else {
+      out[at] = 0xf0 | (code >> 18);
+      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
+      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
+      out[at + 3] = 0x80 | (code & 0x3f);
+      at += 4;
+    }
+  }
+  return out;
+}
+
+
 function nscMdEqual(a: Uint8Array, b: Uint8Array, insensitive: boolean): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) { let x = a[i]!, y = b[i]!; if (insensitive) { if (x >= 65 && x <= 90) x += 32; if (y >= 65 && y <= 90) y += 32; } if (x !== y) return false; }
@@ -794,4 +854,25 @@ function nscvMarkdownRecipe(source: Uint8Array, expanded: readonly boolean[], is
   }
   const builder = new NscMdBuilder(flags, issue, images), blocks = builder.blocks(new NscMdLines(source), false), root = builder.container(false, 12, 0, 0, blocks), recipe = nscMdEncode(builder.nodes, root), output: number[] = [];
   for (const byte of recipe) output.push(byte); return output;
+}
+
+function nscvMarkdownRecipeWords(source: Uint8Array, expanded: readonly boolean[], issue: Uint8Array | null, mappings: readonly { source: Uint8Array; image: { imageLower: number; imageUpper: number }; width: number; height: number }[]): number[] {
+  const flags: boolean[] = []; for (const flag of expanded) flags.push(flag);
+  const images: NscMdImage[] = [];
+  for (let i = 0; i < Math.min(mappings.length, 16); i++) {
+    const mapping = mappings[i]!, identity = mapping.image;
+    if (!Number.isInteger(identity.imageLower) || !Number.isInteger(identity.imageUpper) || identity.imageLower < 0 || identity.imageLower > 4294967295 || identity.imageUpper < 0 || identity.imageUpper >= 2147483648) throw new Error("Markdown registered image identity is not exact");
+    images.push({ source: mapping.source, lower: identity.imageLower, upper: identity.imageUpper, width: Math.fround(mapping.width), height: Math.fround(mapping.height) });
+  }
+  const builder = new NscMdBuilder(flags, issue, images), blocks = builder.blocks(new NscMdLines(source), false), root = builder.container(false, 12, 0, 0, blocks), recipe = nscMdEncode(builder.nodes, root), output: number[] = [];
+  for (const byte of recipe) output.push(byte); return output;
+}
+
+/** Discover canonical image sources using the same bounded parser as the view. */
+export interface MarkdownImageSource { readonly source: Uint8Array; }
+export function markdownImageSources(source: Uint8Array, capacity: number): readonly MarkdownImageSource[] {
+  if (!Number.isSafeInteger(capacity) || capacity < 0 || capacity > 16) throw new Error("invalid Markdown image capacity");
+  const output: MarkdownImageSource[] = [];
+  for (const value of new NscMdDiscovery(capacity).collect(source)) output.push({ source: value });
+  return output;
 }

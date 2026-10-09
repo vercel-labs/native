@@ -166,7 +166,7 @@
 //!                  Image loads are not the string-keyed cancel's to
 //!                  end (they are keyed by numeric id, not a wire key)
 //!                  — `image_cancel` is their cancel.
-//!   image_cancel-> `fx.cancel(id)` on the live load under the id, if
+//!   image_cancel-> `fx.cancelImage(id)` on the live load under the id, if
 //!                  any: the engine's `.cancelled` terminal routes the
 //!                  load's own event arm (state "cancelled") and
 //!                  retires the entry, freeing the id for a fresh load
@@ -1079,13 +1079,13 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         cancelWireKey(fx, key);
                     },
                     // Complete file terminals and exact journaled clocks.
-                    0x37, 0x38 => {
+                    0x37, 0x38, 0x3e, 0x3f => {
                         const key = takeShortBytes(cmd, &at);
                         const tag = takeByte(cmd, &at);
                         const file_path = takeLongBytes(cmd, &at);
-                        const bytes = if (op == 0x38) takeLongBytes(cmd, &at) else "";
-                        const file_op: runtime_effects.EffectFileOp = if (op == 0x38) .write else .read;
-                        const index = allocEffectEntryWithFileResult(fx, .{ .key = key, .ok_tag = tag, .err_tag = tag }, file_op) orelse continue;
+                        const bytes = if (op == 0x38 or op == 0x3f) takeLongBytes(cmd, &at) else "";
+                        const file_op: runtime_effects.EffectFileOp = if (op == 0x38 or op == 0x3f) .write else .read;
+                        const index = allocEffectEntryWithFilePolicy(fx, .{ .key = key, .ok_tag = tag, .err_tag = tag }, file_op, op == 0x37 or op == 0x38) orelse continue;
                         if (file_op == .read) fx.readFile(.{ .key = effect_key_base + index, .path = file_path, .on_result = completeFileResultMsg }) else fx.writeFile(.{ .key = effect_key_base + index, .path = file_path, .bytes = bytes, .on_result = completeFileResultMsg });
                     },
                     0x39 => {
@@ -1327,6 +1327,30 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                     },
                     // quit_app [op]
                     0x11 => fx.quitApp(),
+                    // Lossless identity: two unsigned little-endian words.
+                    0x3b => {
+                        const id_bytes = takeBytes(cmd, &at, 8);
+                        const id = std.mem.readInt(u64, id_bytes[0..8], .little);
+                        const tag = takeByte(cmd, &at);
+                        const image_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache = takeLongBytes(cmd, &at);
+                        const expected_bytes = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bytes[0..8], .little));
+                        issueImageLoadWords(fx, id, tag, image_path, url, cache, expected);
+                    },
+                    0x3c, 0x3d => {
+                        const id_bytes = takeBytes(cmd, &at, 8);
+                        const id = std.mem.readInt(u64, id_bytes[0..8], .little);
+                        const table: []const ImageEntry = if (op == 0x3c) &images else &.{};
+                        const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                            compiledMediaIdentityPlan(0, 4, id, 0, 0, .microphone, 0, 0, 0, table, true)
+                        else
+                            MediaPlan{ .valid = imageWordIdValid(id), .slot = findImage(id), .key = id, .tag = 0, .retire = false, .expected_bytes = 0, .source = .microphone, .sample_rate = 0, .capture_channels = 0 };
+                        if (op == 0x3c) {
+                            if (plan.valid and plan.slot != null) fx.cancelImage(plan.key);
+                        } else if (plan.valid) _ = fx.unregisterImage(plan.key);
+                    },
                     // image_load [op][id f64 LE][event_tag]
                     //            [path_len u32 LE][path][url_len u32 LE][url]
                     //            [cache_len u32 LE][cache][expected f64 LE]
@@ -1754,7 +1778,10 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             return allocEffectEntryWithFileResult(fx, head, null);
         }
         fn allocEffectEntryWithFileResult(fx: *Fx, head: RoutedHead, file_op: ?runtime_effects.EffectFileOp) ?u64 {
-            const blocked = head.key.len > 0 and (reservedWireKeyOccupiedExcept(head.key, .effect) or (file_op != null and (findRequest(head.key) != null or findStream(head.key) != null or findDelay(head.key) != null or findPty(head.key) != null or findDb(head.key) != null)));
+            return allocEffectEntryWithFilePolicy(fx, head, file_op, true);
+        }
+        fn allocEffectEntryWithFilePolicy(fx: *Fx, head: RoutedHead, file_op: ?runtime_effects.EffectFileOp, replace: bool) ?u64 {
+            const blocked = (!replace and head.key.len > 0 and findEffect(head.key) != null) or head.key.len > 0 and (reservedWireKeyOccupiedExcept(head.key, .effect) or (file_op != null and (findRequest(head.key) != null or findStream(head.key) != null or findDelay(head.key) != null or findPty(head.key) != null or findDb(head.key) != null)));
             const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head, blocked) else blk: {
                 break :blk EffectPlan{
                     .admitted = !blocked,
@@ -1795,7 +1822,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         /// the entry through the result callback, which swallows it.
         fn dropEffectEntry(fx: *Fx, index: usize) void {
             effects_table[index].dropped = true;
-            fx.cancel(effect_key_base + index);
+            fx.cancelNonImage(effect_key_base + index);
         }
 
         /// A dropped entry's key is dead to lookup: reissuing it is a
@@ -2468,6 +2495,10 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             expected: f64,
             table: anytype,
         ) MediaPlan {
+            return compiledMediaIdentityPlan(family, operation, key_bits, event_kind, tag, source, sample_rate, capture_channels, expected, table, false);
+        }
+
+        fn compiledMediaIdentityPlan(comptime family: u8, operation: u8, key_bits: u64, event_kind: u8, tag: u8, source: platform.AudioCaptureSource, sample_rate: u32, capture_channels: u8, expected: f64, table: anytype, words: bool) MediaPlan {
             var request: [28 + @as(usize, @max(runtime_effects.max_effects, runtime_effects.max_effect_channels)) * 16]u8 = @splat(0);
             request[0] = operation;
             request[1] = family;
@@ -2476,6 +2507,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             request[4] = tag;
             request[5] = @intFromEnum(source);
             request[6] = capture_channels;
+            request[7] = @intFromBool(words);
             std.mem.writeInt(u64, request[8..16], key_bits, .little);
             std.mem.writeInt(u32, request[16..20], sample_rate, .little);
             std.mem.writeInt(u64, request[20..28], @bitCast(expected), .little);
@@ -2867,6 +2899,24 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             });
         }
 
+        fn imageWordIdValid(id: u64) bool {
+            return id != 0 and id >> 63 == 0;
+        }
+
+        fn issueImageLoadWords(fx: *Fx, id: u64, tag: u8, image_path: []const u8, url: []const u8, cache: []const u8, expected: f64) void {
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledMediaIdentityPlan(0, 3, id, 0, tag, .microphone, 0, 0, expected, &images, true)
+            else
+                MediaPlan{ .valid = imageWordIdValid(id), .slot = if (imageWordIdValid(id) and findImage(id) == null) freeImageIndex() else null, .key = id, .tag = tag, .retire = false, .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected) @intFromFloat(expected) else 0, .source = .microphone, .sample_rate = 0, .capture_channels = 0 };
+            const index = plan.slot orelse {
+                // Invalid identities still echo the complete requested words.
+                fx.stageLoopMsg(msgFromTagImage(tag, .{ .id = id, .outcome = .rejected }));
+                return;
+            };
+            images[index] = .{ .used = true, .id = plan.key, .event_tag = plan.tag };
+            fx.loadImage(.{ .id = plan.key, .path = image_path, .url = url, .cache_path = effectiveImageCachePath(cache, url), .expected_bytes = plan.expected_bytes, .on_result = imageResultMsg });
+        }
+
         fn findImage(id: u64) ?usize {
             if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(0, id, &images);
             for (&images, 0..) |*entry, index| {
@@ -2896,7 +2946,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         fn runImageCancel(fx: *Fx, id_value: f64) void {
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 const plan = compiledMediaPlan(0, 4, @bitCast(id_value), 0, 0, .microphone, 0, 0, 0, &images);
-                if (plan.slot != null) fx.cancel(plan.key);
+                if (plan.slot != null) fx.cancelImage(plan.key);
                 return;
             }
             const representable = std.math.isFinite(id_value) and
@@ -2905,7 +2955,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             if (!representable) return;
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) == null) return;
-            fx.cancel(id);
+            fx.cancelImage(id);
         }
 
         /// The image_unregister record: free the registry slot under
@@ -3528,15 +3578,15 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                     dropEffectEntry(fx, slot);
                 },
                 2 => if (result[3] == 1) {
-                    fx.cancel(clipboard_result_key_base + slot);
+                    fx.cancelNonImage(clipboard_result_key_base + slot);
                 },
                 3 => if (result[3] == 1) {
-                    fx.cancel(spawn_key_base + slot);
+                    fx.cancelNonImage(spawn_key_base + slot);
                 },
                 4 => {
                     if (result[2] == 1) file_streams[slot].used = false;
                     if (result[4] == 1) file_streams[slot].cancelling = true;
-                    if (result[3] == 1) fx.cancel(file_stream_key_base + slot);
+                    if (result[3] == 1) fx.cancelNonImage(file_stream_key_base + slot);
                 },
                 5 => {
                     if (result[3] == 1) fx.cancelTimer(delay_key_base + slot);
@@ -3685,13 +3735,13 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                 return;
             }
             if (findClipboardWrite(key)) |index| {
-                fx.cancel(clipboard_result_key_base + index);
+                fx.cancelNonImage(clipboard_result_key_base + index);
                 return;
             }
             if (findStream(key)) |index| {
                 // The engine's `.cancelled` terminal retires the entry in
                 // spawnExitMsg or fetchStreamResultMsg.
-                fx.cancel(spawn_key_base + index);
+                fx.cancelNonImage(spawn_key_base + index);
                 return;
             }
             if (findFileStream(key)) |index| {
@@ -3702,7 +3752,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                 } else {
                     file_streams[index].cancelling = true;
                 }
-                fx.cancel(file_stream_key_base + index);
+                fx.cancelNonImage(file_stream_key_base + index);
                 return;
             }
             if (findDelay(key)) |index| {
@@ -5155,12 +5205,13 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             const info = @typeInfo(T);
             if (info != .@"struct") return false;
             const fields = info.@"struct".fields;
-            if (fields.len != 5) return false;
+            if (fields.len != 5 and fields.len != 6) return false;
+            const words = fields.len == 6;
             var ok = true;
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, "state")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
-                } else if (std.mem.eql(u8, f.name, "id") or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
+                } else if ((!words and std.mem.eql(u8, f.name, "id")) or (words and (std.mem.eql(u8, f.name, "imageLower") or std.mem.eql(u8, f.name, "imageUpper"))) or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
                     if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
@@ -5192,6 +5243,9 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         inline for (fields) |f| {
                             if (comptime std.mem.eql(u8, f.name, "state")) {
                                 @field(payload, f.name) = imageStateValue(f.type, result.outcome);
+                            } else if (comptime std.mem.eql(u8, f.name, "imageLower") or std.mem.eql(u8, f.name, "imageUpper")) {
+                                const word: u32 = if (comptime std.mem.eql(u8, f.name, "imageLower")) @truncate(result.id) else @truncate(result.id >> 32);
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(word) else @intCast(word);
                             } else if (comptime std.mem.eql(u8, f.name, "id")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.id) else @intCast(result.id);
                             } else if (comptime std.mem.eql(u8, f.name, "width")) {

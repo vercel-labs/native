@@ -1074,7 +1074,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 const expression = markup.parseMessageExpression(raw) orelse fail(node, markup.markdown_on_details_message);
                 if (expression.payload.len != 0) fail(node, markup.markdown_on_details_message);
                 for (@typeInfo(MsgT).@"union".fields) |field| {
-                    if (field.type == usize and std.mem.eql(u8, field.name, expression.tag)) {
+                    if ((field.type == usize or field.type == i64) and std.mem.eql(u8, field.name, expression.tag)) {
                         return Md.detailsMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
                 }
@@ -1120,17 +1120,23 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime (scope_index_opt != null)) {
                 const scope_index = comptime scope_index_opt.?;
                 comptime {
-                    if (entries[scope_index].kind != .slice_arg or entries[scope_index].Item != canvas.markdown.ResolvedImage) {
+                    if (entries[scope_index].kind != .slice_arg or !reflect.isMarkdownImageItem(entries[scope_index].Item)) {
                         fail(node, markup.markdown_images_message);
                     }
                 }
-                return scopePayload(entries, scope_index, scope);
+                return @import("markdown_image_binding.zig").convert(ui.arena, scopePayload(entries, scope_index, scope)) catch {
+                    ui.failed = true;
+                    return &.{};
+                };
             }
             const info = comptime (eachInfo(path) orelse fail(node, markup.markdown_images_message));
             comptime {
-                if (info.Item != canvas.markdown.ResolvedImage) fail(node, markup.markdown_images_message);
+                if (!reflect.isMarkdownImageItem(info.Item)) fail(node, markup.markdown_images_message);
             }
-            return eachItems(info, ui, model);
+            return @import("markdown_image_binding.zig").convert(ui.arena, eachItems(info, ui, model)) catch {
+                ui.failed = true;
+                return &.{};
+            };
         }
 
         // ------------------------------------------------ stepper/timeline

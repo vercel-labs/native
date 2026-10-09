@@ -1039,7 +1039,7 @@ fn tsCoreStage(
         }
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
-        for ([_][]const u8{ "bytes.ts", "bytes.d.ts", "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts" }) |source| {
+        for ([_][]const u8{ "bytes.ts", "bytes.d.ts", "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts", "theme.ts", "theme.d.ts", "internal/image_identity.ts", "internal/image_identity.d.ts", "internal/markdown_policy.ts", "internal/markdown_policy.d.ts" }) |source| {
             sqlite_check.addFileInput(dep.path(b.fmt("packages/core/sdk/{s}", .{source})));
         }
         addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
@@ -1260,7 +1260,7 @@ fn tsCoreStage(
     stage_run.addFileInput(dep.path("packages/core/src/component_composition.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/code_content.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/chart_content.ts"));
-    stage_run.addFileInput(dep.path("packages/core/src/markdown_content.ts"));
+    stage_run.addFileInput(dep.path("packages/core/sdk/internal/markdown_policy.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_routing.ts"));
     stage_run.addFileInput(dep.path("packages/core/src/widget_changes.ts"));
@@ -1523,7 +1523,7 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
 /// contract remains byte-identical. Public for the repository fixture graph,
 /// which exercises the same compiler boundary as app builds.
 pub fn addStagedCoreSdkInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
-    for ([_][]const u8{ "bytes.ts", "text.ts", "events.ts", "theme.ts" }) |source| {
+    for ([_][]const u8{ "bytes.ts", "text.ts", "events.ts", "theme.ts", "internal/image_identity.ts", "internal/markdown_policy.ts" }) |source| {
         stage.addFileInput(sdk_builder.path(b.fmt("packages/core/sdk/{s}", .{source})));
     }
 }

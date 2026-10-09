@@ -10024,6 +10024,25 @@ pub fn Effects(comptime Msg: type) type {
             } });
         }
 
+        /// Cancel only an image load under this exact identity. A rejected
+        /// image request may share a key with another live effect; that
+        /// incumbent belongs to its original caller and must stay intact.
+        pub fn cancelImage(self: *Self, key: u64) void {
+            const index = self.findActiveSlot(key) orelse self.findFinishedSlot(key) orelse return;
+            if (self.slots[index].kind != .image) return;
+            self.cancel(key);
+        }
+
+        /// Named bridge operations use their own keys, but full-width image
+        /// identities may coincide with them. Preserve the image incumbent
+        /// when a rejected named operation is cancelled before delivery.
+        pub fn cancelNonImage(self: *Self, key: u64) void {
+            if (self.findActiveSlot(key) orelse self.findFinishedSlot(key)) |index| {
+                if (self.slots[index].kind == .image) return;
+            }
+            self.cancel(key);
+        }
+
         /// Cancel a running effect by key. After this returns, no
         /// further `on_line` Msgs for that spawn are dispatched; one
         /// `on_exit` Msg with reason `.cancelled` follows once the

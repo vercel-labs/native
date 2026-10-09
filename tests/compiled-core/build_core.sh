@@ -132,7 +132,8 @@ done
 # field name. The two forms are interchangeable for these shapes (no
 # declaration merging, no inheritance), so the staged SDK event/text
 # modules spell them as aliases.
-for sdk_file in bytes.ts text.ts events.ts; do
+for sdk_file in bytes.ts text.ts events.ts internal/image_identity.ts internal/markdown_policy.ts; do
+  mkdir -p "$(dirname "$work/sdk/$sdk_file")"
   sed -e 's|^export interface \([A-Za-z0-9_]*\) {|export type \1 = {|' \
     "$repo/packages/core/sdk/$sdk_file" > "$work/sdk/$sdk_file"
 done
@@ -155,7 +156,7 @@ for src in $sources; do
   more="$(awk '/^export type [A-Za-z0-9_]+ =/ { print $3 }' "$work/$src" | tr '\n' ' ')"
   author_aliases="$author_aliases $more"
 done
-for sdk_file in bytes.ts text.ts events.ts; do
+for sdk_file in bytes.ts text.ts events.ts internal/image_identity.ts internal/markdown_policy.ts; do
   more="$(awk '/^export type [A-Za-z0-9_]+ =/ { print $3 }' "$work/sdk/$sdk_file" | tr '\n' ' ')"
   author_aliases="$author_aliases $more"
 done

@@ -304,7 +304,7 @@ pub fn Markdown(comptime Msg: type) type {
         pub fn detailsMsg(comptime tag: std.meta.Tag(Msg)) *const fn (index: usize) Msg {
             return struct {
                 fn make(index: usize) Msg {
-                    return @unionInit(Msg, @tagName(tag), index);
+                    return @unionInit(Msg, @tagName(tag), @as(@FieldType(Msg, @tagName(tag)), @intCast(index)));
                 }
             }.make;
         }

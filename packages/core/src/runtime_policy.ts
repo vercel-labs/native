@@ -715,7 +715,7 @@ function appLifecyclePolicy(request: Uint8Array): Uint8Array {
 function mediaSlotPolicy(request: Uint8Array): Uint8Array {
   if (request.length < 28 || ![3, 4, 5, 7].includes(request[0]!)) throw new Error("invalid media slot operation");
   const operation = request[0]!, family = request[1]!, count = request[2]!;
-  if (family > 2 || count > (family === 0 ? 16 : 8) || request.length !== 28 + count * 16 || request[7] !== 0 || request[5]! > 1)
+  if (family > 2 || count > (family === 0 ? 16 : 8) || request.length !== 28 + count * 16 || request[7]! > 1 || request[7] === 1 && (family !== 0 || operation !== 3 && operation !== 4) || request[5]! > 1)
     throw new Error("invalid media slot request");
   if (operation === 5 && (family === 0 ? request[3] !== 0 : family === 1 ? request[3]! > 2 : request[3]! > 4))
     throw new Error("invalid media event kind");
@@ -723,9 +723,12 @@ function mediaSlotPolicy(request: Uint8Array): Uint8Array {
   const result = new Uint8Array(28), out = new DataView(result.buffer);
   result[1] = 255; result[2] = request[4]!; result[4] = request[5]!; result[5] = request[6]!;
   out.setUint32(24, wire.getUint32(16, true), true);
-  const numberKey = operation === 3 || operation === 4;
+  const words = request[7] === 1;
+  const numberKey = !words && (operation === 3 || operation === 4);
   const key = wire.getFloat64(8, true);
-  const valid = !numberKey || Number.isFinite(key) && key >= 1 && key < 9007199254740992 && Math.floor(key) === key;
+  const upper = wire.getUint32(12, true), lower = wire.getUint32(8, true);
+  const valid = words ? upper < 0x80000000 && (upper !== 0 || lower !== 0)
+    : !numberKey || Number.isFinite(key) && key >= 1 && key < 9007199254740992 && Math.floor(key) === key;
   result[0] = valid ? 1 : 0;
   if (valid) for (let i = 0; i < 8; i++) result[8 + i] = request[8 + i]!;
   // f64 wire keys become exact u64 words only after the representability gate.

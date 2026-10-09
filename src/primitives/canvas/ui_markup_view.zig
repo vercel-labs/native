@@ -1642,7 +1642,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn detailsConstructor(tag: []const u8) ?*const fn (index: usize) MsgT {
             @setEvalBranchQuota(scan_quota);
             inline for (@typeInfo(MsgT).@"union".fields) |field| {
-                if (field.type == usize) {
+                if (field.type == usize or field.type == i64) {
                     if (std.mem.eql(u8, field.name, tag)) {
                         return Md.detailsMsg(@field(std.meta.Tag(MsgT), field.name));
                     }
@@ -1686,9 +1686,9 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         fn markdownImageItems(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError![]const canvas.markdown.ResolvedImage {
             @setEvalBranchQuota(scan_quota);
             inline for (item_types, 0..) |Item, type_index| {
-                if (comptime (Item == canvas.markdown.ResolvedImage)) {
+                if (comptime (reflect.isMarkdownImageItem(Item))) {
                     if (try self.iterateItems(ui, Item, type_index, scope, path)) |items| {
-                        return items;
+                        return @import("markdown_image_binding.zig").convert(ui.arena, items) catch return self.failText(node, markup.markdown_images_message);
                     }
                 }
             }

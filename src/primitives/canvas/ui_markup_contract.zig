@@ -1454,7 +1454,7 @@ const Checker = struct {
             if (std.mem.eql(u8, attribute.name, "on-details")) {
                 const expression = markup.parseMessageExpression(attribute.value) orelse continue;
                 const tag = self.findMsg(expression.tag) orelse return self.failAttr(node, attribute, markup.markdown_on_details_message);
-                if (tag.payload != .integer or !std.mem.eql(u8, tag.payload_type, "usize")) {
+                if (tag.payload != .integer or (!std.mem.eql(u8, tag.payload_type, "usize") and !std.mem.eql(u8, tag.payload_type, "i64"))) {
                     return self.failAttr(node, attribute, markup.markdown_on_details_message);
                 }
                 continue;
@@ -1472,9 +1472,7 @@ const Checker = struct {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const item = try self.resolveIterable(node, expression.binding, markup.markdown_images_message);
-                if (!std.mem.eql(u8, item.type_name, "ResolvedImage") and
-                    !std.mem.endsWith(u8, item.type_name, ".ResolvedImage"))
-                {
+                if (!markdownImageGroup(item.group)) {
                     return self.failAttr(node, attribute, markup.markdown_images_message);
                 }
                 continue;
@@ -1783,6 +1781,21 @@ fn resolveOnGroup(group: *const Group, path: []const u8, allow_arena: bool) Grou
         return .{ .ok = .{ .kind = scalar.kind, .type_name = scalar.type_name } };
     }
     return .missing;
+}
+
+fn markdownImageGroup(group: *const Group) bool {
+    const source = resolveOnGroup(group, "source", false);
+    if (source != .ok or source.ok.kind != .string) return false;
+    for ([_][]const u8{ "width", "height" }) |path| if (!imageNumberPath(group, path)) return false;
+    if (imageNumberPath(group, "image")) return true;
+    for (group.groups) |entry| if (std.mem.eql(u8, entry.name, "image")) {
+        return entry.group.groups.len == 0 and entry.group.scalars.len == 2 and imageNumberPath(&entry.group, "imageLower") and imageNumberPath(&entry.group, "imageUpper");
+    };
+    return false;
+}
+fn imageNumberPath(group: *const Group, path: []const u8) bool {
+    const value = resolveOnGroup(group, path, false);
+    return value == .ok and (value.ok.kind == .integer or value.ok.kind == .float);
 }
 
 fn pathHead(path: []const u8) []const u8 {

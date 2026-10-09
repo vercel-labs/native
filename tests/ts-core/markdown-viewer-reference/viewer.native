@@ -1,0 +1,88 @@
+<!-- The markdown viewer: toolbar, sidebar library, split editor/preview.
+     Embedded into the binary and hot-reloaded in dev: edit this file while
+     the app runs and the window updates without losing document state. -->
+<column background="background">
+  <!-- The toolbar IS the titlebar (tall hidden-inset chrome): window-drag
+       makes its background move the window — the buttons inside stay
+       buttons, a double-click zooms — the leading spacer pads past the
+       traffic lights by the live chrome inset the model receives via
+       on_chrome, and the row matches its height to the tall titlebar band
+       so cross-centering puts its controls on the traffic lights'
+       centerline (both fall back — zero inset, natural height — in
+       fullscreen, so the toolbar reclaims the space). -->
+  <row gap="8" padding="10" height="{toolbar_height}" cross="center" background="surface" window-drag="true" label="Toolbar">
+    <spacer width="{chrome_leading}" />
+    <!-- The sample picker: a REAL select — the trigger shows the current
+         document, and the options are an anchored dropdown that floats
+         over the toolbar's siblings (late z-pass, window-clipped, no
+         reflow). Open state is the model's; Escape/click-outside dismiss
+         through on-dismiss, picking closes in update. -->
+    <stack>
+      <select size="sm" width="176" on-press="toggle_sample_picker" label="Sample picker">{docTitle}</select>
+      <if test="{sample_picker_open}">
+        <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_sample_picker" label="Samples">
+          <for each="samples" key="id" as="s">
+            <menu-item on-press="load_sample:{s.id}" selected="{s.id == active_sample_id}">{s.title}</menu-item>
+          </for>
+        </dropdown-menu>
+      </if>
+    </stack>
+    <spacer width="16" />
+    <!-- One size register per row: every toolbar control is sm, so the
+         row renders one control height. -->
+    <text-field size="sm" text="{path}" placeholder="/path/to/document.md" on-input="edit_path" on-submit="open_doc" grow="1" label="Document path" />
+    <!-- Inline button icons: icon + label are one widget, so the icon
+         follows the disabled tint (Save greys out whole while unsaved
+         paths make it unavailable) — the gap that kept this toolbar
+         text-only before icon-in-button landed. -->
+    <button size="sm" variant="outline" icon="folder-open" on-press="open_doc" disabled="{pathEmpty}">Open</button>
+    <button size="sm" variant="outline" icon="save" on-press="save_doc" disabled="{cannotSave}">Save</button>
+    <button size="sm" variant="outline" on-press="save_as" disabled="{pathEmpty}">Save As</button>
+    <spacer width="{chrome_trailing}" />
+  </row>
+  <separator />
+  <row grow="1">
+    <column width="216" gap="8" padding="10" background="surface">
+      <text foreground="text_muted">Library</text>
+      <column gap="2">
+        <for each="samples" key="id" as="s">
+          <list-item on-press="load_sample:{s.id}" selected="{s.id == active_sample_id}">{s.title}</list-item>
+        </for>
+      </column>
+      <spacer height="6" />
+      <text foreground="text_muted">Recent</text>
+      <column gap="2">
+        <for each="recentDocs" key="index" as="r">
+          <list-item on-press="open_recent:{r.index}" label="{r.path}">{r.name}</list-item>
+        </for>
+        <else>
+          <text foreground="text_muted">Nothing opened yet</text>
+        </else>
+      </column>
+      <spacer grow="1" />
+    </column>
+    <separator />
+    <column grow="1" padding="10" gap="6">
+      <row gap="6" cross="center">
+        <icon name="edit" width="13" height="13" foreground="text_muted" />
+        <text foreground="text_muted">Editor</text>
+      </row>
+      <textarea text="{document}" on-input="edit" grow="1" placeholder="# Start writing…" label="Markdown source" />
+    </column>
+    <separator />
+    <column grow="1">
+      <row padding="10" cross="center">
+        <text foreground="text_muted" grow="1">Preview</text>
+      </row>
+      <!-- Controlled scroll: the model owns the offset — on-scroll stores
+           the applied value, the binding echoes it back, so the preview
+           keeps its place across every rebuild. -->
+      <scroll grow="1" value="{doc_scroll}" on-scroll="doc_scrolled" label="Preview">
+        <column padding="24">
+          <markdown source="{document}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" images="{markdownImages}" />
+        </column>
+      </scroll>
+    </column>
+  </row>
+  <status-bar>{statusLine}</status-bar>
+</column>

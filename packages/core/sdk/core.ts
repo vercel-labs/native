@@ -1,3 +1,11 @@
+export interface ImageWordsCommand {
+  readonly operation: "load" | "cancel" | "unregister";
+  readonly identity: ImageIdentity;
+  readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.ts";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.ts";
+import { type ImageIdentity } from "./internal/image_identity.ts";
 // @native-sdk/core — the SDK module an app core imports. The subset program
 // maps the "@native-sdk/core" specifier onto this file, so stock tsc types
 // it; the transpiler lowers references to it onto the rt kernel and never
@@ -993,7 +1001,7 @@ export type TimerOutcome = "fired" | "rejected";
 export interface TimerResultArm {
   readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: TimerOutcome;
 }
-export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly result: CapabilityKind<M, FileResultArm>; }
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly replace?: boolean; readonly result: CapabilityKind<M, FileResultArm>; }
 export interface TimerResultRoute<M extends Msgish> { readonly result: CapabilityKind<M, TimerResultArm>; }
 
 export interface ClipboardResultRoute<M extends Msgish> {
@@ -1086,6 +1094,22 @@ export interface ImageSource {
 
 /// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
 /// arm (the five-field ImageEventArm record, matched by field name).
+/** Complete image terminal with a lossless requested identity. */
+export type ImageWordsEventArm = {
+  readonly imageLower: number; readonly imageUpper: number;
+  readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number;
+};
+export type ImageWordsEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageWordsEventArm]
+    ? [keyof ImageWordsEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageWordsEventArm
+        ? [ImageState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface ImageWordsRoute<M extends Msgish> { readonly event: ImageWordsEventKind<M>; }
+
 export interface ImageRoute<M extends Msgish> {
   readonly event: ImageEventKind<M>;
 }
@@ -1307,8 +1331,8 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "wall_time"; readonly msgKind: string }
-  | { readonly op: "read_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
-  | { readonly op: "write_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
   | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
   | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
@@ -1376,6 +1400,9 @@ export type Cmd<M extends Msgish> =
       readonly cachePath: Uint8Array;
       readonly expectedBytes: number;
     }
+  | { readonly op: "image_load_words"; readonly identity: ImageIdentity; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "image_cancel_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_unregister_words"; readonly identity: ImageIdentity }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
@@ -1588,12 +1615,12 @@ export const Cmd = {
 
   /// Read a whole file with every terminal field, including loss metadata.
   readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
-    return { op: "read_file_result", key: route.key ?? "", resultKind: route.result, path };
+    return { op: "read_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path };
   },
   /// Write with the complete terminal. Named keys follow readFile's replace
   /// and silent-cancel policy; unrelated live capabilities refuse the request.
   writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
-    return { op: "write_file_result", key: route.key ?? "", resultKind: route.result, path, bytes };
+    return { op: "write_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path, bytes };
   },
   /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
   /// the same key; cancellation remains silent, like Cmd.delay.
@@ -2119,6 +2146,21 @@ export const Cmd = {
     };
   },
 
+  /** Lossless 63-bit identities: a 32-bit lower word and a 31-bit upper word. */
+  imageLoadWords<M extends Msgish>(identity: ImageIdentity, source: ImageSource, route: ImageWordsRoute<M>): Cmd<M> {
+    return { op: "image_load_words", identity, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+  imageCancelWords(identity: ImageIdentity): Cmd<never> { return { op: "image_cancel_words", identity }; },
+  imageUnregisterWords(identity: ImageIdentity): Cmd<never> { return { op: "image_unregister_words", identity }; },
+  imageBatchWords<M extends Msgish>(commands: readonly ImageWordsCommand[], route: ImageWordsRoute<M>): Cmd<M> {
+    const cmds: Cmd<M>[] = [];
+    for (const command of commands) {
+      if (command.operation === "load") cmds.push({ op: "image_load_words", identity: command.identity, eventKind: route.event, path: command.path, url: command.url, cachePath: command.cachePath, expectedBytes: command.expectedBytes });
+      else if (command.operation === "cancel") cmds.push({ op: "image_cancel_words", identity: command.identity });
+      else cmds.push({ op: "image_unregister_words", identity: command.identity });
+    }
+    return { op: "batch", cmds };
+  },
   /// End the in-flight image load under `id`, if any — LOUDLY: the load's
   /// one terminal arrives as its own `event` arm with state "cancelled"
   /// (ending an in-flight load is an observable event, the spawn cancel

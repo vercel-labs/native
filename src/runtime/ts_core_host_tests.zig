@@ -5145,3 +5145,113 @@ test "callback host consumes full file retirement and silent delivery while reta
     try std.testing.expectEqualStrings("18446744073709551615", Probe.model().file.?.totalBytes);
     callback_complete_probe.suppress_file = false;
 }
+
+const word_image_core = struct {
+    pub const rt = mini_core.rt;
+    const Image = struct { imageLower: f64, imageUpper: f64, state: enum { loaded, rejected, cancelled, decode_failed }, width: i64, height: i64, status: i64 };
+    pub const Model = struct { image: ?Image = null, image_replies: usize = 0, file_replies: usize = 0, file_errors: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, image: Image, file: []const u8, failed: []const u8 };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var stored: Model = .{};
+    pub fn initialModel() *const Model {
+        stored = .{};
+        return &stored;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model { return value; }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .image => |image| { stored.image = image; stored.image_replies += 1; },
+            .file => stored.file_replies += 1,
+            .failed => stored.file_errors += 1,
+        }
+        return .{ .model = &stored, .cmd = "" };
+    }
+    fn imageCommand(buffer: []u8, op: u8, id: u64) []const u8 {
+        buffer[0] = op;
+        std.mem.writeInt(u64, buffer[1..9], id, .little);
+        if (op != 0x3b) return buffer[0..9];
+        buffer[9] = 1;
+        std.mem.writeInt(u32, buffer[10..14], 5, .little);
+        @memcpy(buffer[14..19], "a.png");
+        @memset(buffer[19..35], 0); // empty URL/cache, unspecified expected bytes
+        return buffer[0..35];
+    }
+};
+
+test "word image ABI preserves exact bounds and complete terminals after the command bytes expire" {
+    const WordHost = ts_core_host.TsCoreHost(word_image_core);
+    var fx = WordHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WordHost.init(&fx);
+    var command: [64]u8 = undefined;
+    for ([_]u64{ 1, 9007199254740993, 0x7fff_ffff_ffff_ffff }) |id| {
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, id) });
+        @memset(&command, 255);
+        try std.testing.expectEqual(id, fx.pendingImageLoadAt(0).?.id);
+        try std.testing.expectEqualStrings("a.png", fx.pendingImageLoadAt(0).?.path);
+        try fx.feedImageResult(id, .decode_failed, 19, 23, 503, "");
+        WordHost.drain(&fx);
+        const result = WordHost.model().image.?;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id)))), result.imageLower);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id >> 32)))), result.imageUpper);
+        try std.testing.expectEqual(@as(i64, 19), result.width);
+        try std.testing.expectEqual(@as(i64, 23), result.height);
+        try std.testing.expectEqual(@as(i64, 503), result.status);
+        try std.testing.expectEqual(.decode_failed, result.state);
+    }
+    for ([_]u64{ 0, 0x8000_0000_0000_0000, 0xffff_ffff_ffff_ffff }) |id| {
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, id) });
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+        try std.testing.expectEqual(.rejected, WordHost.model().image.?.state);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id >> 32)))), WordHost.model().image.?.imageUpper);
+    }
+}
+
+test "image and named cancellation preserve the other family's incumbent and queued terminal" {
+    const WordHost = ts_core_host.TsCoreHost(word_image_core);
+    const key = ts_core_host.effect_key_base;
+    const read = [_]u8{ 0x07, 1, 'k', 2, 3, 1, 0, 0, 0, 'p' };
+    const cancel = [_]u8{ 0x06, 1, 'k' };
+    var command: [64]u8 = undefined;
+    var batch: [96]u8 = undefined;
+    for ([_]bool{ false, true }) |queued| {
+        var fx = WordHost.Fx.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        WordHost.init(&fx);
+        WordHost.dispatch(&fx, .{ .commands = &read });
+        if (queued) try fx.feedFileResult(key, .ok, "owned");
+        const load = word_image_core.imageCommand(&command, 0x3b, key);
+        @memcpy(batch[0..load.len], load);
+        const stop = word_image_core.imageCommand(&command, 0x3c, key);
+        @memcpy(batch[load.len..][0..stop.len], stop);
+        WordHost.dispatch(&fx, .{ .commands = batch[0 .. load.len + stop.len] });
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(.rejected, WordHost.model().image.?.state);
+        if (!queued) try fx.feedFileResult(key, .ok, "owned");
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(@as(usize, 1), WordHost.model().file_replies);
+    }
+    for ([_]bool{ false, true }) |queued| {
+        var fx = WordHost.Fx.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        WordHost.init(&fx);
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, key) });
+        if (queued) try fx.feedImageResult(key, .decode_failed, 0, 0, 0, "");
+        @memcpy(batch[0..read.len], &read);
+        @memcpy(batch[read.len..][0..cancel.len], &cancel);
+        WordHost.dispatch(&fx, .{ .commands = batch[0 .. read.len + cancel.len] });
+        WordHost.drain(&fx);
+        // Named cancellation silently drops its own refused file terminal,
+        // while the image incumbent still owns its pending completion.
+        try std.testing.expectEqual(@as(usize, 0), WordHost.model().file_errors);
+        if (!queued) try fx.feedImageResult(key, .decode_failed, 0, 0, 0, "");
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(.decode_failed, WordHost.model().image.?.state);
+        try std.testing.expectEqual(@as(usize, 1), WordHost.model().image_replies);
+    }
+}

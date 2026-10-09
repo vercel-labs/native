@@ -137,10 +137,11 @@ for (const rel of authorFiles) {
 
 // Transform 5: the staged SDK library modules spell their exported
 // records as object-literal aliases (value storage).
-for (const sdkFile of ["bytes.ts", "text.ts", "events.ts", "theme.ts"]) {
+for (const sdkFile of ["bytes.ts", "text.ts", "events.ts", "theme.ts", "internal/image_identity.ts", "internal/markdown_policy.ts"]) {
   const staged = fs
     .readFileSync(path.join(args.sdk, sdkFile), "utf8")
     .replace(/^export interface ([A-Za-z0-9_]+) \{/gm, "export type $1 = {");
+  fs.mkdirSync(path.dirname(path.join(args.out, "sdk", sdkFile)), { recursive: true });
   fs.writeFileSync(path.join(args.out, "sdk", sdkFile), staged);
   aliasNames.push(...exportedAliasNames(staged));
 }

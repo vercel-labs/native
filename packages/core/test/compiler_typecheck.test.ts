@@ -88,6 +88,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   if (msg.kind !== "go") return { done: true };
   return [model, Cmd.batch([
     Cmd.readFileResult(asciiBytes("notes.txt"), { result: "file" }),
+    Cmd.readFileResult(asciiBytes("notes.txt"), { result: "file", replace: false }),
     Cmd.writeFileResult(asciiBytes("notes.txt"), asciiBytes("body"), { result: "file" }),
     Cmd.timerResult("save", 800, "one_shot", { result: "timer" }),
     Cmd.timerResult("refresh", 30000, "repeating", { result: "timer" }),
@@ -101,5 +102,27 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   r = run(source.replace('({ readonly kind: "timer" } & TimerResultArm)', '{ readonly kind: "timer"; readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" }'));
   assert.equal(r.status, 1, r.out);
   r = run(source.replace('readonly stamp: Uint8Array', 'readonly stamp: number'));
+  assert.equal(r.status, 1, r.out);
+});
+
+test("exact image routes require all identity words and terminal metadata", () => {
+  const source = `
+import { Cmd, asciiBytes, imageSourceIdentity, type ImageWordsEventArm } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "go" } | ({ readonly kind: "image" } & ImageWordsEventArm);
+export function initialModel(): Model { return { done: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind !== "go") return { done: true };
+  const id = imageSourceIdentity(asciiBytes("image.png"));
+  return [model, Cmd.batch([
+    Cmd.imageLoadWords(id, { path: asciiBytes("image.png") }, { event: "image" }),
+    Cmd.imageCancelWords(id), Cmd.imageUnregisterWords(id),
+  ])];
+}
+`;
+  let r = run(source); assert.equal(r.status, 0, r.out);
+  r = run(source.replace('({ readonly kind: "image" } & ImageWordsEventArm)', '{ readonly kind: "image"; readonly imageLower: number; readonly imageUpper: number; readonly state: "loaded"; readonly width: number; readonly height: number }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('event: "image"', 'event: "go"'));
   assert.equal(r.status, 1, r.out);
 });

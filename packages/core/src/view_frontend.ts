@@ -594,7 +594,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       if (node.children.length || node.text.trim() || !node.attrs.has("source") || [...node.attrs.keys()].some(name => !allowed.includes(name))) fail(node, "markdown requires source, no children, and its closed presentation attributes");
       const source = binding(node.attrs.get("source")!, node, scope);
       if (!/^\{[^{}]+\}$/.test(node.attrs.get("source")!) || source.type.kind !== "bytes") fail(node, "markdown source requires one byte binding");
-      let expanded = "[]", issue = "null", images = "[]";
+      let expanded = "[]", issue = "null", images = "[]", wordImages = false;
       if (node.attrs.has("details-expanded")) {
         const raw = node.attrs.get("details-expanded")!, value = binding(raw, node, scope);
         if (!/^\{[^{}]+\}$/.test(raw) || value.type.kind !== "slice" || value.type.elem?.kind !== "bool") fail(node, "details-expanded requires one boolean-array binding");
@@ -602,7 +602,10 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       }
       if (node.attrs.has("images")) {
         const raw = node.attrs.get("images")!, value = binding(raw, node, scope), record = value.type.kind === "slice" && value.type.elem && ["node", "value"].includes(value.type.elem.kind) ? contract.types.structs.find(item => item.name === value.type.elem!.name) : null;
-        if (!/^\{[^{}]+\}$/.test(raw) || !record || record.fields.length !== 4 || !record.fields.some(field => field.name === "source" && field.type.kind === "bytes") || !["image", "width", "height"].every(name => record.fields.some(field => field.name === name && category(field.type) === "number"))) fail(node, "images requires source bytes, registered image identity, width and height records");
+        const imageField = record?.fields.find(field => field.name === "image");
+        const identity = imageField && ["node", "value"].includes(imageField.type.kind) ? contract.types.structs.find(item => item.name === imageField.type.name) : null;
+        wordImages = !!identity && identity.fields.length === 2 && ["imageLower", "imageUpper"].every(name => identity.fields.some(field => field.name === name && category(field.type) === "number"));
+        if (!/^\{[^{}]+\}$/.test(raw) || !record || record.fields.length !== 4 || !record.fields.some(field => field.name === "source" && field.type.kind === "bytes") || !["width", "height"].every(name => record.fields.some(field => field.name === name && category(field.type) === "number")) || !(wordImages || imageField && category(imageField.type) === "number")) fail(node, "images requires source bytes, an exact registered image identity, width and height records");
         images = value.code;
       }
       if (node.attrs.has("issue-link-base")) {
@@ -617,7 +620,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(raw) || !arm || arm.payload.kind !== kind) fail(node, `${attribute} requires a bare ${kind} Msg arm`);
         channels.push(`${property}: ${contract.msg.arms.indexOf(arm)}`);
       }
-      output.push(`nscvNodes.push({ end: nscvNodes.length + 1, kind: "markdown", text: "", markdownRecipe: nscvMarkdownRecipe(${source.code}, ${expanded}, ${issue}, ${images})${channels.length ? ", " + channels.join(", ") : ""} });`);
+      output.push(`nscvNodes.push({ end: nscvNodes.length + 1, kind: "markdown", text: "", markdownRecipe: ${wordImages ? "nscvMarkdownRecipeWords" : "nscvMarkdownRecipe"}(${source.code}, ${expanded}, ${issue}, ${images})${channels.length ? ", " + channels.join(", ") : ""} });`);
       return;
     }
     const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", combobox: "combobox", bubble: "bubble", table: "table", "table-row": "data_row", "table-cell": "data_cell", progress: "progress", skeleton: "skeleton", spinner: "spinner", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
@@ -955,7 +958,7 @@ const viewPrelude = "\n// Portable Native components compiled beside the committ
   readFileSync(new URL("./component_composition.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./code_content.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./chart_content.ts", import.meta.url), "utf8") +
-  readFileSync(new URL("./markdown_content.ts", import.meta.url), "utf8") +
+  readFileSync(new URL("../sdk/internal/markdown_policy.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_audits.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_routing.ts", import.meta.url), "utf8") +
   readFileSync(new URL("./widget_changes.ts", import.meta.url), "utf8") +

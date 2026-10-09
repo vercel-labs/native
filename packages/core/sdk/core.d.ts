@@ -1,3 +1,14 @@
+export interface ImageWordsCommand {
+    readonly operation: "load" | "cancel" | "unregister";
+    readonly identity: ImageIdentity;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.js";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.js";
+import { type ImageIdentity } from "./internal/image_identity.js";
 export { asciiBytes, utf8Bytes } from "./bytes.js";
 export type Msgish = {
     readonly kind: string;
@@ -263,6 +274,7 @@ export interface TimerResultArm {
 }
 export interface FileResultRoute<M extends Msgish> {
     readonly key?: string;
+    readonly replace?: boolean;
     readonly result: CapabilityKind<M, FileResultArm>;
 }
 export interface TimerResultRoute<M extends Msgish> {
@@ -314,6 +326,19 @@ export interface ImageSource {
     readonly url?: Uint8Array;
     readonly cachePath?: Uint8Array;
     readonly expectedBytes?: number;
+}
+/** Complete image terminal with a lossless requested identity. */
+export type ImageWordsEventArm = {
+    readonly imageLower: number;
+    readonly imageUpper: number;
+    readonly state: ImageState;
+    readonly width: number;
+    readonly height: number;
+    readonly status: number;
+};
+export type ImageWordsEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ImageWordsEventArm] ? [keyof ImageWordsEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ImageWordsEventArm ? [ImageState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export interface ImageWordsRoute<M extends Msgish> {
+    readonly event: ImageWordsEventKind<M>;
 }
 export interface ImageRoute<M extends Msgish> {
     readonly event: ImageEventKind<M>;
@@ -510,11 +535,13 @@ export type Cmd<M extends Msgish> = {
     readonly msgKind: string;
 } | {
     readonly op: "read_file_result";
+    readonly replace: boolean;
     readonly key: string;
     readonly resultKind: string;
     readonly path: Uint8Array;
 } | {
     readonly op: "write_file_result";
+    readonly replace: boolean;
     readonly key: string;
     readonly resultKind: string;
     readonly path: Uint8Array;
@@ -615,6 +642,20 @@ export type Cmd<M extends Msgish> = {
     readonly url: Uint8Array;
     readonly cachePath: Uint8Array;
     readonly expectedBytes: number;
+} | {
+    readonly op: "image_load_words";
+    readonly identity: ImageIdentity;
+    readonly eventKind: string;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly expectedBytes: number;
+} | {
+    readonly op: "image_cancel_words";
+    readonly identity: ImageIdentity;
+} | {
+    readonly op: "image_unregister_words";
+    readonly identity: ImageIdentity;
 } | {
     readonly op: "image_cancel";
     readonly id: number;
@@ -749,6 +790,11 @@ export declare const Cmd: {
     setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M>;
     quitApp(): Cmd<never>;
     imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M>;
+    /** Lossless 63-bit identities: a 32-bit lower word and a 31-bit upper word. */
+    imageLoadWords<M extends Msgish>(identity: ImageIdentity, source: ImageSource, route: ImageWordsRoute<M>): Cmd<M>;
+    imageCancelWords(identity: ImageIdentity): Cmd<never>;
+    imageUnregisterWords(identity: ImageIdentity): Cmd<never>;
+    imageBatchWords<M extends Msgish>(commands: readonly ImageWordsCommand[], route: ImageWordsRoute<M>): Cmd<M>;
     imageCancel(id: number): Cmd<never>;
     imageUnregister(id: number): Cmd<never>;
     channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M>;

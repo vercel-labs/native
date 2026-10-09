@@ -83,6 +83,8 @@ export interface NativeSnapshot {
     }[];
     readonly timers: readonly { readonly key: string; readonly intervalMs: number; readonly mode: "one_shot" | "repeating" }[];
     readonly files: readonly { readonly key: string; readonly generation: string; readonly op: "read" | "write" | "append" | "stat" | "delete"; readonly path: string; readonly bytes: readonly number[] }[];
+    /** Pending image requests retain exact native identities and owned source bytes. */
+    readonly images: readonly { readonly id: string; readonly path: readonly number[]; readonly url: readonly number[]; readonly cachePath: readonly number[]; readonly expectedBytes: string }[];
     readonly clipboards: readonly { readonly key: string; readonly generation: string; readonly op: "read" | "write"; readonly text: readonly number[] }[];
     /** Parked fake database operations, including complete live-query facts.
      * Decimal strings preserve native keys and generation counters exactly. */
@@ -345,6 +347,14 @@ export class NativeApp implements AsyncDisposable {
   fileResult(key: string, op: "read" | "write" | "append" | "stat" | "delete", bytes: Uint8Array = new Uint8Array(0),
     options: { outcome?: "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "disk_full"; total?: number; mtimeMs?: number; exists?: boolean } = {}): Promise<NativeSnapshot> {
     return this.#snapshot({ op: "file_result", key: identity(key), file_op: op, bytes: [...bytes], file_outcome: options.outcome ?? "ok", file_total: options.total ?? 0, file_mtime_ms: options.mtimeMs ?? 0, file_exists: options.exists ?? false });
+  }
+  /** Feed a complete image terminal; dimensions and status pass through the journal. */
+  imageResult(id: string, options: { outcome?: "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "http_status" | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full" | "alloc_failed"; width?: number; height?: number; status?: number } = {}): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "image_result", key: identity(id), image_outcome: options.outcome ?? "loaded", image_width: options.width ?? 0, image_height: options.height ?? 0, image_status: options.status ?? 0 });
+  }
+  /** Decode and register actual image bytes through the native capability. */
+  imageBytes(id: string, bytes: Uint8Array): Promise<NativeSnapshot> {
+    return this.#snapshot({ op: "image_bytes", key: identity(id), bytes: [...bytes] });
   }
   fetchResult(key: string, status: number, body: Uint8Array,
     options: { outcome?: "ok" | "rejected" | "connect_failed" | "tls_failed" | "protocol_failed" | "timed_out" | "cancelled"; truncated?: boolean } = {}): Promise<NativeSnapshot> {

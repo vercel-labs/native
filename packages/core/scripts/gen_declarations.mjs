@@ -23,7 +23,7 @@ const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const sdkDir = path.join(pkg, "sdk");
 
 /// The author-visible modules, in exports-map order.
-export const declarationSources = ["core.ts", "bytes.ts", "text.ts", "events.ts", "theme.ts"];
+export const declarationSources = ["core.ts", "bytes.ts", "text.ts", "events.ts", "theme.ts", "internal/image_identity.ts", "internal/markdown_policy.ts"];
 
 /// Generate declaration text per output file name (relative to sdk/),
 /// entirely in memory.
@@ -61,7 +61,7 @@ export function generateDeclarations() {
     // resolves `./text.js` to the shipped `./text.d.ts`), so consumers
     // that read declarations never fall through to the sources.
     const rewritten = text.replace(/(from\s+")(\.\.?\/[^"]+)\.ts(")/g, "$1$2.js$3");
-    outputs.set(path.basename(fileName), rewritten);
+    outputs.set(path.relative(sdkDir, fileName), rewritten);
   });
   if (result.emitSkipped) throw new Error("declaration emit was skipped");
   for (const source of declarationSources) {
@@ -85,6 +85,7 @@ function main(check) {
       stale = true;
       console.error(`${path.relative(pkg, outPath)} is stale — run \`node scripts/gen_declarations.mjs\``);
     } else {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
       fs.writeFileSync(outPath, text);
       console.error(`wrote ${path.relative(pkg, outPath)}`);
     }

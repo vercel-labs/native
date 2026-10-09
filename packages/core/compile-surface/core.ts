@@ -1,3 +1,11 @@
+export interface ImageWordsCommand {
+  readonly operation: "load" | "cancel" | "unregister";
+  readonly identity: ImageIdentity;
+  readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.ts";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.ts";
+import { type ImageIdentity } from "./internal/image_identity.ts";
 // The compiled-core stage's restatement of @native-sdk/core: the SAME
 // inert Cmd/Sub data values the reference module's factories build
 // (packages/core/sdk/core.ts — the transpiler lane lowers references by
@@ -118,7 +126,7 @@ export interface FileResultArm {
 }
 export type TimerOutcome = "fired" | "rejected";
 export interface TimerResultArm { readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" | "rejected"; }
-export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly result: M["kind"]; }
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly replace?: boolean; readonly result: M["kind"]; }
 export interface TimerResultRoute<M extends Msgish> { readonly result: M["kind"]; }
 
 export interface FileStatArm { readonly exists: boolean; readonly size: number; readonly mtimeMs: number; }
@@ -419,8 +427,8 @@ export type CmdData =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "wall_time"; readonly msgKind: string }
-  | { readonly op: "read_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
-  | { readonly op: "write_file_result"; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
   | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
   | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
@@ -483,6 +491,9 @@ export type CmdData =
       readonly cachePath: Uint8Array;
       readonly expectedBytes: number;
     }
+  | { readonly op: "image_load_words"; readonly identity: ImageIdentity; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "image_cancel_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_unregister_words"; readonly identity: ImageIdentity }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
@@ -641,12 +652,12 @@ export const Cmd = {
 
   /// Read a whole file with every terminal field, including loss metadata.
   readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): CmdData {
-    return { op: "read_file_result", key: route.key ?? "", resultKind: route.result, path };
+    return { op: "read_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path };
   },
   /// Write with the complete terminal. Named keys follow readFile's replace
   /// and silent-cancel policy; unrelated live capabilities refuse the request.
   writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): CmdData {
-    return { op: "write_file_result", key: route.key ?? "", resultKind: route.result, path, bytes };
+    return { op: "write_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path, bytes };
   },
   /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
   /// the same key; cancellation remains silent, like Cmd.delay.
@@ -995,6 +1006,21 @@ export const Cmd = {
     };
   },
 
+  /** Lossless 63-bit identities. Each word is an unsigned 32-bit integer. */
+  imageLoadWords(identity: ImageIdentity, source: ImageSource, route: { readonly event: string }): CmdData {
+    return { op: "image_load_words", identity, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+  imageCancelWords(identity: ImageIdentity): CmdData { return { op: "image_cancel_words", identity }; },
+  imageUnregisterWords(identity: ImageIdentity): CmdData { return { op: "image_unregister_words", identity }; },
+  imageBatchWords(commands: readonly ImageWordsCommand[], route: { readonly event: string }): CmdData {
+    const cmds: CmdData[] = [];
+    for (const command of commands) {
+      if (command.operation === "load") cmds.push({ op: "image_load_words", identity: command.identity, eventKind: route.event, path: command.path, url: command.url, cachePath: command.cachePath, expectedBytes: command.expectedBytes });
+      else if (command.operation === "cancel") cmds.push({ op: "image_cancel_words", identity: command.identity });
+      else cmds.push({ op: "image_unregister_words", identity: command.identity });
+    }
+    return { op: "batch", cmds };
+  },
   imageCancel(id: number): CmdData {
     return { op: "image_cancel", id };
   },

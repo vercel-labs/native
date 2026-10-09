@@ -2,6 +2,7 @@
 //! compiled core; all interaction, layout, effects and replay use the runtime.
 const std = @import("std");
 const sdk = @import("../root.zig");
+const session_blobs = @import("session_blobs.zig");
 
 const protocol_version = 1;
 const max_request_bytes = 64 * 1024;
@@ -9,7 +10,7 @@ const max_response_bytes = 8 * 1024 * 1024;
 const max_journal_bytes = 8 * 1024 * 1024;
 
 const Request = struct {
-    op: enum { start, snapshot, automation, text_action, input, drop, menu, context_menu, tray, frame, window_close, host_result, db_result, file_result, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
+    op: enum { start, snapshot, automation, text_action, input, drop, menu, context_menu, tray, frame, window_close, host_result, db_result, file_result, image_result, image_bytes, fetch_result, clipboard_result, stream_line, spawn_output, spawn_exit, fetch_response, timer, hold_timer, replay, close },
     app_data_directory: []const u8 = "",
     width: u32 = 640,
     height: u32 = 480,
@@ -26,6 +27,10 @@ const Request = struct {
     file_total: u64 = 0,
     file_mtime_ms: i64 = 0,
     file_exists: bool = false,
+    image_outcome: sdk.EffectImageOutcome = .loaded,
+    image_width: u64 = 0,
+    image_height: u64 = 0,
+    image_status: u16 = 0,
     fetch_outcome: sdk.EffectFetchOutcome = .ok,
     fetch_status: u16 = 200,
     fetch_truncated: bool = false,
@@ -119,6 +124,9 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                 inline for (Adapter.Host.environment_messages) |entry| {
                     if (std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_DATA_DIR")) msg = entry.msg;
                 }
+                if (msg == null) inline for (Adapter.Host.environment_messages) |entry| {
+                    if (std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_LEGACY_DATA_DIR")) msg = entry.msg;
+                };
                 const route = msg orelse return error.AppDataEnvironmentChannelMissing;
                 self.env_values = try gpa.alloc(Adapter.EnvValue, wiring.env_values.len + 1);
                 @memcpy(self.env_values[0..wiring.env_values.len], wiring.env_values);
@@ -365,6 +373,23 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                 try json.endObject();
             }
             try json.endArray();
+            try json.objectField("images");
+            try json.beginArray();
+            for (0..self.state.effects.pendingImageLoadCount()) |index| {
+                const image = self.state.effects.pendingImageLoadAt(index).?;
+                try json.beginObject();
+                try json.objectField("id");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{image.id}));
+                json.options.emit_strings_as_arrays = true;
+                try json.objectField("path"); try json.write(image.path);
+                try json.objectField("url"); try json.write(image.url);
+                try json.objectField("cachePath"); try json.write(image.cache_path);
+                json.options.emit_strings_as_arrays = false;
+                try json.objectField("expectedBytes");
+                try json.write(try std.fmt.bufPrint(&id_buffer, "{d}", .{image.expected_bytes}));
+                try json.endObject();
+            }
+            try json.endArray();
             try json.objectField("clipboards");
             try json.beginArray();
             for (0..self.state.effects.pendingClipboardCount()) |index| {
@@ -446,6 +471,9 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
     const recorder = try gpa.create(sdk.runtime.SessionRecorder);
     defer gpa.destroy(recorder);
     recorder.* = sdk.runtime.SessionRecorder.init(.{ .context = &journal, .write_fn = Journal.write });
+    var blobs = session_blobs.MemoryBlobStore.init(gpa);
+    defer blobs.deinit();
+    recorder.blob_sink = blobs.sink();
     var host: ?*Host = null;
     defer if (host) |value| value.destroy();
     var config: Request = undefined;
@@ -557,6 +585,15 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                     });
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
                 },
+                .image_result, .image_bytes => {
+                    const id = try std.fmt.parseInt(u64, request.key, 10);
+                    if (request.op == .image_bytes) {
+                        try value.state.effects.feedImageBytes(id, request.bytes);
+                    } else {
+                        try value.state.effects.feedImageResult(id, request.image_outcome, request.image_width, request.image_height, request.image_status, request.bytes);
+                    }
+                    try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
+                },
                 .fetch_result => {
                     try value.state.effects.feedResponseOutcomeWithMetadata(try std.fmt.parseInt(u64, request.key, 10), request.fetch_outcome, request.fetch_status, request.bytes, request.fetch_truncated, 0);
                     try value.harness.runtime.dispatchPlatformEvent(value.state.app(), .wake);
@@ -599,6 +636,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                     const report = try sdk.runtime.replaySession(&host.?.harness.runtime, host.?.state.app(), journal.bytes.items, .{
                         .verify = true,
                         .require_same_platform = false,
+                        .blobs = blobs.source(),
                     });
                     if (!report.ok() or fingerprint != host.?.harness.runtime.sessionStateFingerprint()) {
                         std.debug.print("native test replay: {d} mismatches, final {x} != {x}\n", .{ report.mismatch_count, fingerprint, host.?.harness.runtime.sessionStateFingerprint() });

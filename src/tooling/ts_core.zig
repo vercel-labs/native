@@ -818,7 +818,7 @@ pub const editor_package_dir = "node_modules/@native-sdk/core";
 /// materialized copy): package.json, core editor sources, and the test driver.
 /// packages/core/test/package_manifest.test.ts pins the manifest to this
 /// shape, so copy and tarball cannot drift apart.
-const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/bytes.ts", "sdk/text.ts", "sdk/events.ts", "testing/index.ts", "sdk/bytes_text_methods.d.ts" };
+const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/bytes.ts", "sdk/text.ts", "sdk/events.ts", "sdk/theme.ts", "sdk/internal/image_identity.ts", "sdk/internal/markdown_policy.ts", "testing/index.ts", "sdk/bytes_text_methods.d.ts" };
 const sqlite_editor_overlay_marker = ".native/cache/sqlite/editor-overlay";
 
 /// Extract the top-level "version" of a package.json. A targeted scan, not
@@ -1074,6 +1074,10 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/bytes.ts", .data = "// byte module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/text.ts", .data = "// text module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/events.ts", .data = "// events module" });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/theme.ts", .data = "// theme module" });
+    try cwd.createDirPath(io, sdk ++ "/packages/core/sdk/internal");
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/internal/image_identity.ts", .data = "// image identity module" });
+    try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/internal/markdown_policy.ts", .data = "// Markdown policy module" });
     try cwd.writeFile(io, .{ .sub_path = sdk ++ "/packages/core/sdk/bytes_text_methods.d.ts", .data = "// ambient text methods" });
 
     const bundled = try bundledSdkVersion(allocator, io, sdk);

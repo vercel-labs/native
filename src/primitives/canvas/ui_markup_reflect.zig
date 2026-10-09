@@ -49,6 +49,27 @@ pub fn Pointee(comptime T: type) type {
     };
 }
 
+/// Registered Markdown images are boundary data: source bytes, dimensions,
+/// and either an exact native integer or two unsigned identity words.
+pub fn isMarkdownImageItem(comptime Outer: type) bool {
+    const T = Pointee(Outer);
+    if (@typeInfo(T) != .@"struct") return false;
+    inline for (.{ "source", "image", "width", "height" }) |name| if (!@hasField(T, name)) return false;
+    if (sliceElement(@FieldType(T, "source")) != u8) return false;
+    if (!isImageNumber(@FieldType(T, "width")) or !isImageNumber(@FieldType(T, "height"))) return false;
+    const Identity = Pointee(@FieldType(T, "image"));
+    if (isImageNumber(Identity)) return true;
+    if (@typeInfo(Identity) != .@"struct" or !@hasField(Identity, "imageLower") or !@hasField(Identity, "imageUpper")) return false;
+    return @typeInfo(Identity).@"struct".fields.len == 2 and isImageNumber(@FieldType(Identity, "imageLower")) and isImageNumber(@FieldType(Identity, "imageUpper"));
+}
+
+fn isImageNumber(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float => true,
+        else => false,
+    };
+}
+
 /// The element type a `for each` can iterate from this declaration:
 /// slices, arrays, and single-item pointers to either.
 pub fn sliceElement(comptime T: type) ?type {

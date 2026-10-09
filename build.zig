@@ -1374,6 +1374,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-feed-e2e", "Compare compiled Feed with complete native model, viewport, and replay behavior").dependOn(&feed_run.step);
         ts_core_e2e_step.dependOn(&feed_run.step);
         test_step.dependOn(&feed_run.step);
+        const markdown_viewer_run = b.addRunArtifact(ts_core_artifacts.markdown_viewer);
+        b.step("test-ts-markdown-viewer-e2e", "Compare compiled Markdown Viewer with complete native behavior").dependOn(&markdown_viewer_run.step);
+        ts_core_e2e_step.dependOn(&markdown_viewer_run.step);
+        test_step.dependOn(&markdown_viewer_run.step);
         const notes_run = b.addRunArtifact(ts_core_artifacts.notes);
         b.step("test-ts-notes-e2e", "Compare compiled Notes with the complete native reference").dependOn(&notes_run.step);
         ts_core_e2e_step.dependOn(&notes_run.step);
@@ -1728,9 +1732,9 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "break :services_contract stabilizeGeneratedFile(b, raw, \"services.contract.json\", build_trace);" },
         .{ .path = "build/app.zig", .pattern = "addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, \"src\"));" },
         .{ .path = "build/app.zig", .pattern = "addStagedCoreSdkInputs(b, dep.builder, stage_run);" },
-        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\" }) |source|" },
+        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\", \"internal/image_identity.ts\", \"internal/markdown_policy.ts\" }) |source|" },
         .{ .path = "build.zig", .pattern = "app_build.addStagedCoreSdkInputs(b, b, stage_run);" },
-        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\"])" },
+        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\", \"internal/image_identity.ts\", \"internal/markdown_policy.ts\"])" },
         .{ .path = "build/app.zig", .pattern = "if (std.mem.startsWith(u8, normalized, \"services/\")) continue;" },
         .{ .path = "tools/corewire/emit_service.ts", .pattern = "native-sdk.services.abi.v3" },
         .{ .path = "tools/corewire/service.test.ts", .pattern = "excludes implementation-only facts" },
@@ -2488,6 +2492,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-paragraph-transport", "Reject malformed copied paragraph plans", filteredTestArtifact(b, canvas_tests.root_module, "paragraph-transport-tests", &.{"paragraph copied transport"}));
+    addTestStep(b, "test-markdown-image-boundary", "Verify exact registered-image markup boundaries", filteredTestArtifact(b, canvas_tests.root_module, "markdown-image-boundary-tests", &.{"Markdown image boundary"}));
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     addTestStep(b, "test-component-consumers", "Verify menu pins recovery fallback and virtual-scroll consumers", filteredTestArtifact(b, desktop_mod, "component-consumer-tests", &.{
         "runtime.ui_app_tests.test.a declared context menu presents",
@@ -2522,6 +2527,8 @@ pub fn build(b: *std.Build) void {
         "runtime.ts_core_host_tests.test.request host consumes",
         "runtime.ts_core_host_tests.test.file host consumes",
         "runtime.ts_core_host_tests.test.callback host consumes",
+        "runtime.ts_core_host_tests.test.word image ABI",
+        "runtime.ts_core_host_tests.test.image and named cancellation",
     }));
     addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
         "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test",
@@ -4225,6 +4232,7 @@ const TsCoreE2eArtifacts = struct {
     inbox: *std.Build.Step.Compile,
     effects_probe: *std.Build.Step.Compile,
     notes: *std.Build.Step.Compile,
+    markdown_viewer: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
     workbench: *std.Build.Step.Compile,
     video_player: *std.Build.Step.Compile,
@@ -4544,6 +4552,26 @@ fn tsCoreE2eArtifact(
     feed_decoder.addImport("native_sdk", desktop_mod);
     feed_decoder.addImport("core.zig", feed_fixture.module);
     feed_mod.addImport("feed_decoder", feed_decoder);
+
+    const markdown_viewer_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/markdown-viewer/src/core.ts",
+        .src_dir = b.path("examples/markdown-viewer/src"),
+        .name = "markdown_viewer_core",
+        .typescript_view = true,
+    });
+    const markdown_viewer_stage = b.addWriteFiles();
+    const markdown_viewer_root = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/markdown_viewer_e2e_tests.zig"), "markdown_viewer_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "viewer.native", "samples/welcome.md", "samples/tour.md", "samples/spec.md", "samples/notes.md" }) |file|
+        _ = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/markdown-viewer-reference/" ++ file), "markdown-viewer-reference/" ++ file);
+    _ = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = markdown_viewer_stage.addCopyFile(b.path("examples/markdown-viewer/src/app.native"), "app.native");
+    const markdown_viewer_mod = b.createModule(.{ .root_source_file = markdown_viewer_root, .target = target, .optimize = optimize });
+    markdown_viewer_mod.addImport("native_sdk", desktop_mod);
+    markdown_viewer_mod.addImport("markdown_viewer_core", markdown_viewer_fixture.module);
+    const markdown_viewer_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    markdown_viewer_decoder.addImport("native_sdk", desktop_mod);
+    markdown_viewer_decoder.addImport("core.zig", markdown_viewer_fixture.module);
+    markdown_viewer_mod.addImport("markdown_viewer_decoder", markdown_viewer_decoder);
 
     const notes_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/notes/src/core.ts",
@@ -5047,6 +5075,7 @@ fn tsCoreE2eArtifact(
         .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
+        .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
         .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
         .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
         .video_player = filteredTestArtifact(b, video_player_mod, "ts-video-player-e2e-tests", &.{}),
@@ -5426,7 +5455,7 @@ fn externalCoreFixtureModule(
     stage_run.addFileInput(b.path("packages/core/src/component_composition.ts"));
     stage_run.addFileInput(b.path("packages/core/src/code_content.ts"));
     stage_run.addFileInput(b.path("packages/core/src/chart_content.ts"));
-    stage_run.addFileInput(b.path("packages/core/src/markdown_content.ts"));
+    stage_run.addFileInput(b.path("packages/core/sdk/internal/markdown_policy.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_audits.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_routing.ts"));
     stage_run.addFileInput(b.path("packages/core/src/widget_changes.ts"));
