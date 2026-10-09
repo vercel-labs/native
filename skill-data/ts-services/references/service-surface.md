@@ -6,7 +6,7 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.2.4
+# Service compile surface — scriptc 0.2.5
 
 What TypeScript under `src/services/` can use, as stated by the pinned
 compiler itself (surface manifest schema 1, 645 entries:

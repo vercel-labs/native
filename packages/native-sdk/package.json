@@ -36,9 +36,9 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@scriptc/compiler": "0.2.4",
+    "@scriptc/compiler": "0.2.5",
     "@typescript/old": "npm:typescript@6.0.3",
-    "scriptc": "0.2.4"
+    "scriptc": "0.2.5"
   },
   "optionalDependencies": {
     "@native-sdk/cli-darwin-arm64": "0.10.1",
