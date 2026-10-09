@@ -117,7 +117,7 @@ pub fn accumulate(raster: anytype, elements: []const drawing.PathElement, transf
     const request = allocate(std.math.add(usize, len, raster.edge_count * 20) catch @panic("vector raster request too large"));
     defer allocator.free(request);
     @memset(request, 0);
-    request[0..4].* = .{ 66, 1, @intFromBool(style != null), @import("render_plan_policy.zig").numericFlags() };
+    request[0..4].* = .{ 66, 1, @intFromBool(style != null), @import("numeric_capabilities.zig").numericFlags() };
     put(request, 4, elements.len);
     put(request, 8, raster.edges.len);
     put(request, 12, raster.edge_count);
@@ -155,7 +155,7 @@ pub fn sweep(raster: anytype, rule: vector.FillRule, clip: vector.ClipRect, sink
     const request = allocate(80 + raster.edge_count * 20);
     defer allocator.free(request);
     @memset(request, 0);
-    request[0..4].* = .{ 66, 1, 2, @import("render_plan_policy.zig").numericFlags() };
+    request[0..4].* = .{ 66, 1, 2, @import("numeric_capabilities.zig").numericFlags() };
     put(request, 4, raster.edge_count);
     put(request, 8, raster.crossings.len);
     put(request, 12, @intFromEnum(rule));

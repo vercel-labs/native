@@ -163,18 +163,7 @@ pub fn buildBatch(comptime Result: type, planner: anytype, plan: canvas.RenderPl
     return .{ .batches = planner.batches[0..count], .bounds = optionalRect(result, 8) };
 }
 
-/// Native f32 extrema have target-specific signs for opposite zero operands.
-/// Runtime probes expose only that numeric capability, never render decisions.
-pub fn numericFlags() u8 {
-    var zeros = [_]f32{ -0.0, 0.0 };
-    std.mem.doNotOptimizeAway(&zeros);
-    const values = [_]f32{ @min(zeros[0], zeros[1]), @min(zeros[1], zeros[0]), @max(zeros[0], zeros[1]), @max(zeros[1], zeros[0]) };
-    var flags: u8 = 0;
-    for (values, 0..) |v, i| if (@as(u32, @bitCast(v)) == 0x80000000) {
-        flags |= @as(u8, 1) << @intCast(i);
-    };
-    return flags;
-}
+pub const numericFlags = @import("numeric_capabilities.zig").numericFlags;
 fn putWord(bytes: []u8, at: usize, value: usize) void {
     std.mem.writeInt(u32, bytes[at..][0..4], std.math.cast(u32, value) orelse @panic("render planning wire integer overflow"), .little);
 }
