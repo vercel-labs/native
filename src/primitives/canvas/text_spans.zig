@@ -1119,7 +1119,7 @@ fn rebaseSpanWrapEntry(cache: *SpanWrapCache, entry_index: usize, spans: []const
     if (options.paragraph_policy) |owner| {
         if (entry.run_len > max_text_span_runs_per_paragraph) @panic("measured paragraph run storage overflow");
         var bytes: [32 + max_text_spans_per_paragraph * 4 + max_text_span_runs_per_paragraph * 12]u8 = undefined;
-        const count = @min(spans.len, max_text_spans_per_paragraph);
+        const count: usize = @min(spans.len, max_text_spans_per_paragraph);
         const request = bytes[0 .. 32 + count * 4 + entry.run_len * 12];
         measured_cache_policy.header(request, 7, 0, entry.run_len, count, 0);
         for (spans[0..count], 0..) |span, i| measured_cache_policy.put(request, 32 + i * 4, span.text.len);

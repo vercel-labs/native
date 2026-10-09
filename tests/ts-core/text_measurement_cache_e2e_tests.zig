@@ -150,3 +150,25 @@ test "compiled widget metric measured cache retains paragraphs and rebases compl
         }
     }
 }
+
+test "compiled widget metric measured cache rebases full span budgets without narrow wire arithmetic" {
+    _ = core.initialModel();
+    var trace: Trace = .{};
+    const provider: c.TextMeasureProvider = .{ .context = &trace, .measure_fn = width, .measure_advances_fn = advances };
+    var spans: [33]c.TextSpan = undefined;
+    for (&spans, 0..) |*span, i| span.* = .{ .text = if (i % 2 == 0) "first " else "second ", .monospace = i % 3 == 0 };
+    var a: [160]c.TextSpanRun = undefined;
+    var b: [160]c.TextSpanRun = undefined;
+    for ([_]usize{ 15, 16, 31, 32, 33 }) |count| {
+        const options: c.TextSpanLayoutOptions = .{ .measure = &provider, .size = 12.25, .max_width = 125 };
+        c.bumpTextMeasureGeneration();
+        const expected = c.layoutTextSpans(spans[0..count], options, &a);
+        c.bumpTextMeasureGeneration();
+        var compiled_options = options;
+        compiled_options.paragraph_policy = core.nativeWindowPolicy;
+        try exact(expected, c.layoutTextSpans(spans[0..count], compiled_options, &b));
+        // The second layout takes the copied rebase protocol at the full budget.
+        try exact(expected, c.layoutTextSpans(spans[0..count], compiled_options, &b));
+        core.rt.frameReset();
+    }
+}
