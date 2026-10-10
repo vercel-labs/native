@@ -38,6 +38,7 @@ test "compiled model themes copy the complete register across frame and commit o
         reference.control_command_policy = core.nativeWindowPolicy;
         reference.widget_motion_policy = core.nativeWindowPolicy;
         reference.widget_audit_policy = core.nativeWindowPolicy;
+        reference.accessibility_policy = core.nativeWindowPolicy;
         reference.widget_routing_policy = core.nativeWindowPolicy;
         reference.widget_change_policy = core.nativeWindowPolicy;
         reference.widget_paint_policy = core.nativeWindowPolicy;
@@ -103,6 +104,7 @@ fn restamp(reference: *canvas.DesignTokens, actual: canvas.DesignTokens) void {
     reference.control_command_policy = core.nativeWindowPolicy;
     reference.widget_motion_policy = core.nativeWindowPolicy;
     reference.widget_audit_policy = core.nativeWindowPolicy;
+    reference.accessibility_policy = core.nativeWindowPolicy;
     reference.widget_routing_policy = core.nativeWindowPolicy;
     reference.widget_change_policy = core.nativeWindowPolicy;
     reference.widget_paint_policy = core.nativeWindowPolicy;
