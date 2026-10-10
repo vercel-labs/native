@@ -437,7 +437,10 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     recordDispatchError(self, "context_menu_action", err);
                     if (self.dispatch_error_policy == .propagate) return err;
                 },
-                .widget_context_menu_action => |action_event| try AutomationWidgetMethods().dispatchWidgetContextMenuItem(self, app, action_event),
+                .widget_context_menu_action => |action_event| AutomationWidgetMethods().dispatchWidgetContextMenuItem(self, app, action_event) catch |err| {
+                    recordDispatchError(self, "widget_context_menu_action", err);
+                    if (self.dispatch_error_policy == .propagate) return err;
+                },
                 .widget_accessibility_action => |action_event| {
                     _ = self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
                         .id = action_event.id,

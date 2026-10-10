@@ -205,15 +205,19 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
         /// target's view, mid-verb.
         pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
             const view_index = try automationWidgetTargetViewIndex(self, item.target);
-            try self.dispatchPlatformEvent(app, .{ .widget_context_menu_action = .{
+            const invocation: platform.WidgetContextMenuActionEvent = .{
                 .window_id = self.views[view_index].window_id,
                 .label = self.views[view_index].label,
                 .id = item.target.id,
                 .item_index = std.math.cast(u32, item.item_index) orelse return error.ContextMenuItemOutOfRange,
-            } });
+            };
+            // Driver misuse must fail before staging a journal event.
+            // The platform handler also validates replayed invocations.
+            _ = try widgetContextMenuTargetViewIndex(self, invocation);
+            try self.dispatchPlatformEvent(app, .{ .widget_context_menu_action = invocation });
         }
 
-        pub fn dispatchWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: platform.WidgetContextMenuActionEvent) anyerror!void {
+        fn widgetContextMenuTargetViewIndex(self: *Runtime, item: platform.WidgetContextMenuActionEvent) anyerror!usize {
             try validateViewLabel(item.label);
             const window_index = runtimeFindWindowIndexById(self, item.window_id) orelse return error.WindowNotFound;
             if (!self.windows[window_index].info.open) return error.WindowNotFound;
@@ -230,6 +234,13 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const declared = widget.context_menu[item.item_index];
             if (declared.separator) return error.ContextMenuItemSeparator;
             if (!declared.enabled) return error.ContextMenuItemDisabled;
+            return view_index;
+        }
+
+        pub fn dispatchWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: platform.WidgetContextMenuActionEvent) anyerror!void {
+            const view_index = try widgetContextMenuTargetViewIndex(self, item);
+            const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.id) orelse return error.InvalidCommand;
+            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
 
             // This direct dispatch supersedes any pending presentation:
             // the replacement request commits first (bookkeeping must
