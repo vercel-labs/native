@@ -1623,7 +1623,16 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
          [attribute isEqualToString:NSAccessibilitySelectedTextRangesAttribute])) {
         return (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) != 0;
     }
-    return [super accessibilityIsAttributeSettable:attribute];
+    /* NSAccessibilityElement does not implement the legacy informal
+     * protocol: forwarding to super raised (and unwound) an exception for
+     * every property the host set on every element of every published
+     * tree. Answer "not settable" the way the caught exception did. */
+    static BOOL superSettable;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        superSettable = [NSAccessibilityElement instancesRespondToSelector:@selector(accessibilityIsAttributeSettable:)];
+    });
+    return superSettable ? [super accessibilityIsAttributeSettable:attribute] : NO;
 }
 
 - (void)accessibilitySetValue:(id)value forAttribute:(NSAccessibilityAttributeName)attribute {
@@ -1855,7 +1864,7 @@ static NSBezierPath *NativeSdkPacketShapePath(NSDictionary *shape) {
         NSBezierPath *path = [NSBezierPath bezierPath];
         [path moveToPoint:NativeSdkPacketPoint(shape[@"from"])];
         [path lineToPoint:NativeSdkPacketPoint(shape[@"to"])];
-        path.lineWidth = MAX(1, NativeSdkPacketNumber(shape[@"width"], 1));
+        path.lineWidth = fmax(0, NativeSdkPacketNumber(shape[@"width"], 1));
         return path;
     }
     return nil;
@@ -1863,6 +1872,9 @@ static NSBezierPath *NativeSdkPacketShapePath(NSDictionary *shape) {
 
 static BOOL NativeSdkPacketDrawPaintedPath(NSBezierPath *path, NSDictionary *paint, CGFloat opacity, BOOL stroke) {
     if (!path || !paint) return NO;
+    /* AppKit strokes a zero width as the thinnest device line; the
+     * reference renderer draws nothing, and so does this host. */
+    if (stroke && !(path.lineWidth > 0)) return YES;
     NSString *kind = [paint[@"kind"] isKindOfClass:[NSString class]] ? paint[@"kind"] : @"";
     if ([kind isEqualToString:@"color"]) {
         NSColor *color = NativeSdkPacketColor(paint[@"color"], opacity);
@@ -2823,8 +2835,16 @@ static BOOL NativeSdkPacketDrawText(NSDictionary *text, CGFloat opacity) {
     NSString *value = [text[@"text"] isKindOfClass:[NSString class]] ? text[@"text"] : @"";
     NSColor *color = NativeSdkPacketColor(text[@"color"], opacity);
     if (!color) return NO;
-    CGFloat size = MAX(1, NativeSdkPacketNumber(text[@"size"], 12));
+    CGFloat requestedSize = NativeSdkPacketNumber(text[@"size"], 12);
+    CGFloat size = isfinite(requestedSize) ? MAX(1, requestedSize) : 12;
     NSFont *font = NativeSdkPacketPreferredFont(text, size);
+    // AppKit/CoreText may return nil when a requested face or size cannot
+    // be resolved. Never put that nil into the attributed-string dictionary:
+    // fall back to the system face, or reject the command if AppKit cannot
+    // provide even that. The dictionary literal otherwise raises
+    // NSInvalidArgumentException and terminates the app.
+    if (!font) font = [NSFont systemFontOfSize:size];
+    if (!font) return NO;
     NSPoint origin = NativeSdkPacketPoint(text[@"origin"]);
     NSDictionary *baseAttributes = @{
         NSFontAttributeName: font,
@@ -2885,15 +2905,40 @@ static BOOL NativeSdkPacketDrawEffect(NSDictionary *effect, CGFloat opacity, CGC
         if (!color) return NO;
         NSRect rect = NativeSdkPacketRect(effect[@"rect"]);
         NSArray *offset = NativeSdkPacketArray(effect[@"offset"], 2);
-        NSSize shadowOffset = offset ? NSMakeSize(NativeSdkPacketNumber(offset[0], 0), NativeSdkPacketNumber(offset[1], 0)) : NSZeroSize;
+        /* Canvas packets use the top-left coordinate convention shared by
+         * layout and the Windows renderer: positive Y moves a shadow down.
+         * NSShadow interprets a positive height in AppKit's bottom-left
+         * shadow space even while this flipped surface paints top-down, so
+         * passing the packet value through verbatim inverted every vertical
+         * shadow on macOS. */
+        NSSize shadowOffset = offset ? NSMakeSize(NativeSdkPacketNumber(offset[0], 0), -NativeSdkPacketNumber(offset[1], 0)) : NSZeroSize;
         NSShadow *shadow = [[NSShadow alloc] init];
         shadow.shadowColor = color;
         shadow.shadowOffset = shadowOffset;
         shadow.shadowBlurRadius = MAX(0, NativeSdkPacketNumber(effect[@"blur"], 0));
         NSBezierPath *path = NativeSdkPacketRoundedRectPath(rect, effect[@"radius"]);
+        /* CoreGraphics derives a shadow's opacity from the ALPHA OF THE
+         * SOURCE it is cast by, so filling the shape at 1% alpha (the old
+         * way of keeping the source itself invisible) also scaled the
+         * shadow to 1% — every drop shadow in the tree rendered at well
+         * under a percent of its declared strength, which reads as no
+         * shadow at all.
+         *
+         * Cast it from an opaque source instead, and keep the source
+         * invisible by clipping the shape's own interior out of the spill
+         * region: nothing paints inside the shape, and the shadow outside
+         * it lands at full declared strength. */
+        CGFloat blurRadius = shadow.shadowBlurRadius;
+        CGFloat spread = fabs(NativeSdkPacketNumber(effect[@"spread"], 0));
+        CGFloat margin = blurRadius + spread + 1;
+        NSRect spill = NSUnionRect(rect, NSInsetRect(NSOffsetRect(rect, shadowOffset.width, shadowOffset.height), -margin, -margin));
+        NSBezierPath *clip = [NSBezierPath bezierPathWithRect:spill];
+        [clip appendBezierPath:path];
+        clip.windingRule = NSEvenOddWindingRule;
         [NSGraphicsContext saveGraphicsState];
+        [clip addClip];
         [shadow set];
-        [[color colorWithAlphaComponent:0.01] setFill];
+        [[NSColor colorWithCalibratedWhite:0 alpha:1] setFill];
         [path fill];
         [NSGraphicsContext restoreGraphicsState];
         return YES;
@@ -3151,7 +3196,7 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
         ok = NativeSdkPacketDrawPaintedPath(NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"])), NativeSdkPacketDictionary(command[@"paint"]), opacity, NO);
     } else if ([kind hasPrefix:@"stroke_rect"]) {
         NSBezierPath *path = NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"]));
-        path.lineWidth = MAX(1, NativeSdkPacketNumber(command[@"strokeWidth"], path.lineWidth));
+        path.lineWidth = fmax(0, NativeSdkPacketNumber(command[@"strokeWidth"], path.lineWidth));
         ok = NativeSdkPacketDrawPaintedPath(path, NativeSdkPacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind hasPrefix:@"draw_line"]) {
         ok = NativeSdkPacketDrawPaintedPath(NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"])), NativeSdkPacketDictionary(command[@"paint"]), opacity, YES);
@@ -3159,7 +3204,7 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
         ok = NativeSdkPacketDrawPaintedPath(NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"])), NativeSdkPacketDictionary(command[@"paint"]), opacity, NO);
     } else if ([kind isEqualToString:@"stroke_path"]) {
         NSBezierPath *path = NativeSdkPacketShapePath(NativeSdkPacketDictionary(command[@"shape"]));
-        path.lineWidth = MAX(1, NativeSdkPacketNumber(command[@"strokeWidth"], path.lineWidth));
+        path.lineWidth = fmax(0, NativeSdkPacketNumber(command[@"strokeWidth"], path.lineWidth));
         /* End caps come from the command's cap channel (the engine's
          * reference renderer honors the same field); joins are always
          * round for path strokes — the engine rounds every stroke-path
