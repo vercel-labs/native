@@ -1302,6 +1302,8 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub const accessibility_policy = @import("accessibility_policy.zig");
+    pub const accessibility_publication = runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
     pub const DamageCurrentCommand = @import("canvas_frame.zig").DamageCurrentCommand;
     pub const referenceDamageSnap = @import("canvas_frame.zig").referenceDamageSnap;
     pub const referenceDamageWiden = @import("canvas_frame.zig").referenceDamageWiden;

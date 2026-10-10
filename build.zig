@@ -1512,6 +1512,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&typography_run.step);
         const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
         b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership").dependOn(&surface_layout_run.step);
+        b.step("test-ts-accessibility-publication", "Compare complete compiled accessibility projection and runtime publication").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-accessibility-publication-tests", &.{"compiled accessibility"})).step);
         b.step("test-ts-vector-derivation", "Compare compiled vector and effect derivation without runtime frame setup").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-derivation-tests", &.{ "compiled vector resources preserve", "vector resource copied transport" })).step);
         b.step("test-ts-render-resources", "Compare complete compiled image layer and resource derivation").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-render-resource-tests", &.{ "compiled render resources", "render resource copied transport" })).step);
         b.step("test-ts-gpu-planning", "Compare complete compiled GPU packet and encoder planning").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-gpu-planning-tests", &.{ "compiled GPU planning", "GPU planning copied transport", "both runtime damage consumers preserve", "both Runtime consumers preserve full override frames" })).step);
@@ -2031,6 +2032,21 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "self.webviewPendingURLs[[self webViewKeyForWindow:windowId label:label]] = resolvedURL;" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "bridgeOriginForWindowId:window_id_ webViewLabel:labelString sourceURL:sourceURLString" },
     });
+    var appkit_accessibility_step: ?*std.Build.Step = null;
+    if (@import("builtin").os.tag == .macos and target.result.os.tag == .macos) {
+        const compile_accessibility = b.addSystemCommand(&.{ "xcrun", "clang", "-fobjc-arc", "-fno-sanitize=builtin", "-O2" });
+        compile_accessibility.addFileArg(b.path("tests/platform/appkit_accessibility.m"));
+        compile_accessibility.addFileArg(b.path("src/platform/macos/appkit_host.m"));
+        for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "CoreMedia", "CoreVideo", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+            compile_accessibility.addArgs(&.{ "-framework", framework });
+        }
+        compile_accessibility.addArg("-o");
+        const accessibility_exe = compile_accessibility.addOutputFileArg("appkit-accessibility-tests");
+        const run_accessibility = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_accessibility.addFileArg(accessibility_exe);
+        appkit_accessibility_step = b.step("test-appkit-accessibility", "Exercise production AppKit accessibility identity, optional fields and lifetime");
+        appkit_accessibility_step.?.dependOn(&run_accessibility.step);
+    }
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-native-accessibility-roles", "Verify AppKit native views publish accessibility roles", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkAccessibilityRoleForNativeViewKind" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityToolbarRole" },
@@ -2506,7 +2522,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.h", .pattern = "uint64_t parent_id;" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".parent_id = node.parent_id orelse 0" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityParent = parent;" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityChildren = elementsById[@(element.widgetId)] == element ? (childrenByParentId[@(element.widgetId)] ?: defaults.accessibilityChildren) : defaults.accessibilityChildren;" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return self.widgetAccessibilityRootElements ?: @[];" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-appearance-bridge", "Verify AppKit reports system light and dark appearance changes", &.{
@@ -3745,6 +3761,7 @@ pub fn build(b: *std.Build) void {
     canvas_preview_smoke_step.dependOn(&canvas_preview_smoke_run.step);
 
     const gpu_components_smoke_step = b.step("test-gpu-components-smoke", "Run the TypeScript component gallery automation smoke test");
+    if (appkit_accessibility_step) |accessibility_step| gpu_components_smoke_step.dependOn(accessibility_step);
     const gpu_components_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_components_smoke_build.setCwd(b.path("examples/gpu-components"));
     const gpu_components_smoke_run = b.addSystemCommand(&.{
@@ -4684,8 +4701,7 @@ fn tsCoreE2eArtifact(
     const deck_root = deck_stage.addCopyFile(b.path("tests/ts-core/deck_e2e_tests.zig"), "deck_e2e_tests.zig");
     // Expose reference hooks for independent integration tests without
     // changing the preserved native app sources.
-    _ = deck_stage.add("deck_reference_access.zig",
-        "pub const main = @import(\"deck-reference/main.zig\");\n" ++
+    _ = deck_stage.add("deck_reference_access.zig", "pub const main = @import(\"deck-reference/main.zig\");\n" ++
         "pub const view = @import(\"deck-reference/view.zig\");\n" ++
         "pub const model = @import(\"deck-reference/model.zig\");\n");
     inline for (.{ "main.zig", "model.zig", "view.zig", "theme.zig", "chrome.zig", "layout.zig", "tests.zig", "music_manifest.zon", "statusbar.native", "spectrum.native", "icons/stop.svg", "icons/minimize.svg", "fonts/GeistPixel-Square.ttf", "fonts/OFL.txt", "art/exit-signs.jpg", "art/blue-season.jpg", "art/second-nature.jpg", "art/no-good-way-out.jpg", "art/glass-flowers.jpg", "art/night-bloom.jpg", "art/motion-picture.jpg", "art/channel-surfing.jpg" }) |file|

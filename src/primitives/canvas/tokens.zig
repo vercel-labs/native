@@ -1924,6 +1924,8 @@ pub const DesignTokens = struct {
     widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable accessibility/layout audit rules over native measurement facts.
     widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Platform semantic projection/publication; native owns OS elements.
+    accessibility_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable input routing and focus over copied solved-tree facts.
     widget_routing_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Portable retained widget matching and change classification.
