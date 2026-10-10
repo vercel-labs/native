@@ -2522,7 +2522,7 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.h", .pattern = "uint64_t parent_id;" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".parent_id = node.parent_id orelse 0" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityParent = parent;" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityChildren = elementsById[@(element.widgetId)] == element ? (childrenByParentId[@(element.widgetId)] ?: defaults.accessibilityChildren) : defaults.accessibilityChildren;" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return self.widgetAccessibilityRootElements ?: @[];" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-appearance-bridge", "Verify AppKit reports system light and dark appearance changes", &.{
