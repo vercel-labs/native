@@ -1092,6 +1092,11 @@ export class IntInference {
         const input = src.getProperty(property.name);
         const inputDecl = input?.valueDeclaration ?? input?.declarations?.[0];
         if (!inputDecl || inputDecl === target) continue;
+        // SDK records cross their own checked boundary (for example, the
+        // bounded SQLite page decoder). This application forwarding pass
+        // must not invent unknown inflows for declarations it does not
+        // analyze, demoting an already established model field ABI.
+        if (!this.fileSet.has(inputDecl.getSourceFile())) continue;
         const slot = this.slots.get(target);
         if (slot) {
           const inputSlot = this.slots.get(inputDecl);

@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { checkFiles } from "./helpers.ts";
+import { checkFile } from "../src/frontend.ts";
+import { analyzeSqlite, generateCoreSurface } from "../src/sqlite_codegen.ts";
 
 const entry = `
 import { step } from "./worker.ts";
@@ -28,6 +34,26 @@ function contract(files: Record<string, string>): any {
   assert.equal(result.ok, true, [...result.typeErrors, ...result.diagnostics.map(d => `${d.id}: ${d.message}`)].join("\n"));
   return JSON.parse(result.contract!);
 }
+
+test("checked SQLite row forwarding preserves complete identifier and timestamp integer ABI", () => {
+  const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const app = path.resolve(packageDir, "../../examples/relational-notes/src");
+  const sdk = fs.mkdtempSync(path.join(os.tmpdir(), "native-row-forwarding-"));
+  try {
+    const analysis = analyzeSqlite(app);
+    assert.deepEqual(analysis.diagnostics, []);
+    fs.cpSync(path.join(packageDir, "sdk"), sdk, { recursive: true });
+    const sdkCorePath = path.join(sdk, "core.ts");
+    fs.writeFileSync(sdkCorePath, generateCoreSurface(fs.readFileSync(sdkCorePath, "utf8"), analysis));
+    const result = checkFile(path.join(app, "core.ts"), { sdkCorePath, contractEntry: "src/core.ts" });
+    assert.equal(result.ok, true, [...result.typeErrors, ...result.diagnostics.map(d => `${d.id}: ${d.message}`)].join("\n"));
+    const doc = JSON.parse(result.contract!);
+    const row = doc.types.structs.find((s: any) => s.name === "NoteRow");
+    assert.deepEqual(row.fields.map((f: any) => [f.name, f.type.kind]), [["id", "i64"], ["title", "bytes"], ["updated_at", "i64"]]);
+  } finally {
+    fs.rmSync(sdk, { recursive: true, force: true });
+  }
+});
 
 test("whole message forwarding carries integer demand through matching union arms", () => {
   const doc = contract({ "core.ts": entry, "worker.ts": worker });
