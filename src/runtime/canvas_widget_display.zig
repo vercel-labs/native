@@ -12,6 +12,7 @@ const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const launch_timing = @import("launch_timing.zig");
 const widget_bridge = @import("widget_bridge.zig");
+const accessibility_policy = @import("accessibility_policy.zig");
 
 const CanvasWidgetDisplayListChrome = runtime_api.CanvasWidgetDisplayListChrome;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
@@ -215,7 +216,16 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
             const semantics = view.widgetSemantics();
             const count = @min(semantics.len, nodes.len);
-            for (semantics[0..count], 0..) |node, index| {
+            if (view.widget_tokens.accessibility_policy) |policy| {
+                _ = try accessibility_policy.project(self.owned_allocator, policy, semantics, view.keyboard_active, view.focused, view.canvas_widget_focused_id, view.canvas_widget_hovered_id, view.canvas_widget_pressed_id, &nodes);
+                // History availability is an explicit retained-storage query;
+                // the compiled projection chooses which editor is focused.
+                for (nodes[0..count]) |*node| if (node.focused) {
+                    const history = view.canvasWidgetTextHistoryAvailability(node.id);
+                    node.can_undo = history.can_undo;
+                    node.can_redo = history.can_redo;
+                };
+            } else for (semantics[0..count], 0..) |node, index| {
                 const focused = node.state.focused or (view.keyboard_active and view.focused and node.id == view.canvas_widget_focused_id);
                 // Native menu validation only consults the focused editor.
                 // Resolving history for that one node also avoids searching
@@ -267,7 +277,15 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // A failed publish records nothing, so the next refresh
             // retries.
             const published_hash = hashWidgetAccessibilityNodes(nodes[0..count]);
-            if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash) {
+            const decision: accessibility_policy.Publication = if (view.widget_tokens.accessibility_policy) |policy|
+                accessibility_policy.publication(policy, view.widget_accessibility_published, view.widget_accessibility_published_hash, published_hash, allow_deferral, self.canvas_widget_accessibility_defer_depth > 0)
+            else if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash)
+                .unchanged
+            else if (allow_deferral and self.canvas_widget_accessibility_defer_depth > 0)
+                .deferred
+            else
+                .publish;
+            if (decision == .unchanged) {
                 view.widget_accessibility_publish_deferred = false;
                 return;
             }
@@ -280,7 +298,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // only when the platform would actually be called. Direct API
             // callers (no input dispatch live) publish synchronously as
             // always; the settle/flush paths pass allow_deferral=false.
-            if (allow_deferral and self.canvas_widget_accessibility_defer_depth > 0) {
+            if (decision == .deferred) {
                 view.widget_accessibility_publish_deferred = true;
                 return;
             }
@@ -301,7 +319,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// nothing deferred.
         pub fn flushDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
             for (0..self.view_count) |view_index| {
-                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
+                const view = &self.views[view_index];
+                const flush = if (view.widget_tokens.accessibility_policy) |policy|
+                    accessibility_policy.flush(policy, view.widget_accessibility_publish_deferred, view.gpu_canvas_frame_requested, true)
+                else
+                    view.widget_accessibility_publish_deferred;
+                if (!flush) continue;
                 self.views[view_index].widget_accessibility_publish_deferred = false;
                 try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
             }
@@ -314,8 +337,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// to protect, so inline costs the glass nothing.
         pub fn settleDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
             for (0..self.view_count) |view_index| {
-                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
-                if (self.views[view_index].gpu_canvas_frame_requested) continue;
+                const view = &self.views[view_index];
+                const flush = if (view.widget_tokens.accessibility_policy) |policy|
+                    accessibility_policy.flush(policy, view.widget_accessibility_publish_deferred, view.gpu_canvas_frame_requested, false)
+                else
+                    view.widget_accessibility_publish_deferred and !view.gpu_canvas_frame_requested;
+                if (!flush) continue;
                 self.views[view_index].widget_accessibility_publish_deferred = false;
                 try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
             }

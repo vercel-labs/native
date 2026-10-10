@@ -49,6 +49,7 @@ pub fn expectComplete(expected: anytype, actual: @TypeOf(expected)) anyerror!voi
 
 test {
     _ = @import("semantic_tree_e2e_tests.zig");
+    _ = @import("accessibility_publication_e2e_tests.zig");
     _ = @import("virtual_extent_e2e_tests.zig");
     _ = @import("text_cache_e2e_tests.zig");
     _ = @import("glyph_atlas_e2e_tests.zig");

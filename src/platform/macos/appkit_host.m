@@ -487,7 +487,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
 - (void)publishAccessibilityFocused:(BOOL)focused;
-@property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
+@property(nonatomic, weak) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
 @property(nonatomic, assign) uint32_t actionFlags;
 @property(nonatomic, assign) BOOL canUndo;
@@ -1507,6 +1507,10 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 
 @end
 
+static BOOL NativeSdkAccessibilityValuesEqual(id left, id right) {
+    return left == right || [left isEqual:right];
+}
+
 @implementation NativeSdkWidgetAccessibilityElement
 
 /* The action-flag gate for advertising AXPress: press, toggle, and
@@ -1521,7 +1525,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
     NATIVE_SDK_APPKIT_WIDGET_ACTION_SELECT;
 
 - (NSArray *)accessibilityActionNames {
-    if (!self.accessibilityEnabled) return @[];
+    if (!self.surfaceView || !self.accessibilityEnabled) return @[];
     NSMutableArray *actions = [NSMutableArray arrayWithCapacity:3];
     if ((self.actionFlags & NativeSdkWidgetPressActionFlags) != 0) {
         [actions addObject:NSAccessibilityPressAction];
@@ -1550,22 +1554,22 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
  * list instead of no-op'ing on invocation. */
 - (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
     if (selector == @selector(accessibilityPerformPress)) {
-        return self.accessibilityEnabled && (self.actionFlags & NativeSdkWidgetPressActionFlags) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NativeSdkWidgetPressActionFlags) != 0;
     }
     if (selector == @selector(accessibilityPerformIncrement)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0;
     }
     if (selector == @selector(accessibilityPerformDecrement)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) != 0;
     }
     if (selector == @selector(accessibilityPerformCancel)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) != 0;
     }
     return [super isAccessibilitySelectorAllowed:selector];
 }
 
 - (BOOL)accessibilityPerformPress {
-    if (!self.accessibilityEnabled) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled) return NO;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_TOGGLE) != 0) {
         return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_TOGGLE];
     }
@@ -1579,17 +1583,17 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)accessibilityPerformIncrement {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_INCREMENT];
 }
 
 - (BOOL)accessibilityPerformDecrement {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DECREMENT];
 }
 
 - (BOOL)accessibilityPerformCancel {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DISMISS];
 }
 
@@ -1602,7 +1606,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
  * reports the app's actual focus back. */
 - (void)setAccessibilityFocused:(BOOL)focused {
     [super setAccessibilityFocused:focused];
-    if (!focused || !self.accessibilityEnabled) return;
+    if (!self.surfaceView || !focused || !self.accessibilityEnabled) return;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS) == 0) return;
     [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
 }
@@ -1615,10 +1619,10 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute {
-    if (self.accessibilityEnabled && [attribute isEqualToString:NSAccessibilityValueAttribute]) {
+    if (self.surfaceView && self.accessibilityEnabled && [attribute isEqualToString:NSAccessibilityValueAttribute]) {
         return (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) != 0;
     }
-    if (self.accessibilityEnabled &&
+    if (self.surfaceView && self.accessibilityEnabled &&
         ([attribute isEqualToString:NSAccessibilitySelectedTextRangeAttribute] ||
          [attribute isEqualToString:NSAccessibilitySelectedTextRangesAttribute])) {
         return (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) != 0;
@@ -1640,7 +1644,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)emitSetTextAccessibilityValue:(id)value {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) == 0) return NO;
     NSString *text = @"";
     if ([value isKindOfClass:[NSString class]]) {
         text = (NSString *)value;
@@ -1655,7 +1659,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) == 0) return NO;
     NSRange selectedRange = NSMakeRange(NSNotFound, 0);
     if ([value isKindOfClass:[NSValue class]]) {
         selectedRange = [(NSValue *)value rangeValue];
@@ -5825,13 +5829,46 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
+    NSArray<NativeSdkWidgetAccessibilityElement *> *previous = (id)(self.widgetAccessibilityElements ?: @[]);
     if (!nodes || count == 0) {
+        for (NativeSdkWidgetAccessibilityElement *element in previous) {
+            element.surfaceView = nil;
+            element.actionFlags = 0;
+            element.canUndo = NO;
+            element.canRedo = NO;
+            [element publishAccessibilityFocused:NO];
+            element.accessibilityEnabled = NO;
+            element.accessibilityParent = nil;
+            element.accessibilityChildren = @[];
+        }
         self.widgetAccessibilityElements = @[];
         self.widgetAccessibilityRootElements = @[];
-        NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+        if (previous.count > 0) NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
         return;
     }
 
+    // Reuse each unique, nonzero widget identity within this surface. Duplicate
+    // and anonymous ids remain independent elements, preserving their ordering.
+    NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *previousById = [NSMutableDictionary dictionaryWithCapacity:previous.count];
+    NSMutableSet<NSNumber *> *ambiguousIds = [NSMutableSet set];
+    for (NativeSdkWidgetAccessibilityElement *element in previous) {
+        NSNumber *key = @(element.widgetId);
+        if (previousById[key]) [ambiguousIds addObject:key];
+        previousById[key] = element;
+    }
+    NSMutableSet<NSNumber *> *incomingIds = [NSMutableSet set];
+    for (NSUInteger i = 0; i < count; i++) {
+        NSNumber *key = @(nodes[i].id);
+        if ([incomingIds containsObject:key]) [ambiguousIds addObject:key];
+        [incomingIds addObject:key];
+    }
+    NativeSdkWidgetAccessibilityElement *defaults = [[NativeSdkWidgetAccessibilityElement alloc] init];
+    BOOL layoutChanged = previous.count != count;
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *valueChangedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *titleChangedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *focusedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *selectionChangedElements = [NSMutableArray array];
+    BOOL focusChanged = NO;
     NSMutableArray<NativeSdkWidgetAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
     NSMutableArray<NSNumber *> *parentIds = [NSMutableArray arrayWithCapacity:count];
     NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *elementsById = [NSMutableDictionary dictionaryWithCapacity:count];
@@ -5841,7 +5878,52 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         NSString *textValue = NativeSdkStringFromBytes(node.text_value, node.text_value_len) ?: @"";
         NSString *placeholder = NativeSdkStringFromBytes(node.placeholder, node.placeholder_len) ?: @"";
         NSString *name = label.length > 0 ? label : textValue;
-        NativeSdkWidgetAccessibilityElement *element = [[NativeSdkWidgetAccessibilityElement alloc] init];
+        NSNumber *key = @(node.id);
+        NativeSdkWidgetAccessibilityElement *element = node.id != 0 && ![ambiguousIds containsObject:key] ? previousById[key] : nil;
+        BOOL reused = element != nil;
+        if (!element) element = [[NativeSdkWidgetAccessibilityElement alloc] init];
+        id previousValue = element.accessibilityValue;
+        NSString *previousLabel = element.accessibilityLabel;
+        NSString *previousPlaceholder = element.accessibilityPlaceholderValue;
+        NSString *previousDescription = element.accessibilityValueDescription;
+        id previousMin = element.accessibilityMinValue, previousMax = element.accessibilityMaxValue;
+        BOOL previousExpanded = element.accessibilityExpanded;
+        BOOL previousRequired = element.accessibilityRequired;
+        BOOL previousUndo = element.canUndo, previousRedo = element.canRedo;
+        NSInteger previousCharacters = element.accessibilityNumberOfCharacters;
+        NSRange previousVisible = element.accessibilityVisibleCharacterRange;
+        NSString *previousSelectedText = element.accessibilitySelectedText;
+        NSInteger previousRows = element.accessibilityRowCount, previousColumns = element.accessibilityColumnCount, previousIndex = element.accessibilityIndex;
+        NSRange previousRowRange = element.accessibilityRowIndexRange, previousColumnRange = element.accessibilityColumnIndexRange;
+        NSString *previousRole = element.accessibilityRole;
+        NSRange previousSelection = element.accessibilitySelectedTextRange;
+        BOOL previousFocused = element.accessibilityFocused;
+        BOOL previousSelected = element.accessibilitySelected;
+        BOOL previousEnabled = element.accessibilityEnabled;
+        uint32_t previousActions = element.actionFlags;
+        NSRect previousFrame = element.surfaceFrame;
+        if (!reused || index >= previous.count || previous[index] != element) layoutChanged = YES;
+        // Optional fields must return to exactly the fresh-element defaults.
+        // Reusing an editor as a label must not retain selection or scroll data.
+        element.accessibilityValue = defaults.accessibilityValue;
+        element.accessibilityValueDescription = defaults.accessibilityValueDescription;
+        element.accessibilityMinValue = defaults.accessibilityMinValue;
+        element.accessibilityMaxValue = defaults.accessibilityMaxValue;
+        element.accessibilityRowCount = defaults.accessibilityRowCount;
+        element.accessibilityColumnCount = defaults.accessibilityColumnCount;
+        element.accessibilityRowIndexRange = defaults.accessibilityRowIndexRange;
+        element.accessibilityColumnIndexRange = defaults.accessibilityColumnIndexRange;
+        element.accessibilityIndex = defaults.accessibilityIndex;
+        element.accessibilityNumberOfCharacters = defaults.accessibilityNumberOfCharacters;
+        element.accessibilityVisibleCharacterRange = defaults.accessibilityVisibleCharacterRange;
+        element.accessibilitySelectedTextRange = defaults.accessibilitySelectedTextRange;
+        element.accessibilitySelectedTextRanges = defaults.accessibilitySelectedTextRanges;
+        element.accessibilitySelectedText = defaults.accessibilitySelectedText;
+        element.accessibilityInsertionPointLineNumber = defaults.accessibilityInsertionPointLineNumber;
+        element.accessibilityExpanded = defaults.accessibilityExpanded;
+        if ([element respondsToSelector:@selector(setAccessibilityPlaceholderValue:)]) {
+            element.accessibilityPlaceholderValue = defaults.accessibilityPlaceholderValue;
+        }
         element.surfaceView = self;
         element.widgetId = node.id;
         element.actionFlags = node.action_flags;
@@ -5923,6 +6005,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
         element.surfaceFrame = NSMakeRect(node.x, nativeY, node.width, node.height);
         element.accessibilityFrameInParentSpace = element.surfaceFrame;
+        if (reused) {
+            if (![previousRole isEqual:element.accessibilityRole] || previousEnabled != element.accessibilityEnabled || previousActions != element.actionFlags || !NSEqualRects(previousFrame, element.surfaceFrame) || previousRows != element.accessibilityRowCount || previousColumns != element.accessibilityColumnCount || previousIndex != element.accessibilityIndex || !NSEqualRanges(previousRowRange, element.accessibilityRowIndexRange) || !NSEqualRanges(previousColumnRange, element.accessibilityColumnIndexRange)) layoutChanged = YES;
+            if (!NativeSdkAccessibilityValuesEqual(previousLabel, element.accessibilityLabel) || !NativeSdkAccessibilityValuesEqual(previousPlaceholder, element.accessibilityPlaceholderValue)) [titleChangedElements addObject:element];
+            if (!NativeSdkAccessibilityValuesEqual(previousValue, element.accessibilityValue) || !NativeSdkAccessibilityValuesEqual(previousDescription, element.accessibilityValueDescription) || !NativeSdkAccessibilityValuesEqual(previousMin, element.accessibilityMinValue) || !NativeSdkAccessibilityValuesEqual(previousMax, element.accessibilityMaxValue) || previousSelected != element.accessibilitySelected || previousExpanded != element.accessibilityExpanded || previousRequired != element.accessibilityRequired || previousUndo != element.canUndo || previousRedo != element.canRedo || previousCharacters != element.accessibilityNumberOfCharacters || !NSEqualRanges(previousVisible, element.accessibilityVisibleCharacterRange)) [valueChangedElements addObject:element];
+            if (!NSEqualRanges(previousSelection, element.accessibilitySelectedTextRange) || !NativeSdkAccessibilityValuesEqual(previousSelectedText, element.accessibilitySelectedText)) [selectionChangedElements addObject:element];
+        }
+        if (previousFocused != element.accessibilityFocused) focusChanged = YES;
+        if (!previousFocused && element.accessibilityFocused) [focusedElements addObject:element];
         [elements addObject:element];
         [parentIds addObject:@(node.parent_id)];
         [elementsById setObject:element forKey:@(node.id)];
@@ -5935,6 +6025,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         NSNumber *parentId = parentIds[index];
         NativeSdkWidgetAccessibilityElement *parent = parentId.unsignedLongLongValue == 0 ? nil : [elementsById objectForKey:parentId];
         if (parent && parent != element) {
+            if (element.accessibilityParent != parent) layoutChanged = YES;
             element.accessibilityParent = parent;
             NSRect parentFrame = parent.surfaceFrame;
             NSRect childFrame = element.surfaceFrame;
@@ -5951,17 +6042,35 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             }
             [children addObject:element];
         } else {
+            if (element.accessibilityParent != self) layoutChanged = YES;
             element.accessibilityParent = self;
             [rootElements addObject:element];
         }
     }
-    for (NSNumber *parentId in childrenByParentId) {
-        NativeSdkWidgetAccessibilityElement *parent = [elementsById objectForKey:parentId];
-        parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];
+    for (NativeSdkWidgetAccessibilityElement *element in elements) {
+        element.accessibilityChildren = elementsById[@(element.widgetId)] == element ? (childrenByParentId[@(element.widgetId)] ?: defaults.accessibilityChildren) : defaults.accessibilityChildren;
+    }
+    for (NativeSdkWidgetAccessibilityElement *element in previous) {
+        if ([elements indexOfObjectIdenticalTo:element] != NSNotFound) continue;
+        element.surfaceView = nil;
+        element.actionFlags = 0;
+        element.canUndo = NO;
+        element.canRedo = NO;
+        [element publishAccessibilityFocused:NO];
+        element.accessibilityEnabled = NO;
+        element.accessibilityParent = nil;
+        element.accessibilityChildren = @[];
     }
     self.widgetAccessibilityElements = elements;
     self.widgetAccessibilityRootElements = rootElements;
-    NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+    // Content updates keep the graph stable and announce only changed content.
+    // Assistive clients can retain a control while playback updates its value.
+    if (layoutChanged) NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in titleChangedElements) NSAccessibilityPostNotification(element, NSAccessibilityTitleChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in valueChangedElements) NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in selectionChangedElements) NSAccessibilityPostNotification(element, NSAccessibilitySelectedTextChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in focusedElements) NSAccessibilityPostNotification(element, NSAccessibilityFocusedUIElementChangedNotification);
+    if (focusChanged && focusedElements.count == 0) NSAccessibilityPostNotification(self, NSAccessibilityFocusedUIElementChangedNotification);
 }
 
 - (void)stopDisplayTimer {

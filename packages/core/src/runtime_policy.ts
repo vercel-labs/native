@@ -260,6 +260,7 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   if (request[0] === 67) return nscvChromeComposition(request);
   if (request[0] === 66) return nscvVectorRaster(request);
   if (request[0] === 64) return nscvRenderResources(request);
+  if (request[0] === 68) return nscvAccessibility(request);
   const data = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let at = 0;
   const byte = (): number => {
@@ -313,6 +314,67 @@ export function native_window_policy(request: Uint8Array): Uint8Array {
   for (const value of canvases) if (equal(canvas, value)) collision = true;
   if (collision) result[0] = 4;
   return result;
+}
+
+/** Platform accessibility projection and publication over copied semantic facts.
+ * Identities and fingerprints remain eight opaque bytes. Native retains strings,
+ * history storage, OS elements and the last successfully published fingerprint.
+ */
+function nscvAccessibility(request: Uint8Array): Uint8Array {
+  if (request.length < 4 || request[1]! > 2) throw new Error("invalid accessibility operation");
+  const operation = request[1]!;
+  if (operation === 1) {
+    if (request.length !== 20 || request[2]! > 1 || request[3]! > 3) throw new Error("invalid accessibility publication facts");
+    let equal = request[2] === 1;
+    for (let i = 0; i < 8; i++) if (request[4 + i] !== request[12 + i]) equal = false;
+    const out = new Uint8Array(4);
+    out[0] = equal ? 0 : request[3] === 3 ? 1 : 2;
+    return out;
+  }
+  if (operation === 2) {
+    if (request.length !== 4 || request[2]! > 1 || request[3]! > 3) throw new Error("invalid accessibility flush facts");
+    const out = new Uint8Array(4);
+    out[0] = request[2] === 1 && ((request[3]! & 2) !== 0 || (request[3]! & 1) === 0) ? 1 : 0;
+    return out;
+  }
+  if (request.length < 40 || request[2]! > 1 || request[3]! > 1) throw new Error("invalid accessibility projection header");
+  const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  const count = wire.getUint32(4, true), capacity = wire.getUint32(8, true);
+  if (count > 1024 || capacity > 64 || request.length !== 40 + count * 32 || wire.getUint32(12, true) !== 0) throw new Error("invalid accessibility projection table");
+  const length = Math.min(count, capacity), out = new Uint8Array(8 + length * 28), result = new DataView(out.buffer);
+  result.setUint32(0, length, true);
+  const roles = [0, 1, 2, 4, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21, 17, 18, 19, 3, 10, 11, 1];
+  for (let i = 0; i < count; i++) {
+    const at = 40 + i * 32, role = wire.getUint32(at + 12, true), state = wire.getUint32(at + 16, true), fields = wire.getUint32(at + 20, true), actions = wire.getUint32(at + 28, true);
+    if (role >= roles.length || state > 255 || fields > 63 || actions > 2047) throw new Error("invalid accessibility semantic facts");
+    if (i >= length) continue;
+    let zero = true, focusedId = true, hoveredId = true, pressedId = true;
+    for (let b = 0; b < 8; b++) {
+      if (request[at + b] !== 0) zero = false;
+      if (request[at + b] !== request[16 + b]) focusedId = false;
+      if (request[at + b] !== request[24 + b]) hoveredId = false;
+      if (request[at + b] !== request[32 + b]) pressedId = false;
+    }
+    const roleSelected = role === 17 || role === 18 || role === 20 || role === 12 || role === 15 || role === 16;
+    const selected = (state & 16) !== 0 || ((fields & 4) !== 0 && !(wire.getFloat32(at + 24, true) < 0.5) && roleSelected);
+    const flags = ((state & 8) === 0 ? 1 : 0) |
+      ((state & 4) !== 0 || (request[2] === 1 && request[3] === 1 && focusedId) ? 2 : 0) |
+      ((state & 1) !== 0 || (!zero && hoveredId) ? 4 : 0) |
+      ((state & 2) !== 0 || (!zero && pressedId) ? 8 : 0) |
+      (selected ? 16 : 0) | ((state & 32) !== 0 ? 32 : 0) |
+      ((state & 64) !== 0 ? 64 : 0) | ((state & 128) !== 0 ? 128 : 0) |
+      ((fields & 16) !== 0 ? 256 : 0) | ((fields & 32) !== 0 ? 512 : 0) | ((fields & 8) !== 0 ? 1024 : 0);
+    const target = 8 + i * 28, parent = wire.getUint32(at + 8, true);
+    if (parent < count) {
+      for (let b = 0; b < 8; b++) out[target + b] = request[40 + parent * 32 + b]!;
+      result.setUint32(target + 8, 1, true);
+    }
+    result.setUint32(target + 12, roles[role]!, true);
+    result.setUint32(target + 16, flags, true);
+    result.setUint32(target + 20, fields & 3, true);
+    result.setUint32(target + 24, actions, true);
+  }
+  return out;
 }
 
 /** Portable decisions over native-owned timer tables.
