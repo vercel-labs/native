@@ -1,0 +1,57 @@
+<column grow="1">
+  <row height="30" gap="8" cross="center" window-drag="true" label="Cap band">
+    <stack width="4"/>
+    <button variant="outline" width="20" height="20" icon="x" on-press="close_window:{playerWindow}" label="Close window"/>
+    <button variant="outline" width="20" height="20" icon="app:minimize" on-press="minimize_window:{playerWindow}" label="Minimize window"/>
+    <text width="64" text-alignment="center" label="Brand"><span weight="bold" mono="true" foreground="text" scale="1">D E C K</span></text>
+    <spacer grow="1"/>
+    <text><span mono="true" foreground="text_muted" scale="1">STEREO DECK // MK-48</span></text>
+    <row gap="4" cross="center">
+      <icon name="circle-dot" width="9" height="9" foreground="{powerColor}"/>
+      <text label="Power state"><span mono="true" foreground="text_muted" scale="1">{powerState}</span></text>
+    </row>
+    <stack width="4"/>
+  </row>
+  <column grow="1" padding="12" gap="8">
+    <row gap="8" height="140">
+      <panel width="340" padding="8" background="background" radius="sm" label="Display bay">
+        <column gap="2" grow="1">
+          <row gap="8" height="40">
+            <stack width="96" label="Segment readout"/>
+            <chart grow="1" y-min="0" y-max="1" label="Spectrum analyzer"><series kind="bar" values="{deckSpectrumLevels}" color="accent" label="spectrum"/></chart>
+          </row>
+          <text label="Marquee"><span mono="true" weight="bold" scale="2" foreground="{deckMarqueeColor}">{deckMarqueeText}</span></text>
+          <row cross="center" gap="8">
+            <text label="Channel"><span mono="true" foreground="{channelColor}" scale="1">{deckChannelText}</span></text>
+            <spacer grow="1"/>
+            <text><span mono="true" foreground="{lampColor}" scale="1">{lampText}</span></text>
+          </row>
+          <row cross="center" gap="8">
+            <text label="Source"><span mono="true" foreground="info" scale="1">{deckSourceLabel}</span></text>
+            <spacer grow="1"/>
+            <text><span mono="true" foreground="info" scale="1">SPECTRUM//32</span></text>
+          </row>
+        </column>
+      </panel>
+      <if test="{deckHasCover}"><image image="{deckNowCover}" fit="cover" width="140" height="140" label="Art bay"/></if>
+      <else>
+        <panel width="140" height="140" background="background" radius="sm" label="Art bay">
+          <column grow="1" main="center" cross="center"><text><span mono="true" foreground="info" scale="1">{artCaption}</span></text></column>
+        </panel>
+      </else>
+    </row>
+    <row height="18" cross="center" label="Seek row"><slider key="{seekKey}" grow="1" height="18" value="{deckProgressFraction}" disabled="{idle}" on-change="seek_changed" label="Seek"/></row>
+    <row gap="8" height="36" cross="center" label="Transport">
+      <button variant="outline" width="32" height="26" icon="skip-back" disabled="{idle}" on-press="prev_track" label="Previous track"/>
+      <button variant="outline" width="44" height="26" icon="play" on-press="transport_play" label="Play"/>
+      <button variant="outline" width="32" height="26" icon="pause" disabled="{!playing}" on-press="transport_pause" label="Pause"/>
+      <button variant="outline" width="32" height="26" icon="app:stop" disabled="{idle}" on-press="stop" label="Stop"/>
+      <button variant="outline" width="32" height="26" icon="skip-forward" disabled="{idle}" on-press="next_track" label="Next track"/>
+      <stack width="8"/>
+      <text width="28" text-alignment="start"><span mono="true" foreground="text_muted" scale="1">VOL</span></text>
+      <slider width="40" height="26" value="{volumeFraction}" on-change="volume_adjusted" label="Volume"/>
+      <spacer grow="1"/>
+      <toggle-button width="44" height="26" selected="{playlistOpen}" on-toggle="toggle_playlist" label="Playlist window">PL</toggle-button>
+    </row>
+  </column>
+</column>

@@ -157,6 +157,11 @@ fn coreOptions() Adapter.CoreOptions {
                 data_root_env_count += 1;
                 env_entries[env_entry_count] = .{ .msg = entry.msg, .value = "" };
                 env_entry_count += 1;
+            } else if (comptime std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_CACHE_DIR")) {
+                // URL media caching has no mobile cache-root capability yet.
+                // Report its absence without reading an ambient path override.
+                env_entries[env_entry_count] = .{ .msg = entry.msg, .value = "" };
+                env_entry_count += 1;
             } else if (std.c.getenv(entry.env)) |value| {
                 // Snapshot the process value at launch, matching the desktop
                 // runner. Keep an owned copy because later setenv calls may

@@ -176,6 +176,14 @@ export class TypedAst {
     return this.checker.getTypeAtLocation(node);
   }
 
+  /// The property's type on this particular record/union constituent,
+  /// including instantiated type arguments and control-flow narrowing.
+  propertyTypeOf(type: Type, name: string): Type | undefined {
+    const property = type.getProperty(name);
+    const at = property?.valueDeclaration ?? property?.declarations?.[0];
+    return property && at ? this.checker.getTypeOfSymbolAtLocation(property, at) : undefined;
+  }
+
   /// The VALUE side of a shorthand property (`{ x }` reads the local/param
   /// `x`): getSymbolAtLocation on the name yields the property symbol, so
   /// the value symbol needs its own query.
@@ -470,9 +478,15 @@ export class TypedAst {
     // `T | null` contexts: the property lives on the non-null constituent.
     contextual = this.checker.getNonNullableType(contextual);
     // Union contexts (e.g. `Model | [Model, Cmd<Msg>]` return positions):
-    // the property lives on whichever constituent carries it.
+    // A literal kind selects its own arm. Picking the first same-named
+    // property would connect unrelated payload slots (e.g. an index and a
+    // fractional gain), even though only one arm receives this value.
     if (contextual.isUnion()) {
+      const actual = this.checker.getTypeAtLocation(objLit);
+      const actualTag = this.propertyTypeOf(actual, "kind");
       for (const member of contextual.types) {
+        const tag = this.propertyTypeOf(member, "kind");
+        if (actualTag?.isStringLiteral() && tag?.isStringLiteral() && actualTag.value !== tag.value) continue;
         const sym = member.getProperty(prop.name.text);
         if (sym?.declarations?.[0]) return sym.declarations[0];
       }

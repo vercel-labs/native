@@ -1387,6 +1387,31 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-canvas-layers", "Compare complete compiled chrome layers, ownership and retained replay").dependOn(&canvas_layers_run.step);
         ts_core_e2e_step.dependOn(&canvas_layers_run.step);
         test_step.dependOn(&canvas_layers_run.step);
+        const audio_exact_run = b.addRunArtifact(ts_core_artifacts.audio_exact);
+        b.step("test-ts-audio-exact", "Compare exact compiled audio capabilities, ownership and effect replay").dependOn(&audio_exact_run.step);
+        ts_core_e2e_step.dependOn(&audio_exact_run.step);
+        test_step.dependOn(&audio_exact_run.step);
+        const spawn_exact_run = b.addRunArtifact(ts_core_artifacts.spawn_exact);
+        b.step("test-ts-spawn-exact", "Compare exact compiled subprocess routing, ownership and effect replay").dependOn(&spawn_exact_run.step);
+        ts_core_e2e_step.dependOn(&spawn_exact_run.step);
+        test_step.dependOn(&spawn_exact_run.step);
+        const boot_images_run = b.addRunArtifact(ts_core_artifacts.boot_images);
+        b.step("test-ts-boot-images", "Compare synchronous compiled image startup, complete results and native pixel ownership").dependOn(&boot_images_run.step);
+        ts_core_e2e_step.dependOn(&boot_images_run.step);
+        test_step.dependOn(&boot_images_run.step);
+        const deck_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        deck_driver_run.setCwd(b.path("examples/deck"));
+        deck_driver_run.has_side_effects = true;
+        deck_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        _ = deck_driver_run.captureStdOut(.{});
+        b.step("test-ts-deck-app-driver", "Run the compiled Deck player and playlist through complete snapshots and replay").dependOn(&deck_driver_run.step);
+        ts_core_e2e_step.dependOn(&deck_driver_run.step);
+        test_step.dependOn(&deck_driver_run.step);
+        const deck_run = b.addRunArtifact(ts_core_artifacts.deck);
+        b.step("test-ts-deck-e2e", "Compare complete Deck state, views, capabilities and replay with the native reference").dependOn(&deck_run.step);
+        b.step("test-ts-deck-integration", "Run Deck whole-app snapshots, theme, chrome and sealed replay").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.deck.root_module, "ts-deck-integration-tests", &.{ "Deck whole", "Deck complete theme" })).step);
+        ts_core_e2e_step.dependOn(&deck_run.step);
+        test_step.dependOn(&deck_run.step);
         const gpu_dashboard_run = b.addRunArtifact(ts_core_artifacts.gpu_dashboard);
         b.step("test-ts-gpu-dashboard-e2e", "Compare complete GPU Dashboard models, views, chrome, animations and replay").dependOn(&gpu_dashboard_run.step);
         ts_core_e2e_step.dependOn(&gpu_dashboard_run.step);
@@ -4262,6 +4287,10 @@ const TsCoreE2eArtifacts = struct {
     channel_monitor: *std.Build.Step.Compile,
     gpu_dashboard: *std.Build.Step.Compile,
     canvas_layers: *std.Build.Step.Compile,
+    audio_exact: *std.Build.Step.Compile,
+    spawn_exact: *std.Build.Step.Compile,
+    boot_images: *std.Build.Step.Compile,
+    deck: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
     split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
@@ -4617,6 +4646,60 @@ fn tsCoreE2eArtifact(
     canvas_layers_decoder.addImport("native_sdk", desktop_mod);
     canvas_layers_decoder.addImport("core.zig", canvas_layers_fixture.module);
     canvas_layers_mod.addImport("canvas_layers_decoder", canvas_layers_decoder);
+
+    const audio_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/audio-exact/core.ts",
+        .src_dir = b.path("tests/ts-core/audio-exact"),
+        .name = "audio_exact_core",
+    });
+    const audio_exact_mod = module(b, target, optimize, "tests/ts-core/audio_exact_effect_tests.zig");
+    audio_exact_mod.addImport("native_sdk", desktop_mod);
+    audio_exact_mod.addImport("audio_exact_core", audio_exact_fixture.module);
+
+    const spawn_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/spawn-exact/core.ts",
+        .src_dir = b.path("tests/ts-core/spawn-exact"),
+        .name = "spawn_exact_core",
+    });
+    const spawn_exact_mod = module(b, target, optimize, "tests/ts-core/spawn_exact_effect_tests.zig");
+    spawn_exact_mod.addImport("native_sdk", desktop_mod);
+    spawn_exact_mod.addImport("spawn_exact_core", spawn_exact_fixture.module);
+
+    const boot_images_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/boot-images/core.ts",
+        .src_dir = b.path("tests/ts-core/boot-images"),
+        .name = "boot_images_core",
+    });
+    const boot_images_mod = module(b, target, optimize, "tests/ts-core/boot_images_e2e_tests.zig");
+    boot_images_mod.addImport("native_sdk", desktop_mod);
+    boot_images_mod.addImport("boot_images_core", boot_images_fixture.module);
+
+    const deck_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/deck/src/core.ts",
+        .src_dir = b.path("examples/deck/src"),
+        .name = "deck_core",
+        .typescript_view = true,
+    });
+    const deck_stage = b.addWriteFiles();
+    const deck_root = deck_stage.addCopyFile(b.path("tests/ts-core/deck_e2e_tests.zig"), "deck_e2e_tests.zig");
+    // Expose reference hooks for independent integration tests without
+    // changing the preserved native app sources.
+    _ = deck_stage.add("deck_reference_access.zig",
+        "pub const main = @import(\"deck-reference/main.zig\");\n" ++
+        "pub const view = @import(\"deck-reference/view.zig\");\n" ++
+        "pub const model = @import(\"deck-reference/model.zig\");\n");
+    inline for (.{ "main.zig", "model.zig", "view.zig", "theme.zig", "chrome.zig", "layout.zig", "tests.zig", "music_manifest.zon", "statusbar.native", "spectrum.native", "icons/stop.svg", "icons/minimize.svg", "fonts/GeistPixel-Square.ttf", "fonts/OFL.txt", "art/exit-signs.jpg", "art/blue-season.jpg", "art/second-nature.jpg", "art/no-good-way-out.jpg", "art/glass-flowers.jpg", "art/night-bloom.jpg", "art/motion-picture.jpg", "art/channel-surfing.jpg" }) |file|
+        _ = deck_stage.addCopyFile(b.path("tests/ts-core/deck-reference/" ++ file), "deck-reference/" ++ file);
+    _ = deck_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = deck_stage.addCopyFile(b.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
+    const deck_mod = b.createModule(.{ .root_source_file = deck_root, .target = target, .optimize = optimize });
+    deck_mod.addImport("native_sdk", desktop_mod);
+    deck_mod.addImport("deck_core", deck_fixture.module);
+    const deck_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    deck_decoder.addImport("native_sdk", desktop_mod);
+    deck_decoder.addImport("core.zig", deck_fixture.module);
+    deck_mod.addImport("deck_decoder", deck_decoder);
+    deck_mod.addImport("deck_manifest", b.createModule(.{ .root_source_file = b.path("examples/deck/app.zon"), .target = target, .optimize = optimize }));
 
     const gpu_dashboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/gpu-dashboard/src/core.ts",
@@ -5206,6 +5289,10 @@ fn tsCoreE2eArtifact(
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
         .canvas_layers = filteredTestArtifact(b, canvas_layers_mod, "ts-canvas-layers-e2e-tests", &.{}),
+        .audio_exact = filteredTestArtifact(b, audio_exact_mod, "ts-audio-exact-effect-tests", &.{}),
+        .spawn_exact = filteredTestArtifact(b, spawn_exact_mod, "ts-spawn-exact-effect-tests", &.{}),
+        .boot_images = filteredTestArtifact(b, boot_images_mod, "ts-boot-images-tests", &.{}),
+        .deck = filteredTestArtifact(b, deck_mod, "ts-deck-e2e-tests", &.{}),
         .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
         .channel_monitor = filteredTestArtifact(b, channel_monitor_mod, "ts-channel-monitor-e2e-tests", &.{}),
         .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),

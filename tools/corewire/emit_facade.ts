@@ -640,7 +640,7 @@ class RecordDecode {
     return "{ " + parts.join(", ") + " }";
   }
   decodeUnion(name: string): string {
-    const u = findUnion(this.em.s, name)!; this.em.use("read_u8");
+    const u = findUnion(this.em.s, name)!; this.em.use("read_u8"); this.em.reference(name);
     const tag = this.nextLocal(); this.line("const {s} = nscfReadU8({s}, nscfAt);\n", [tag, this.buf]); this.advance("1");
     const local = this.nextLocal(); this.line("let {s}: {s};\n", [local, name]);
     for (let i = 0; i < u.arms.length; i++) {

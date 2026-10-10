@@ -142,6 +142,7 @@ pub fn Hooks(comptime core: type, comptime Model: type, comptime App: type) type
                     .background = contextColor(@FieldType(Context, "background"), tokens.colors.background),
                     .surface = contextColor(@FieldType(Context, "surface"), tokens.colors.surface),
                     .border = contextColor(@FieldType(Context, "border"), tokens.colors.border),
+                    .text = contextColor(@FieldType(Context, "text"), tokens.colors.text),
                 };
                 const commands = if (comptime params.len == 2) @field(Model, name)(model, context) else @field(Model, name)(model, context, core.rt.frameAllocator());
                 if (commands.len > max_layer_commands) return error.CanvasChromeCommandLimit;

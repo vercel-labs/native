@@ -57,6 +57,18 @@ export type AudioEventArm = {
     readonly buffering: boolean;
     readonly bands: Uint8Array;
 };
+/** Complete native audio reports. Identities and millisecond counters are
+ * canonical unsigned decimal bytes, preserving every u64 value. */
+export type ExactAudioEventArm = {
+    readonly key: Uint8Array;
+    readonly state: AudioState;
+    readonly positionMs: Uint8Array;
+    readonly durationMs: Uint8Array;
+    readonly playing: boolean;
+    readonly buffering: boolean;
+    readonly bands: Uint8Array;
+};
+export type ExactAudioEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ExactAudioEventArm] ? [keyof ExactAudioEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ExactAudioEventArm ? [AudioState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export type AudioEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof AudioEventArm] ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & AudioEventArm ? [AudioState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 export type VideoEventArm = {
@@ -263,6 +275,13 @@ export interface SpawnEventsRoute<M extends Msgish> {
     readonly line?: CapabilityKind<M, SpawnLineEventArm>;
     readonly exit: CapabilityKind<M, SpawnExitEventArm>;
 }
+/** Native subprocess identity and complete results, without numeric rounding. */
+export interface ExactSpawnEventsRoute<M extends Msgish> {
+    readonly stdin?: Uint8Array;
+    readonly collect?: boolean;
+    readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+    readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
 export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
 export type FileEvent = "terminal" | "chunk" | "done";
 export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
@@ -321,6 +340,18 @@ export interface AudioSource {
 export interface AudioRoute<M extends Msgish> {
     readonly event: AudioEventKind<M>;
 }
+export interface ExactAudioSource extends AudioSource {
+    /** Derive a content-addressed path for the URL when cachePath is empty.
+     * Empty or omitted disables caching. */
+    readonly cacheDir?: Uint8Array;
+}
+export interface ExactAudioRoute<M extends Msgish> {
+    readonly event: ExactAudioEventKind<M>;
+}
+/** Controls for the single native player. Volume is remembered while idle;
+ * seek positions use canonical unsigned decimal bytes. */
+export { type AudioTransport } from "./events.js";
+import { type AudioTransport } from "./events.js";
 export interface VideoSource {
     readonly surface: number;
     readonly path?: Uint8Array;
@@ -599,6 +630,17 @@ export type Cmd<M extends Msgish> = {
     readonly argv: readonly Uint8Array[];
     readonly stdin: Uint8Array;
 } | {
+    readonly op: "spawn_events_exact";
+    readonly key: Uint8Array;
+    readonly lineKind: string;
+    readonly exitKind: string;
+    readonly collect: boolean;
+    readonly argv: readonly Uint8Array[];
+    readonly stdin: Uint8Array;
+} | {
+    readonly op: "cancel_exact";
+    readonly key: Uint8Array;
+} | {
     readonly op: "video_snapshot";
     readonly snapshotKind: string;
 } | {
@@ -642,6 +684,18 @@ export type Cmd<M extends Msgish> = {
     readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
     readonly value: number;
 } | {
+    readonly op: "audio_play_exact";
+    readonly key: Uint8Array;
+    readonly eventKind: string;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly cacheDir: Uint8Array;
+    readonly expectedBytes: number;
+} | {
+    readonly op: "audio_transport";
+    readonly transport: AudioTransport;
+} | {
     readonly op: "video_load";
     readonly key: string;
     readonly eventKind: string;
@@ -661,6 +715,12 @@ export type Cmd<M extends Msgish> = {
     readonly label: string;
 } | {
     readonly op: "window_hide";
+    readonly label: string;
+} | {
+    readonly op: "window_close";
+    readonly label: string;
+} | {
+    readonly op: "window_minimize";
     readonly label: string;
 } | {
     readonly op: "dock_presence";
@@ -812,7 +872,20 @@ export declare const Cmd: {
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
     spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M>;
+    /** Stream complete subprocess records under a canonical unsigned decimal key.
+     * Native admission owns duplicate-key refusal and the one terminal per request.
+     * A refused request retains its own completion route without replacing a live child.
+     * Malformed keys fail admission before any native operation. */
+    spawnEventsExact<M extends Msgish>(key: Uint8Array, argv: readonly Uint8Array[], route: ExactSpawnEventsRoute<M>): Cmd<M>;
+    /** Cancel an engine effect by its exact native identity. Its ordinary terminal remains routed. */
+    cancelExact(key: Uint8Array): Cmd<never>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;
+    /** Open the single player with an exact caller-chosen u64 identity.
+     * Deferred rejections and failures retain their load's route and key after replacement.
+     * A rejected source reports its own key without replacing the active player.
+     * Malformed identities fail admission before any native operation. */
+    audioPlayExact<M extends Msgish>(key: Uint8Array, source: ExactAudioSource, route: ExactAudioRoute<M>): Cmd<M>;
+    audioTransport(transport: AudioTransport): Cmd<never>;
     audioPause(key: string): Cmd<never>;
     audioResume(key: string): Cmd<never>;
     audioStop(key: string): Cmd<never>;
@@ -830,6 +903,8 @@ export declare const Cmd: {
     videoSetLoop(key: string, loop: boolean): Cmd<never>;
     showWindow(label: string): Cmd<never>;
     hideWindow(label: string): Cmd<never>;
+    closeWindow(label: string): Cmd<never>;
+    minimizeWindow(label: string): Cmd<never>;
     setDockPresence(visible: boolean): Cmd<never>;
     launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M>;

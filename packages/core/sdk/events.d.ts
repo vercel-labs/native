@@ -1,3 +1,15 @@
+/** Complete synchronous registration result for a declared boot image.
+ * `id` is canonical decimal ASCII for the native u64 identity. Failure keeps
+ * dimensions zero and supplies the complete native error name. No pixels or
+ * encoded image storage enter the core's model heap.
+ */
+export type BootImageResult = {
+    readonly id: Uint8Array;
+    readonly registered: boolean;
+    readonly width: number;
+    readonly height: number;
+    readonly errorName: Uint8Array;
+};
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.js";
 export interface WebViewPane {
     readonly label: Uint8Array;
@@ -165,6 +177,13 @@ export interface ScrollState {
     readonly contentExtentX: number;
     readonly contentExtentY: number;
 }
+/** Retained main-canvas slider observation at the update/rebuild boundary.
+ * Ids retain all native bits; values are the applied native f32 widened exactly. */
+export interface SliderState {
+    readonly id: Uint8Array;
+    readonly label: Uint8Array;
+    readonly value: number;
+}
 export interface FrameEvent {
     readonly width: number;
     readonly height: number;
@@ -233,6 +252,30 @@ export interface CanvasPathElement {
     readonly second: CanvasPoint;
     readonly third: CanvasPoint;
 }
+export type CanvasIconPaint = {
+    readonly kind: "none";
+} | {
+    readonly kind: "current_color";
+} | {
+    readonly kind: "color";
+    readonly color: CanvasColor;
+};
+export type CanvasIconLineJoin = "miter" | "round";
+export interface CanvasIconShape {
+    readonly start: number;
+    readonly count: number;
+    readonly fill: CanvasIconPaint;
+    readonly stroke: CanvasIconPaint;
+    readonly strokeWidth: number;
+    readonly linecap: CanvasLineCap;
+    readonly linejoin: CanvasIconLineJoin;
+}
+export interface CanvasIconDefinition {
+    readonly name: Uint8Array;
+    readonly viewBox: CanvasRect;
+    readonly elements: readonly CanvasPathElement[];
+    readonly shapes: readonly CanvasIconShape[];
+}
 export type CanvasChromeCommand = {
     readonly kind: "rect";
     readonly id: Uint8Array;
@@ -274,6 +317,7 @@ export interface CanvasChromeContext {
     readonly background: CanvasColor;
     readonly surface: CanvasColor;
     readonly border: CanvasColor;
+    readonly text: CanvasColor;
 }
 export interface CanvasTransform {
     readonly a: number;
@@ -363,6 +407,32 @@ export interface AudioEvent {
     readonly buffering: boolean;
     readonly bands: Uint8Array;
 }
+/** Complete native audio report with exact canonical unsigned decimal bytes
+ * for the caller's key and both millisecond counters. */
+export interface ExactAudioEvent {
+    readonly key: Uint8Array;
+    readonly state: AudioState;
+    readonly positionMs: Uint8Array;
+    readonly durationMs: Uint8Array;
+    readonly playing: boolean;
+    readonly buffering: boolean;
+    readonly bands: Uint8Array;
+}
+/** Commands for the single native player. Seek positions are canonical
+ * unsigned decimal bytes; volume is remembered while the player is idle. */
+export type AudioTransport = {
+    readonly kind: "pause";
+} | {
+    readonly kind: "play";
+} | {
+    readonly kind: "stop";
+} | {
+    readonly kind: "seek";
+    readonly positionMs: Uint8Array;
+} | {
+    readonly kind: "volume";
+    readonly value: number;
+};
 export type AudioCaptureSource = "microphone" | "system";
 export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
 export interface AudioCaptureEvent {

@@ -62,6 +62,9 @@
 //! place, which cannot exist for a committed graph. TS apps keep
 //! continuous controls model-driven (`on-change`/`on-scroll` Msgs echo
 //! the value back into the model — the pattern UiApp already supports).
+//! `sliderStateMsg(model, sliders)` can additionally sample retained
+//! main-canvas sliders through a pure message and the normal commit walker.
+//! Its update must return no commands; native only supplies observations.
 //!
 //! Record/replay, automation, and pixel fingerprints need nothing
 //! extra: the adapter rides the ordinary UiApp dispatch path, so the
@@ -85,6 +88,10 @@ const ui_app = @import("ui_app.zig");
 const ts_core_host = @import("ts_core_host.zig");
 
 const ts_ui_app_log = std.log.scoped(.zero_ts_ui_app);
+
+test {
+    _ = @import("ts_canvas_icons.zig");
+}
 
 /// Quota for a comptime scan of an app-authored type. TS `Msg` unions may
 /// legally carry 256 arms; include total identifier bytes because
@@ -441,6 +448,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            if (comptime @hasDecl(Model, "sliderStateMsg")) stamped.sync = syncSliders;
             if (options.pty_key_resolver != null) @panic("TsUiApp owns pty_key_resolver - remove custom PTY identity wiring");
             stamped.pty_key_resolver = Host.resolvePtyKey;
             if (comptime @hasDecl(core, "nativeWindowPolicy")) {
@@ -1546,6 +1554,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
+            @import("ts_canvas_icons.zig").Icons(core, Model).install(model) catch @panic("invalid compiled canvas icon declarations");
             if (comptime @hasDecl(core, "nativeEffectPolicy")) {
                 compiledInitFx(model, fx);
                 return;
@@ -1557,12 +1566,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             } else if (persist_options_store) |persist| {
                 fx.bindHostCalls(persist.binding);
             }
-            for (boot_images_store) |image| {
-                // Registration is synchronous; a failed decode leaves the
-                // views on their fallback (avatar initials) — a bad asset
-                // never breaks presentation (the Zig apps' convention).
-                _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
-            }
+            for (boot_images_store) |image| registerBootImage(fx, image);
             if (persist_options_store) |persist| {
                 if (persist.outcome_handle) |handle| {
                     handle.* = fx.openChannel(.{
@@ -1587,9 +1591,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 1 => fx.bindHostCalls(host_call_mux_store.?.binding()),
                 2 => fx.bindHostCalls(host_calls_store.?),
                 3 => fx.bindHostCalls(persist_options_store.?.binding),
-                4 => for (boot_images_store) |image| {
-                    _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
-                },
+                4 => for (boot_images_store) |image| registerBootImage(fx, image),
                 5 => persist_options_store.?.outcome_handle.?.* = fx.openChannel(.{
                     .key = persist_outcome_channel_key,
                     .on_event = persistOutcomeMsg,
@@ -1604,6 +1606,55 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 10 => model.* = Host.runtimeModel().*,
                 else => @panic("invalid compiled installation action"),
             };
+        }
+
+        /// Native decoding and pixel ownership remain in the image registry.
+        /// The compiled core chooses how each complete result affects its
+        /// model, before boot commands and the first view. Registration has
+        /// the same non-journaled semantics as the native init_fx convention.
+        fn registerBootImage(fx: *Effects, image: BootImage) void {
+            var dimensions: runtime_effects.RegisteredImage = .{};
+            var failure: ?anyerror = null;
+            if (fx.registerImageBytes(image.id, image.bytes)) |registered| {
+                dimensions = registered;
+            } else |err| failure = err;
+            if (comptime @hasDecl(Model, "bootImageMsg")) {
+                const params = @typeInfo(@TypeOf(Model.bootImageMsg)).@"fn".params;
+                if (params.len != 2 and params.len != 3)
+                    @compileError("TsUiApp: bootImageMsg must take Model and BootImageResult");
+                const Result = params[1].type.?;
+                if (@typeInfo(Result) != .@"struct" or @typeInfo(Result).@"struct".fields.len != 5 or
+                    !@hasField(Result, "id") or !@hasField(Result, "registered") or !@hasField(Result, "width") or !@hasField(Result, "height") or !@hasField(Result, "errorName"))
+                    @compileError("TsUiApp: bootImageMsg's BootImageResult must carry all five result fields");
+                comptime validateChannelRecord(struct { width: @FieldType(Result, "width"), height: @FieldType(Result, "height") }, &.{ "width", "height" }, "bootImageMsg's dimensions", &.{});
+                if (@FieldType(Result, "id") != []const u8 or @FieldType(Result, "registered") != bool or @FieldType(Result, "errorName") != []const u8)
+                    @compileError("TsUiApp: bootImageMsg must retain decimal identity bytes, registered boolean and complete error bytes");
+                var decimal: [20]u8 = undefined;
+                const result: Result = .{
+                    .id = std.fmt.bufPrint(&decimal, "{d}", .{image.id}) catch unreachable,
+                    .registered = failure == null,
+                    .width = channelNum(@FieldType(Result, "width"), @floatFromInt(dimensions.width)),
+                    .height = channelNum(@FieldType(Result, "height"), @floatFromInt(dimensions.height)),
+                    .errorName = if (failure) |err| @errorName(err) else "",
+                };
+                const model = Host.runtimeModel();
+                const value = (if (comptime params.len == 2) model.bootImageMsg(result) else model.bootImageMsg(result, core.rt.frameAllocator())) orelse return;
+                const message: Msg = switch (value) {
+                    inline else => |payload, tag| blk: {
+                        const Target = @FieldType(Msg, @tagName(tag));
+                        if (comptime @typeInfo(Target) == .@"struct") {
+                            // Separate inline records have distinct native
+                            // types even when their declared fields match.
+                            var forwarded: Target = undefined;
+                            inline for (@typeInfo(Target).@"struct".fields) |field|
+                                @field(forwarded, field.name) = @field(payload, field.name);
+                            break :blk @unionInit(Msg, @tagName(tag), forwarded);
+                        }
+                        break :blk @unionInit(Msg, @tagName(tag), payload);
+                    },
+                };
+                Host.dispatch(fx, message);
+            }
         }
 
         /// Resolve the boot snapshot entirely at the effect boundary. Live
@@ -2214,6 +2265,45 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// app-held root becomes the new committed value. The incoming
         /// model pointer is the previous root value — the bridge holds
         /// the authoritative one, so it is overwritten, never read.
+        fn syncSliders(model: *Model, layout: canvas.WidgetLayoutTree) void {
+            const params = @typeInfo(@TypeOf(Model.sliderStateMsg)).@"fn".params;
+            const Slice = params[1].type.?;
+            const Sample = @typeInfo(Slice).pointer.child;
+            comptime {
+                if (params.len != 3 or params[0].type != *const Model or params[2].type != std.mem.Allocator or
+                    @typeInfo(Slice).pointer.size != .slice or @typeInfo(Sample).@"struct".fields.len != 3 or
+                    @FieldType(Sample, "id") != []const u8 or @FieldType(Sample, "label") != []const u8 or @FieldType(Sample, "value") != f64)
+                    @compileError("sliderStateMsg must take (model: Model, sliders: readonly SliderState[]) and return Msg | null");
+            }
+            const arena = core.rt.frameAllocator();
+            var count: usize = 0;
+            for (layout.nodes) |node| if (node.widget.kind == .slider) { count += 1; };
+            const samples = arena.alloc(Sample, count) catch @panic("slider state allocation failed");
+            count = 0;
+            for (layout.nodes) |node| {
+                if (node.widget.kind != .slider) continue;
+                samples[count] = .{ .id = exactFrameClock(node.widget.id), .label = node.widget.semantics.label, .value = node.widget.value };
+                count += 1;
+            }
+            const message = model.sliderStateMsg(samples, arena);
+            if (message) |value| {
+                const msg: Msg = switch (value) {
+                    inline else => |payload, tag| blk: {
+                        const Target = @FieldType(Msg, @tagName(tag));
+                        if (comptime @typeInfo(Target) == .@"struct") {
+                            var forwarded: Target = undefined;
+                            inline for (@typeInfo(Target).@"struct".fields) |field|
+                                @field(forwarded, field.name) = @field(payload, field.name);
+                            break :blk @unionInit(Msg, @tagName(tag), forwarded);
+                        }
+                        break :blk @unionInit(Msg, @tagName(tag), payload);
+                    },
+                };
+                Host.syncControls(msg);
+                model.* = Host.runtimeModel().*;
+            }
+        }
+
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
             model.* = Host.runtimeModel().*;

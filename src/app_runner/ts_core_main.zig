@@ -119,6 +119,7 @@ fn requestsLegacyDataDirectory() bool {
 }
 
 const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
+const app_cache_dir_env = "NATIVE_SDK_APP_CACHE_DIR";
 
 fn appOptions(io: ?std.Io) Adapter.Options {
     var options: Adapter.Options = .{
@@ -286,6 +287,11 @@ pub fn main(init: std.process.Init) !void {
         inline for (core.envMsgs) |entry| {
             if (std.mem.eql(u8, entry.env, app_data_dir_env)) {
                 env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, app_cache_dir_env)) {
+                // Supply the same OS-resolved cache root used by URL media.
+                // An ambient value cannot replace this app-owned capability.
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = audio_cache_dir };
                 env_value_count += 1;
             } else if (std.mem.eql(u8, entry.env, legacy_data_dir_env)) {
                 env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = legacy_data_dir };

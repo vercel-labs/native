@@ -14,12 +14,13 @@ type NscViewNode = {
   key?: string; keyBytes?: readonly number[]; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyBytes?: readonly number[]; globalKeyInt?: number;
   columns?: number; virtualized?: boolean; virtualItemExtent?: number; virtualWindow?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
+  paddingTop?: number; paddingBottom?: number; paddingLeft?: number; paddingRight?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
   value?: number; valueX?: number; axis?: string; overscroll?: string;
   videoSrc?: string; videoControls?: boolean; videoAutoplay?: boolean; videoLoop?: boolean; videoMuted?: boolean;
   videoControl?: string; zeroIntrinsic?: boolean; clipContent?: boolean; overflow?: string;
   pty?: number; ptyBytes?: readonly number[]; scrollback?: number; terminal?: number;
-  image?: number; icon?: string; iconBytes?: readonly number[]; iconPlacement?: string; label?: string; role?: string;
+  image?: number; imageLower?: number; imageUpper?: number; imageFit?: string; icon?: string; iconBytes?: readonly number[]; iconPlacement?: string; label?: string; role?: string;
   background?: string; foreground?: string; borderColor?: string; focusRing?: string; accent?: string; accentForeground?: string; radius?: string; backdropBlur?: string; quietHover?: boolean; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
   disabled?: boolean; selected?: boolean; focusable?: boolean; autofocus?: boolean;
@@ -97,6 +98,21 @@ function nscvTextBytes(parts: readonly Uint8Array[]): number[] {
 function nscvSpanScale(value: number): number {
   if (!Number.isFinite(value) || value <= 0 || value > 3.4028234663852886e38) throw new Error("span scale requires a positive finite f32");
   return value;
+}
+
+/** Decimal identity bytes cross the view ABI as two exact u32 words. */
+function nscvImageIdentity(bytes: Uint8Array): { imageLower: number; imageUpper: number } {
+  if (bytes.length === 0 || bytes.length > 20 || bytes.length > 1 && bytes[0] === 48) throw new Error("image identity requires canonical u64 decimal bytes");
+  let lower = 0, upper = 0;
+  for (const byte of bytes) {
+    if (byte < 48 || byte > 57) throw new Error("image identity requires canonical u64 decimal bytes");
+    const product = lower * 10 + byte - 48;
+    const nextUpper = upper * 10 + Math.floor(product / 4294967296);
+    if (nextUpper > 4294967295) throw new Error("image identity exceeds u64");
+    lower = product % 4294967296;
+    upper = nextUpper;
+  }
+  return { imageLower: lower, imageUpper: upper };
 }
 
 function nscvPush(nodes: NscViewNode[], node: NscViewNode): void {

@@ -851,9 +851,9 @@ test "compiled Code Editor preserves the sixteen pinned tab limit and a seventee
     defer pair.destroy();
     try pair.scan(path[0..len], tmp.dir);
     for (0..17) |i| {
-        try pair.step(.{ .preview_entry = @intCast(i) }, .{ .preview_entry = @floatFromInt(i) });
+        try pair.step(.{ .preview_entry = @intCast(i) }, .{ .preview_entry = @intCast(i) });
         try pair.file(.ok, "const value = 1;\n");
-        try pair.step(.{ .pin_entry = @intCast(i) }, .{ .pin_entry = @floatFromInt(i) });
+        try pair.step(.{ .pin_entry = @intCast(i) }, .{ .pin_entry = @intCast(i) });
     }
     try testing.expectEqual(@as(usize, 16), pair.model.sessions[0].browser.pinned_count);
     try testing.expectEqual(@as(usize, 17), pair.model.sessions[0].browser.document_count);
