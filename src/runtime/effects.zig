@@ -2034,6 +2034,10 @@ pub const EffectResultKind = enum(u8) {
     /// salted digest and length; replay synthesizes same-length placeholder
     /// bytes and never consults an OS keychain.
     credentials = 18,
+    /// Successful native window bookkeeping, at execution rather than Msg
+    /// delivery. `code` is 0 for focus and 1 for close; the complete copied
+    /// request and correlated reply ride `payload` and `stderr_tail`.
+    window_execution = 19,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -4488,6 +4492,15 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const ReplayWindowExecution = struct {
+            key: u64,
+            closed: bool,
+            request_len: u16,
+            request: [293]u8,
+            reply_len: u8,
+            reply: [38]u8,
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -4607,6 +4620,8 @@ pub fn Effects(comptime Msg: type) type {
             // Desktop calls can enter AppKit or remove runtime views. UiApp
             // executes them only after its current rebuild has settled.
             desktop_waiting: bool = false,
+            replay_window_reply_len: u8 = 0,
+            replay_window_reply: [38]u8 = undefined,
             // ---- image-only fields (kind == .image) ----
             on_image: ?ImageMsgFn = null,
             /// The local source path (the URL rides `url_storage`, a
@@ -5119,6 +5134,9 @@ pub fn Effects(comptime Msg: type) type {
         /// after (freed when the queue empties, and at `deinit`) — the
         /// pending stages' storage discipline.
         replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
+        replay_window_executions: [64]ReplayWindowExecution = undefined,
+        replay_window_execution_len: usize = 0,
+        replay_window_diverged: bool = false,
         replay_video_source_spill: []ReplayVideoSource = &.{},
         replay_video_source_len: usize = 0,
         /// A journaled cascade resolution paired against a different
@@ -6357,7 +6375,9 @@ pub fn Effects(comptime Msg: type) type {
         /// against a different key. A leftover or mismatched record
         /// means the replayed updates issued different loads than the
         /// recording — divergence, not success.
-        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence }!void {
+        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence, ReplayWindowDivergence }!void {
+            if (self.replay_window_diverged or self.replay_window_execution_len != 0) return error.ReplayWindowDivergence;
+            for (&self.slots) |*slot| if (slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
             if (self.replay_audio_diverged) return error.ReplayAudioDivergence;
             for (0..self.pending_exit_len) |offset| {
                 const entry = self.pending_exits[(self.pending_exit_head + offset) % max_effect_pending_exits];
@@ -9491,6 +9511,7 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_clipboard = null;
             slot.on_host = options.on_result;
             slot.desktop_waiting = false;
+            slot.replay_window_reply_len = 0;
             slot.on_credentials = credentials_fn;
             slot.cancel_requested.store(false, .release);
             // `cancelled_generation` stays sticky, exactly as in `spawn`.
@@ -9515,7 +9536,10 @@ pub fn Effects(comptime Msg: type) type {
 
             // Fake mode (tests and session replay) parks here: the feed
             // is the only terminal source.
-            if (fake) return;
+            if (fake) {
+                slot.desktop_waiting = self.defer_desktop_capabilities and @import("desktop_files.zig").isName(slot.hostName());
+                return;
+            }
             if (store_op) |operation| {
                 if (operation == .get or operation == .scan) {
                     self.performBoundStoreRequest(slot.hostName(), options.key, slot.fetchPayload());
@@ -9577,7 +9601,11 @@ pub fn Effects(comptime Msg: type) type {
         /// captured generations. Calls queued by a nested native event belong
         /// to the next batch, and fake/replay executors never reach the OS.
         pub fn flushDesktopCapabilities(self: *Self) void {
-            if (self.executor == .fake or self.flushing_desktop_capabilities) return;
+            if (self.executor == .fake) {
+                if (self.replay) self.flushReplayWindowExecutions();
+                return;
+            }
+            if (self.flushing_desktop_capabilities) return;
             self.flushing_desktop_capabilities = true;
             defer self.flushing_desktop_capabilities = false;
             const Pending = struct { index: usize, generation: u32 };
@@ -9610,6 +9638,7 @@ pub fn Effects(comptime Msg: type) type {
         fn performDesktopCapability(self: *Self, index: usize) void {
             const slot = &self.slots[index];
             const generation = slot.generation;
+            const key = slot.key;
             const binding = self.system_services orelse return self.feedDesktopResult(index, generation, false, "unsupported");
             const execute = binding.execute_capability_fn orelse return self.feedDesktopResult(index, generation, false, "unsupported");
             // A modal native call can reenter the event loop and replace or
@@ -9626,7 +9655,65 @@ pub fn Effects(comptime Msg: type) type {
                 self.feedDesktopResult(index, generation, false, @errorName(err));
                 return;
             };
+            if (desktopWindowSuccess(name, payload, result)) {
+                self.journalNote(.{ .kind = .window_execution, .key = key, .code = @intFromBool(std.mem.eql(u8, name, "native-sdk.window.closeResult")), .payload = payload, .stderr_tail = result });
+            }
             self.feedDesktopResult(index, generation, true, result);
+        }
+
+        fn desktopWindowSuccess(name: []const u8, payload: []const u8, reply: []const u8) bool {
+            if (!std.mem.eql(u8, name, "native-sdk.window.focusResult") and !std.mem.eql(u8, name, "native-sdk.window.closeResult")) return false;
+            const desktop = @import("desktop_files.zig");
+            var request = desktop.request(payload) catch return false;
+            var response = desktop.request(reply) catch return false;
+            if (request.at != response.at or !std.mem.eql(u8, payload[0..request.at], reply[0..response.at])) return false;
+            const label = request.field() catch return false;
+            request.finish() catch return false;
+            const failure = response.field() catch return false;
+            response.finish() catch return false;
+            return failure.len == 0 and label.len > 0 and label.len <= 255 and std.mem.indexOfScalar(u8, label, 0) == null;
+        }
+
+        /// Execution facts can precede their triggering event, like clock
+        /// reads. Copy them until that event's settled view transaction claims
+        /// the exact request. Neither native calls nor application Msgs run.
+        pub fn pushReplayWindowExecution(self: *Self, record: EffectResultRecord) !void {
+            const name = if (record.code == 1) "native-sdk.window.closeResult" else "native-sdk.window.focusResult";
+            const canonical: EffectResultRecord = .{ .kind = .window_execution, .key = record.key, .code = record.code, .payload = record.payload, .stderr_tail = record.stderr_tail };
+            if (!self.replay or record.kind != .window_execution or record.code < 0 or record.code > 1 or
+                !std.meta.eql(record, canonical) or
+                record.payload.len > 293 or record.stderr_tail.len > 38 or
+                !desktopWindowSuccess(name, record.payload, record.stderr_tail)) return error.ReplayDamagedRecord;
+            if (self.replay_window_execution_len == self.replay_window_executions.len) return error.ReplayWindowDivergence;
+            const entry = &self.replay_window_executions[self.replay_window_execution_len];
+            entry.key = record.key;
+            entry.closed = record.code == 1;
+            entry.request_len = @intCast(record.payload.len);
+            @memcpy(entry.request[0..record.payload.len], record.payload);
+            entry.reply_len = @intCast(record.stderr_tail.len);
+            @memcpy(entry.reply[0..record.stderr_tail.len], record.stderr_tail);
+            self.replay_window_execution_len += 1;
+        }
+
+        fn flushReplayWindowExecutions(self: *Self) void {
+            while (self.replay_window_execution_len > 0) {
+                const entry = &self.replay_window_executions[0];
+                const index = self.findActiveSlot(entry.key) orelse break;
+                const slot = &self.slots[index];
+                const name = if (entry.closed) "native-sdk.window.closeResult" else "native-sdk.window.focusResult";
+                if (slot.kind != .host or !slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running or
+                    !std.mem.eql(u8, slot.hostName(), name) or !std.mem.eql(u8, slot.fetchPayload(), entry.request[0..entry.request_len])) break;
+                if (slot.replay_window_reply_len != 0) {
+                    self.replay_window_diverged = true;
+                    break;
+                }
+                slot.desktop_waiting = false;
+                slot.replay_window_reply_len = entry.reply_len;
+                @memcpy(slot.replay_window_reply[0..entry.reply_len], entry.reply[0..entry.reply_len]);
+                self.restoreDesktopWindowResult(slot, entry.reply[0..entry.reply_len]);
+                self.replay_window_execution_len -= 1;
+                std.mem.copyForwards(ReplayWindowExecution, self.replay_window_executions[0..self.replay_window_execution_len], self.replay_window_executions[1 .. self.replay_window_execution_len + 1]);
+            }
         }
 
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
@@ -13625,13 +13712,17 @@ pub fn Effects(comptime Msg: type) type {
         /// whole one); if the completion queue is somehow full, the
         /// terminal still lands through the pending ring as an err —
         /// never a silent ok with lost bytes.
-        pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{EffectNotFound}!void {
+        pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{ EffectNotFound, ReplayWindowDivergence }!void {
             const slot_index = blk: {
                 const index = self.findActiveSlot(key) orelse return error.EffectNotFound;
                 if (self.slots[index].kind != .host and self.slots[index].kind != .store and self.slots[index].kind != .credentials) return error.EffectNotFound;
                 break :blk index;
             };
             const slot = &self.slots[slot_index];
+            if (self.replay and desktopWindowSuccess(slot.hostName(), slot.fetchPayload(), bytes)) {
+                if (!ok or slot.replay_window_reply_len == 0 or !std.mem.eql(u8, bytes, slot.replay_window_reply[0..slot.replay_window_reply_len])) return error.ReplayWindowDivergence;
+            } else if (self.replay and slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
+            slot.replay_window_reply_len = 0;
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
             const capacity = buffer.len - slot.payload_len;
             var delivered_ok = ok;
@@ -13640,7 +13731,7 @@ pub fn Effects(comptime Msg: type) type {
                 delivered_ok = false;
                 delivered = "host result over budget";
             }
-            if (slot.fake and delivered_ok) self.restoreDesktopWindowResult(slot, delivered);
+            if (slot.fake and !self.replay and delivered_ok) self.restoreDesktopWindowResult(slot, delivered);
             @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
             slot.body_len = delivered.len;
             var entry: Entry = .{
@@ -14687,6 +14778,7 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (slot.kind == .credentials) slot.credentials_waiting = false;
             slot.desktop_waiting = false;
+            slot.replay_window_reply_len = 0;
             slot.state.store(.idle, .release);
         }
 

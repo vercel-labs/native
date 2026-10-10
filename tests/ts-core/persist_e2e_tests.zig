@@ -530,7 +530,7 @@ test "compiled replay admission preserves every damage predicate, provenance and
     defer std.testing.allocator.free(saved);
     const Record = native_sdk.runtime.EffectResultRecord;
     const words = [_]u64{ 0, 1, 255, 256, 4096, 4097, 65536, 65537, 262144, 262145, 8388608, 8388609, 16777216, 16777217, 0xffffffff, 0x100000000, 9007199254740991, 9007199254740992, 9007199254740993, std.math.maxInt(u64) };
-    for (1..19) |kind| {
+    for (1..20) |kind| {
         var record: Record = .{ .kind = @enumFromInt(kind), .key = std.math.maxInt(u64) };
         try compareReplay(record);
         inline for (@typeInfo(@FieldType(Record, "exit_reason")).@"enum".fields) |entry| {
@@ -701,7 +701,7 @@ test "compiled replay admission preserves every damage predicate, provenance and
     var seed: u64 = 0x92a1337;
     for (0..6000) |_| {
         seed = seed *% 6364136223846793005 +% 1442695040888963407;
-        var record: Record = .{ .kind = @enumFromInt(1 + seed % 18), .key = seed };
+        var record: Record = .{ .kind = @enumFromInt(1 + seed % 19), .key = seed };
         record.exit_reason = @enumFromInt((seed >> 0) % @typeInfo(@FieldType(Record, "exit_reason")).@"enum".fields.len);
         record.file_op = @enumFromInt((seed >> 3) % @typeInfo(@FieldType(Record, "file_op")).@"enum".fields.len);
         record.file_event = @enumFromInt((seed >> 6) % @typeInfo(@FieldType(Record, "file_event")).@"enum".fields.len);

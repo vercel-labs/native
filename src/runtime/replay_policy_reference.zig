@@ -268,6 +268,7 @@ pub fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         .host => record.exit_reason == .rejected,
         .db => record.exit_reason == .rejected,
         .credentials => false,
+        .window_execution => false,
         // Image `.rejected` terminals journal from BOTH sides of the
         // executor seam, so the outcome alone is not provenance: only
         // loop-side validation refusals — which the replayed

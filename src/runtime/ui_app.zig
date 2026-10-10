@@ -1710,6 +1710,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // `.rejected` and regenerate from the same
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
+                    .window_execution => try self.effects.pushReplayWindowExecution(record),
                     .credentials => try self.effects.feedCredentialsResult(
                         record.key,
                         record.credentials_operation,

@@ -14,9 +14,13 @@ const RuntimeFixture = struct {
     harness: *sdk.TestHarness(),
     state: *Adapter.App,
     fn create() !RuntimeFixture {
+        return make(null, true);
+    }
+    fn make(recorder: ?*sdk.runtime.SessionRecorder, start: bool) !RuntimeFixture {
         const harness = try sdk.TestHarness().create(testing.allocator, .{ .size = .init(1120, 720) });
         errdefer harness.destroy(testing.allocator);
         harness.null_platform.gpu_surfaces = true;
+        harness.runtime.options.session_recorder = recorder;
         _ = try harness.null_platform.platform().services.createWindow(.{
             .id = 1, .label = "main", .title = "Native SDK Code Editor", .default_frame = .init(0, 0, 1120, 720),
         });
@@ -27,9 +31,11 @@ const RuntimeFixture = struct {
         });
         errdefer state.destroy();
         state.effects.executor = .real;
-        try harness.start(state.app());
         const self: RuntimeFixture = .{ .harness = harness, .state = state };
-        try self.frame(1, "code-editor-canvas");
+        if (start) {
+            try harness.start(state.app());
+            try self.frame(1, "code-editor-canvas");
+        }
         return self;
     }
     fn destroy(self: RuntimeFixture) void {
@@ -119,6 +125,8 @@ test "journaled desktop window terminals restore runtime lifetime without OS foc
     var request = fx.pendingHostAt(0).?;
     var output: [128]u8 = undefined;
     var len = try @import("desktop_files.zig").replyHeaderFor(&output, request.payload, "");
+    try fx.pushReplayWindowExecution(.{ .kind = .window_execution, .key = request.key, .code = 0, .payload = request.payload, .stderr_tail = output[0..len] });
+    fx.flushDesktopCapabilities();
     try fx.feedHostResult(request.key, true, output[0..len]);
     try fixture.state.drainEffects(&fixture.harness.runtime);
     try testing.expectEqual(@as(?i64, null), core.snapshotModel().pending_focus_session);
@@ -132,6 +140,8 @@ test "journaled desktop window terminals restore runtime lifetime without OS foc
     try fixture.frame(1, "code-editor-canvas");
     request = fx.pendingHostAt(0).?;
     len = try @import("desktop_files.zig").replyHeaderFor(&output, request.payload, "");
+    try fx.pushReplayWindowExecution(.{ .kind = .window_execution, .key = request.key, .code = 1, .payload = request.payload, .stderr_tail = output[0..len] });
+    fx.flushDesktopCapabilities();
     try fx.feedHostResult(request.key, true, output[0..len]);
     try fixture.state.drainEffects(&fixture.harness.runtime);
     try testing.expect(!core.snapshotModel().pending_close_main);
@@ -139,6 +149,134 @@ test "journaled desktop window terminals restore runtime lifetime without OS foc
     try testing.expectError(error.WindowNotFound, fixture.harness.runtime.canvasWidgetLayout(1, "code-editor-canvas"));
     try fixture.command(secondary, "new-window");
     _ = try fixture.window("code-editor-3");
+}
+
+test "window execution facts refuse malformed metadata and mismatched correlation" {
+    var fx = Host.Fx.init(testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    const payload = [_]u8{ 1, 7, 4, 0, 'm', 'a', 'i', 'n' };
+    const reply = [_]u8{ 1, 7, 0, 0 };
+    const Record = sdk.runtime.EffectResultRecord;
+    const valid: Record = .{ .kind = .window_execution, .key = 9, .code = 0, .payload = &payload, .stderr_tail = &reply };
+    for (0..payload.len) |len| {
+        var bad = valid;
+        bad.payload = payload[0..len];
+        try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    }
+    for (0..reply.len) |len| {
+        var bad = valid;
+        bad.stderr_tail = reply[0..len];
+        try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    }
+    var bad = valid;
+    bad.code = 2;
+    try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    bad = valid;
+    bad.truncated = true;
+    try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    bad = valid;
+    bad.file_total = 1;
+    try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    bad = valid;
+    bad.stderr_tail = &.{ 1, 8, 0, 0 };
+    try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    bad.stderr_tail = &.{ 1, 7, 1, 0, 'x' };
+    try testing.expectError(error.ReplayDamagedRecord, fx.pushReplayWindowExecution(bad));
+    try fx.finishReplay();
+}
+
+test "window execution facts require one exact request and matching terminal" {
+    const payload = [_]u8{ 1, 7, 4, 0, 'm', 'a', 'i', 'n' };
+    const reply = [_]u8{ 1, 7, 0, 0 };
+    const valid: sdk.runtime.EffectResultRecord = .{ .kind = .window_execution, .key = 9, .code = 0, .payload = &payload, .stderr_tail = &reply };
+    for (0..6) |scenario| {
+        var fx = Host.Fx.init(testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.defer_desktop_capabilities = true;
+        if (scenario != 0) try fx.pushReplayWindowExecution(valid);
+        if (scenario == 1) {
+            fx.flushDesktopCapabilities();
+            try testing.expectError(error.ReplayWindowDivergence, fx.finishReplay());
+            continue;
+        }
+        // A changed label and a changed capability cannot claim the fact.
+        fx.hostRequest(.{ .key = 9,
+            .name = if (scenario == 2) "native-sdk.window.closeResult" else "native-sdk.window.focusResult",
+            .payload = if (scenario == 3) &.{ 1, 7, 4, 0, 'e', 'l', 's', 'e' } else &payload,
+        });
+        fx.flushDesktopCapabilities();
+        if (scenario == 2 or scenario == 3) {
+            try testing.expectError(error.ReplayWindowDivergence, fx.finishReplay());
+            continue;
+        }
+        if (scenario == 0) {
+            try testing.expectError(error.ReplayWindowDivergence, fx.feedHostResult(9, true, &reply));
+            continue;
+        }
+        try testing.expectError(error.ReplayWindowDivergence, fx.finishReplay());
+        if (scenario == 4) {
+            try testing.expectError(error.ReplayWindowDivergence, fx.feedHostResult(9, false, &reply));
+            try testing.expectError(error.ReplayWindowDivergence, fx.feedHostResult(9, true, &.{ 1, 8, 0, 0 }));
+            try fx.feedHostResult(9, true, &reply);
+            try fx.finishReplay();
+        } else {
+            try fx.pushReplayWindowExecution(valid);
+            fx.flushDesktopCapabilities();
+            try fx.feedHostResult(9, true, &reply);
+            try testing.expectError(error.ReplayWindowDivergence, fx.finishReplay());
+        }
+    }
+}
+
+test "window execution facts preserve focus and close checkpoints before delayed terminals" {
+    const Buffer = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        fn write(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.bytes.appendSlice(testing.allocator, bytes);
+        }
+    };
+    var buffer: Buffer = .{};
+    defer buffer.bytes.deinit(testing.allocator);
+    const recorder = try testing.allocator.create(sdk.runtime.SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = sdk.runtime.SessionRecorder.init(.{ .context = &buffer, .write_fn = Buffer.write });
+    recorder.begin(.{ .app_name = "code-editor", .platform_name = "test" });
+    var fingerprint: u64 = 0;
+    var model: []u8 = undefined;
+    {
+        const live = try RuntimeFixture.make(recorder, true);
+        defer live.destroy();
+        const runtime = &live.harness.runtime;
+        const app = live.state.app();
+        try runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "new-window", .window_id = 1 } });
+        try runtime.dispatchPlatformEvent(app, .frame_requested);
+        const secondary = try live.window("code-editor-2");
+        try live.frame(secondary, "code-editor-canvas-2");
+        try runtime.dispatchPlatformEvent(app, .wake);
+        try runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "close-tab", .window_id = 1 } });
+        try runtime.dispatchPlatformEvent(app, .frame_requested);
+        try runtime.dispatchPlatformEvent(app, .wake);
+        try testing.expect(!core.snapshotModel().pending_close_main);
+        try testing.expectError(error.WindowNotFound, runtime.canvasWidgetLayout(1, "code-editor-canvas"));
+        fingerprint = runtime.sessionStateFingerprint();
+        model = try testing.allocator.dupe(u8, core.persistenceSnapshot());
+        recorder.finish();
+        try testing.expect(recorder.finished and !recorder.failed and recorder.effect_count >= 4);
+    }
+    defer testing.allocator.free(model);
+    const replay = try RuntimeFixture.make(null, false);
+    defer replay.destroy();
+    // Any accidental native replay close fails. Execution facts only change
+    // runtime ownership, independently of the later terminal/model commit.
+    replay.harness.null_platform.fail_next_close_window = true;
+    const report = try sdk.runtime.replaySession(&replay.harness.runtime, replay.state.app(), buffer.bytes.items, .{ .require_same_platform = false });
+    try testing.expect(report.ok() and report.checkpoints_verified >= 2);
+    try testing.expectEqual(fingerprint, replay.harness.runtime.sessionStateFingerprint());
+    try testing.expectEqualSlices(u8, model, core.persistenceSnapshot());
+    try testing.expect(replay.harness.null_platform.fail_next_close_window);
 }
 
 test "compiled Code Editor creates five independently owned sessions" {

@@ -628,7 +628,7 @@ test("media policy rejects damaged packets before a plan and keeps input and out
     const before = input.slice(), output = native_effect_policy(offset.subarray(7, 7 + input.length)), saved = output.slice();
     assert.deepEqual(input, before); offset.fill(0); native_effect_policy(requests[0]!); assert.deepEqual(output, saved);
   }
-  for (const [at, value] of [[0, 8], [1, 3], [2, 17], [5, 2], [7, 1], [28, 2], [38, 2]]) {
+  for (const [at, value] of [[0, 8], [1, 3], [2, 17], [5, 2], [7, 2], [28, 2], [38, 2]]) {
     const broken = requests[0]!.slice(); broken[at!] = value!; assert.throws(() => native_effect_policy(broken));
   }
   assert.throws(() => native_effect_policy(mediaRequest(5, 1, slots, 99n)));
@@ -997,7 +997,7 @@ test("replay admission refuses every truncated packet and invalid flags", () => 
   for (let at = 247; at < 256; at++) if (at !== 248) { bytes[at] = 1; assert.throws(() => native_effect_policy(bytes)); bytes[at] = 0; }
 });
 test("replay decisions retain external truth and reject hostile scalar words", () => {
-  for (let kind = 1; kind <= 18; kind++) {
+  for (let kind = 1; kind <= 19; kind++) {
     const request = replayRequest(kind), frozen = request.slice();
     const result = native_effect_policy(request); assert.equal(result.length,8); assert.deepEqual(request,frozen);
     assert.equal(result[2],kind === 6 ? 1 : 0);
@@ -1010,6 +1010,16 @@ test("replay decisions retain external truth and reject hostile scalar words", (
   assert.equal(new DataView(native_effect_policy(bytes).buffer).getUint16(0,true) & 128,128);
   const file = replayRequest(4); file[5] = 4;
   assert.equal(native_effect_policy(file)[2],0);file[240] = 1;assert.equal(native_effect_policy(file)[2],1);
+});
+
+test("window execution records remain external facts and unknown kinds refuse admission", () => {
+  for (const code of [0, 1]) {
+    const request = replayRequest(19);
+    new DataView(request.buffer).setInt32(16, code, true);
+    const result = native_effect_policy(request);
+    assert.deepEqual([...result], Array(8).fill(0));
+  }
+  assert.throws(() => native_effect_policy(replayRequest(20)));
 });
 
 test("replay sequencing preserves refusal precedence and one-drain back-pressure", () => {
