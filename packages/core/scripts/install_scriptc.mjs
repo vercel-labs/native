@@ -9,7 +9,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { installedRelease, releaseConfiguration } from "./scriptc_toolchain.mjs";
+import { installedRelease, nativeManifestName, nativeTargetName, releaseConfiguration } from "./scriptc_toolchain.mjs";
 
 export async function downloadVerified(asset, output, options = {}) {
   const url = new URL(asset.url);
@@ -106,8 +106,9 @@ export async function installScriptc(origin = new URL("../package.json", import.
   try {
     console.error(`Installing scriptc ${config.release.version} for ${config.host}`);
     await acquire(config.release.releases[config.host], releaseRoot);
-    const nativeManifest = readJson(path.join(releaseRoot, "bin", "scriptc.json"));
-    if (nativeManifest.compiler_version !== config.release.version || nativeManifest.target !== config.host) throw new Error("native compiler release identity mismatch");
+    const nativeManifestPath = path.join(releaseRoot, "bin", nativeManifestName(config.host));
+    const nativeManifest = readJson(nativeManifestPath);
+    if (nativeManifest.compiler_version !== config.release.version || nativeManifest.target !== nativeTargetName(config.host)) throw new Error("native compiler release identity mismatch");
     for (const [key, asset] of Object.entries(config.release.packages)) {
       const directory = path.join(modules, ...(key === "compiler" ? ["@scriptc", "compiler"] : key.startsWith("runtime-") ? ["@scriptc", key] : [key]));
       await acquire(asset, directory, { strip: 1 });
@@ -132,9 +133,9 @@ export async function installScriptc(origin = new URL("../package.json", import.
     for (const name of packs) verifyPack(path.join(scope, name), config.release.version, config.release.runtimeAbi);
     // Extend the upstream relocatable manifest with the complete matching
     // target packs. Keep the original manifest alongside it for provenance.
-    await fsp.copyFile(path.join(releaseRoot, "bin", "scriptc.json"), path.join(releaseRoot, "bin", "scriptc.upstream.json"));
-    nativeManifest.runtime_packs = packs.map(name => ({ target: name.slice("runtime-".length), path: "../../api/node_modules/@scriptc/" + name }));
-    await fsp.writeFile(path.join(releaseRoot, "bin", "scriptc.json"), JSON.stringify(nativeManifest, null, 2) + "\n");
+    await fsp.copyFile(nativeManifestPath, path.join(releaseRoot, "bin", "scriptc.upstream.json"));
+    nativeManifest.runtime_packs = packs.map(name => ({ target: nativeTargetName(name.slice("runtime-".length)), path: "../../api/node_modules/@scriptc/" + name }));
+    await fsp.writeFile(nativeManifestPath, JSON.stringify(nativeManifest, null, 2) + "\n");
     const probe = spawnSync(path.join(releaseRoot, "bin", process.platform === "win32" ? "scriptc.exe" : "scriptc"), ["-v"], { encoding: "utf8" });
     if (probe.status !== 0 || probe.stdout.trim() !== config.release.version) throw new Error("native compiler executable reports another release");
     const receipt = { schemaVersion: 1, version: config.release.version, host: config.host, manifestSha256: config.identity, complete: true, runtimeAbi: config.release.runtimeAbi, runtimePacks: packs, downloaded };

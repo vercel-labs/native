@@ -103,7 +103,7 @@ const constrainedCallRefusal = missingLoweringFence?.code
 const sections = [];
 sections.push(`<!-- GENERATED FILE — do not edit by hand.
      Derived byte-for-byte from the pinned compiler's surface manifest:
-       packages/core/node_modules/@scriptc/compiler/surface-manifest.json
+       resolved through packages/core/scripts/scriptc_toolchain.mjs
      Regenerate after any compiler pin move:
        node packages/core/scripts/gen_service_surface.mjs
      Verify without writing:

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { downloadVerified, extractVerified } from "../scripts/install_scriptc.mjs";
-import { hostRelease, installedRelease, releaseConfiguration, scriptcVersion } from "../scripts/scriptc_toolchain.mjs";
+import { hostRelease, installedRelease, nativeManifestName, nativeTargetName, releaseConfiguration, scriptcVersion } from "../scripts/scriptc_toolchain.mjs";
 
 test("host selection preserves desktop distributions and explicit libc", () => {
   for (const arch of ["x64", "arm64"]) {
@@ -14,6 +14,12 @@ test("host selection preserves desktop distributions and explicit libc", () => {
     for (const libc of ["gnu", "musl"]) assert.equal(hostRelease({ platform: "linux", arch, libc }), `linux-${arch}-${libc}`);
   }
   assert.equal(hostRelease({ platform: "win32", arch: "arm64" }), "win32-x64-msvc");
+  assert.equal(nativeTargetName("darwin-arm64"), "macos-arm64");
+  assert.equal(nativeTargetName("darwin-x64"), "macos-x64");
+  assert.equal(nativeTargetName("win32-x64-msvc"), "windows-x64-msvc");
+  assert.equal(nativeTargetName("linux-arm64-musl"), "linux-arm64-musl");
+  assert.equal(nativeManifestName("darwin-arm64"), "scriptc.json");
+  assert.equal(nativeManifestName("win32-x64-msvc"), "scriptc.exe.json");
   assert.throws(() => hostRelease({ platform: "linux", arch: "x64", libc: "unknown" }));
   assert.throws(() => scriptcVersion({ nativeToolchain: { scriptc: "^0.2.7" } }));
 });

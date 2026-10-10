@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "installationFormat": 2,
   "version": "0.2.7",
   "repository": "vercel-labs/scriptc",
   "releases": {

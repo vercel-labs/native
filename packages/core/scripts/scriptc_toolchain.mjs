@@ -29,6 +29,14 @@ export function hostRelease(options = {}) {
   throw new Error(`unsupported scriptc host: ${platform}-${arch}`);
 }
 
+export function nativeTargetName(distribution) {
+  return distribution.replace(/^darwin-/, "macos-").replace(/^win32-/, "windows-");
+}
+
+export function nativeManifestName(host) {
+  return host.startsWith("win32-") ? "scriptc.exe.json" : "scriptc.json";
+}
+
 export function coreManifestPath(origin) {
   let directory = path.dirname(origin instanceof URL || origin.startsWith("file:") ? fileURLToPath(origin) : origin);
   for (;;) {
@@ -70,7 +78,7 @@ export function installedRelease(origin, options = {}) {
   if (receipt.runtimeAbi !== config.release.runtimeAbi || !Array.isArray(receipt.runtimePacks) || JSON.stringify([...receipt.runtimePacks].sort()) !== JSON.stringify(packs)) {
     throw new Error("scriptc installation has an incomplete runtime pack inventory");
   }
-  for (const name of ["release/bin/scriptc.json", `release/bin/scriptc${config.host.startsWith("win32-") ? ".exe" : ""}`, "api/node_modules/@scriptc/compiler/dist/index.js", "api/node_modules/@scriptc/compiler/surface-manifest.json", "api/node_modules/typescript/package.json", "api/node_modules/typescript5/package.json", ...packs.map(name => `api/node_modules/@scriptc/${name}/runtime-pack.json`)]) {
+  for (const name of [`release/bin/${nativeManifestName(config.host)}`, `release/bin/scriptc${config.host.startsWith("win32-") ? ".exe" : ""}`, "api/node_modules/@scriptc/compiler/dist/index.js", "api/node_modules/@scriptc/compiler/surface-manifest.json", "api/node_modules/typescript/package.json", "api/node_modules/typescript5/package.json", ...packs.map(name => `api/node_modules/@scriptc/${name}/runtime-pack.json`)]) {
     if (!fs.statSync(path.join(config.root, name)).isFile()) throw new Error(`scriptc installation is missing ${name}`);
   }
   return config;
