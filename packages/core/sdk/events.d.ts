@@ -31,6 +31,8 @@ export type ThemeState = {
     readonly pack?: ThemeStatePack;
     readonly colorScheme?: ThemeStateColorScheme;
     readonly accent?: string;
+    readonly highContrast?: boolean;
+    readonly reduceMotion?: boolean;
 };
 export type StatusItemTone = "normal" | "warning" | "critical";
 export type StatusItemFontWeight = "regular" | "medium" | "semibold" | "bold";
@@ -170,6 +172,130 @@ export interface FrameEvent {
     readonly intervalMs: number;
     readonly timestampNs: Uint8Array;
     readonly intervalNs: Uint8Array;
+}
+export type CanvasFrameRisk = "idle" | "low" | "moderate" | "high";
+export interface CanvasFrameEvent {
+    readonly width: number;
+    readonly height: number;
+    readonly timestampNs: Uint8Array;
+    readonly intervalNs: Uint8Array;
+    readonly risk: CanvasFrameRisk;
+    readonly workUnits: Uint8Array;
+    readonly commands: Uint8Array;
+    readonly batches: Uint8Array;
+    readonly representable: boolean;
+    readonly dirtyRatio: number;
+}
+export interface CanvasColor {
+    readonly r: number;
+    readonly g: number;
+    readonly b: number;
+    readonly a: number;
+}
+export interface CanvasRect {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+}
+export interface CanvasPoint {
+    readonly x: number;
+    readonly y: number;
+}
+export interface CanvasGradientStop {
+    readonly offset: number;
+    readonly color: CanvasColor;
+}
+export type CanvasFill = {
+    readonly kind: "color";
+    readonly color: CanvasColor;
+} | {
+    readonly kind: "linear_gradient";
+    readonly start: CanvasPoint;
+    readonly end: CanvasPoint;
+    readonly stops: readonly CanvasGradientStop[];
+};
+export interface CanvasStroke {
+    readonly fill: CanvasFill;
+    readonly width: number;
+}
+export interface CanvasRadius {
+    readonly topLeft: number;
+    readonly topRight: number;
+    readonly bottomRight: number;
+    readonly bottomLeft: number;
+}
+export type CanvasPathVerb = "move_to" | "line_to" | "quad_to" | "cubic_to" | "close";
+export type CanvasLineCap = "butt" | "round";
+export interface CanvasPathElement {
+    readonly verb: CanvasPathVerb;
+    readonly first: CanvasPoint;
+    readonly second: CanvasPoint;
+    readonly third: CanvasPoint;
+}
+export type CanvasChromeCommand = {
+    readonly kind: "rect";
+    readonly id: Uint8Array;
+    readonly rect: CanvasRect;
+    readonly fill: CanvasFill;
+} | {
+    readonly kind: "rounded_rect";
+    readonly id: Uint8Array;
+    readonly rect: CanvasRect;
+    readonly radius: number;
+    readonly fill: CanvasFill;
+} | {
+    readonly kind: "stroke_rect";
+    readonly id: Uint8Array;
+    readonly rect: CanvasRect;
+    readonly radius: CanvasRadius;
+    readonly stroke: CanvasStroke;
+} | {
+    readonly kind: "line";
+    readonly id: Uint8Array;
+    readonly from: CanvasPoint;
+    readonly to: CanvasPoint;
+    readonly stroke: CanvasStroke;
+} | {
+    readonly kind: "fill_path";
+    readonly id: Uint8Array;
+    readonly elements: readonly CanvasPathElement[];
+    readonly fill: CanvasFill;
+} | {
+    readonly kind: "stroke_path";
+    readonly id: Uint8Array;
+    readonly elements: readonly CanvasPathElement[];
+    readonly stroke: CanvasStroke;
+    readonly cap: CanvasLineCap;
+};
+export interface CanvasChromeContext {
+    readonly width: number;
+    readonly height: number;
+    readonly background: CanvasColor;
+    readonly surface: CanvasColor;
+    readonly border: CanvasColor;
+}
+export interface CanvasTransform {
+    readonly a: number;
+    readonly b: number;
+    readonly c: number;
+    readonly d: number;
+    readonly tx: number;
+    readonly ty: number;
+}
+export type CanvasAnimationPart = "fill" | "text";
+export type CanvasAnimationLoop = "none" | "wrap" | "ping_pong";
+export interface CanvasAnimation {
+    readonly label: Uint8Array;
+    readonly index: number;
+    readonly part: CanvasAnimationPart;
+    readonly durationMs: number;
+    readonly easing: LayoutTweenEasing;
+    readonly loop: CanvasAnimationLoop;
+    readonly fromOpacity: number;
+    readonly toOpacity: number;
+    readonly fromTransform: CanvasTransform;
+    readonly toTransform: CanvasTransform;
 }
 export type LayoutTweenEasing = "linear" | "standard" | "emphasized" | "spring";
 export interface LayoutTween {

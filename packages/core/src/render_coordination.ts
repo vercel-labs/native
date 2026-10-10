@@ -141,3 +141,30 @@ function nscvRenderChildren(request: Uint8Array): Uint8Array {
   }
   return result;
 }
+
+/** Split the authored chrome around the widget span. Budgets retain all
+ * u64 words; native owns the builder and supplies its actual bounded counts. */
+function nscvChromeComposition(request: Uint8Array): Uint8Array {
+  if (request.length !== 40 || request[0] !== 67 || request[1] !== 1 || request[2]! > 3 || request[3] !== 0)
+    throw new Error("invalid chrome composition header");
+  const w = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  if (w.getUint32(4, true) !== 0) throw new Error("invalid chrome composition reserved bytes");
+  const separate = (request[2]! & 1) !== 0, variable = (request[2]! & 2) !== 0;
+  const prefixBudget = w.getUint32(8, true), prefixHigh = w.getUint32(12, true);
+  const suffixBudget = w.getUint32(16, true), suffixHigh = w.getUint32(20, true);
+  const count = w.getUint32(24, true), countHigh = w.getUint32(28, true);
+  const before = w.getUint32(32, true), beforeHigh = w.getUint32(36, true);
+  const result = new Uint8Array(24), out = new DataView(result.buffer);
+  out.setUint32(0, 1, true);
+  // A builder cannot supply more than a u32 count. This rejects, rather
+  // than rounding, any malformed or unrepresentable observed count.
+  let valid = countHigh === 0 && beforeHigh === 0 && (separate || before === 0);
+  const prefix = separate ? before : count - suffixBudget;
+  const suffix = separate ? count - before : suffixBudget;
+  valid &&= prefix >= 0 && suffix >= 0 && prefix <= count && suffix <= count;
+  valid &&= separate ? suffixHigh !== 0 || suffix <= suffixBudget : suffixHigh === 0;
+  valid &&= variable ? prefixHigh !== 0 || prefix <= prefixBudget : prefixHigh === 0 && prefix === prefixBudget;
+  out.setUint32(4, valid ? 0 : 1, true);
+  if (valid) { out.setUint32(8, prefix, true); out.setUint32(12, suffix, true); }
+  return result;
+}

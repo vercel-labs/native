@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 const source = readFileSync(new URL("../src/render_coordination.ts", import.meta.url), "utf8");
-const { nscvRenderRecipe: recipe, nscvRenderChildren: children } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvRenderRecipe,nscvRenderChildren};").toString("base64")}`);
+const { nscvRenderRecipe: recipe, nscvRenderChildren: children, nscvChromeComposition: composition } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(source) + "\nexport {nscvRenderRecipe,nscvRenderChildren,nscvChromeComposition};").toString("base64")}`);
 const wire = (b: Uint8Array) => new DataView(b.buffer, b.byteOffset, b.byteLength);
 function packet(kind: number, retained = false, flags = 0, disclosure = 0): Uint8Array {
   const b = new Uint8Array(32); b.set([43,1,retained ? 1 : 0,disclosure]);
@@ -69,4 +69,29 @@ test("all kind and flag recipes are bounded, owned and reject malformed packets"
   for(const at of [0,1,2,3,5,12,20,24,31]){const b=packet(31,true);b[at]=255;assert.throws(()=>recipe(b),/invalid/);}
   for(const at of [0,1,2,3,4,24,32,36,40]){const b=childPacket([[31,false,null]]);b[at]=255;assert.throws(()=>children(b),/invalid/);}
   const b=childPacket([[31,false,null],[31,false,null]]),saved=b.slice(),r=children(b),copy=r.slice();assert.deepEqual(b,saved);b.fill(255);assert.deepEqual(r,copy);
+});
+
+function chromePacket(prefix: bigint, suffix: bigint, total: bigint, before: bigint | null, variable: boolean): Uint8Array {
+  const b = new Uint8Array(40), w = wire(b); b.set([67, 1, (before === null ? 0 : 1) | (variable ? 2 : 0), 0]);
+  [prefix, suffix, total, before ?? 0n].forEach((value, i) => w.setBigUint64(8 + i * 8, value, true));
+  return b;
+}
+test("chrome composition preserves complete exact, variable and independently derived spans", () => {
+  const values = [0n, 1n, 2n, 63n, 64n, 255n, 256n, 512n, 0xffffffffn, 0x100000000n, 9007199254740993n, 0xffffffffffffffffn];
+  for (const p of values) for (const s of values) for (const total of [0n, 1n, 2n, 64n, 256n, 512n, 0x100000000n]) for (const before of [null, 0n, 1n, 256n, 512n]) for (const variable of [false, true]) {
+    const prefix = before ?? total - s, suffix = total - prefix;
+    const valid = total <= 0xffffffffn && (before ?? 0n) <= 0xffffffffn && prefix >= 0 && suffix >= 0 && prefix <= total && suffix <= total &&
+      (before === null ? suffix === s : suffix <= s) && (variable ? prefix <= p : prefix === p);
+    const packet = chromePacket(p, s, total, before, variable), saved = packet.slice();
+    const expected = new Uint8Array(24), e = wire(expected); e.setUint32(0, 1, true); e.setUint32(4, valid ? 0 : 1, true);
+    if (valid) { e.setUint32(8, Number(prefix), true); e.setUint32(12, Number(suffix), true); }
+    const actual = composition(packet); assert.deepEqual(actual, expected); assert.deepEqual(packet, saved);
+    packet.fill(255); assert.deepEqual(actual, expected);
+  }
+});
+test("chrome composition rejects malformed headers and keeps invalid spans empty", () => {
+  for (const at of [0, 1, 2, 3, 4, 7]) { const b = chromePacket(1n, 1n, 2n, null, false); b[at] = 255; assert.throws(() => composition(b), /invalid/); }
+  for (const length of [0, 39, 41]) assert.throws(() => composition(new Uint8Array(length)), /invalid/);
+  const b = chromePacket(1n, 1n, 2n, null, false); wire(b).setBigUint64(32, 1n, true);
+  assert.deepEqual(Array.from(composition(b)), [1, 0, 0, 0, 1, ...Array(19).fill(0)]);
 });

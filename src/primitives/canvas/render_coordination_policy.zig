@@ -138,3 +138,26 @@ pub const ChildPlan = struct {
         return @enumFromInt(read(self.result, 12 + ordinal * 8));
     }
 };
+
+/// Actual layer boundaries are copied from the portable composition owner.
+pub const ChromePlan = struct {
+    prefix: usize,
+    suffix: usize,
+    pub fn init(policy: Policy, prefix_budget: usize, suffix_budget: usize, count: usize, before: ?usize, variable: bool) error{InvalidChromeCommandCount}!ChromePlan {
+        var request: [40]u8 = @splat(0);
+        request[0..4].* = .{ 67, 1, @as(u8, @intFromBool(before != null)) | (@as(u8, @intFromBool(variable)) << 1), 0 };
+        for ([_]usize{ prefix_budget, suffix_budget, count, before orelse 0 }, 0..) |value, i|
+            std.mem.writeInt(u64, request[8 + i * 8 ..][0..8], value, .little);
+        var result: [24]u8 = @splat(0xa5);
+        if (policy(&request, &result) != result.len or read(&result, 0) != 1 or read(&result, 4) > 1 or !std.mem.allEqual(u8, result[16..], 0))
+            @panic("invalid chrome composition result");
+        if (read(&result, 4) == 1) {
+            if (!std.mem.allEqual(u8, result[8..], 0)) @panic("invalid rejected chrome composition");
+            return error.InvalidChromeCommandCount;
+        }
+        const plan: ChromePlan = .{ .prefix = read(&result, 8), .suffix = read(&result, 12) };
+        if (plan.prefix > count or plan.suffix > count - plan.prefix or plan.prefix + plan.suffix != count)
+            @panic("invalid chrome composition span");
+        return plan;
+    }
+};

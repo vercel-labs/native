@@ -200,7 +200,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// BUDGET instead: `build` may emit any count up to it.
             prefix_commands: usize,
             /// Number of chrome commands preserved after the
-            /// widget-generated commands. Always exact.
+            /// widget-generated commands. Exact with the combined builder;
+            /// a budget when build_suffix supplies a separate derived layer.
             suffix_commands: usize = 0,
             /// The prefix length is whatever `build` emitted this
             /// rebuild (minus the fixed suffix) rather than an exact
@@ -216,6 +217,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// commands (up to `prefix_commands` under
             /// `variable_prefix`).
             build: *const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void,
+            /// Optional independent suffix. The first builder supplies only
+            /// the prefix; both actual lengths are retained on every rebuild.
+            build_suffix: ?*const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void = null,
         };
 
         /// A live webview region hosted alongside the canvas — the "both
@@ -3592,21 +3596,37 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// runtime then regenerates the widget span on internal state
         /// changes while preserving the chrome via
         /// `emitCanvasWidgetDisplayListWithChrome`.
+        // Zig-core compatibility for the original combined chrome callback.
+        // Compiled cores always install the TypeScript composition owner.
+        fn nativeChromePlan(chrome: ChromeOptions, count: usize, before: ?usize) error{InvalidChromeCommandCount}!canvas.render_coordination_policy.ChromePlan {
+            const prefix = before orelse blk: {
+                if (count < chrome.suffix_commands) return error.InvalidChromeCommandCount;
+                break :blk count - chrome.suffix_commands;
+            };
+            if (prefix > count or (chrome.variable_prefix and prefix > chrome.prefix_commands) or
+                (!chrome.variable_prefix and prefix != chrome.prefix_commands)) return error.InvalidChromeCommandCount;
+            const suffix = count - prefix;
+            if (before != null and suffix > chrome.suffix_commands) return error.InvalidChromeCommandCount;
+            return .{ .prefix = prefix, .suffix = suffix };
+        }
+
         fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
             var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var chrome_builder = canvas.Builder.init(&chrome_commands);
             try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
-            const chrome_list = chrome_builder.displayList();
-            if (chrome.variable_prefix) {
-                if (chrome_list.commands.len < chrome.suffix_commands or
-                    chrome_list.commands.len - chrome.suffix_commands > chrome.prefix_commands)
-                {
-                    return error.InvalidChromeCommandCount;
-                }
-            } else if (chrome_list.commands.len != chrome.prefix_commands + chrome.suffix_commands) {
-                return error.InvalidChromeCommandCount;
+            var before_suffix: ?usize = null;
+            if (chrome.build_suffix) |build_suffix| {
+                before_suffix = chrome_builder.displayList().commands.len;
+                try build_suffix(&self.model, &chrome_builder, self.canvas_size, tokens);
             }
-            const prefix_len = chrome_list.commands.len - chrome.suffix_commands;
+            const count = chrome_builder.displayList().commands.len;
+            const plan = if (self.options.render_coordination_policy) |policy|
+                try canvas.render_coordination_policy.ChromePlan.init(policy, chrome.prefix_commands, chrome.suffix_commands, count, before_suffix, chrome.variable_prefix)
+            else
+                try nativeChromePlan(chrome, count, before_suffix);
+            const prefix_len = plan.prefix;
+            const suffix_len = plan.suffix;
+            const chrome_list = chrome_builder.displayList();
 
             var commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
             var builder = canvas.Builder.init(&commands);
@@ -3622,7 +3642,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
             _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
                 .prefix_command_count = prefix_len,
-                .suffix_command_count = chrome.suffix_commands,
+                .suffix_command_count = suffix_len,
             });
         }
 
@@ -4581,12 +4601,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const self: *Self = @ptrCast(@alignCast(context));
             if (self.options.on_window_context) |map| {
                 const source_id: ?platform.WindowId = switch (event_value) {
-                    inline .command, .shortcut, .canvas_widget_pointer, .canvas_widget_keyboard,
-                    .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag,
-                    .canvas_widget_context_menu, .canvas_widget_context_menu_shown,
-                    .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request,
-                    .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize,
-                    .canvas_widget_change, .window_closed, .automation_provenance => |event| event.window_id,
+                    inline .command, .shortcut, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance => |event| event.window_id,
                     else => null,
                 };
                 if (source_id) |id| {

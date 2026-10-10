@@ -623,9 +623,15 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 stamped.layout_tweens = layoutTweensAdapter;
             }
             const CanvasHooks = @import("ts_canvas_hooks.zig").Hooks(core, Model, App);
-            if (comptime @hasDecl(Model, "canvasChrome")) {
+            if (comptime @hasDecl(Model, "canvasChrome") or @hasDecl(Model, "canvasChromeSuffix")) {
                 if (options.chrome != null) @panic("TsUiApp owns chrome from canvasChrome");
-                stamped.chrome = .{ .prefix_commands = 64, .variable_prefix = true, .build = CanvasHooks.chrome };
+                stamped.chrome = .{
+                    .prefix_commands = if (@hasDecl(Model, "canvasChrome")) 256 else 0,
+                    .suffix_commands = if (@hasDecl(Model, "canvasChromeSuffix")) 256 else 0,
+                    .variable_prefix = true,
+                    .build = CanvasHooks.chrome,
+                    .build_suffix = if (@hasDecl(Model, "canvasChromeSuffix")) CanvasHooks.suffix else null,
+                };
             }
             if (comptime @hasDecl(Model, "canvasAnimations")) {
                 if (options.animations != null) @panic("TsUiApp owns animations from canvasAnimations");
