@@ -42,6 +42,12 @@ pub const HostEventPump = struct {
     }
 
     fn enqueue(self: *HostEventPump, event: platform.Event) !void {
+        // A modal host service can keep requesting the same scheduling turn
+        // while its caller is suspended. Adjacent requests carry no observed
+        // payload and one turn satisfies them; keep every intervening event
+        // and every completed GPU frame in its original order.
+        if (event == .frame_requested and self.count != 0 and
+            self.pending.items[self.pending.items.len - 1].event == .frame_requested) return;
         if (self.count == capacity or @sizeOf(Pending) > max_bytes - self.bytes) return error.HostEventQueueFull;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
@@ -111,6 +117,35 @@ pub const HostEventPump = struct {
         }
     }
 };
+
+test "native callbacks coalesce adjacent scheduling requests during modal work" {
+    const Probe = struct {
+        pump: HostEventPump = .{ .allocator = std.testing.allocator },
+        order: [4]platform.Event = undefined,
+        count: usize = 0,
+        fn receive(context: *anyopaque, event: platform.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event == .app_start) {
+                for (0..10000) |_| try self.pump.dispatch(self, receive, .frame_requested);
+                try self.pump.dispatch(self, receive, .{ .window_focused = 9 });
+                for (0..10000) |_| try self.pump.dispatch(self, receive, .frame_requested);
+                try std.testing.expectEqual(@as(usize, 3), self.pump.count);
+                try std.testing.expectEqual(@as(usize, 0), self.count);
+            }
+            self.order[self.count] = event;
+            self.count += 1;
+        }
+    };
+    var probe: Probe = .{};
+    defer probe.pump.deinit();
+    try probe.pump.dispatch(&probe, Probe.receive, .app_start);
+    try std.testing.expectEqual(@as(usize, 4), probe.count);
+    try std.testing.expect(probe.order[0] == .app_start);
+    try std.testing.expect(probe.order[1] == .frame_requested);
+    try std.testing.expectEqual(@as(platform.WindowId, 9), probe.order[2].window_focused);
+    try std.testing.expect(probe.order[3] == .frame_requested);
+    try std.testing.expectEqual(@as(usize, 0), probe.pump.bytes);
+}
 
 test "native callbacks retain borrowed payloads and drain after their cause" {
     const Probe = struct {
