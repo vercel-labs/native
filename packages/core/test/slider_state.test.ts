@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { check, ruleIds } from "./helpers.ts";
+import { check, checkFiles, ruleIds } from "./helpers.ts";
 
 const source = `
 import { Cmd } from "@native-sdk/core";
@@ -34,4 +34,21 @@ test("slider channel rejects wrong records, whole Msg and mismatched subset payl
     inert.replace("): SampleMsg | null", "): Msg | null"),
     inert.replace('export type SampleMsg = { readonly kind: "sample"; readonly fraction: number }', 'export type SampleMsg = { readonly kind: "increment"; readonly fraction: number }'),
   ]) assert.ok(ruleIds(check(candidate)).includes("NS1033"));
+});
+
+test("slider state entry wiring rejects imported declarations and re-exports", () => {
+  const at = source.indexOf("export function sliderStateMsg");
+  const entry = source.slice(0, at);
+  const helper = `import type { Model, SampleMsg } from "./core.ts";
+import type { SliderState } from "@native-sdk/core/events";
+${source.slice(at)}`;
+  for (const wiring of [
+    'import { sliderStateMsg } from "./helper.ts";',
+    'export { sliderStateMsg } from "./helper.ts";',
+  ]) {
+    const result = checkFiles({ "core.ts": entry + wiring, "helper.ts": helper }, { contractEntry: "src/core.ts" });
+    assert.deepEqual(result.typeErrors, []);
+    assert.equal(result.ok, false);
+    assert.ok(ruleIds(result).includes("NS1014"));
+  }
 });
