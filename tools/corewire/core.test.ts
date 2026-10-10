@@ -5,10 +5,46 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { createRequire } from "node:module";
 import { baseContract, coreCases } from "./core_cases.ts";
 
 assert.ok(process.argv[2], "run with the compiled corewire path (zig build test-corewire-policy)");
 const corewire = path.resolve(process.argv[2]);
+
+test("nested unions in helper arguments retain their decoder type imports", () => {
+  const contract = baseContract();
+  contract.update_returns_cmd = false;
+  contract.types.structs.push({ name: "Envelope", origin: "actions.ts", exported: true,
+    fields: [{ name: "choice", type: { kind: "union", name: "Inner" } }] });
+  contract.types.unions.push(
+    { name: "Inner", origin: "events.ts", exported: true, arms: [
+      { name: "first", member: null, payload: { kind: "void" } },
+      { name: "second", member: null, payload: { kind: "void" } },
+    ] },
+    { name: "Outer", origin: "actions.ts", exported: true, arms: [
+      { name: "empty", member: null, payload: { kind: "void" } },
+      { name: "wrapped", member: "value", payload: { kind: "value", name: "Envelope" } },
+    ] },
+  );
+  contract.model_helpers.push({ name: "take", params: [{ kind: "union", name: "Outer" }], returns: { kind: "bool" }, arena: false });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-nested-helper-imports-"));
+  try {
+    fs.writeFileSync(path.join(dir, "input.json"), JSON.stringify(contract, (key, value) => key === "member" && value === null ? undefined : value));
+    const result = spawnSync(corewire, ["--sidecar", "input.json", "--facade", "facade.ts"], { cwd: dir, encoding: "utf8" });
+    assert.ifError(result.error); assert.equal(result.status, 0, result.stderr);
+    fs.writeFileSync(path.join(dir, "events.ts"), 'export type Inner = { readonly kind: "first" } | { readonly kind: "second" };\n');
+    fs.writeFileSync(path.join(dir, "actions.ts"), 'import type { Inner } from "./events.ts";\nexport interface Envelope { readonly choice: Inner; }\nexport type Outer = { readonly kind: "empty" } | { readonly kind: "wrapped"; readonly value: Envelope };\n');
+    fs.writeFileSync(path.join(dir, "core.ts"), 'import type { Outer } from "./actions.ts";\nexport interface Model { readonly count: number; readonly label: Uint8Array; }\nexport type Msg = { readonly kind: "bump" } | { readonly kind: "label_set"; readonly body: Uint8Array };\nexport function initialModel(): Model { return { count: 0, label: new Uint8Array(0) }; }\nexport function update(model: Model, msg: Msg): Model { return model; }\nexport function take(model: Model, value: Outer): boolean { return value.kind === "wrapped" && value.value.choice.kind === "first"; }\n');
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "src/core.ts"), 'export type { Model, Msg } from "../core.ts";\n');
+    const require = createRequire(new URL("../../packages/core/package.json", import.meta.url));
+    const ts = require("@typescript/old");
+    const program = ts.createProgram([path.join(dir, "facade.ts")], { noEmit: true, strict: true, skipLibCheck: true,
+      target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, allowImportingTsExtensions: true });
+    const diagnostics = ts.getPreEmitDiagnostics(program);
+    assert.equal(diagnostics.length, 0, diagnostics.map((item: { messageText: string }) => ts.flattenDiagnosticMessageText(item.messageText, "\n")).join("\n"));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 // Exact diagnostics and complete generated-file hashes captured from the
 // independent native implementation before replacing its admission rules.
 // Mirror hashes include the reviewed stateless-runtime API addition.
@@ -17,6 +53,12 @@ const corewire = path.resolve(process.argv[2]);
 // addition recovers every previous complete facade pin. The byte-key
 // encoder and bounded 4 MiB view changes are also audited against those
 // complete pins; their removal recovers the earlier generator output.
+// Exact audio adds two command records. Removing those two encoder cases
+// recovers every prior complete facade; all other projection pins are retained.
+// Native close/minimize add UTF-8 label records. Removing that encoder block
+// recovers every complete facade from the exact-audio projection.
+// Exact subprocess and cancellation records are independently audited:
+// removing only their encoder cases recovers every preceding complete facade.
 const goldens = JSON.parse(fs.readFileSync(new URL("core_goldens.json", import.meta.url), "utf8")) as Record<string, {
   status: number; diagnostics: string; hashes: Record<string, string>;
   check_status: number; check_diagnostics: string;

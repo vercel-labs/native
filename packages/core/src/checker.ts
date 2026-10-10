@@ -515,6 +515,8 @@ export class SubsetChecker {
     this.checkWebPanesHelper();
     this.checkLayoutTweensHelper();
     this.checkCanvasHelpers();
+    this.checkBootImageHelper();
+    this.checkSliderStateHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -1574,18 +1576,62 @@ export class SubsetChecker {
       this.report("NS1033", "`layoutTweens` must be a single-Model helper returning `readonly LayoutTween[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
   }
 
+  private checkBootImageHelper(): void {
+    const decl = this.entryExportedFunction("bootImageMsg");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "bootImageMsg" && candidate.decl === decl);
+    const input = decl.parameters[1]?.type;
+    const record = input ? this.table.resolveTypeNode(input) : null;
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+    const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+    const root = this.table.unions.get("Msg");
+    const valid = helper !== undefined && decl.parameters.length === 2 &&
+      record?.k === "struct" && record.name === "BootImageResult" &&
+      this.table.structs.get(record.name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts") &&
+      returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+      result.arms.every(arm => {
+        const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+        return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+          field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+      });
+    if (!valid) this.report("NS1033", "bootImageMsg must take (Model, BootImageResult) from @native-sdk/core/events and return a dedicated Msg subset union | null with identical dispatch payloads.", decl.type ?? decl);
+  }
+
+  private checkSliderStateHelper(): void {
+    const decl = this.entryExportedFunction("sliderStateMsg");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "sliderStateMsg" && candidate.decl === decl);
+    const input = decl.parameters[1]?.type;
+    const samples = input ? this.table.resolveTypeNode(input) : null;
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+    const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+    const root = this.table.unions.get("Msg");
+    const valid = helper !== undefined && decl.parameters.length === 2 && samples?.k === "slice" &&
+      samples.elem.k === "struct" && samples.elem.name === "SliderState" &&
+      this.table.structs.get(samples.elem.name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts") &&
+      returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+      result.arms.every(arm => {
+        const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+        return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+          field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+      });
+    if (!valid) this.report("NS1033", "sliderStateMsg must take (Model, readonly SliderState[]) from @native-sdk/core/events and return a dedicated Msg subset union | null with identical payloads. Its update must return no commands.", decl.type ?? decl);
+  }
+
   private checkCanvasHelpers(): void {
     const canonicalRecord = (type: import("./types.ts").ZType, name: string): boolean =>
       type.k === "struct" && type.name === name &&
       this.table.structs.get(name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
-    for (const name of ["canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg"]) {
+    for (const name of ["canvasIcons", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg"]) {
       const decl = this.entryExportedFunction(name);
       if (decl === null) continue;
       const helper = this.table.modelHelperDecls().find(candidate => candidate.name === name && candidate.decl === decl);
       const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
       const context = decl.parameters[1]?.type;
       let valid = helper !== undefined;
-      if (name === "canvasAnimations") {
+      if (name === "canvasIcons") {
+        valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasIconDefinition");
+      } else if (name === "canvasAnimations") {
         valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasAnimation");
       } else if (name === "canvasChrome" || name === "canvasChromeSuffix") {
         valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasChromeContext") &&
@@ -1603,7 +1649,7 @@ export class SubsetChecker {
           });
         if (this.entryExportedFunction("frameMsg")) valid = false;
       }
-      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasChrome/canvasChromeSuffix(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
+      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasIcons(Model): readonly CanvasIconDefinition[]; canvasChrome/canvasChromeSuffix(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
     }
   }
 
@@ -2116,7 +2162,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasIcons", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg", "bootImageMsg",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

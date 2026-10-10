@@ -1011,6 +1011,16 @@ The view binds that model-owned id in either tier; `0` is the no-image sentinel 
 <avatar image="{avatar}" label="Octocat">OC</avatar>
 ```
 
+Compiled TypeScript views also accept canonical unsigned decimal `Uint8Array`
+identity bytes, through max-u64. Keep exact restored/native identities in that
+representation instead of converting them to `number`. The view validates the
+bytes and sends two exact u32 words to native storage. An image leaf accepts
+`fit="stretch|contain|cover"`; the default is stretch and avatars use cover.
+Compiled views support per-side `padding-top`, `padding-bottom`, `padding-left`
+and `padding-right` over the uniform `padding` value. Color-token and radius
+attributes may bind a closed string-literal union of their supported tokens;
+the compiler rejects arbitrary text and unsupported members.
+
 One registered image can be a texture atlas. The source rectangle uses
 decoded-image pixel coordinates; declare all four markup attributes, or set
 the equivalent `ElementOptions.image_src` `geometry.RectF` in a Zig view.

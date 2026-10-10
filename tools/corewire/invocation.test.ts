@@ -13,6 +13,10 @@ const corewire = path.resolve(process.argv[2]);
 // addition recovers every previous complete facade pin. The byte-key
 // encoder and bounded 4 MiB view changes are also audited against those
 // complete pins; their removal recovers the earlier generator output.
+// Exact audio and close/minimize encoder additions are likewise audited
+// by recovering each complete earlier facade after removing those blocks.
+// Exact subprocess and cancellation records are independently audited:
+// removing only their encoder cases recovers every preceding complete facade.
 const goldens = JSON.parse(fs.readFileSync(new URL("invocation_goldens.json", import.meta.url), "utf8"));
 for (const item of invocationCases()) test("invocation: " + item.name, () => {
   assert.ok(goldens[item.name], "missing independent native reference");

@@ -1045,8 +1045,77 @@ export class IntInference {
   private flowInto(target: ts.Node | undefined, expr: ts.Expression): void {
     if (!target) return;
     const slot = this.slots.get(target);
-    if (!slot) return;
-    slot.inflows.push(this.contribution(expr));
+    if (slot) {
+      slot.inflows.push(this.contribution(expr));
+      return;
+    }
+    // Passing a whole record does not read its numeric fields syntactically,
+    // but it still assigns each field to the callee's corresponding slot.
+    // Wire declarations, not spellings: separate union arms may use the same
+    // field name while requiring different numeric representations.
+    if (ts.isParameter(target) || ts.isVariableDeclaration(target) ||
+        ts.isPropertySignature(target) || ts.isPropertyDeclaration(target)) {
+      this.flowStructured(this.tast.typeOf(target), this.tast.typeOf(expr), expr);
+    }
+  }
+
+  private flowStructured(destination: ts.Type, source: ts.Type, site: ts.Expression): void {
+    const visited = new Map<ts.Type, Set<ts.Type>>();
+    const walk = (dst: ts.Type, src: ts.Type): void => {
+      const seen = visited.get(dst);
+      if (seen?.has(src)) return;
+      if (seen) seen.add(src);
+      else visited.set(dst, new Set([src]));
+      if (dst.isUnion()) {
+        for (const member of dst.types) walk(member, src);
+        return;
+      }
+      if (src.isUnion()) {
+        for (const member of src.types) walk(dst, member);
+        return;
+      }
+      if (!(dst.flags & ts.TypeFlags.Object) || !(src.flags & ts.TypeFlags.Object)) return;
+      const dstTag = this.tast.propertyTypeOf(dst, "kind");
+      const srcTag = this.tast.propertyTypeOf(src, "kind");
+      if (dstTag?.isStringLiteral() && srcTag?.isStringLiteral() && dstTag.value !== srcTag.value) return;
+      if (this.tast.isArrayLikeType(dst) && this.tast.isArrayLikeType(src)) {
+        const dstElement = this.tast.typeArgumentsOf(dst)[0];
+        const srcElement = this.tast.typeArgumentsOf(src)[0];
+        if (dstElement && srcElement) walk(dstElement, srcElement);
+        return;
+      }
+      for (const property of dst.getProperties()) {
+        const target = property.valueDeclaration ?? property.declarations?.[0];
+        // Library implementation details and methods are not model fields.
+        if (!target || !this.fileSet.has(target.getSourceFile()) ||
+            !(ts.isPropertySignature(target) || ts.isPropertyDeclaration(target))) continue;
+        const input = src.getProperty(property.name);
+        const inputDecl = input?.valueDeclaration ?? input?.declarations?.[0];
+        if (!inputDecl || inputDecl === target) continue;
+        const slot = this.slots.get(target);
+        if (slot) {
+          const inputSlot = this.slots.get(inputDecl);
+          if (inputSlot) {
+            slot.inflows.push({ slots: [inputSlot], float: false, unknown: false, intSource: false, site });
+          } else if (ts.isPropertyAssignment(inputDecl)) {
+            slot.inflows.push(this.contribution(inputDecl.initializer));
+          } else if (ts.isShorthandPropertyAssignment(inputDecl)) {
+            const value = this.tast.shorthandValueDeclaration(inputDecl);
+            const valueSlot = value ? this.slots.get(value) : undefined;
+            slot.inflows.push({ slots: valueSlot ? [valueSlot] : [], float: false,
+              unknown: valueSlot === undefined, intSource: false, site });
+          } else {
+            // An untracked numeric source cannot establish integer proof.
+            slot.inflows.push({ slots: [], float: false, unknown: true, intSource: false, site });
+          }
+        } else {
+          const dstField = this.tast.propertyTypeOf(dst, property.name);
+          const srcField = this.tast.propertyTypeOf(src, property.name);
+          if (dstField && srcField) walk(dstField, srcField);
+        }
+      }
+    };
+    walk(destination, source);
   }
 
   private demand(expr: ts.Expression): void {

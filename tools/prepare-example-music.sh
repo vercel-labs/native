@@ -7,6 +7,7 @@
 #   examples/soundboard/assets/music/<album-slug>/<track-slug>.mp3   (gitignored)
 #   examples/soundboard/src/music_manifest.zon                       (committed)
 #   examples/deck/src/music_manifest.zon                             (committed copy)
+#   examples/deck/src/catalog.ts                                     (compiled tables)
 #
 # The audio files never enter git; the manifest does, so the examples can
 # browse the full catalog even on machines that have not run this script.
@@ -48,10 +49,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_ROOT="$REPO_ROOT/examples/soundboard/assets/music"
 MANIFEST="$REPO_ROOT/examples/soundboard/src/music_manifest.zon"
 DECK_MANIFEST="$REPO_ROOT/examples/deck/src/music_manifest.zon"
+DECK_CATALOG="$REPO_ROOT/examples/deck/src/catalog.ts"
 
 [ -x "$FFMPEG" ] || { echo "error: ffmpeg not found at $FFMPEG (set FFMPEG=...)" >&2; exit 1; }
 [ -x "$FFPROBE" ] || { echo "error: ffprobe not found at $FFPROBE (set FFPROBE=...)" >&2; exit 1; }
 [ -d "$SRC_ROOT" ] || { echo "error: source library not found at $SRC_ROOT (set NATIVE_SDK_MUSIC_SRC=...)" >&2; exit 1; }
+command -v node >/dev/null || { echo "error: node is required to encode TypeScript catalog literals" >&2; exit 1; }
 
 # The catalog. Bands with two albums have their folder split across both;
 # a band folder that is absent on disk still gets its catalog entry, with
@@ -70,8 +73,7 @@ CATALOG=(
     "Color TV|Channel Surfing|Color TV|1|color tv.png"
 )
 
-# Soundboard registers committed album art from assets/; Deck keeps its
-# embedded copies under src/ (the module root `@embedFile` reaches). 512px JPEG: the display
+# Both examples register committed album art from assets/. 512px JPEG: the display
 # register is ~256pt at 2x, and JPEG is the only route that keeps real
 # artwork well under the commit budget — the repo's own PNG codec
 # writes stored (uncompressed) deflate only, which is ~1MB at this
@@ -82,7 +84,7 @@ CATALOG=(
 # pure-vector fallback instead — the same state a codec-less host shows.
 ART_SRC="$SRC_ROOT/art"
 ART_OUT="$REPO_ROOT/examples/soundboard/assets/art"
-DECK_ART_OUT="$REPO_ROOT/examples/deck/src/art"
+DECK_ART_OUT="$REPO_ROOT/examples/deck/assets/art"
 
 # Downscale, strip, and verify one album's art. Prints nothing; the
 # caller checks the output file exists.
@@ -110,6 +112,12 @@ slug_of() {
 # Escape a string for a ZON double-quoted literal.
 zon_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Encode metadata as a byte literal, retaining non-ASCII text and escaping
+# quotes/backslashes without interpreting it as TypeScript source.
+byte_literal() {
+    node -e 'const text = process.argv[1]; process.stdout.write((/[^\x00-\x7f]/.test(text) ? "utf8Bytes" : "asciiBytes") + "(" + JSON.stringify(text) + ")");' "$1"
 }
 
 # Album year: 2025 or 2026, decided by the seed so it never drifts.
@@ -213,6 +221,9 @@ rm -rf "$OUT_ROOT" "$ART_OUT" "$DECK_ART_OUT"
 mkdir -p "$OUT_ROOT" "$ART_OUT" "$DECK_ART_OUT"
 
 manifest_body=""
+catalog_albums=""
+catalog_tracks=""
+album_no=0
 total_tracks=0
 total_art=0
 missing_folders=()
@@ -220,6 +231,8 @@ missing_art=()
 
 for entry in "${CATALOG[@]}"; do
     IFS='|' read -r artist album folder slot art_file <<< "$entry"
+    album_no=$((album_no + 1))
+    track_start=$total_tracks
 
     two_albums="no"
     matches=0
@@ -236,10 +249,12 @@ for entry in "${CATALOG[@]}"; do
     fi
 
     art_zon="null"
+    art_ts="null"
     if [ -f "$ART_SRC/$art_file" ]; then
         prepare_art "$ART_SRC/$art_file" "$ART_OUT/$album_slug.jpg"
         cp "$ART_OUT/$album_slug.jpg" "$DECK_ART_OUT/$album_slug.jpg"
         art_zon="\"art/$album_slug.jpg\""
+        art_ts="$(byte_literal "art/$album_slug.jpg")"
         total_art=$((total_art + 1))
     else
         missing_art+=("$art_file")
@@ -259,6 +274,9 @@ for entry in "${CATALOG[@]}"; do
         tracks_zon+="$(printf '                .{ .title = "%s", .file = "%s", .duration_ms = %s, .bytes = %s },' \
             "$(zon_escape "$title")" "$(zon_escape "$dst_rel")" "$duration_ms" "$track_bytes")"$'\n'
         total_tracks=$((total_tracks + 1))
+        catalog_tracks+="$(printf '  { id: %s, album: %s, number: %s, title: %s, file: %s, path: %s, duration_ms: %s, bytes: %s },' \
+            "$total_tracks" "$album_no" "$track_no" "$(byte_literal "$title")" "$(byte_literal "$dst_rel")" \
+            "$(byte_literal "../soundboard/assets/$dst_rel")" "$duration_ms" "$track_bytes")"$'\n'
         echo "  $artist / $album: $title (${duration_ms}ms, ${track_bytes} bytes)"
     done < <(tracks_for_album "$artist" "$album" "$folder" "$slot" "$two_albums")
 
@@ -271,6 +289,8 @@ for entry in "${CATALOG[@]}"; do
 
     manifest_body+="$(printf '        .{\n            .artist = "%s",\n            .title = "%s",\n            .year = %s,\n            .art = %s,\n            .tracks = %s,\n        },' \
         "$(zon_escape "$artist")" "$(zon_escape "$album")" "$year" "$art_zon" "$tracks_block")"$'\n'
+    catalog_albums+="$(printf '  { id: %s, artist: %s, title: %s, year: %s, art: %s, track_start: %s, track_count: %s },' \
+        "$album_no" "$(byte_literal "$artist")" "$(byte_literal "$album")" "$year" "$art_ts" "$track_start" "$track_no")"$'\n'
 done
 
 # The streaming base baked into the manifest: the hosted mirror by
@@ -307,10 +327,36 @@ EOF
 
 cp "$MANIFEST" "$DECK_MANIFEST"
 
+catalog_url_base="${NATIVE_SDK_MUSIC_URL_BASE:-${HOSTED_URL_BASE%/}}"
+catalog_url_base="${catalog_url_base%/}"
+cat > "$DECK_CATALOG" <<EOF
+// Generated by tools/prepare-example-music.sh alongside music_manifest.zon.
+// Album slices preserve manifest order; audio files are shared with Soundboard.
+import { asciiBytes, utf8Bytes } from "@native-sdk/core";
+export interface Album {
+  readonly id: number; readonly artist: Uint8Array; readonly title: Uint8Array;
+  readonly year: number; readonly art: Uint8Array | null;
+  readonly track_start: number; readonly track_count: number;
+}
+export interface Track {
+  readonly id: number; readonly album: number; readonly number: number;
+  readonly title: Uint8Array; readonly file: Uint8Array; readonly path: Uint8Array;
+  readonly duration_ms: number; readonly bytes: number;
+}
+export const url_base = $(byte_literal "$catalog_url_base");
+export const albums: readonly Album[] = [
+${catalog_albums}];
+export const tracks: readonly Track[] = [
+${catalog_tracks}];
+export function albumById(id: number): Album | undefined { return albums.find((album) => album.id === id); }
+export function trackById(id: number): Track | undefined { return tracks.find((track) => track.id === id); }
+EOF
+
 echo
 echo "wrote $total_tracks tracks under $OUT_ROOT"
 echo "wrote $total_art covers under $ART_OUT (+ copies in $DECK_ART_OUT)"
 echo "wrote manifest $MANIFEST (+ copy $DECK_MANIFEST)"
+echo "wrote TypeScript catalog $DECK_CATALOG"
 if [ "${#missing_folders[@]}" -gt 0 ]; then
     echo "note: no source folder for: ${missing_folders[*]} — catalog entry kept with zero tracks"
 fi

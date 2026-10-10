@@ -75,7 +75,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { combobox, bubble, table, data_grid, popover, menu_surface, data_row, data_cell, progress, skeleton, spinner, column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
+    kind: enum { image, combobox, bubble, table, data_grid, popover, menu_surface, data_row, data_cell, progress, skeleton, spinner, column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -96,6 +96,10 @@ const Record = struct {
     virtualWindow: ?usize = null,
     gap: f32 = 0,
     padding: ?f32 = null,
+    paddingTop: ?f32 = null,
+    paddingBottom: ?f32 = null,
+    paddingLeft: ?f32 = null,
+    paddingRight: ?f32 = null,
     grow: f32 = 0,
     width: f32 = 0,
     height: f32 = 0,
@@ -109,6 +113,9 @@ const Record = struct {
     axis: ?sdk.canvas.ScrollAxes = null,
     overscroll: ?sdk.canvas.WidgetOverscroll = null,
     image: u64 = 0,
+    imageLower: ?u32 = null,
+    imageUpper: ?u32 = null,
+    imageFit: ?sdk.canvas.ImageFit = null,
     pty: ?u64 = null,
     ptyBytes: ?ByteText = null,
     scrollback: ?u32 = null,
@@ -327,6 +334,9 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.end <= index or value.end > parent_end) return error.InvalidView;
     if (!std.math.isFinite(value.gap) or value.gap < 0 or !std.math.isFinite(value.grow) or value.grow < 0) return error.InvalidView;
     if (value.padding) |padding| if (!std.math.isFinite(padding) or padding < 0) return error.InvalidView;
+    for ([_]?f32{ value.paddingTop, value.paddingBottom, value.paddingLeft, value.paddingRight }) |side| if (side) |padding| if (!std.math.isFinite(padding) or padding < 0) return error.InvalidView;
+    if ((value.kind == .code or value.kind == .input_group or value.kind == .input_group_actions) and
+        (value.paddingTop != null or value.paddingBottom != null or value.paddingLeft != null or value.paddingRight != null)) return error.InvalidView;
     for ([_]f32{ value.width, value.height, value.minWidth, value.maxWidth }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
     if (value.kind == .resizable and value.gap != 0) return error.InvalidView;
     if (value.resize != null and value.kind != .split) return error.InvalidView;
@@ -344,6 +354,10 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (value.key != null and value.keyInt != null or value.globalKey != null and value.globalKeyInt != null) return error.InvalidView;
     if (value.keySlot > 1024 or value.keySlot != 0 and value.key == null and value.keyInt == null) return error.InvalidView;
     if (value.image > 9007199254740991) return error.InvalidView;
+    if ((value.imageLower == null) != (value.imageUpper == null) or value.imageLower != null and value.image != 0) return error.InvalidView;
+    if (value.imageLower != null and value.kind != .image and value.kind != .avatar) return error.InvalidView;
+    if (value.imageFit != null and value.kind != .image) return error.InvalidView;
+    if (value.kind == .image and (value.text.len != 0 or value.textBytes != null)) return error.InvalidView;
     for ([_]?i64{ value.keyInt, value.globalKeyInt }) |int| if (int) |key| if (key < -9007199254740991 or key > 9007199254740991) return error.InvalidView;
     const chart_metadata = value.chartSeries != null or value.chartXLabels != null or value.chartYMin != null or value.chartYMax != null or value.chartGridLines != null or value.chartBaseline != null or value.chartYLabels != null or value.chartHoverDetails != null or value.chartStrokeWidth != null;
     if (chart_metadata and value.kind != .chart) return error.InvalidView;
@@ -530,7 +544,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .value_x = value.valueX orelse 0,
         .axis = value.axis orelse .vertical,
         .overscroll = value.overscroll orelse .default,
-        .image = value.image,
+        .image = if (value.imageLower) |lower| @as(u64, lower) | (@as(u64, value.imageUpper.?) << 32) else value.image,
         .pty = value.pty orelse 0,
         .pty_name = if (value.ptyBytes) |key| key.bytes else "",
         .scrollback = value.scrollback orelse 0,
@@ -572,6 +586,11 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .tooltip_delay = value.tooltipDelay orelse -1,
     }, children.items);
     if (value.kind == .avatar) result.widget.image_fit = .cover;
+    if (value.imageFit) |fit| result.widget.image_fit = fit;
+    if (value.paddingTop) |padding| result.widget.layout.padding.top = padding;
+    if (value.paddingBottom) |padding| result.widget.layout.padding.bottom = padding;
+    if (value.paddingLeft) |padding| result.widget.layout.padding.left = padding;
+    if (value.paddingRight) |padding| result.widget.layout.padding.right = padding;
     if (value.virtualWindow) |window| {
         const resolved = virtuals[window];
         if (children.items.len != resolved.range.itemCount()) return error.InvalidView;
@@ -694,6 +713,56 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         result.widget.layout.clip_content = true;
     }
     return result;
+}
+
+test "compiled per-side padding keeps uniform defaults and rejects invalid extents" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const node_value = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"padding\":8,\"paddingTop\":2,\"paddingLeft\":16}]}" );
+    try std.testing.expectEqualDeep(@TypeOf(node_value.widget.layout.padding){ .top = 2, .bottom = 8, .left = 16, .right = 8 }, node_value.widget.layout.padding);
+    for ([_][]const u8{ "paddingTop", "paddingBottom", "paddingLeft", "paddingRight" }) |field| {
+        const invalid = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"column\",\"text\":\"\",\"{s}\":-1}}]}}", .{field});
+        try std.testing.expectError(error.InvalidView, decode(&ui, invalid));
+        const group = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":2,\"kind\":\"input_group\",\"text\":\"\",\"{s}\":0}},{{\"end\":2,\"kind\":\"textarea\",\"text\":\"\"}}]}}", .{field});
+        try std.testing.expectError(error.InvalidView, decode(&ui, group));
+        const actions = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":3,\"kind\":\"input_group\",\"text\":\"\"}},{{\"end\":2,\"kind\":\"textarea\",\"text\":\"\"}},{{\"end\":3,\"kind\":\"input_group_actions\",\"text\":\"\",\"{s}\":0}}]}}", .{field});
+        try std.testing.expectError(error.InvalidView, decode(&ui, actions));
+    }
+}
+
+test "compiled image records preserve exact identities fit and independent native ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    for ([_]u64{ 0, 1, 4294967295, 4294967296, 9007199254740993, 9223372036854775808, std.math.maxInt(u64) }) |id| {
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"image\",\"text\":\"\",\"imageLower\":{d},\"imageUpper\":{d},\"imageFit\":\"cover\",\"width\":140,\"height\":140,\"label\":\"Art bay\"}}]}}", .{ @as(u32, @truncate(id)), id >> 32 });
+        const retained = try decode(&ui, bytes);
+        @memset(bytes, 'x');
+        _ = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"image\",\"text\":\"\",\"image\":7}]}" );
+        var reference = Ui.init(arena.allocator());
+        reference.construction_policy = ui.construction_policy;
+        reference.composition_policy = ui.composition_policy;
+        var expected = reference.image(.{ .image = id, .width = 140, .height = 140, .semantics = .{ .label = "Art bay" } });
+        if (comptime @hasDecl(core, "nativeWindowPolicy")) expected.widget.appearance_policy = core.nativeWindowPolicy;
+        if (comptime @hasDecl(core, "nativeTextPolicy")) expected.widget.interaction_policy = core.nativeTextPolicy;
+        expected.widget.image_fit = .cover;
+        try std.testing.expectEqualDeep(expected.widget, retained.widget);
+    }
+    for ([_][]const u8{
+        "\"imageLower\":1", "\"imageUpper\":1", "\"imageLower\":0,\"imageUpper\":0,\"image\":1",
+        "\"imageLower\":4294967296,\"imageUpper\":0", "\"imageLower\":0,\"imageUpper\":-1",
+        "\"imageLower\":1.5,\"imageUpper\":0", "\"image\":9007199254740992", "\"imageFit\":\"invalid\"",
+    }) |fields| {
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"image\",\"text\":\"\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    for ([_][]const u8{
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"image\",\"text\":\"caption\"}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"image\",\"text\":\"\",\"textBytes\":[]}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"panel\",\"text\":\"\",\"imageLower\":0,\"imageUpper\":0}]}",
+        "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"avatar\",\"text\":\"DK\",\"imageFit\":\"cover\"}]}",
+    }) |bytes| try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
 }
 
 test "compiled app Markdown rejects unrelated fields malformed bytes and incompatible routes" {

@@ -10512,11 +10512,7 @@ pub fn Effects(comptime Msg: type) type {
         /// is its own namespace (like timer keys) and identifies the
         /// playback in every event; it consumes no `max_effects` slots.
         pub fn playAudio(self: *Self, options: PlayAudioOptions) void {
-            const rejected = (options.path.len == 0 and options.url.len == 0) or
-                options.path.len > max_effect_audio_path_bytes or
-                options.url.len > max_effect_audio_path_bytes or
-                options.cache_path.len > max_effect_audio_path_bytes;
-            if (rejected) {
+            if (audioPlayRejected(options)) {
                 self.deliverLoopAudio(.{ .key = options.key, .kind = .rejected }, options.on_event);
                 return;
             }
@@ -10573,6 +10569,15 @@ pub fn Effects(comptime Msg: type) type {
             }
             services.audioPlay() catch return self.failAudioChannel();
             if (volume != 1.0) services.audioSetVolume(volume) catch {};
+        }
+
+        /// The native source admission boundary; rejected loads retain the
+        /// active player and deliver their own deferred result.
+        pub fn audioPlayRejected(options: PlayAudioOptions) bool {
+            return (options.path.len == 0 and options.url.len == 0) or
+                options.path.len > max_effect_audio_path_bytes or
+                options.url.len > max_effect_audio_path_bytes or
+                options.cache_path.len > max_effect_audio_path_bytes;
         }
 
         /// Pause the current playback in place. Idle channels no-op; no

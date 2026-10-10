@@ -623,8 +623,9 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvNodes.push({ end: nscvNodes.length + 1, kind: "markdown", text: "", markdownRecipe: ${wordImages ? "nscvMarkdownRecipeWords" : "nscvMarkdownRecipe"}(${source.code}, ${expanded}, ${issue}, ${images})${channels.length ? ", " + channels.join(", ") : ""} });`);
       return;
     }
-    const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", combobox: "combobox", bubble: "bubble", table: "table", "data-grid": "data_grid", popover: "popover", "menu-surface": "menu_surface", "table-row": "data_row", "table-cell": "data_cell", progress: "progress", skeleton: "skeleton", spinner: "spinner", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
+    const kinds: Record<string, string> = { image: "image", terminal: "terminal", icon: "icon", combobox: "combobox", bubble: "bubble", table: "table", "data-grid": "data_grid", popover: "popover", "menu-surface": "menu_surface", "table-row": "data_row", "table-cell": "data_cell", progress: "progress", skeleton: "skeleton", spinner: "spinner", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
+    if (node.name === "image" && (!node.attrs.has("image") || node.text.trim() || node.children.length)) fail(node, "image requires an identity binding and no content");
     if (node.name === "terminal" && (!node.attrs.has("pty") || node.text.trim() || node.children.length || node.attrs.has("text"))) fail(node, "terminal requires pty and no authored content");
     if (node.name === "icon" && (!node.attrs.has("name") || node.text.trim() || node.children.length)) fail(node, "icon requires name and no content");
     if (node.name === "radio-group" && !node.attrs.has("label")) fail(node, "radio-group requires a label");
@@ -734,8 +735,15 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
               fields.push(`weight: ${JSON.stringify(value)}`);
             }
           } else if (name === "foreground") {
-            if (!["background", "surface", "surface_subtle", "surface_pressed", "text", "text_muted", "syntax_plain", "syntax_comment", "syntax_keyword", "syntax_literal", "syntax_function", "syntax_property", "syntax_constant", "border", "accent", "accent_text", "destructive", "destructive_text", "success", "success_text", "warning", "warning_text", "info", "info_text", "focus_ring", "shadow", "scrim", "disabled"].includes(value)) fail(part, "unsupported span foreground token");
-            fields.push(`color: ${JSON.stringify(value)}`);
+            if (value.startsWith("{")) {
+              const expr = binding(value, part, scope);
+              const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
+              if (expr.type.kind !== "enum" || !members?.length || !members.every(member => colorTokenNames.includes(member))) fail(part, "span foreground requires its closed token vocabulary");
+              fields.push(`color: ${expr.code}`);
+            } else {
+              if (!colorTokenNames.includes(value)) fail(part, "unsupported span foreground token");
+              fields.push(`color: ${JSON.stringify(value)}`);
+            }
           } else fail(part, `unsupported span attribute ${name}; layout, identity and events belong on text`);
         }
         runs.push(`{ ${fields.join(", ")} }`);
@@ -770,7 +778,24 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     for (const [name, value] of node.attrs) {
       if (node.name === "code" && ["source", "language", "editable", "wrap", "line-numbers", "added-lines", "removed-lines", "on-input"].includes(name)) continue;
       if (name === "gap" && node.name === "resizable") fail(node, "resizable is a stacking surface; put gap on a row or column inside");
-      if (["gap", "padding", "grow", "width", "height", "value", "image"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
+      if (name === "image") {
+        if (!["image", "avatar"].includes(node.name) || !/^\{[^{}]+\}$/.test(value)) fail(node, "image requires one identity binding on image or avatar");
+        const identity = binding(value, node, scope);
+        if (identity.type.kind === "bytes") {
+          const local = `nscvImage${next++}`;
+          output.push(`const ${local} = nscvImageIdentity(${identity.code});`);
+          props.push(`imageLower: ${local}.imageLower`, `imageUpper: ${local}.imageUpper`);
+        } else props.push(`image: ${bound(value, "number", node, scope)}`);
+      }
+      else if (name === "fit") {
+        if (node.name !== "image" || !["contain", "cover", "stretch"].includes(value)) fail(node, "fit requires contain, cover or stretch on image");
+        props.push(`imageFit: ${JSON.stringify(value)}`);
+      }
+      else if (["gap", "padding", "grow", "width", "height", "value"].includes(name)) props.push(`${name}: ${bound(value, "number", node, scope)}`);
+      else if (["padding-top", "padding-bottom", "padding-left", "padding-right"].includes(name)) {
+        const property = name.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+        props.push(`${property}: ${bound(value, "number", node, scope)}`);
+      }
       else if (name === "surface") {
         if (node.name !== "media-surface") fail(node, "surface requires media-surface");
         props.push(`image: ${bound(value, "number", node, scope)}`);
@@ -907,11 +932,12 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       }
       else if (["main", "cross", "size", "variant", "role", "background", "foreground", "border-color", "focus-ring", "accent", "accent-foreground", "radius"].includes(name)) {
         const vocab: Record<string, string[]> = { main: ["start", "center", "end", "space_between"], cross: ["start", "center", "end", "stretch"], size: ["default", "sm", "lg", "icon", "heading", "display"], variant: ["default", "primary", "secondary", "ghost", "destructive", "outline"], role: ["list", "listitem", "tree", "treeitem", "tab"], background: colorTokenNames, foreground: colorTokenNames, "border-color": colorTokenNames, "focus-ring": colorTokenNames, accent: colorTokenNames, "accent-foreground": colorTokenNames, radius: ["sm", "md", "lg", "xl", "none"] };
-        if (name === "variant" && value.startsWith("{")) {
+        if (["variant", "background", "foreground", "border-color", "focus-ring", "accent", "accent-foreground", "radius"].includes(name) && value.startsWith("{")) {
           const expr = binding(value, node, scope);
           const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
-          if (expr.type.kind !== "enum" || !members?.every(member => vocab.variant!.includes(member))) fail(node, "variant requires the closed widget variant vocabulary");
-          props.push(`variant: ${expr.code}`);
+          if (expr.type.kind !== "enum" || !members?.length || !members.every(member => vocab[name]!.includes(member))) fail(node, `${name} requires its closed token vocabulary`);
+          const property = name === "border-color" ? "borderColor" : name === "focus-ring" ? "focusRing" : name === "accent-foreground" ? "accentForeground" : name;
+          props.push(`${property}: ${expr.code}`);
           continue;
         }
         if (!vocab[name]!.includes(value)) fail(node, `unsupported ${name}=${value}`);

@@ -20,7 +20,7 @@ const Command = union(enum) {
     fill_path: struct { id: []const u8 = "1", elements: []const Element = &.{}, fill: Fill = .{ .color = .{} } },
     stroke_path: struct { id: []const u8 = "1", elements: []const Element = &.{}, stroke: Stroke = .{}, cap: canvas.LineCap = .butt },
 };
-const Context = struct { width: f64, height: f64, background: Color, surface: Color, border: Color };
+const Context = struct { width: f64, height: f64, background: Color, surface: Color, border: Color, text: Color };
 const Transform = struct { a: f64 = 1, b: f64 = 0, c: f64 = 0, d: f64 = 1, tx: f64 = 0, ty: f64 = 0 };
 const Animation = struct {
     label: []const u8 = "target",

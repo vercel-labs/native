@@ -466,7 +466,7 @@ class ContractEmitter {
     if (helperNames.includes("statusItems") && !model.includes("statusItems")) model.push("statusItems");
     if (helperNames.includes("windows") && !model.includes("windows")) model.push("windows");
     if (helperNames.includes("webPanes") && !model.includes("webPanes")) model.push("webPanes");
-    for (const name of ["canvasFrameMsg", "canvasChrome", "canvasChromeSuffix", "canvasAnimations"]) {
+    for (const name of ["canvasIcons", "canvasFrameMsg", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "bootImageMsg", "sliderStateMsg"]) {
       if (helperNames.includes(name) && !model.includes(name)) model.push(name);
     }
     return { model, msg };

@@ -210,6 +210,12 @@ export interface AudioRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
 
+export interface ExactAudioSource extends AudioSource {
+  readonly cacheDir?: Uint8Array;
+}
+export { type AudioTransport } from "./events.ts";
+import { type AudioTransport } from "./events.ts";
+
 export interface VideoSource {
   readonly surface: number;
   readonly path?: Uint8Array;
@@ -436,6 +442,8 @@ export type CmdData =
   | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
   | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
   | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "spawn_events_exact"; readonly key: Uint8Array; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "cancel_exact"; readonly key: Uint8Array }
   | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
@@ -465,6 +473,8 @@ export type CmdData =
       readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
       readonly value: number;
     }
+  | { readonly op: "audio_play_exact"; readonly key: Uint8Array; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly cacheDir: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "audio_transport"; readonly transport: AudioTransport }
   | {
       readonly op: "video_load";
       readonly key: string;
@@ -484,6 +494,8 @@ export type CmdData =
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "window_close"; readonly label: string }
+  | { readonly op: "window_minimize"; readonly label: string }
   | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
@@ -910,6 +922,12 @@ export const Cmd = {
     return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""), exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
   },
 
+  spawnEventsExact(key: Uint8Array, argv: readonly Uint8Array[], route: { readonly stdin?: Uint8Array; readonly collect?: boolean; readonly line?: string; readonly exit: string }): CmdData {
+    return { op: "spawn_events_exact", key, lineKind: route.collect ? "" : (route.line ?? ""), exitKind: route.exit,
+      collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+  cancelExact(key: Uint8Array): CmdData { return { op: "cancel_exact", key }; },
+
   audioPlay(key: string, source: AudioSource, route: { readonly event: string }): CmdData {
     return {
       op: "audio_play",
@@ -920,6 +938,14 @@ export const Cmd = {
       cachePath: source.cachePath ?? new Uint8Array(0),
       expectedBytes: source.expectedBytes ?? 0,
     };
+  },
+
+  audioPlayExact(key: Uint8Array, source: ExactAudioSource, route: { readonly event: string }): CmdData {
+    return { op: "audio_play_exact", key, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), cacheDir: source.cacheDir ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+
+  audioTransport(transport: AudioTransport): CmdData {
+    return { op: "audio_transport", transport };
   },
 
   audioPause(key: string): CmdData {
@@ -993,6 +1019,14 @@ export const Cmd = {
 
   hideWindow(label: string): CmdData {
     return { op: "window_hide", label };
+  },
+
+  closeWindow(label: string): CmdData {
+    return { op: "window_close", label };
+  },
+
+  minimizeWindow(label: string): CmdData {
+    return { op: "window_minimize", label };
   },
 
   setDockPresence(visible: boolean): CmdData {

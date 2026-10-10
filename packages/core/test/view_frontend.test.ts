@@ -47,6 +47,56 @@ test("compiled audit type names receive the wiring collision diagnostic", () => 
     assert.throws(() => compileView("<column />", conflicting), /collides with compiled view wiring/);
   }
 });
+
+test("compiled image leaves preserve the complete u64 identity and cover fit", () => {
+  const value = evaluate('<column><image image="{status}" fit="cover" width="140" height="140" label="Art bay"/><avatar image="{status}">DK</avatar></column>');
+  const ids = [0n, 1n, 4294967295n, 4294967296n, 9007199254740991n, 9007199254740993n, 9223372036854775808n, 18446744073709551615n];
+  let seed = 31n;
+  for (let i = 0; i < 256; i++) { seed = (seed * 6364136223846793005n + 1n) & ((1n << 64n) - 1n); ids.push(seed); }
+  for (const id of ids) {
+    value.model.status = new TextEncoder().encode(id.toString());
+    const nodes = value.wire().nodes;
+    for (const node of nodes.slice(1)) {
+      assert.equal(BigInt(node.imageLower) | BigInt(node.imageUpper) << 32n, id);
+      assert.equal(node.image, undefined);
+    }
+    assert.equal(nodes[1].kind, "image"); assert.equal(nodes[1].imageFit, "cover");
+  }
+  for (const invalid of ["", "00", "01", "-1", "+1", "1.0", " 1", "1 ", "18446744073709551616", "999999999999999999999"]) {
+    value.model.status = new TextEncoder().encode(invalid);
+    assert.throws(value.wire, /image identity/);
+  }
+  for (const invalid of [[48, 0], [255], [49, 10]]) {
+    value.model.status = new Uint8Array(invalid); assert.throws(value.wire, /image identity/);
+  }
+  for (const markup of ['<image/>', '<image image="1"/>', '<image image="{count}">Text</image>', '<image image="{count}"><text>Child</text></image>', '<image image="{count}" fit="invalid"/>', '<avatar image="{count}" fit="cover"/>']) assert.throws(() => compileView(markup, contract));
+  const numeric = evaluate('<image image="{count}"/>').wire().nodes[0];
+  assert.equal(numeric.image, 7); assert.equal(numeric.imageLower, undefined);
+});
+
+test("compiled colors and inline colors bind only their closed token unions", () => {
+  const input: ViewContract = { ...contract, types: { ...contract.types, enums: [{ name: "SignalColor", members: ["accent", "warning", "info"] }], structs: [{ name: "Model", fields: [{ name: "color", type: { kind: "enum", name: "SignalColor" } }] }] } };
+  const code = compileView('<panel background="{color}" foreground="{color}" border-color="{color}" focus-ring="{color}" accent="{color}" accent-foreground="{color}"><text><span foreground="{color}" mono="true" scale="2">Signal</span></text></panel>', input);
+  const model = { color: "accent" }, exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(ts.transpile(code, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS }), { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  for (const color of ["accent", "warning", "info"]) {
+    model.color = color;
+    const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+    for (const field of ["background", "foreground", "borderColor", "focusRing", "accent", "accentForeground"]) assert.equal(nodes[0][field], color);
+    assert.equal(nodes[1].spans[0].color, color);
+  }
+  const invalid = { ...input, types: { ...input.types, enums: [{ name: "SignalColor", members: ["accent", "invented"] }] } };
+  for (const markup of ['<panel foreground="{color}"/>', '<text><span foreground="{color}">Signal</span></text>']) assert.throws(() => compileView(markup, invalid), /closed token vocabulary/);
+  assert.throws(() => compileView('<panel foreground="{status}"/>', contract), /closed token vocabulary/);
+});
+
+test("compiled per-side padding overrides carry independently bound values", () => {
+  const value = evaluate('<column padding="8" padding-top="2" padding-bottom="3" padding-left="{count}" padding-right="{stampedMs}"/>');
+  value.model.stampedMs = 4.5;
+  const node = value.wire().nodes[0];
+  assert.deepEqual([node.padding, node.paddingTop, node.paddingBottom, node.paddingLeft, node.paddingRight], [8, 2, 3, 7, 4.5]);
+  assert.throws(() => compileView('<column padding-left="{status}"/>', contract), /expected number/);
+});
 const source = readFileSync(new URL("../../../tests/native-driver/src/app.native", import.meta.url), "utf8");
 const evaluate = (markup: string) => {
   const generated = compileView(markup, contract);

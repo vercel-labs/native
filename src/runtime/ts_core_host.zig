@@ -967,6 +967,20 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             dispatchDepth(fx, msg, 0);
         }
 
+        /// Commit a pure retained-control observation at the UiApp sync
+        /// boundary. Effects and subscriptions belong to normal dispatch.
+        pub fn syncControls(msg: Msg) void {
+            if (comptime update_returns_cmd) {
+                const result = updateModel(model_root, msg);
+                if (result.cmd.len != 0) @panic("sliderStateMsg must produce a state-only update without commands");
+                model_root = commitModel(result.model);
+            } else {
+                model_root = commitModel(updateModel(model_root, msg));
+            }
+            // The enclosing dispatch may already hold a frame-backed message
+            // (for example exact frame clocks). It owns the scratch reset.
+        }
+
         /// Drain every queued effect completion into the core — the
         /// bridge-shaped mirror of `UiApp.drainEffects`' loop. Hosts
         /// that embed the core without a UiApp call this on wake/frame.
@@ -1236,6 +1250,26 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         clip_write_counter +%= 1;
                     },
                     // Complete spawn records; the legacy opcode remains unchanged.
+                    0x46 => {
+                        const key = parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact subprocess identity");
+                        const line_tag = takeByte(cmd, &at);
+                        const exit_tag = takeByte(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        const argc = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid exact subprocess output mode");
+                        var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
+                        for (0..argc) |i| {
+                            const arg = takeLongBytes(cmd, &at);
+                            if (i < argv.len) argv[i] = arg;
+                        }
+                        const stdin = takeLongBytes(cmd, &at);
+                        // An over-capacity argv is a native rejected request.
+                        const retained = if (argc <= argv.len) argv[0..argc] else &.{};
+                        issueSpawnExact(fx, key, line_tag, exit_tag, mode == 1, retained, stdin);
+                    },
+                    0x47 => fx.cancel(parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                        @panic("ts core host: invalid exact cancellation identity")),
                     0x33 => {
                         const key = takeShortBytes(cmd, &at);
                         const line_tag = takeByte(cmd, &at);
@@ -1332,11 +1366,46 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         const value: f64 = @bitCast(std.mem.readInt(u64, value_bits[0..8], .little));
                         runAudioCtl(fx, key, verb, value);
                     },
+                    // Exact audio: decimal key, load-owned route, source and cache facts.
+                    0x42 => {
+                        const key = parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact audio identity");
+                        const tag = takeByte(cmd, &at);
+                        const audio_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache_path = takeLongBytes(cmd, &at);
+                        const cache_dir = takeLongBytes(cmd, &at);
+                        const expected_bits = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
+                        issueAudioPlayExact(fx, key, tag, audio_path, url, cache_path, cache_dir, expected);
+                    },
+                    // Single-player transport. Seek retains the native u64 range.
+                    0x43 => switch (takeByte(cmd, &at)) {
+                        0 => fx.pauseAudio(),
+                        1 => fx.resumeAudio(),
+                        2 => {
+                            audio_entry.used = false;
+                            fx.stopAudio();
+                        },
+                        3 => fx.seekAudio(parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact audio seek position")),
+                        4 => {
+                            const bits = takeBytes(cmd, &at, 8);
+                            const value: f64 = @bitCast(std.mem.readInt(u64, bits[0..8], .little));
+                            if (!std.math.isFinite(value) or @abs(value) > std.math.floatMax(f32))
+                                @panic("ts core host: invalid audio volume");
+                            fx.setAudioVolume(@floatCast(value));
+                        },
+                        else => @panic("ts core host: invalid audio transport verb"),
+                    },
                     // window_show [op][label_len][label]
                     0x10 => {
                         const label = takeShortBytes(cmd, &at);
                         fx.showWindow(label);
                     },
+                    // Native close/minimize preserve the ordinary window policy.
+                    0x44 => fx.closeWindow(takeShortBytes(cmd, &at)),
+                    0x45 => fx.minimizeWindow(takeShortBytes(cmd, &at)),
                     // quit_app [op]
                     0x11 => fx.quitApp(),
                     // Lossless identity: two unsigned little-endian words.
@@ -1986,6 +2055,48 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
 
         const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8, complete_events: bool = false };
 
+        /// The engine copies the request and owns admission, pending routes,
+        /// cancellation and lifetime. Per-arm callback thunks retain the route
+        /// of each request, including refusals under an already occupied key.
+        fn issueSpawnExact(fx: *Fx, key: u64, line_tag: u8, exit_tag: u8, collect: bool, argv: []const []const u8, stdin: []const u8) void {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (exit_tag == index) {
+                    if (comptime exactSpawnArmShape(arm.type, false)) {
+                        const Exit = struct {
+                            fn message(exit: runtime_effects.EffectExit) Msg {
+                                return msgFromSpawnExit(index, exit, decimalFrame(exit.key));
+                            }
+                        };
+                        var options: Fx.SpawnOptions = .{ .key = key, .argv = argv,
+                            .stdin = if (stdin.len > 0) stdin else null,
+                            .output = if (collect) .collect else .lines, .on_exit = Exit.message };
+                        if (line_tag == spawn_no_line_tag) {
+                            fx.spawn(options);
+                            return;
+                        }
+                        inline for (msg_arms, 0..) |line_arm, line_index| {
+                            if (line_tag == line_index) {
+                                if (comptime exactSpawnArmShape(line_arm.type, true)) {
+                                    const Line = struct {
+                                        fn message(line: runtime_effects.EffectLine) Msg {
+                                            return msgFromSpawnLine(line_index, line, decimalFrame(line.key));
+                                        }
+                                    };
+                                    options.on_line = Line.message;
+                                    fx.spawn(options);
+                                    return;
+                                }
+                                @panic("ts core host: incompatible exact subprocess line arm");
+                            }
+                        }
+                        @panic("ts core host: invalid exact subprocess line tag");
+                    }
+                    @panic("ts core host: incompatible exact subprocess terminal arm");
+                }
+            }
+            @panic("ts core host: invalid exact subprocess terminal tag");
+        }
+
         /// Open a spawn stream: claim a non-retiring stream entry (the
         /// keyed-effect discipline's ONE exception — a live wire key
         /// REJECTS the new spawn, because a running subprocess is never
@@ -2634,6 +2745,36 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             @memcpy(audio_entry.key[0..key.len], key);
             audio_entry.event_tag = plan.tag;
             fx.playAudio(.{ .key = audio_key_base, .path = path, .url = url, .cache_path = effectiveAudioCachePath(cache, url), .expected_bytes = plan.expected_bytes, .on_event = audioEventMsg });
+        }
+
+        fn issueAudioPlayExact(fx: *Fx, key: u64, tag: u8, path: []const u8, url: []const u8, cache: []const u8, cache_dir: []const u8, expected: f64) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(false, tag, 0, expected, path, url)
+            else
+                .{ .accepted = true, .tag = tag, .flags = 0, .surface = 0, .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0) @intFromFloat(expected) else 0 };
+            if (!plan.accepted) @panic("ts core host: exact audio load cannot refuse bridge admission");
+            var cache_buffer: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
+            const cache_path = if (cache.len > 0 or url.len == 0 or cache_dir.len == 0) cache else runtime_effects.audioCachePath(&cache_buffer, cache_dir, url) catch "";
+            inline for (msg_arms, 0..) |arm, index| {
+                if (plan.tag == index) {
+                    if (comptime exactAudioArmShape(arm.type)) {
+                        const Callback = struct {
+                            fn eventMsg(event: runtime_effects.EffectAudio) Msg {
+                                const bands = core.rt.frameAlloc(u8, event.bands.len);
+                                @memcpy(bands, &event.bands);
+                                return msgFromCapability(index, .{ .key = decimalFrame(event.key), .state = event.kind, .positionMs = decimalFrame(event.position_ms), .durationMs = decimalFrame(event.duration_ms), .playing = event.playing, .buffering = event.buffering, .bands = @as([]const u8, bands) });
+                            }
+                        };
+                        const options: Fx.PlayAudioOptions = .{ .key = key, .path = path, .url = url, .cache_path = cache_path, .expected_bytes = plan.expected_bytes, .on_event = Callback.eventMsg };
+                        // Rejection retains the prior native player and its compatibility route.
+                        if (!Fx.audioPlayRejected(options)) audio_entry.used = false;
+                        fx.playAudio(options);
+                        return;
+                    }
+                    @panic("ts core host: exact audio targets an incompatible message arm");
+                }
+            }
+            @panic("ts core host: invalid exact audio message tag");
         }
 
         fn issueVideoLoad(fx: *Fx, key: []const u8, tag: u8, surface: f64, path: []const u8, url: []const u8, flags: u8) void {
@@ -4262,10 +4403,14 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         /// arm; every non-ok outcome routes the err arm with the
         /// outcome's name as bytes. A dropped entry's terminal routes
         /// nothing — the silent drop.
-        fn parseExactTimerInterval(decimal: []const u8) ?u64 {
+        fn parseExactUnsigned(decimal: []const u8) ?u64 {
             if (decimal.len == 0 or decimal.len > 20 or (decimal.len > 1 and decimal[0] == '0')) return null;
             for (decimal) |byte| if (byte < '0' or byte > '9') return null;
-            const value = std.fmt.parseInt(u64, decimal, 10) catch return null;
+            return std.fmt.parseInt(u64, decimal, 10) catch null;
+        }
+
+        fn parseExactTimerInterval(decimal: []const u8) ?u64 {
+            const value = parseExactUnsigned(decimal) orelse return null;
             if (value > std.math.maxInt(u64) / std.time.ns_per_ms) return null;
             return value;
         }
@@ -5125,6 +5270,69 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             return ok;
         }
 
+        fn exactAudioArmShape(comptime T: type) bool {
+            if (@typeInfo(T) != .@"struct") return false;
+            const fields = @typeInfo(T).@"struct".fields;
+            if (fields.len != 7) return false;
+            for (fields) |field| {
+                if (std.mem.eql(u8, field.name, "state")) {
+                    if (@typeInfo(field.type) != .@"enum") return false;
+                    const states = @typeInfo(field.type).@"enum".fields;
+                    if (states.len != 6) return false;
+                    for (states) |state| {
+                        var found = false;
+                        for (@typeInfo(runtime_effects.EffectAudioEventKind).@"enum".fields) |expected|
+                            if (std.mem.eql(u8, expected.name, state.name)) {
+                                found = true;
+                            };
+                        if (!found) return false;
+                    }
+                } else if (std.mem.eql(u8, field.name, "playing") or std.mem.eql(u8, field.name, "buffering")) {
+                    if (field.type != bool) return false;
+                } else if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "positionMs") or
+                    std.mem.eql(u8, field.name, "durationMs") or std.mem.eql(u8, field.name, "bands"))
+                {
+                    if (field.type != []const u8) return false;
+                } else return false;
+            }
+            return true;
+        }
+
+        fn exactSpawnArmShape(comptime T: type, comptime line: bool) bool {
+            if (@typeInfo(T) != .@"struct") return false;
+            const fields = @typeInfo(T).@"struct".fields;
+            if (fields.len != (if (line) @as(usize, 4) else 8)) return false;
+            for (fields) |field| {
+                if (std.mem.eql(u8, field.name, "key") or
+                    (line and std.mem.eql(u8, field.name, "line")) or
+                    (!line and (std.mem.eql(u8, field.name, "output") or std.mem.eql(u8, field.name, "stderrTail"))))
+                {
+                    if (field.type != []const u8) return false;
+                } else if ((line and std.mem.eql(u8, field.name, "truncated")) or
+                    (!line and (std.mem.eql(u8, field.name, "outputTruncated") or std.mem.eql(u8, field.name, "stderrTruncated"))))
+                {
+                    if (field.type != bool) return false;
+                } else if ((line and std.mem.eql(u8, field.name, "droppedBefore")) or
+                    (!line and (std.mem.eql(u8, field.name, "code") or std.mem.eql(u8, field.name, "droppedLines"))))
+                {
+                    if (field.type != f64 and field.type != i64 and field.type != u64) return false;
+                } else if (!line and std.mem.eql(u8, field.name, "reason")) {
+                    if (@typeInfo(field.type) != .@"enum") return false;
+                    const reasons = @typeInfo(field.type).@"enum".fields;
+                    const expected = @typeInfo(runtime_effects.EffectExitReason).@"enum".fields;
+                    if (reasons.len != expected.len) return false;
+                    for (reasons) |reason| {
+                        var found = false;
+                        for (expected) |value| if (std.mem.eql(u8, reason.name, value.name)) {
+                            found = true;
+                        };
+                        if (!found) return false;
+                    }
+                } else return false;
+            }
+            return true;
+        }
+
         /// The arm's `state` member for an engine event kind, matched
         /// by member NAME (the frontend pins the member set, so the
         /// app's declaration order never matters to the wire).
@@ -5768,6 +5976,18 @@ test "exact timer wire admission preserves unsigned decimal ownership and nanose
     }
     for ([_][]const u8{ "", "00", "+1", "-0", "1_0", "1.0", "1e2", " 1", "1 ", "1\x00", "18446744073710", "18446744073709551615", "18446744073709551616", "123456789012345678901" }) |text|
         try std.testing.expect(Host.parseExactTimerInterval(text) == null);
+}
+
+test "exact audio identities and seek positions admit every canonical u64 without rounding" {
+    const Host = TsCoreHost(PtyBindingTestCore);
+    for ([_]u64{ 0, 1, 9007199254740991, 9007199254740993, std.math.maxInt(u64) }) |value| {
+        var buffer: [20]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buffer, "{d}", .{value});
+        try std.testing.expectEqual(value, Host.parseExactUnsigned(text).?);
+        @memset(&buffer, 'x');
+    }
+    for ([_][]const u8{ "", "00", "01", "+1", "-0", "-1", "1.0", "1e2", " 1", "1 ", "1\x00", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expect(Host.parseExactUnsigned(text) == null);
 }
 
 test "PTY name bindings own bytes and retain ended identities without restricting unbound reuse" {
