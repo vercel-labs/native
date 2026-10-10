@@ -277,4 +277,5 @@ pub const CanvasPixelSize = core.CanvasPixelSize;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("ts_canvas_hooks_tests.zig");
 }

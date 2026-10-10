@@ -75,7 +75,7 @@ const Record = struct {
     clipContent: ?bool = null,
     overflow: sdk.canvas.TextOverflow = .ellipsis,
     end: usize,
-    kind: enum { combobox, bubble, table, data_row, data_cell, progress, skeleton, spinner, column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
+    kind: enum { combobox, bubble, table, data_grid, popover, menu_surface, data_row, data_cell, progress, skeleton, spinner, column, row, stack, grid, card, alert, dialog, drawer, sheet, separator, panel, badge, input, text_field, search_field, textarea, text, icon, button, checkbox, switch_control, toggle, slider, status_bar, spacer, scroll, avatar, radio, radio_group, button_group, breadcrumb, pagination, toggle_button, toggle_group, accordion, tabs, segmented_control, tree, list, list_item, select, dropdown_menu, menu_item, tooltip, split, resizable, media_surface, terminal, input_group, input_group_actions, code, chart, markdown },
     text: []const u8,
     textBytes: ?ByteText = null,
     placeholder: []const u8 = "",
@@ -126,6 +126,7 @@ const Record = struct {
     radius: @FieldType(sdk.canvas.StyleTokenRefs, "radius") = null,
     accent: @FieldType(sdk.canvas.StyleTokenRefs, "accent") = null,
     accentForeground: @FieldType(sdk.canvas.StyleTokenRefs, "accent_foreground") = null,
+    backdropBlur: @FieldType(Ui.ElementOptions, "backdrop_blur_token") = null,
     quietHover: bool = false,
     windowDrag: bool = false,
     main: @FieldType(Ui.ElementOptions, "main") = .start,
@@ -348,16 +349,16 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     if (chart_metadata and value.kind != .chart) return error.InvalidView;
     if (value.kind == .chart and (value.chartSeries == null or value.chartXLabels == null or value.chartSeries.?.len == 0 or value.chartSeries.?.len > 64 or value.text.len != 0 or value.textBytes != null or value.role != .none or value.focusable or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or value.contextMenu.len != 0)) return error.InvalidView;
     const modal = value.kind == .dialog or value.kind == .drawer or value.kind == .sheet;
-    const container = value.kind == .bubble or value.kind == .table or value.kind == .data_row or value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
+    const container = value.kind == .bubble or value.kind == .table or value.kind == .data_grid or value.kind == .popover or value.kind == .menu_surface or value.kind == .data_row or value.kind == .input_group or value.kind == .input_group_actions or modal or value.kind == .card or value.kind == .alert or value.kind == .grid or value.kind == .column or value.kind == .row or value.kind == .stack or value.kind == .scroll or value.kind == .panel or value.kind == .radio_group or value.kind == .button_group or value.kind == .breadcrumb or value.kind == .pagination or value.kind == .toggle_group or value.kind == .accordion or value.kind == .tabs or value.kind == .tree or value.kind == .list or value.kind == .list_item or value.kind == .dropdown_menu or value.kind == .split or value.kind == .resizable;
     const tree_row = (value.kind == .column or value.kind == .row or value.kind == .panel or value.kind == .list_item) and value.role == .treeitem;
     if (value.role == .treeitem and !tree_row) return error.InvalidView;
     if (value.role == .tree and value.kind != .column and value.kind != .row and value.kind != .panel and value.kind != .scroll and value.kind != .tree) return error.InvalidView;
-    if (value.kind == .data_row and parent_kind != .table or value.kind == .data_cell and parent_kind != .data_row) return error.InvalidView;
+    if (value.kind == .data_row and parent_kind != .table and parent_kind != .data_grid or value.kind == .data_cell and parent_kind != .data_row) return error.InvalidView;
     if (!container and value.end != index + 1) return error.InvalidView;
     if (value.kind == .list_item and value.end != index + 1 and value.text.len != 0) return error.InvalidView;
-    if (value.dismiss != null and !modal and value.kind != .dropdown_menu) return error.InvalidView;
+    if (value.dismiss != null and !modal and value.kind != .dropdown_menu and value.kind != .popover and value.kind != .menu_surface) return error.InvalidView;
     if (!std.math.isFinite(value.anchorOffset)) return error.InvalidView;
-    if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu and value.kind != .tooltip) return error.InvalidView;
+    if ((value.anchor != null or value.anchorAlignment != .start or value.anchorOffset != 4) and value.kind != .dropdown_menu and value.kind != .popover and value.kind != .menu_surface and value.kind != .tooltip) return error.InvalidView;
     if (value.tooltipDelay) |delay| if (value.kind != .tooltip or value.anchor == null or delay < 0) return error.InvalidView;
     if (value.anchor == null and (value.anchorAlignment != .start or value.anchorOffset != 4)) return error.InvalidView;
     if ((value.expanded != null or value.treeLevel != 0) and value.role != .treeitem) return error.InvalidView;
@@ -486,7 +487,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
     };
     if (value.contextMenu.len > 32) return error.InvalidView;
     const non_hit_target = switch (value.kind) {
-        .row, .column, .stack, .list, .grid, .split, .tree, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .badge, .avatar, .tooltip, .separator, .spacer, .table, .data_row, .skeleton, .spinner, .icon => true,
+        .row, .column, .stack, .list, .grid, .split, .tree, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .badge, .avatar, .tooltip, .separator, .spacer, .table, .data_grid, .data_row, .skeleton, .spinner, .icon => true,
         else => false,
     };
     if (value.quietHover and non_hit_target) return error.InvalidView;
@@ -537,6 +538,7 @@ fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth
         .icon = value.icon,
         .icon_placement = value.iconPlacement,
         .window_drag = value.windowDrag,
+        .backdrop_blur_token = value.backdropBlur,
         .semantics = .{ .role = value.role, .label = value.label, .focusable = value.focusable, .list_item_index = value.listItemIndex, .list_item_count = value.listItemCount },
         .style_tokens = .{ .background = value.background, .foreground = value.foreground, .border_color = value.borderColor, .focus_ring = value.focusRing, .accent = value.accent, .accent_foreground = value.accentForeground, .radius = value.radius },
         .main = value.main,

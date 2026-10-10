@@ -514,6 +514,7 @@ export class SubsetChecker {
     this.checkWindowsHelper();
     this.checkWebPanesHelper();
     this.checkLayoutTweensHelper();
+    this.checkCanvasHelpers();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -894,14 +895,16 @@ export class SubsetChecker {
       return found.join(",") === expected.slice().sort().join(",");
     };
     const valid =
-      names.join(",") === "accent,colorScheme,pack" &&
+      names.join(",") === "accent,colorScheme,highContrast,pack,reduceMotion" &&
       optionalEnumMembersAre(pack, ["house", "geist"]) &&
       optionalEnumMembersAre(colorScheme, ["light", "dark", "system"]) &&
-      accent?.type.k === "optional" && accent.type.inner.k === "string";
+      accent?.type.k === "optional" && accent.type.inner.k === "string" &&
+      field("highContrast")?.type.k === "optional" && field("highContrast")?.type.inner.k === "bool" &&
+      field("reduceMotion")?.type.k === "optional" && field("reduceMotion")?.type.inner.k === "bool";
     if (!valid) {
       this.report(
         "NS1033",
-        "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`); import it from `@native-sdk/core/events`.",
+        "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`, `highContrast?`, `reduceMotion?`); import it from `@native-sdk/core/events`.",
         decl.type,
       );
     }
@@ -1571,6 +1574,39 @@ export class SubsetChecker {
       this.report("NS1033", "`layoutTweens` must be a single-Model helper returning `readonly LayoutTween[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
   }
 
+  private checkCanvasHelpers(): void {
+    const canonicalRecord = (type: import("./types.ts").ZType, name: string): boolean =>
+      type.k === "struct" && type.name === name &&
+      this.table.structs.get(name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
+    for (const name of ["canvasChrome", "canvasAnimations", "canvasFrameMsg"]) {
+      const decl = this.entryExportedFunction(name);
+      if (decl === null) continue;
+      const helper = this.table.modelHelperDecls().find(candidate => candidate.name === name && candidate.decl === decl);
+      const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+      const context = decl.parameters[1]?.type;
+      let valid = helper !== undefined;
+      if (name === "canvasAnimations") {
+        valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasAnimation");
+      } else if (name === "canvasChrome") {
+        valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasChromeContext") &&
+          returns?.k === "slice" && returns.elem.k === "union" && returns.elem.name === "CanvasChromeCommand" &&
+          this.table.unions.get("CanvasChromeCommand")?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
+      } else {
+        const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+        const root = this.table.unions.get("Msg");
+        valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasFrameEvent") &&
+          returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+          result.arms.every(arm => {
+            const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+            return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+              field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+          });
+        if (this.entryExportedFunction("frameMsg")) valid = false;
+      }
+      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasChrome(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
+    }
+  }
+
   private checkWindowsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -2080,7 +2116,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasChrome", "canvasAnimations", "canvasFrameMsg",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

@@ -86,8 +86,9 @@ export interface TerminalState {
 
 /// The stock theme axes a TypeScript core may derive from committed model
 /// state. Omit `pack`/`accent` to inherit app.zon; omit `colorScheme` (or
-/// return `"system"`) to follow the OS. High contrast and reduced motion
-/// remain system-owned, and high contrast suppresses accent overrides.
+/// return `"system"`) to follow the OS. Omit the accessibility flags to
+/// follow the OS, or retain observed flags in the model for replay.
+/// Effective high contrast suppresses accent overrides.
 export type ThemeStatePack = "house" | "geist";
 
 export type ThemeStateColorScheme = "light" | "dark" | "system";
@@ -96,6 +97,10 @@ export type ThemeState = {
   readonly pack?: ThemeStatePack;
   readonly colorScheme?: ThemeStateColorScheme;
   readonly accent?: string;
+  /// Omission follows the OS. Explicit values retain observed appearance
+  /// in the committed model, including when a session is replayed.
+  readonly highContrast?: boolean;
+  readonly reduceMotion?: boolean;
 };
 
 /// One row in a menu-bar status item's menu. Non-separator rows need a
@@ -299,6 +304,73 @@ export interface FrameEvent {
   /// copies these values into the channel arena before entering the core.
   readonly timestampNs: Uint8Array;
   readonly intervalNs: Uint8Array;
+}
+
+/// Copied presentation facts for `canvasFrameMsg(model, frame)`. Counters
+/// and clocks are exact unsigned decimal bytes, including values above 2^53.
+export type CanvasFrameRisk = "idle" | "low" | "moderate" | "high";
+export interface CanvasFrameEvent {
+  readonly width: number;
+  readonly height: number;
+  readonly timestampNs: Uint8Array;
+  readonly intervalNs: Uint8Array;
+  readonly risk: CanvasFrameRisk;
+  readonly workUnits: Uint8Array;
+  readonly commands: Uint8Array;
+  readonly batches: Uint8Array;
+  readonly representable: boolean;
+  readonly dirtyRatio: number;
+}
+
+export interface CanvasColor {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+  readonly a: number;
+}
+export interface CanvasRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+export interface CanvasPoint { readonly x: number; readonly y: number; }
+export interface CanvasGradientStop { readonly offset: number; readonly color: CanvasColor; }
+export type CanvasFill =
+  | { readonly kind: "color"; readonly color: CanvasColor }
+  | { readonly kind: "linear_gradient"; readonly start: CanvasPoint; readonly end: CanvasPoint; readonly stops: readonly CanvasGradientStop[] };
+export type CanvasChromeCommand =
+  | { readonly kind: "rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly fill: CanvasFill }
+  | { readonly kind: "rounded_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: number; readonly fill: CanvasFill };
+/// Native supplies viewport dimensions and the resolved stock colors. The
+/// core derives a prefix of at most 64 commands; native copies all results
+/// before the helper arena is reused. Each gradient has at most 16 stops.
+export interface CanvasChromeContext {
+  readonly width: number;
+  readonly height: number;
+  readonly background: CanvasColor;
+  readonly surface: CanvasColor;
+  readonly border: CanvasColor;
+}
+export interface CanvasTransform {
+  readonly a: number; readonly b: number; readonly c: number;
+  readonly d: number; readonly tx: number; readonly ty: number;
+}
+export type CanvasAnimationPart = "fill" | "text";
+export type CanvasAnimationLoop = "none" | "wrap" | "ping_pong";
+/// Target a widget by exact accessibility label and occurrence. Native
+/// resolves its retained identity and stamps the exact presentation clock.
+export interface CanvasAnimation {
+  readonly label: Uint8Array;
+  readonly index: number;
+  readonly part: CanvasAnimationPart;
+  readonly durationMs: number;
+  readonly easing: LayoutTweenEasing;
+  readonly loop: CanvasAnimationLoop;
+  readonly fromOpacity: number;
+  readonly toOpacity: number;
+  readonly fromTransform: CanvasTransform;
+  readonly toTransform: CanvasTransform;
 }
 
 /// A model-declared split layout tween. An optional label narrows the

@@ -2000,6 +2000,30 @@ test "malformed adapter theme accents reject the rebuild instead of inheriting s
     try std.testing.expect(!app_state.installed);
 }
 
+test "model accessibility theme flags preserve omission and explicit false and complete-token precedence" {
+    const state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(state);
+    state.* = CounterApp.init(std.testing.allocator, .{}, counterOptions());
+    defer state.deinit();
+    state.theme_state_known = true;
+    const accent = canvas.Color.rgb8(0xdf, 0x26, 0x70);
+    const flags = [_]?bool{ null, false, true };
+    for ([_]bool{ false, true }) |dark| for ([_]bool{ false, true }) |os_contrast| for ([_]bool{ false, true }) |os_motion| {
+        state.system_appearance = .{ .color_scheme = if (dark) .dark else .light, .high_contrast = os_contrast, .reduce_motion = os_motion };
+        for (flags) |contrast| for (flags) |motion| {
+            state.theme_state = .{ .pack = .geist, .accent = accent, .high_contrast = contrast, .reduce_motion = motion };
+            const scheme: canvas.ColorScheme = if (dark) .dark else .light;
+            var expected = canvas.DesignTokens.theme(.{ .pack = .geist, .color_scheme = scheme, .contrast = if (contrast orelse os_contrast) .high else .standard, .reduce_motion = motion orelse os_motion });
+            if (!(contrast orelse os_contrast)) expected = expected.withOverrides(canvas.accentOverrides(accent, scheme));
+            try std.testing.expectEqualDeep(expected, state.effectiveTokens());
+        };
+    };
+    const complete = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    state.options.tokens = complete;
+    state.theme_state = .{ .high_contrast = true, .reduce_motion = true, .invalid_accent = "ignored" };
+    try std.testing.expectEqualDeep(complete, state.effectiveTokens());
+}
+
 test "forced theme state still follows accessibility axes while scheme-only OS flips do not restyle" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);

@@ -2221,6 +2221,14 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 .bool => @field(options, field) = value.truthy(),
                 .optional => |optional| switch (@typeInfo(optional.child)) {
                     .bool => @field(options, field) = value.truthy(),
+                    .@"enum" => {
+                        const text = switch (value) {
+                            .string => |text| text,
+                            else => return self.failVoid(node, "expected an option name"),
+                        };
+                        @field(options, field) = std.meta.stringToEnum(optional.child, text) orelse
+                            return self.failVoid(node, "unknown option value");
+                    },
                     .float => @field(options, field) = switch (value) {
                         .float => |float| float,
                         .integer => |int| @floatFromInt(int),

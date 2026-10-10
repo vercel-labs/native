@@ -2278,6 +2278,19 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 .bool => @field(options, zig_field) = attrExprValue(node, entries, attribute_name, raw, ui, model, scope).truthy(),
                 .optional => |optional| switch (@typeInfo(optional.child)) {
                     .bool => @field(options, zig_field) = attrExprValue(node, entries, attribute_name, raw, ui, model, scope).truthy(),
+                    .@"enum" => {
+                        comptime requireVariant(variant, &.{.string}, node, "expected an option name");
+                        const expression = comptime markup.parseAttrExpression(raw).?;
+                        if (comptime expression == .literal) {
+                            @field(options, zig_field) = comptime (std.meta.stringToEnum(optional.child, expression.literal) orelse fail(node, "unknown option value"));
+                        } else {
+                            const text = switch (attrExprValue(node, entries, attribute_name, raw, ui, model, scope)) {
+                                .string => |text| text,
+                                else => runtimeFail([]const u8, ui),
+                            };
+                            @field(options, zig_field) = std.meta.stringToEnum(optional.child, text) orelse runtimeFail(optional.child, ui);
+                        }
+                    },
                     .float => {
                         comptime requireVariant(variant, &.{ .float, .integer }, node, "expected a number");
                         @field(options, zig_field) = switch (attrExprValue(node, entries, attribute_name, raw, ui, model, scope)) {

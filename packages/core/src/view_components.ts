@@ -20,7 +20,7 @@ type NscViewNode = {
   videoControl?: string; zeroIntrinsic?: boolean; clipContent?: boolean; overflow?: string;
   pty?: number; ptyBytes?: readonly number[]; scrollback?: number; terminal?: number;
   image?: number; icon?: string; iconBytes?: readonly number[]; iconPlacement?: string; label?: string; role?: string;
-  background?: string; foreground?: string; borderColor?: string; focusRing?: string; accent?: string; accentForeground?: string; radius?: string; quietHover?: boolean; windowDrag?: boolean;
+  background?: string; foreground?: string; borderColor?: string; focusRing?: string; accent?: string; accentForeground?: string; radius?: string; backdropBlur?: string; quietHover?: boolean; windowDrag?: boolean;
   main?: string; cross?: string; size?: string; variant?: string; checked?: boolean;
   disabled?: boolean; selected?: boolean; focusable?: boolean; autofocus?: boolean;
   expanded?: boolean; treeLevel?: number;

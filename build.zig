@@ -710,6 +710,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    b.step("test-ts-canvas-hooks", "Verify canvas declaration validation, ownership, and model accessibility themes").dependOn(&b.addRunArtifact(filteredTestArtifact(b, desktop_mod, "ts-canvas-hook-tests", &.{ "TypeScript canvas", "model accessibility theme" })).step);
     test_step.dependOn(&invalid_import_compile.step);
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
@@ -1381,6 +1382,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
         ts_core_e2e_step.dependOn(&split_collapse_run.step);
         test_step.dependOn(&split_collapse_run.step);
+        const gpu_dashboard_run = b.addRunArtifact(ts_core_artifacts.gpu_dashboard);
+        b.step("test-ts-gpu-dashboard-e2e", "Compare complete GPU Dashboard models, views, chrome, animations and replay").dependOn(&gpu_dashboard_run.step);
+        ts_core_e2e_step.dependOn(&gpu_dashboard_run.step);
+        test_step.dependOn(&gpu_dashboard_run.step);
         const channel_monitor_run = b.addRunArtifact(ts_core_artifacts.channel_monitor);
         b.step("test-ts-channel-monitor-e2e", "Compare compiled Channel Monitor with complete native channel and replay behavior").dependOn(&channel_monitor_run.step);
         ts_core_e2e_step.dependOn(&channel_monitor_run.step);
@@ -4250,6 +4255,7 @@ const TsCoreE2eArtifacts = struct {
     notes: *std.Build.Step.Compile,
     code_editor: *std.Build.Step.Compile,
     channel_monitor: *std.Build.Step.Compile,
+    gpu_dashboard: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
     split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
@@ -4591,6 +4597,27 @@ fn tsCoreE2eArtifact(
     split_decoder.addImport("native_sdk", desktop_mod);
     split_decoder.addImport("core.zig", split_fixture.module);
     split_mod.addImport("split_decoder", split_decoder);
+
+    const gpu_dashboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/gpu-dashboard/src/core.ts",
+        .src_dir = b.path("examples/gpu-dashboard/src"),
+        .name = "gpu_dashboard_core",
+        .typescript_view = true,
+    });
+    const gpu_dashboard_stage = b.addWriteFiles();
+    const gpu_dashboard_root = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/gpu_dashboard_e2e_tests.zig"), "gpu_dashboard_e2e_tests.zig");
+    // Test-only access to the unchanged reference's private capability hooks.
+    _ = gpu_dashboard_stage.add("gpu_dashboard_reference_access.zig", @embedFile("tests/ts-core/gpu-dashboard-reference/main.zig") ++
+        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n");
+    _ = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = gpu_dashboard_stage.addCopyFile(b.path("examples/gpu-dashboard/src/app.native"), "app.native");
+    const gpu_dashboard_mod = b.createModule(.{ .root_source_file = gpu_dashboard_root, .target = target, .optimize = optimize });
+    gpu_dashboard_mod.addImport("native_sdk", desktop_mod);
+    gpu_dashboard_mod.addImport("gpu_dashboard_core", gpu_dashboard_fixture.module);
+    const gpu_dashboard_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    gpu_dashboard_decoder.addImport("native_sdk", desktop_mod);
+    gpu_dashboard_decoder.addImport("core.zig", gpu_dashboard_fixture.module);
+    gpu_dashboard_mod.addImport("gpu_dashboard_decoder", gpu_dashboard_decoder);
 
     const channel_monitor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/channel-monitor/src/core.ts",
@@ -5157,6 +5184,7 @@ fn tsCoreE2eArtifact(
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
+        .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
         .channel_monitor = filteredTestArtifact(b, channel_monitor_mod, "ts-channel-monitor-e2e-tests", &.{}),
         .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),
         .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
