@@ -17,6 +17,9 @@ export function canvasFrameMsg(model: Model, frame: CanvasFrameEvent): FrameResu
 export function canvasChrome(model: Model, context: CanvasChromeContext): readonly CanvasChromeCommand[] {
   return [{ kind: "rect", id: asciiBytes("18446744073709551615"), rect: { x: 0, y: 0, width: context.width, height: context.height }, fill: { kind: "color", color: context.background } }];
 }
+export function canvasChromeSuffix(model: Model, context: CanvasChromeContext): readonly CanvasChromeCommand[] {
+  return [{ kind: "stroke_path", id: asciiBytes("2"), elements: [{ verb: "cubic_to", first: { x: 0.25, y: 1 }, second: { x: 2, y: 3 }, third: { x: 4, y: 5 } }], stroke: { fill: { kind: "color", color: context.border }, width: 1.75 }, cap: "round" }];
+}
 export function canvasAnimations(model: Model): readonly CanvasAnimation[] { return []; }
 export function themeState(model: Model): ThemeState { return { highContrast: false, reduceMotion: true }; }
 `;
@@ -25,9 +28,9 @@ test("canonical canvas hooks carry complete records with fractional numeric ABI 
   const result = check(source, { contractEntry: "src/core.ts" });
   assert.equal(result.ok, true, result.diagnostics.map(d => d.message).join("\n") || result.typeErrors.join("\n"));
   const contract = JSON.parse(result.contract!);
-  assert.deepEqual(contract.model_helpers.map((h: { name: string }) => h.name), ["canvasFrameMsg", "canvasChrome", "canvasAnimations", "themeState"]);
-  assert.deepEqual(contract.model_unbound.slice().sort(), ["canvasFrameMsg", "canvasChrome", "canvasAnimations", "themeState"].sort());
-  for (const name of ["CanvasFrameEvent", "CanvasChromeContext", "CanvasColor", "CanvasRect", "CanvasAnimation", "CanvasTransform"]) {
+  assert.deepEqual(contract.model_helpers.map((h: { name: string }) => h.name), ["canvasFrameMsg", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "themeState"]);
+  assert.deepEqual(contract.model_unbound.slice().sort(), ["canvasFrameMsg", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "themeState"].sort());
+  for (const name of ["CanvasFrameEvent", "CanvasChromeContext", "CanvasColor", "CanvasRect", "CanvasAnimation", "CanvasTransform", "CanvasStroke", "CanvasRadius", "CanvasPathElement"]) {
     const record = contract.types.structs.find((r: { name: string }) => r.name === name);
     assert.ok(record, name);
     for (const field of record.fields) assert.notEqual(field.type.kind, "i64", `${name}.${field.name}`);

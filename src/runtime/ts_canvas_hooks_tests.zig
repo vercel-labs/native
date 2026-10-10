@@ -9,28 +9,56 @@ const Point = struct { x: f64 = 0, y: f64 = 0 };
 const Rect = struct { x: f64 = 0, y: f64 = 0, width: f64 = 10, height: f64 = 10 };
 const Stop = struct { offset: f64, color: Color = .{} };
 const Fill = union(enum) { color: Color, linear_gradient: struct { start: Point = .{}, end: Point = .{}, stops: []const Stop } };
+const Stroke = struct { fill: Fill = .{ .color = .{} }, width: f64 = 1 };
+const Radius = struct { topLeft: f64 = 0, topRight: f64 = 0, bottomRight: f64 = 0, bottomLeft: f64 = 0 };
+const Element = struct { verb: canvas.PathVerb, first: Point = .{}, second: Point = .{}, third: Point = .{} };
 const Command = union(enum) {
     rect: struct { id: []const u8 = "1", rect: Rect = .{}, fill: Fill = .{ .color = .{} } },
     rounded_rect: struct { id: []const u8 = "1", rect: Rect = .{}, radius: f64 = 1, fill: Fill = .{ .color = .{} } },
+    stroke_rect: struct { id: []const u8 = "1", rect: Rect = .{}, radius: Radius = .{}, stroke: Stroke = .{} },
+    line: struct { id: []const u8 = "1", from: Point = .{}, to: Point = .{}, stroke: Stroke = .{} },
+    fill_path: struct { id: []const u8 = "1", elements: []const Element = &.{}, fill: Fill = .{ .color = .{} } },
+    stroke_path: struct { id: []const u8 = "1", elements: []const Element = &.{}, stroke: Stroke = .{}, cap: canvas.LineCap = .butt },
 };
 const Context = struct { width: f64, height: f64, background: Color, surface: Color, border: Color };
 const Transform = struct { a: f64 = 1, b: f64 = 0, c: f64 = 0, d: f64 = 1, tx: f64 = 0, ty: f64 = 0 };
 const Animation = struct {
-    label: []const u8 = "target", index: f64 = 0,
-    part: enum { fill, text } = .fill, durationMs: f64 = 900,
-    easing: canvas.Easing = .linear, loop: canvas.CanvasRenderAnimationLoop = .none,
-    fromOpacity: f64 = 1, toOpacity: f64 = 1, fromTransform: Transform = .{}, toTransform: Transform = .{},
+    label: []const u8 = "target",
+    index: f64 = 0,
+    part: enum { fill, text } = .fill,
+    durationMs: f64 = 900,
+    easing: canvas.Easing = .linear,
+    loop: canvas.CanvasRenderAnimationLoop = .none,
+    fromOpacity: f64 = 1,
+    toOpacity: f64 = 1,
+    fromTransform: Transform = .{},
+    toTransform: Transform = .{},
 };
 const Core = struct {
     pub const Msg = union(enum) { noop };
-    pub const rt = struct { pub fn frameAllocator() std.mem.Allocator { return testing.allocator; } };
+    pub const rt = struct {
+        pub fn frameAllocator() std.mem.Allocator {
+            return testing.allocator;
+        }
+    };
     pub const Model = struct {
-        commands: []const Command = &.{}, declarations: []const Animation = &.{},
-        pub fn canvasChrome(self: *const Model, _: Context) []const Command { return self.commands; }
-        pub fn canvasAnimations(self: *const Model) []const Animation { return self.declarations; }
+        commands: []const Command = &.{},
+        suffix_commands: []const Command = &.{},
+        declarations: []const Animation = &.{},
+        pub fn canvasChrome(self: *const Model, _: Context) []const Command {
+            return self.commands;
+        }
+        pub fn canvasChromeSuffix(self: *const Model, _: Context) []const Command {
+            return self.suffix_commands;
+        }
+        pub fn canvasAnimations(self: *const Model) []const Animation {
+            return self.declarations;
+        }
     };
 };
-const App = struct { pub const Ui = canvas.Ui(Core.Msg); };
+const App = struct {
+    pub const Ui = canvas.Ui(Core.Msg);
+};
 const H = hooks.Hooks(Core, Core.Model, App);
 
 fn chrome(commands: []const Command, builder: *canvas.Builder) !void {
@@ -38,7 +66,7 @@ fn chrome(commands: []const Command, builder: *canvas.Builder) !void {
 }
 
 test "TypeScript canvas chrome validates exact identities and bounds before native submission" {
-    var output: [65]canvas.CanvasCommand = undefined;
+    var output: [257]canvas.CanvasCommand = undefined;
     var builder = canvas.Builder.init(&output);
     try chrome(&.{.{ .rect = .{ .id = "18446744073709551615" } }}, &builder);
     try testing.expectEqual(std.math.maxInt(u64), builder.displayList().commands[0].fill_rect.id);
@@ -48,7 +76,7 @@ test "TypeScript canvas chrome validates exact identities and bounds before nati
     }
     builder = canvas.Builder.init(&output);
     try testing.expectError(error.DuplicateCanvasChromeId, chrome(&.{ .{ .rect = .{} }, .{ .rounded_rect = .{} } }, &builder));
-    var many: [65]Command = @splat(.{ .rect = .{} });
+    var many: [257]Command = @splat(.{ .rect = .{} });
     builder = canvas.Builder.init(&output);
     try testing.expectError(error.CanvasChromeCommandLimit, chrome(&many, &builder));
     for ([_]f64{ std.math.nan(f64), std.math.inf(f64), std.math.floatMax(f64) }) |value| {
@@ -158,4 +186,94 @@ test "TypeScript canvas markup surfaces preserve bound blur grids anchors and di
         var ui = Ui.init(arena.allocator());
         try testing.expectError(error.MarkupBuild, view.build(&ui, &.{}));
     }
+}
+
+test "TypeScript canvas layers preserve complete path and stroke payloads with disjoint native storage" {
+    var elements = [_]Element{
+        .{ .verb = .move_to, .first = .{ .x = 1.25, .y = -2 }, .second = .{ .x = 7 } },
+        .{ .verb = .line_to, .first = .{ .x = 5, .y = 9 } },
+        .{ .verb = .quad_to, .first = .{ .x = 2 }, .second = .{ .y = 4 } },
+        .{ .verb = .cubic_to, .first = .{ .x = 3 }, .second = .{ .y = 5 }, .third = .{ .x = 8 } },
+        .{ .verb = .close },
+    };
+    var stops = [_]Stop{ .{ .offset = 0.125, .color = .{ .r = 0.375 } }, .{ .offset = 0.875, .color = .{ .a = 0.625 } } };
+    const paint: Fill = .{ .linear_gradient = .{ .start = .{ .x = 2, .y = 3 }, .end = .{ .x = 11, .y = 13 }, .stops = &stops } };
+    var first = [_]Command{
+        .{ .stroke_rect = .{ .id = "18446744073709551615", .rect = .{ .x = 0.25, .y = 2, .width = 7, .height = 11 }, .radius = .{ .topLeft = 1, .topRight = 2, .bottomRight = 3, .bottomLeft = 4 }, .stroke = .{ .fill = paint, .width = 1.75 } } },
+        .{ .line = .{ .id = "2", .from = .{ .x = -1.5, .y = 2.75 }, .to = .{ .x = 11, .y = 17 }, .stroke = .{ .fill = paint, .width = 2.25 } } },
+        .{ .fill_path = .{ .id = "3", .elements = &elements, .fill = paint } },
+    };
+    const last = [_]Command{.{ .stroke_path = .{ .id = "4", .elements = &elements, .stroke = .{ .fill = paint, .width = 3.5 }, .cap = .round } }};
+    var model = Core.Model{ .commands = &first, .suffix_commands = &last };
+    var output: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&output);
+    try H.chrome(&model, &builder, .init(400, 300), .{});
+    elements[0].first.x = 99;
+    stops[0].color.r = 0.75;
+    try H.suffix(&model, &builder, .init(400, 300), .{});
+    const list = builder.displayList();
+    const rectangle = list.commands[0].stroke_rect;
+    try testing.expectEqualDeep(canvas.Radius{ .top_left = 1, .top_right = 2, .bottom_right = 3, .bottom_left = 4 }, rectangle.radius);
+    try testing.expectEqual(@as(f32, 1.75), rectangle.stroke.width);
+    try testing.expectEqual(@as(f32, 0.375), rectangle.stroke.fill.linear_gradient.stops[0].color.r);
+    try testing.expectEqualDeep(@import("geometry").PointF.init(-1.5, 2.75), list.commands[1].draw_line.from);
+    const prefix = list.commands[2].fill_path;
+    const suffix = list.commands[3].stroke_path;
+    try testing.expectEqual(@as(f32, 1.25), prefix.elements[0].points[0].x);
+    try testing.expectEqual(@as(f32, 99), suffix.elements[0].points[0].x);
+    try testing.expectEqual(canvas.LineCap.round, suffix.cap);
+    try testing.expectEqual(@as(f32, 3.5), suffix.stroke.width);
+    try testing.expectEqual(@as(f32, 0.75), suffix.stroke.fill.linear_gradient.stops[0].color.r);
+    for (prefix.elements, elements) |actual, original| {
+        try testing.expectEqual(original.verb, actual.verb);
+        try testing.expectEqual(@as(f32, @floatCast(original.second.x)), actual.points[1].x);
+        try testing.expectEqual(@as(f32, @floatCast(original.third.x)), actual.points[2].x);
+    }
+    const scratch = try testing.allocator.create(Scratch);
+    defer testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    const owned_prefix = try scratch.copyCanvasCommand(list.commands[2]);
+    const owned_suffix = try scratch.copyCanvasCommand(list.commands[3]);
+    elements[0].first.x = 123;
+    stops[0].color.r = 0.875;
+    builder = canvas.Builder.init(&output);
+    try H.chrome(&model, &builder, .init(400, 300), .{});
+    try H.suffix(&model, &builder, .init(400, 300), .{});
+    try testing.expectEqual(@as(f32, 1.25), owned_prefix.fill_path.elements[0].points[0].x);
+    try testing.expectEqual(@as(f32, 99), owned_suffix.stroke_path.elements[0].points[0].x);
+    try testing.expectEqual(@as(f32, 0.375), owned_prefix.fill_path.fill.linear_gradient.stops[0].color.r);
+    try testing.expectEqual(@as(f32, 0.75), owned_suffix.stroke_path.stroke.fill.linear_gradient.stops[0].color.r);
+    model.suffix_commands = &.{.{ .rect = .{ .id = "3" } }};
+    builder = canvas.Builder.init(&output);
+    try H.chrome(&model, &builder, .init(400, 300), .{});
+    try testing.expectError(error.DuplicateCanvasChromeId, H.suffix(&model, &builder, .init(400, 300), .{}));
+    try testing.expectEqual(@as(usize, 3), builder.len);
+}
+
+test "TypeScript canvas layers reject whole invalid batches and enforce path and command bounds" {
+    var output: [256]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&output);
+    var many: [256]Command = @splat(.{ .rect = .{ .id = "0" } });
+    try chrome(&many, &builder);
+    try testing.expectEqual(@as(usize, 256), builder.len);
+    builder = canvas.Builder.init(output[0..255]);
+    try testing.expectError(error.DisplayListFull, chrome(&many, &builder));
+    try testing.expectEqual(@as(usize, 0), builder.len);
+    var elements: [65]Element = @splat(.{ .verb = .line_to });
+    builder = canvas.Builder.init(&output);
+    try testing.expectError(error.CanvasPathElementLimit, chrome(&.{ .{ .rect = .{} }, .{ .fill_path = .{ .id = "2", .elements = &elements } } }, &builder));
+    try testing.expectEqual(@as(usize, 0), builder.len);
+    try chrome(&.{.{ .stroke_path = .{ .elements = elements[0..64] } }}, &builder);
+    try testing.expectEqual(@as(usize, 64), builder.displayList().commands[0].stroke_path.elements.len);
+    for ([_]f64{ -1, std.math.nan(f64), std.math.inf(f64) }) |invalid| {
+        builder = canvas.Builder.init(&output);
+        const wanted = if (invalid == -1) error.InvalidCanvasStrokeWidth else error.InvalidCanvasScalar;
+        try testing.expectError(wanted, chrome(&.{ .{ .rect = .{} }, .{ .line = .{ .id = "2", .stroke = .{ .width = invalid } } } }, &builder));
+        try testing.expectEqual(@as(usize, 0), builder.len);
+    }
+    builder = canvas.Builder.init(&output);
+    try testing.expectError(error.InvalidCanvasRadius, chrome(&.{.{ .stroke_rect = .{ .radius = .{ .bottomLeft = -1 } } }}, &builder));
+    elements[0].third.x = std.math.nan(f64);
+    try testing.expectError(error.InvalidCanvasScalar, chrome(&.{.{ .fill_path = .{ .elements = elements[0..1] } }}, &builder));
+    try testing.expectEqual(@as(usize, 0), builder.len);
 }

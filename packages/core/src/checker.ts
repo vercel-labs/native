@@ -1578,7 +1578,7 @@ export class SubsetChecker {
     const canonicalRecord = (type: import("./types.ts").ZType, name: string): boolean =>
       type.k === "struct" && type.name === name &&
       this.table.structs.get(name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
-    for (const name of ["canvasChrome", "canvasAnimations", "canvasFrameMsg"]) {
+    for (const name of ["canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg"]) {
       const decl = this.entryExportedFunction(name);
       if (decl === null) continue;
       const helper = this.table.modelHelperDecls().find(candidate => candidate.name === name && candidate.decl === decl);
@@ -1587,7 +1587,7 @@ export class SubsetChecker {
       let valid = helper !== undefined;
       if (name === "canvasAnimations") {
         valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasAnimation");
-      } else if (name === "canvasChrome") {
+      } else if (name === "canvasChrome" || name === "canvasChromeSuffix") {
         valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasChromeContext") &&
           returns?.k === "slice" && returns.elem.k === "union" && returns.elem.name === "CanvasChromeCommand" &&
           this.table.unions.get("CanvasChromeCommand")?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
@@ -1603,7 +1603,7 @@ export class SubsetChecker {
           });
         if (this.entryExportedFunction("frameMsg")) valid = false;
       }
-      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasChrome(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
+      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasChrome/canvasChromeSuffix(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
     }
   }
 
@@ -2116,7 +2116,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasChrome", "canvasAnimations", "canvasFrameMsg",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 

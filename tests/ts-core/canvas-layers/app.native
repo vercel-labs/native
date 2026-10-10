@@ -1,0 +1,5 @@
+<column padding="20" gap="8">
+  <button on-press="next" label="Next layer state">Next</button>
+  <button on-press="reset" label="Reset layers">Reset</button>
+  <slider value="{level}" on-change="level" label="Path shape" />
+</column>

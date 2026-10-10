@@ -1296,6 +1296,7 @@ pub fn build(b: *std.Build) void {
         native_api_tests.addFileArg(b.path("packages/core/test/widget_metrics.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/layout_coordination.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/render_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/canvas_hooks.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/control_commands.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/control_payloads.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/control_primitives.test.ts"));
@@ -1382,6 +1383,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
         ts_core_e2e_step.dependOn(&split_collapse_run.step);
         test_step.dependOn(&split_collapse_run.step);
+        const canvas_layers_run = b.addRunArtifact(ts_core_artifacts.canvas_layers);
+        b.step("test-ts-canvas-layers", "Compare complete compiled chrome layers, ownership and retained replay").dependOn(&canvas_layers_run.step);
+        ts_core_e2e_step.dependOn(&canvas_layers_run.step);
+        test_step.dependOn(&canvas_layers_run.step);
         const gpu_dashboard_run = b.addRunArtifact(ts_core_artifacts.gpu_dashboard);
         b.step("test-ts-gpu-dashboard-e2e", "Compare complete GPU Dashboard models, views, chrome, animations and replay").dependOn(&gpu_dashboard_run.step);
         ts_core_e2e_step.dependOn(&gpu_dashboard_run.step);
@@ -4256,6 +4261,7 @@ const TsCoreE2eArtifacts = struct {
     code_editor: *std.Build.Step.Compile,
     channel_monitor: *std.Build.Step.Compile,
     gpu_dashboard: *std.Build.Step.Compile,
+    canvas_layers: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
     split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
@@ -4597,6 +4603,20 @@ fn tsCoreE2eArtifact(
     split_decoder.addImport("native_sdk", desktop_mod);
     split_decoder.addImport("core.zig", split_fixture.module);
     split_mod.addImport("split_decoder", split_decoder);
+
+    const canvas_layers_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tests/ts-core/canvas-layers/core.ts",
+        .src_dir = b.path("tests/ts-core/canvas-layers"),
+        .name = "canvas_layers_core",
+        .typescript_view = true,
+    });
+    const canvas_layers_mod = module(b, target, optimize, "tests/ts-core/canvas_layers_e2e_tests.zig");
+    canvas_layers_mod.addImport("native_sdk", desktop_mod);
+    canvas_layers_mod.addImport("canvas_layers_core", canvas_layers_fixture.module);
+    const canvas_layers_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    canvas_layers_decoder.addImport("native_sdk", desktop_mod);
+    canvas_layers_decoder.addImport("core.zig", canvas_layers_fixture.module);
+    canvas_layers_mod.addImport("canvas_layers_decoder", canvas_layers_decoder);
 
     const gpu_dashboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/gpu-dashboard/src/core.ts",
@@ -5185,6 +5205,7 @@ fn tsCoreE2eArtifact(
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
+        .canvas_layers = filteredTestArtifact(b, canvas_layers_mod, "ts-canvas-layers-e2e-tests", &.{}),
         .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
         .channel_monitor = filteredTestArtifact(b, channel_monitor_mod, "ts-channel-monitor-e2e-tests", &.{}),
         .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),

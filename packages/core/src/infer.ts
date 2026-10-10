@@ -286,7 +286,7 @@ export class IntInference {
           while (!ts.isInterfaceDeclaration(owner) && !ts.isTypeAliasDeclaration(owner) && owner.parent) owner = owner.parent;
           const canvasRecord = events !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(events) &&
             (ts.isInterfaceDeclaration(owner) || ts.isTypeAliasDeclaration(owner)) &&
-            ["CanvasFrameEvent", "CanvasColor", "CanvasRect", "CanvasPoint", "CanvasGradientStop", "CanvasChromeCommand", "CanvasChromeContext", "CanvasTransform", "CanvasAnimation"].includes(owner.name.text);
+            ["CanvasFrameEvent", "CanvasColor", "CanvasRect", "CanvasPoint", "CanvasGradientStop", "CanvasStroke", "CanvasRadius", "CanvasPathElement", "CanvasChromeCommand", "CanvasChromeContext", "CanvasTransform", "CanvasAnimation"].includes(owner.name.text);
           // Canvas inputs include fractional native geometry; declarations
           // retain one f64 ABI across apps. Native checks integer selectors
           // and durations and explicitly converts GPU scalars to f32.

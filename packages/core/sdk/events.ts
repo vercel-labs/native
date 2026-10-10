@@ -339,12 +339,32 @@ export interface CanvasGradientStop { readonly offset: number; readonly color: C
 export type CanvasFill =
   | { readonly kind: "color"; readonly color: CanvasColor }
   | { readonly kind: "linear_gradient"; readonly start: CanvasPoint; readonly end: CanvasPoint; readonly stops: readonly CanvasGradientStop[] };
+export interface CanvasStroke { readonly fill: CanvasFill; readonly width: number; }
+export interface CanvasRadius {
+  readonly topLeft: number; readonly topRight: number;
+  readonly bottomRight: number; readonly bottomLeft: number;
+}
+/// The complete native path vocabulary. All three point slots are carried
+/// explicitly, including unused zero points, so snapshots stay lossless.
+export type CanvasPathVerb = "move_to" | "line_to" | "quad_to" | "cubic_to" | "close";
+export type CanvasLineCap = "butt" | "round";
+export interface CanvasPathElement {
+  readonly verb: CanvasPathVerb;
+  readonly first: CanvasPoint; readonly second: CanvasPoint; readonly third: CanvasPoint;
+}
+/// Canonical decimal u64 IDs; zero is anonymous. Nonzero IDs must be
+/// unique across both layers. Native aggregate resource limits still apply.
 export type CanvasChromeCommand =
   | { readonly kind: "rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly fill: CanvasFill }
-  | { readonly kind: "rounded_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: number; readonly fill: CanvasFill };
+  | { readonly kind: "rounded_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: number; readonly fill: CanvasFill }
+  | { readonly kind: "stroke_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: CanvasRadius; readonly stroke: CanvasStroke }
+  | { readonly kind: "line"; readonly id: Uint8Array; readonly from: CanvasPoint; readonly to: CanvasPoint; readonly stroke: CanvasStroke }
+  | { readonly kind: "fill_path"; readonly id: Uint8Array; readonly elements: readonly CanvasPathElement[]; readonly fill: CanvasFill }
+  | { readonly kind: "stroke_path"; readonly id: Uint8Array; readonly elements: readonly CanvasPathElement[]; readonly stroke: CanvasStroke; readonly cap: CanvasLineCap };
 /// Native supplies viewport dimensions and the resolved stock colors. The
-/// core derives a prefix of at most 64 commands; native copies all results
-/// before the helper arena is reused. Each gradient has at most 16 stops.
+/// core derives each layer with at most 256 commands; native copies results
+/// before the helper arena is reused. Gradients allow 16 stops and paths
+/// allow 64 elements. canvasChromeSuffix uses the same context and records.
 export interface CanvasChromeContext {
   readonly width: number;
   readonly height: number;
