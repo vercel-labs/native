@@ -90,6 +90,17 @@ export type ChannelEventKind<M extends Msgish> = M extends Msgish ? [Exclude<key
 export interface ChannelRoute<M extends Msgish> {
     readonly event: ChannelEventKind<M>;
 }
+/** The immediate outcome of starting an external producer. A refused open
+ * skips startup; a started producer alone may post. Failure bytes describe the
+ * native startup error. Replay supplies this outcome without starting a source.
+ */
+export type ChannelSourceState = "started" | "skipped" | "failed";
+export type ChannelSourceArm = {
+    readonly key: number;
+    readonly state: ChannelSourceState;
+    readonly bytes: Uint8Array;
+};
+export type ChannelSourceKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm] ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ChannelSourceArm ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export type AudioCaptureSource = "microphone" | "system";
 export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
 export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
@@ -690,6 +701,14 @@ export type Cmd<M extends Msgish> = {
     readonly eventKind: string;
     readonly maxPending: number;
 } | {
+    readonly op: "channel_open_source";
+    readonly key: number;
+    readonly eventKind: string;
+    readonly startedKind: string;
+    readonly maxPending: number;
+    readonly source: string;
+    readonly payload: Uint8Array;
+} | {
     readonly op: "channel_close";
     readonly key: number;
 } | {
@@ -824,6 +843,17 @@ export declare const Cmd: {
     imageCancel(id: number): Cmd<never>;
     imageUnregister(id: number): Cmd<never>;
     channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M>;
+    /** Open a channel and attempt native producer startup in the same dispatch.
+     * The source name is 1–255 UTF-8 bytes and arguments are at most 4096 bytes.
+     * Startup runs only for this newly accepted occupancy; a refused open never
+     * starts an existing producer. The started arm runs before the settled view,
+     * while channel events retain their normal drain boundary. On failure the
+     * app closes the channel. The built-in native-sdk.process.samples source
+     * takes empty arguments and posts process readings every 500 ms.
+     */
+    channelOpenSource<M extends Msgish>(key: number, source: string, payload: Uint8Array, route: ChannelRoute<M> & {
+        readonly started: ChannelSourceKind<M>;
+    }): Cmd<M>;
     channelClose(key: number): Cmd<never>;
     audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M>;
     audioCaptureStop(key: number): Cmd<never>;

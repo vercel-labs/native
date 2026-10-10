@@ -37,7 +37,7 @@ export function invocationCases(): InvocationCase[] {
   add("core-staging-prefix-alias", [...input, "--out", "mirror", "--facade", "mirror.corewire-tmp"]);
   add("decode-before-slot", [...input, "--check", "--f64-slot", "Missing.count"], "{");
   add("slot-before-optimization", [...input, "--check", "--f64-slot", "Missing.count", "--optimization", "invalid"]);
-  add("mirror-before-optimization", [...input, "--check", "--optimization", "invalid"], core.replace('"wire_version":9', '"wire_version":0'));
+  add("mirror-before-optimization", [...input, "--check", "--optimization", "invalid"], core.replace('"wire_version":10', '"wire_version":0'));
   add("facade-before-optimization", [...input, "--check", "--optimization", "invalid"], coreCases().find(c => c.name === "unbound-helper-shadow")!.input);
   add("check-demotion", [...input, "--check", "--f64-slot", "Model.count"]);
   add("check-duplicate-demotion", [...input, "--check", "--f64-slot", "Model.count", "--f64-slot", "Model.count"]);

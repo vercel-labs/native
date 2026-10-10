@@ -94,9 +94,9 @@
     "diagnostics": "input.json: warning: additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "c384219641a52b5306dd23cf9f9770d3dcee61f682efba159b497deeb247f941"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "e3bc23eb92273a9e320c2741fe52b4c102fc5ee150d10c099ee27561d9f5e6aa"
     }
   },
   "core-root-missing-format": {
@@ -241,7 +241,7 @@
   },
   "core-wire_version-0": {
     "status": 1,
-    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 9, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
+    "diagnostics": "input.json: error: wire_version: this SDK's command-wire vocabulary is generation 10, the sidecar declares 0 — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it\n",
     "hashes": {
       "mirror": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
       "facade": "6b428ace0262db5de1acac5d5e225a117674ede63c6631800103512289d791e6",
@@ -474,9 +474,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "25e424f3c24e3bb2681a174e4a0dc2df3753c0967462dfa2922b1409a055d045",
-      "facade": "455d7bd29e802aeffb22d7d31bb91c25d0e12592546e16fe180388c7152baa10",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "d3c1ec3e83ca8c6f112a2b7577cebd3494fc2263e0f204f401a81cbd2863ec4f"
+      "facade": "a564d8de2a8523fbcc441b607b886ae711e259f4cc128a104eb12de0999aa862",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "011d15343e4459b52c340e4d6ce3c6aacb6d7741a62af6134bd950eb55f03812"
     }
   },
   "core-compiler_version-[]": {
@@ -574,9 +574,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "9ba9bacdb1b43adac2ec4d065198f22a9c502e6efb2d64cd61c56b7893826566",
-      "facade": "11a7562821bb3587990b71df9ad7cdcdf4c257a943fae2d79e6bce5e41b42af0",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "528dd77aab52f2e163f74dd0436fce58e53ec9f630aed466f202cc68c7986630"
+      "facade": "9ce32c5322acb9a653918c17b902f32cccc617ae0c433c79010c7cb352a1810e",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "a1457b0173d54b52feec7dade810544e1f47ff9e00b046e470610e1570c3ffd3"
     }
   },
   "core-entry-[]": {
@@ -1004,9 +1004,9 @@
     "diagnostics": "input.json: warning: types.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "9c8c2b4e9bfb32629e7a18ce34c1c80a92cc3c9d10920841dfa0bc553d213496"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "30c9e0116655b0cd4ddd900ed48199898b956f77d6a94a61f9b3b9121d98eded"
     }
   },
   "core-types-missing-structs": {
@@ -1204,9 +1204,9 @@
     "diagnostics": "input.json: warning: types.structs[0].additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "d5ad28555fc020c162aa4f29e61fc1949df9c91132c9b83fa14cdeb56a322fd3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "634450e29449850308454c757467d13fc4f044f783f0b169fec02a03206b619c"
     }
   },
   "core-types.structs.0-missing-name": {
@@ -1384,9 +1384,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "339217880d66f02f238e9dfdbb5cfb8a82e2107797dcf1aa254201d8060bfbeb",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "65c9fa8777cc7bc71efe511c308f1842379e532fde57958960467a6612212c0f"
+      "facade": "1504198cb3824e3f215ec4264b66f3b10055f0d890650c6c25a07384b14f3167",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "d41e785385e73e809edd150fe471a52f3d11e2e17f568fd962d3af338cdaea2d"
     }
   },
   "core-types.structs.0.origin-[]": {
@@ -1414,9 +1414,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "a17f34b9c2acee3290e25fe99cd0d05382b1a3d8b9c0aef0d751d2f008ac5acc"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "43d383b1cbc672bea6e9df1e8e20687e33b20a849b09f67c8cf6a097dfededab"
     }
   },
   "core-types.structs.0.exported-null": {
@@ -1434,9 +1434,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-types.structs.0.exported-false": {
@@ -1444,9 +1444,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "bddb19befb34b18287e1c7aead8f29edfb6587d272abaed030cf91bb13ed2ca7",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "46fc356e57bf6e7fe2ac735a7ea0c5542661c18b8b4f9f2644790766f4158f74"
+      "facade": "0ffbf6fab015d3209d5974974ad58de57c8f5ba8287a9ca2895bc7ef145e9de2",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "e2c4b217d2c9b3857e1a839780aed08a21844a079bfa0cf18181c4f6d70c9fed"
     }
   },
   "core-types.structs.0.exported-0": {
@@ -1704,9 +1704,9 @@
     "diagnostics": "input.json: warning: types.structs[0].fields[0].additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "778137af878272c8f031722c7489135cf0ef1606a08b91000c634d1371316d85"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "463e4114b1f0aa930a31716f7d4afb659cd4b87a4b415a2b2c3b29ad9dd48631"
     }
   },
   "core-types.structs.0.fields.0-missing-name": {
@@ -1914,9 +1914,9 @@
     "diagnostics": "input.json: warning: types.structs[0].fields[0].type.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "bb9f35307dfaa0e17fbb65db1ca0423e89d6f78c629fdc3e6d2f2b739925e2be"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "8b308da533187e0876d3228cafa83c5a365adcf4d03442481de032ead98dfc54"
     }
   },
   "core-types.structs.0.fields.0.type-missing-kind": {
@@ -2104,9 +2104,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-types.enums-{}": {
@@ -2204,9 +2204,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-types.unions-{}": {
@@ -2404,9 +2404,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-model_helpers-{}": {
@@ -2504,9 +2504,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-model_unbound-{}": {
@@ -2624,9 +2624,9 @@
     "diagnostics": "input.json: warning: msg.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "da98e56547a0b017794ec4aff0a324cd70e972e1a8184fb2c7a37306556b5b9f"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6e1333386b44e61582c7769b9e4d385cd5d940ef0581b2bb7bcb4713553a9d56"
     }
   },
   "core-msg-missing-name": {
@@ -2704,9 +2704,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f2a7818b6779bfbd900a75a85d3770a2da6c783ea8f8c7eb732ef22d85401dae",
-      "facade": "cc4b7ac73e0d4bf96f33b7e35674e3977acb5e56716e4d57d31c4920a84c2119",
-      "profile": "c6b2d75e5ebfa79006a887e5fe8406e28b245f2163c46fba86500a3f33259b93",
-      "effective": "373c00d98a99e1a01d9671bb92220cf9461607eb186d82ac74676165b09496eb"
+      "facade": "95aa82a1038685ae3602cc6262f3edf3a7d90f40235c40b88649ce4671f4df7d",
+      "profile": "4dde885542452cd0ed15df1081c51a422aeb93e82ebc73c6b3af641635104a0a",
+      "effective": "29f93cef5f0de0668e5939642defed979e31191eb660d08b1b41313a88313a4e"
     }
   },
   "core-msg.name-[]": {
@@ -2924,9 +2924,9 @@
     "diagnostics": "input.json: warning: msg.arms[0].additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "cf3501996ac079947c79ed81bfaa37ab8e51615ba973febbda0cf7c755795dc6"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "a0b350097501f6fd07d37e448d5d5482fb6614de567e423cc7b47a5d014086dc"
     }
   },
   "core-msg.arms.0-missing-name": {
@@ -3004,9 +3004,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "ce964c6308975eda518bfa131e2b1f834187e191f1cadb60d1c4cfe8e94ff1cc",
-      "facade": "c431a10b53fb2ce53a6e3e1d5aef47ad5dbcf2b1dd099c9868ea3ff88f6b54f3",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "df4b112716e21833d255ea6ffb8d518ea5c14d8f73862d5f4498cba12e61fdad"
+      "facade": "c211935ae3719635731a591f11c7442ff1f12b912f69ddcbf9a4cda3e0dbf158",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "041a4ce359e91d7957b2ff3a8c465b21915e9f5eec17534d5202b5d67ded0a4e"
     }
   },
   "core-msg.arms.0.name-[]": {
@@ -3134,9 +3134,9 @@
     "diagnostics": "input.json: warning: msg.arms[0].payload.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "59922c6ffc51fb9457d26a3f587e23637a617abf72c59c54ea2b40740b523014"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "1b3bd1140ab616be4d0012f9f47a2589db2955fdaf152786146200e8a875cb04"
     }
   },
   "core-msg.arms.0.payload-missing-kind": {
@@ -3324,9 +3324,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-msg.unbound-{}": {
@@ -3364,9 +3364,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "7bf822c4a664dac61ffb122cf6f65e68d7322c34f6e7195bdf9c9c1de5c0f277",
-      "facade": "fde1cf04f9ce42e844db0acc6ff0a954406772c44f730c4452dad941808e4553",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "28fae6877ebe0ce327567fc3b7dacab012b8a14ec8fe4336faa0ad7bcbec5236"
+      "facade": "dc7b7672b97ff940910d82e8e09b27420c2f4ff653000f8e6887369a71e2b032",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "01efcce03e446fabb95d2aed3bdd7677bdd2a99c80bd8759c4c9b476d7532380"
     }
   },
   "core-init_returns_cmd-false": {
@@ -3374,9 +3374,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-init_returns_cmd-0": {
@@ -3464,9 +3464,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-update_returns_cmd-false": {
@@ -3475,8 +3475,8 @@
     "hashes": {
       "mirror": "ba6eb37c92a8663a1ce60fc1631800a5e5d7088d0cd690b20e1c74c84bfaa8f7",
       "facade": "e34a901be9fdd77fab6493c3f114e22cf9adf2eca2c15ecece8086321cb60f35",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "f860802f3f22c9e1f6b48af7cf7d40b357a720cc29175f37d42c820316f4faaf"
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "31ae7c68b631a0e34ed338ac9a41840db91d7e79c5953b505e7760f856130097"
     }
   },
   "core-update_returns_cmd-0": {
@@ -3564,9 +3564,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "b2d597add6777d07be3742b80d94fd5dab8ec33bbf010aa97a6ad9c7c41ba04c",
-      "facade": "5b2036adf559d4092e7eb92bb1b546adb3589ec4d02455a2140b5a22ef605c14",
-      "profile": "572a6786f35739245f6a703379cb59f3c26a40dc868344c45b4153a2312f102d",
-      "effective": "98dc57dd0e46fd36f2d457092a1a3b03390bae3cb498bc60a71b308dc4af30bd"
+      "facade": "993a2efc8455a5d3df8cf4af98e4f4f063baf01646d13491617a5156888522ed",
+      "profile": "fb8fb569febb7c1ec564b5c3b47cdc3af3b37be6455af513dcca73f9a881b61f",
+      "effective": "8b61dd2e469c98d8ddbe0b3fff0e71f957526c6fed78a55587c7753f6ec43ad4"
     }
   },
   "core-has_subscriptions-false": {
@@ -3574,9 +3574,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-has_subscriptions-0": {
@@ -3664,9 +3664,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "d257b6bf74894ec30874f8b9b095e7f441a3d6d7d5877693662db2e834683bab",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1f73ae55a9ffc9eabee1f1cb61576b4874c10c0f7ba71027b0505f85110db430"
+      "facade": "21c8a6c823d0782a4bafa11fdfc84aa56c7ab0aae24bf854b9873c717100f0d3",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "aca8e64a47cdade9428e1bcecff3741cf4669f42a0c06f4a0d6b59cf9824af3c"
     }
   },
   "core-has_migrate-false": {
@@ -3674,9 +3674,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-has_migrate-0": {
@@ -3844,9 +3844,9 @@
     "diagnostics": "input.json: warning: channels.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "ea801edb34f88b6831a7b43e27a5134b5f9b4e62a8b9e8177203f21962f329a5"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "053ec2e32c440e24a88d696f6e5343d0c55cf2f0c95bd0e6c028af93fda8c911"
     }
   },
   "core-channels-missing-command_msg": {
@@ -3884,9 +3884,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.command_msg-0": {
@@ -3984,9 +3984,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.frame_msg-0": {
@@ -4084,9 +4084,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.key_msg-0": {
@@ -4184,9 +4184,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.pinch_msg-0": {
@@ -4254,9 +4254,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "90209223ad18fd770024e8278470ffd61d651d4a838401c74ef25f8906d4afc9"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "552ee03abd7e45a092c9d87e2b60dc7937276da41a2f64672a9f2fa683ce0e2f"
     }
   },
   "core-channels.drop_msg-null": {
@@ -4284,9 +4284,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.drop_msg-0": {
@@ -4364,9 +4364,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.appearance_msg-true": {
@@ -4464,9 +4464,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.chrome_msg-true": {
@@ -4634,9 +4634,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-channels.env_msgs-{}": {
@@ -4754,9 +4754,9 @@
     "diagnostics": "input.json: warning: abi.additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "a10388b5bbd8487a1f03afd3c0bc544baebcd29da9a8c779776ceac145923862"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "901da1878781333ea611db955368a35c2653dc4a7632a72e1224f45e7f497f77"
     }
   },
   "core-abi-missing-prefix": {
@@ -4834,9 +4834,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "377bb1df2e205781470a32190df4e034adc250bffd023317eba203f742b9ccb8",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "2cfc9c5e643aab2d9fec4d5bace9b4eb46e48e46bd8fe00d8801ac0413a21c94",
-      "effective": "00678b204e6d97539a8b0c8928deb7f4bebb46db198717dbeb1b5c51622226fc"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "bbe20c40bc718d0d2df8731ce22da0a4b33d00311fb080eac5b151850630db6a",
+      "effective": "a61d5bc5e94704c708b340f645e5df4280973ea0d360ea261512aa3f6dd1f064"
     }
   },
   "core-abi.prefix-[]": {
@@ -5344,9 +5344,9 @@
     "diagnostics": "input.json: warning: integer_slots[0].additive: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "2618a5742e5499da4f77359d778e44064a9b66e0e63f3932557a0c996e72ff91"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "9ace12aa1535d739de18f88e8f7efdacdb20256570b01e1808acfe230d906691"
     }
   },
   "core-integer_slots.0-missing-slot": {
@@ -5574,9 +5574,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-deterministic-false": {
@@ -5674,9 +5674,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "1203b5cf0174a4115a19af46ed75fab07127c70984ebe36a28d7825a7d0ce9d3"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "6a66c0857319947fce85caac42f1791e77b9683366ba584339b9841a8b1fee57"
     }
   },
   "core-async_free-false": {
@@ -11827,9 +11827,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "ab7185eaab19818b8f98340cb284c08ac7ccddbb62ff2bfcc02689addd312c1f",
-      "facade": "1099475c2956fc145247fa53395ef28b9efd49c85ceafbd98cad7548297504c9",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "daa46d927371f2cadfe9648a0831ea158a0a2cfe9b9e7608fd53dc417310afd8"
+      "facade": "8d45b5e3039df8eb04f06ff38d370d5e0753ff4b8766702a0a52babba5d1be47",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "5dfd2995d7c910da7b8d06a2a4cf0b0c690525f758f903cd665e7d912f67cd50"
     }
   },
   "core-hash-ffffffffffffffff": {
@@ -11837,9 +11837,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "56f7fcec5e7023374f26cc4d87b06cf82b9653e10807ce278ddb271e029a1b87",
-      "facade": "1752922059c0578d602f8db6e4550f4048abcfbd51a4a864dcd034719dfca892",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "9048282789f47930db9ed653cc7ba1925c5c209d17d56f7ed750b5fb76043f7c"
+      "facade": "d6aa7839b99b9413a80ebbdd76e19feb40b30ba236a448a73cb4fa4a61bb3684",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "b4805cd68542706bfde1d1af871ff48a643c7544ca84b0c42c3ebc652069b103"
     }
   },
   "core-hash-8000000000000000": {
@@ -11847,9 +11847,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "e35629d1d1acd81db04e79ec45786e5b2c93da3152374c8c992900df0e5aa426",
-      "facade": "fe0b31fbfacd508b83780bc7a24a775b4885600e847aed9d7bd9041f62baaa34",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "8c84304c57c7383c0d368c9dd8f6f457dd940b7466d17820fb4c3e541f4d25a3"
+      "facade": "2d15d744c4b8e2589709df77045fd94806639c01f899b3cdd2f3a5f7a25900bb",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "a3b4b186c5e556194c1a20058d4d31db14663b080fa6c381d87fd9d8ef22c1fd"
     }
   },
   "core-hash-0000000000000001": {
@@ -11857,9 +11857,9 @@
     "diagnostics": "",
     "hashes": {
       "mirror": "2a51d032f5caaf922b8fb72bbb8c4ea0a00b91bbe09ec2bc7d9174d903388c52",
-      "facade": "f45430fa3ad386be9a3df6ebf51ac55319e8fe2ca4338a33c7efe941816cf818",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "c868a3d875eb46150d3560c4238f988771e9f040bab4c932581aa2f4ae79b7b7"
+      "facade": "ac4730df8dbb1e71faaf605f23caa0aff7ec1874590a72d549414b43f8d04819",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "f908f189f33bebe6ed88ac296fa6211a05070e563f11edbe686d64ccbdd1f8dc"
     }
   },
   "core-typeref-bool": {
@@ -11887,9 +11887,9 @@
     "diagnostics": "input.json: warning: types.structs[0].fields[0].type.inner: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[0].type.elem: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[0].type.name: unknown field ignored (an emitter newer than this reader may emit additive facts)\ninput.json: warning: types.structs[0].fields[0].type.extra: unknown field ignored (an emitter newer than this reader may emit additive facts)\n",
     "hashes": {
       "mirror": "f9d25504dbcf74919d4208da4bc0b140ebc86590a4c877eb0ce84b3893585d27",
-      "facade": "7bc81f11246f191a7930417ba3668fc460cd4f59d15fc78454d3f2e14c153405",
-      "profile": "3ec6f640d2915aa17f96262d75ead0c4e238a25b06b8b0e183779e32e44c319c",
-      "effective": "8593c5ceccfd85e2641f71dc4ca50f7d20e3a7e7ec373b4ae2a9fbc6750070d4"
+      "facade": "bd0fa459dc467781387306ce39ce57c319c9bb2fd3171a65aa21e7c063953d8a",
+      "profile": "1eddcb19b3f52ff6fd4a596bbd45dcca49ae3d307dfd3af1a4a033465fae0035",
+      "effective": "c3bbb33e0452a353e5258e8e8582fd158357dfc07831df7ef1388f07b1224d2d"
     }
   },
   "core-typeref-bytes": {

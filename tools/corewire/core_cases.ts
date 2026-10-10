@@ -9,7 +9,7 @@ export interface Contract extends CoreContract {
 export interface CoreCase { name: string; input: string; slots?: string[]; mirrorOnly?: boolean }
 export function baseContract(): Contract {
   return {
-    format: 1, wire_version: 9, abi_version: 2, compiler_version: "0.0.1", entry: "src/core.ts",
+    format: 1, wire_version: 10, abi_version: 2, compiler_version: "0.0.1", entry: "src/core.ts",
     source_hash: "00000000c0ffee00", build_id: "00000000b01dface", model_fingerprint: "00000000a11ce001",
     types: { structs: [{ name: "Model", origin: "src/core.ts", exported: true, fields: [{ name: "count", type: { kind: "i64" } }, { name: "label", type: { kind: "bytes" } }] }], enums: [], unions: [] },
     model: "Model", model_helpers: [], model_unbound: [],

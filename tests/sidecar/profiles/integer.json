@@ -31,7 +31,7 @@
   ],
   "sidecar": {
     "path": "core.contract.json",
-    "wire_version": 9,
+    "wire_version": 10,
     "abi_version": 2,
     "snapshot_format": 1,
     "build_id_symbol": "nsc_core_build_id",

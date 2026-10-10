@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 9) onto the real effect engine
+//! emits (`cmd_format_version` 10) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -775,6 +775,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         const clipboard_result_key_base: u64 = 0x5453_4352_0000_0000;
 
         const PendingNow = union(enum) {
+            channel_source: struct { tag: u8, key: u64, state: runtime_effects.EffectChannelSourceState, bytes: [255]u8, len: u8 },
             clock: struct { tag: u8, ms: i64 },
             decimal_clock: struct { tag: u8, ms: i64 },
             video: struct { tag: u8, snapshot: Fx.VideoSnapshot, key: [max_wire_key_bytes]u8, key_len: usize },
@@ -1009,6 +1010,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             core.rt.frameReset();
             for (nows[0..now_count]) |*pending| {
                 const reply = switch (pending.*) {
+                    .channel_source => |*source| msgFromTagChannelSource(source.tag, .{ .key = source.key, .state = source.state, .bytes = source.bytes[0..source.len] }),
                     .clock => |clock| msgFromTagNumber(clock.tag, @floatFromInt(clock.ms)),
                     .decimal_clock => |clock| msgFromTagBytes(clock.tag, decimalFrame(clock.ms)),
                     .video => |*video| msgFromVideoSnapshot(video.tag, video.snapshot, video.key[0..video.key_len]),
@@ -1019,7 +1021,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
 
         // ------------------------------------------------- command walk
 
-        /// Walk one command value (v3 wire format; batch is plain
+        /// Walk one command value (generation 10; batch is plain
         /// concatenation, the empty slice is `Cmd.none`).
         fn runCmd(
             fx: *Fx,
@@ -1394,6 +1396,26 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         const event_tag = takeByte(cmd, &at);
                         const max_pending = takeByte(cmd, &at);
                         _ = issueChannelOpen(fx, key_value, event_tag, max_pending);
+                    },
+                    // channel_open_source [op][key f64 LE][event_tag][started_tag]
+                    //                     [max_pending][source short][payload long]
+                    0x41 => {
+                        const key_bits = takeBytes(cmd, &at, 8);
+                        const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const started_tag = takeByte(cmd, &at);
+                        const max_pending = takeByte(cmd, &at);
+                        const name = takeShortBytes(cmd, &at);
+                        const payload = takeLongBytes(cmd, &at);
+                        if (name.len == 0 or payload.len > runtime_effects.max_channel_source_payload or now_count.* >= max_nows_per_cmd)
+                            @panic("ts core host: invalid channel source command");
+                        const accepted = issueChannelOpen(fx, key_value, event_tag, max_pending);
+                        const key: u64 = if (std.math.isFinite(key_value) and key_value >= 1 and key_value < 9007199254740992.0 and @floor(key_value) == key_value) @intFromFloat(key_value) else 0;
+                        const result = fx.startChannelSource(key, if (accepted) fx.channelHandle(key) else null, name, payload);
+                        const pending = &nows[now_count.*];
+                        pending.* = .{ .channel_source = .{ .tag = started_tag, .key = key, .state = result.state, .bytes = undefined, .len = @intCast(result.bytes.len) } };
+                        @memcpy(pending.channel_source.bytes[0..result.bytes.len], result.bytes);
+                        now_count.* += 1;
                     },
                     // channel_close [op][key f64 LE]
                     0x16 => {
@@ -3066,7 +3088,8 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             entry.used = true;
             entry.key = key;
             entry.event_tag = chosen.tag;
-            _ = fx.openChannel(.{
+            const already_open = fx.channelHandle(key) != null;
+            const opened = fx.openChannel(.{
                 .key = key,
                 .on_event = channelEventMsg,
                 .max_pending = max_pending,
@@ -3075,7 +3098,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             // both live execution and replay (whose accepted handle is inert).
             // Validation and capacity refusals stage their rejection without
             // leaving an open slot.
-            return fx.channelHandle(key) != null;
+            return opened.live() or (!already_open and fx.replayArmed() and fx.channelHandle(key) != null);
         }
 
         fn findChannel(key: u64) ?usize {
@@ -5290,6 +5313,77 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
         /// `imageArmShape`'s twin: `key` (number), `state` (any enum;
         /// members matched by name at delivery), `bytes` (bytes),
         /// `droppedPending`/`droppedTotal` (numbers).
+        fn channelSourceArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 3) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "bytes")) {
+                    if (f.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, f.name, "key")) {
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine channel source result kind,
+        /// matched by member NAME — `imageStateValue`'s twin.
+        fn channelSourceStateValue(comptime E: type, kind: runtime_effects.EffectChannelSourceState) E {
+            const name = @tagName(kind);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: a channel source result kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
+        }
+
+        /// Build the three-field channel source result arm at index `tag` from
+        /// an engine event, by field name. The bytes copy into the
+        /// core's frame arena like every routed payload (the engine's
+        /// slice is drain scratch); `key` is the channel key echoed
+        /// verbatim (always below 2^53 — the bridge refused anything
+        /// wider — so both number classes carry it exactly), and the
+        /// drop counters widen the way the subset's number model
+        /// classes them.
+        fn msgFromTagChannelSource(tag: u8, event: runtime_effects.EffectChannelSourceResult) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime channelSourceArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = channelSourceStateValue(f.type, event.state);
+                            } else if (comptime std.mem.eql(u8, f.name, "key")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.key) else @intCast(event.key);
+                            } else if (event.bytes.len == 0) {
+                                // Payload-free events (rejected/closed
+                                // terminals, and the staged rejection
+                                // Msgs that must be self-contained
+                                // across the frame reset) carry the
+                                // static empty slice, never a
+                                // zero-length frame pointer.
+                                @field(payload, f.name) = "";
+                            } else {
+                                const copy = core.rt.frameAlloc(u8, event.bytes.len);
+                                @memcpy(copy, event.bytes);
+                                @field(payload, f.name) = copy;
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: a channel source result targets Msg arm '" ++ arm.name ++ "', which is not the three-field channel source result record");
+                }
+            }
+            @panic("ts core host: a channel source result names a Msg tag outside the union");
+        }
+
         fn channelArmShape(comptime T: type) bool {
             const info = @typeInfo(T);
             if (info != .@"struct") return false;

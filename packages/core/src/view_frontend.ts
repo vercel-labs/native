@@ -282,7 +282,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     }
     const expr = binding(raw, node, scope);
     if (expr.type.kind !== "i64" && expr.type.kind !== "bytes" && expr.type.kind !== "string") fail(node, "keys must be integers or strings");
-    return expr.type.kind === "i64" ? { code: `nscvInteger(${expr.code})`, type: expr.type } : { code: textValue(expr, node), type: { kind: "string" } };
+    return expr.type.kind === "i64" ? { code: `nscvInteger(${expr.code})`, type: expr.type } : expr.type.kind === "bytes" ? expr : { code: textValue(expr, node), type: { kind: "string" } };
   };
   const output: string[] = []; let next = 0;
   const textInputUnion = (ref: Ref): boolean => {
@@ -449,7 +449,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       const base = field === undefined ? null : key(`{${as}.${field}}`, node, inner);
       output.push(`for (const ${variable} of ${items.code}) {`, `const nscvFirst${id} = nscvNodes.length;`);
       emitChildren(node.children, inner, slot, stack, depth + 1);
-      if (base !== null) output.push(`nscvLoopKeys(nscvNodes, nscvFirst${id}, ${base.code});`);
+      if (base !== null) output.push(`${base.type.kind === "bytes" ? "nscvLoopByteKeys" : "nscvLoopKeys"}(nscvNodes, nscvFirst${id}, ${base.code});`);
       output.push("}"); return;
     }
     const stringAttr = (name: string, fallback = ""): string => {
@@ -467,7 +467,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         const raw = node.attrs.get(name);
         if (raw !== undefined) {
           const expr = key(raw, node, scope);
-          props.push(`${name === "key" ? "key" : "globalKey"}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
+          props.push(`${name === "key" ? "key" : "globalKey"}${expr.type.kind === "i64" ? "Int" : expr.type.kind === "bytes" ? "Bytes" : ""}: ${expr.type.kind === "bytes" ? `nscvTextBytes([${expr.code}])` : expr.code}`);
         }
       }
       if (node.attrs.has("label")) {
@@ -844,7 +844,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         props.push(`treeLevel: nscvTreeLevel(${bound(value, "number", node, scope)})`);
       } else if (name === "key" || name === "global-key") {
         const expr = key(value, node, scope), prop = name === "key" ? "key" : "globalKey";
-        props.push(`${prop}${expr.type.kind === "i64" ? "Int" : ""}: ${expr.code}`);
+        props.push(`${prop}${expr.type.kind === "i64" ? "Int" : expr.type.kind === "bytes" ? "Bytes" : ""}: ${expr.type.kind === "bytes" ? `nscvTextBytes([${expr.code}])` : expr.code}`);
       } else if (["label", "text", "placeholder", "command"].includes(name)) {
         if (name === "text" && !["input", "text-field", "search-field", "textarea", "combobox", "select", "accordion", "checkbox", "radio", "switch", "toggle", "button", "toggle-button", "table-cell", "status-bar", "badge", "menu-item", "list-item", "avatar", "tooltip", "text", "card", "alert", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header, checkbox or captioned surface");
         if (name === "placeholder" && !["input", "text-field", "search-field", "textarea", "combobox", "select"].includes(node.name)) fail(node, "placeholder requires a text-entry widget or select");

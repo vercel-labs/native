@@ -11,7 +11,7 @@ type NscChartSeries = { kind: string; values: readonly number[]; color: string; 
 
 type NscViewNode = {
   end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
-  key?: string; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyInt?: number;
+  key?: string; keyBytes?: readonly number[]; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyBytes?: readonly number[]; globalKeyInt?: number;
   columns?: number; virtualized?: boolean; virtualItemExtent?: number; virtualWindow?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;
   resizeDuration?: number; resizeEasing?: string; resizeOrigin?: number;
@@ -79,7 +79,7 @@ function nscvVirtualRequest(requests: NscVirtualRequest[], value: NscVirtualRequ
 
 function nscvVirtualRow(nodes: NscViewNode[], first: number): void {
   const row = nodes[first];
-  if (!row || row.end !== nodes.length || row.key === undefined && row.keyInt === undefined && row.globalKey === undefined && row.globalKeyInt === undefined) throw new Error("virtual-list query requires one keyed root per row");
+  if (!row || row.end !== nodes.length || row.key === undefined && row.keyBytes === undefined && row.keyInt === undefined && row.globalKey === undefined && row.globalKeyBytes === undefined && row.globalKeyInt === undefined) throw new Error("virtual-list query requires one keyed root per row");
 }
 
 function nscvVirtualList(nodes: NscViewNode[], first: number, range: NscVirtualRange): void {
@@ -1619,9 +1619,22 @@ function nscvLoopKeys(nodes: NscViewNode[], first: number, base: string | number
   let slot = 0;
   for (let i = first; i < nodes.length; i = nodes[i]!.end) {
     const node = nodes[i]!;
-    if (node.key === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyInt === undefined) {
+    if (node.key === undefined && node.keyBytes === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyBytes === undefined && node.globalKeyInt === undefined) {
       if (typeof base === "number") node.keyInt = base;
       else node.key = base;
+      node.keySlot = slot;
+    }
+    slot++;
+  }
+}
+
+function nscvLoopByteKeys(nodes: NscViewNode[], first: number, base: Uint8Array): void {
+  const bytes = nscvTextBytes([base]);
+  let slot = 0;
+  for (let i = first; i < nodes.length; i = nodes[i]!.end) {
+    const node = nodes[i]!;
+    if (node.key === undefined && node.keyBytes === undefined && node.keyInt === undefined && node.globalKey === undefined && node.globalKeyBytes === undefined && node.globalKeyInt === undefined) {
+      node.keyBytes = bytes;
       node.keySlot = slot;
     }
     slot++;

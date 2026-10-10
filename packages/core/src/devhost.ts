@@ -1763,6 +1763,20 @@ function performCmd(cmd: Cmdish): void {
       say(`cmd channel_open key=${channelKey} event=${eventKind}`);
       return;
     }
+    case "channel_open_source": {
+      if (journalWriter || journalReplayPath) throw new Error("external producer recordings require the native runtime; use native automate replay");
+      const requested = cmd.key as number, event = cmd.eventKind as string, started = cmd.startedKind as string;
+      const source = cmd.source as string, payload = cmd.payload as Uint8Array;
+      const sourceBytes = encoder.encode(source);
+      if (sourceBytes.length === 0 || sourceBytes.length > 255 || payload.length > 4096) throw new Error("invalid channel source arguments");
+      const key = Number.isSafeInteger(requested) && requested >= 1 ? requested : 0;
+      const accepted = key !== 0 && !serviceChannels.has(key);
+      if (accepted) serviceChannels.set(key, event);
+      say(`cmd channel_open_source key=${key} source=${source} state=${accepted ? "failed" : "skipped"}`);
+      dispatch({ kind: started, key, state: accepted ? "failed" : "skipped", bytes: accepted ? encoder.encode("UnsupportedChannelSource") : new Uint8Array(0) });
+      if (!accepted) dispatch(channelMsg(event, key, "rejected"));
+      return;
+    }
     case "channel_close": {
       const channelKey = cmd.key as number;
       const event = serviceChannels.get(channelKey);

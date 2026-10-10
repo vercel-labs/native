@@ -9,7 +9,7 @@ import { automationProtocolFingerprint, journalFormatFingerprint, readDevhostJou
 
 function runTemporaryDevhost(
   files: Record<string, string>,
-  options: { script?: readonly string[]; serviceCwd?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {},
+  options: { script?: readonly string[]; serviceCwd?: boolean; record?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {},
 ): { run: ReturnType<typeof spawnSync>; serviceCwd: string } {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-devhost-services-"));
@@ -29,6 +29,7 @@ function runTemporaryDevhost(
       script,
     ];
     if (options.serviceCwd) argv.push("--service-cwd", serviceCwd);
+    if (options.record) argv.push("--record-journal", path.join(root, "session.journal"));
     const run = spawnSync(process.execPath, argv, {
       cwd: root,
       encoding: "utf8",
@@ -46,6 +47,35 @@ function lastModel(stdout: string): Record<string, unknown> {
   assert.ok(line, stdout);
   return JSON.parse(line.slice("model ".length)) as Record<string, unknown>;
 }
+
+test("the devhost refuses native producer startup explicitly and requires native recording", () => {
+  const files = { "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly failed: boolean; readonly closed: boolean; }
+export type ChannelState = "data" | "closed" | "rejected";
+export type SourceState = "started" | "skipped" | "failed";
+export type Msg =
+  | { readonly kind: "start" }
+  | { readonly kind: "started"; readonly key: number; readonly state: SourceState; readonly bytes: Uint8Array }
+  | { readonly kind: "event"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { failed: false, closed: false }; }
+export function commandMsg(name: string): Msg | null { if (name === "start") return { kind: "start" }; return null; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start": return [model, Cmd.channelOpenSource(41, "native-sdk.process.samples", new Uint8Array(0), { event: "event", started: "started" })];
+    case "started": return [{ ...model, failed: msg.state === "failed" }, Cmd.channelClose(41)];
+    case "event": return { ...model, closed: msg.state === "closed" };
+  }
+}` };
+  const script = ['{"command":"start"}'];
+  const { run } = runTemporaryDevhost(files, { script });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /cmd channel_open_source key=41 source=native-sdk\.process\.samples state=failed/);
+  assert.deepEqual(lastModel(run.stdout), { failed: true, closed: true });
+  const recording = runTemporaryDevhost(files, { script, record: true }).run;
+  assert.notEqual(recording.status, 0);
+  assert.match(recording.stderr, /external producer recordings require the native runtime/);
+});
 
 test("the devhost keeps Cmd.persist in memory and restores it through the boot route", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

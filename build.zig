@@ -1381,6 +1381,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
         ts_core_e2e_step.dependOn(&split_collapse_run.step);
         test_step.dependOn(&split_collapse_run.step);
+        const channel_monitor_run = b.addRunArtifact(ts_core_artifacts.channel_monitor);
+        b.step("test-ts-channel-monitor-e2e", "Compare compiled Channel Monitor with complete native channel and replay behavior").dependOn(&channel_monitor_run.step);
+        ts_core_e2e_step.dependOn(&channel_monitor_run.step);
+        test_step.dependOn(&channel_monitor_run.step);
         const code_editor_run = b.addRunArtifact(ts_core_artifacts.code_editor);
         b.step("test-ts-code-editor-e2e", "Compare compiled Code Editor with complete native behavior").dependOn(&code_editor_run.step);
         ts_core_e2e_step.dependOn(&code_editor_run.step);
@@ -4245,6 +4249,7 @@ const TsCoreE2eArtifacts = struct {
     effects_probe: *std.Build.Step.Compile,
     notes: *std.Build.Step.Compile,
     code_editor: *std.Build.Step.Compile,
+    channel_monitor: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
     split_collapse: *std.Build.Step.Compile,
     feed: *std.Build.Step.Compile,
@@ -4586,6 +4591,26 @@ fn tsCoreE2eArtifact(
     split_decoder.addImport("native_sdk", desktop_mod);
     split_decoder.addImport("core.zig", split_fixture.module);
     split_mod.addImport("split_decoder", split_decoder);
+
+    const channel_monitor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/channel-monitor/src/core.ts",
+        .src_dir = b.path("examples/channel-monitor/src"),
+        .name = "channel_monitor_core",
+        .typescript_view = true,
+    });
+    const channel_monitor_stage = b.addWriteFiles();
+    const channel_monitor_root = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/channel_monitor_e2e_tests.zig"), "channel_monitor_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig" }) |file|
+        _ = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/channel-monitor-reference/" ++ file), "channel-monitor-reference/" ++ file);
+    _ = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = channel_monitor_stage.addCopyFile(b.path("examples/channel-monitor/src/app.native"), "app.native");
+    const channel_monitor_mod = b.createModule(.{ .root_source_file = channel_monitor_root, .target = target, .optimize = optimize });
+    channel_monitor_mod.addImport("native_sdk", desktop_mod);
+    channel_monitor_mod.addImport("channel_monitor_core", channel_monitor_fixture.module);
+    const channel_monitor_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    channel_monitor_decoder.addImport("native_sdk", desktop_mod);
+    channel_monitor_decoder.addImport("core.zig", channel_monitor_fixture.module);
+    channel_monitor_mod.addImport("channel_monitor_decoder", channel_monitor_decoder);
 
     const code_editor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
         .entry = "examples/code-editor/src/core.ts",
@@ -5132,6 +5157,7 @@ fn tsCoreE2eArtifact(
         .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
         .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
+        .channel_monitor = filteredTestArtifact(b, channel_monitor_mod, "ts-channel-monitor-e2e-tests", &.{}),
         .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),
         .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
         .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),

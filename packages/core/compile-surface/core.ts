@@ -501,6 +501,7 @@ export type CmdData =
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
+  | { readonly op: "channel_open_source"; readonly key: number; readonly eventKind: string; readonly startedKind: string; readonly maxPending: number; readonly source: string; readonly payload: Uint8Array }
   | { readonly op: "channel_close"; readonly key: number }
   | { readonly op: "audio_capture_start"; readonly key: number; readonly source: "microphone" | "system"; readonly sampleRate: number; readonly channels: number; readonly eventKind: string }
   | { readonly op: "audio_capture_stop"; readonly key: number }
@@ -1047,6 +1048,10 @@ export const Cmd = {
 
   channelOpen(key: number, route: { readonly event: string }): CmdData {
     return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
+  },
+
+  channelOpenSource(key: number, source: string, payload: Uint8Array, route: { readonly event: string; readonly started: string }): CmdData {
+    return { op: "channel_open_source", key, source, payload, eventKind: route.event, startedKind: route.started, maxPending: 64 };
   },
 
   channelClose(key: number): CmdData {

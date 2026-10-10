@@ -658,6 +658,26 @@ export interface ChannelRoute<M extends Msgish> {
   readonly event: ChannelEventKind<M>;
 }
 
+/** The immediate outcome of starting an external producer. A refused open
+ * skips startup; a started producer alone may post. Failure bytes describe the
+ * native startup error. Replay supplies this outcome without starting a source.
+ */
+export type ChannelSourceState = "started" | "skipped" | "failed";
+export type ChannelSourceArm = {
+  readonly key: number;
+  readonly state: ChannelSourceState;
+  readonly bytes: Uint8Array;
+};
+export type ChannelSourceKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm]
+    ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ChannelSourceArm
+        ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
 /// The native capture source. "microphone" captures the selected/default
 /// input device; "system" captures the process-independent desktop output
 /// mix (the OS may present a screen/audio consent prompt).
@@ -1410,6 +1430,7 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
+  | { readonly op: "channel_open_source"; readonly key: number; readonly eventKind: string; readonly startedKind: string; readonly maxPending: number; readonly source: string; readonly payload: Uint8Array }
   | { readonly op: "channel_close"; readonly key: number }
   | {
       readonly op: "audio_capture_start";
@@ -2236,6 +2257,18 @@ export const Cmd = {
   /// starts, keeping replay fully offline.
   channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
     return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
+  },
+
+  /** Open a channel and attempt native producer startup in the same dispatch.
+   * The source name is 1–255 UTF-8 bytes and arguments are at most 4096 bytes.
+   * Startup runs only for this newly accepted occupancy; a refused open never
+   * starts an existing producer. The started arm runs before the settled view,
+   * while channel events retain their normal drain boundary. On failure the
+   * app closes the channel. The built-in native-sdk.process.samples source
+   * takes empty arguments and posts process readings every 500 ms.
+   */
+  channelOpenSource<M extends Msgish>(key: number, source: string, payload: Uint8Array, route: ChannelRoute<M> & { readonly started: ChannelSourceKind<M> }): Cmd<M> {
+    return { op: "channel_open_source", key, source, payload, eventKind: route.event, startedKind: route.started, maxPending: 64 };
   },
 
   /// Close the open channel under `key`: posts stop landing, the
