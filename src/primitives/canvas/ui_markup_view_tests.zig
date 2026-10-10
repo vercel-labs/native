@@ -1451,6 +1451,7 @@ test "the registry's attr value classes match the ElementOptions field types" {
             .optional => |optional| switch (@typeInfo(optional.child)) {
                 .bool => .truthy,
                 .float => .number,
+                .@"enum" => .option,
                 else => unreachable,
             },
             .@"enum" => .option,
@@ -1634,7 +1635,7 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   lowered through `Ui.inputGroup`), so no plain element maps to the
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .icon_button, .data_grid, .popover, .menu_surface, .chart, .split_divider, .input_group,
+    .icon_button, .chart, .split_divider, .input_group,
 };
 
 pub const SegmentedModel = struct {

@@ -636,6 +636,8 @@ pub fn Ui(comptime Msg: type) type {
             submit_on_enter: bool = false,
             variant: canvas.WidgetVariant = .default,
             size: canvas.WidgetSize = .default,
+            /// Resolve backdrop blur against the live design-token register.
+            backdrop_blur_token: @FieldType(Widget, "backdrop_blur_token") = null,
             /// Definite width: the widget is exactly this wide (the value
             /// becomes both the min and max bound), so intrinsic content
             /// can neither shrink nor silently overflow the box. 0 keeps
@@ -3933,6 +3935,7 @@ pub fn Ui(comptime Msg: type) type {
                 .scroll_axes = options.axis,
                 .variant = options.variant,
                 .size = options.size,
+                .backdrop_blur_token = options.backdrop_blur_token,
                 .state = .{
                     .selected = false,
                     .expanded = options.expanded,

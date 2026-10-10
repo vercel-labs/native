@@ -69,7 +69,7 @@ pub const SessionRecorder = struct {
     /// checkpoint follows each published frame.
     last_checkpoint_frame: u64 = 0,
     depth: usize = 0,
-    /// Staging-stack depth of the `widget_accessibility_action` event
+    /// Staging-stack depth of the accessibility or widget-menu action
     /// currently being dispatched, if any. While set, nested
     /// stage/commit pairs are suppressed: the outer action record is the
     /// journal's WHOLE representation of the interaction (see
@@ -139,7 +139,10 @@ pub const SessionRecorder = struct {
     /// the suppressed window). Effect results are NOT suppressed: they
     /// write directly to the stream and still precede the action record,
     /// exactly the feed-then-dispatch order replay depends on. BOTH
-    /// entry surfaces stage the action record: the platform AX event
+    /// Declared widget-menu invocations likewise own their synthetic
+    /// selection: replay reconstructs the pending request and its token
+    /// before dispatching the selection, with chrome facts owned here.
+    /// Both accessibility entry surfaces stage the action record: the platform AX event
     /// path stages it at the dispatch choke point, and the direct verb
     /// surfaces (an embed host's `widgetAction`, automation
     /// `widget_action` commands) stage a synthetic one inside
@@ -168,7 +171,7 @@ pub const SessionRecorder = struct {
         self.staged_lens[self.depth] = encoded.len;
         self.staged_suppressed[self.depth] = false;
         self.staged_chrome_counts[self.depth] = 0;
-        if (event == .widget_accessibility_action) self.suppress_owner_depth = self.depth;
+        if (event == .widget_accessibility_action or event == .widget_context_menu_action) self.suppress_owner_depth = self.depth;
         self.depth += 1;
     }
 

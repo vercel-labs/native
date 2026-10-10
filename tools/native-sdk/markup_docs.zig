@@ -52,7 +52,10 @@ pub const element_docs = [_]Doc{
     .{ .name = "tabs", .doc = "Row container for a tab strip; children (buttons with selected) flow horizontally." },
     .{ .name = "toggle-group", .doc = "Row container grouping toggle-buttons; children flow horizontally." },
     .{ .name = "table", .doc = "Vertical table container; children are table-row elements." },
-    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table, children are table-cells." },
+    .{ .name = "data-grid", .doc = "Data-grid container; children are table-row elements with table-cell children." },
+    .{ .name = "popover", .doc = "Overlay surface; children stack. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "menu-surface", .doc = "Vertical menu surface. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table or data-grid, children are table-cells." },
     .{ .name = "table-cell", .doc = "Table cell text leaf; only allowed inside a table-row, dispatch with on-press." },
     .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements. anchor=\"below|above\" floats it against its parent (put it beside its trigger in a stack): late z-pass above the whole tree, window-clipped, auto-flipping at the edges. Pair with on-dismiss so Escape/click-outside close model-side." },
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
@@ -123,6 +126,7 @@ pub const virtual_list_attr_docs = [_]Doc{
 };
 
 pub const attribute_docs = [_]Doc{
+    .{ .name = "backdrop-blur", .doc = "Backdrop blur token: none, sm, or md. Resolves against the current design tokens." },
     .{ .name = "command", .doc = "Command name retained with a widget and dispatched by the runtime when the control activates; a literal or one {binding}. Message handlers remain independent." },
     .{ .name = "text", .doc = "Text value for text-bearing elements; a literal or one {binding}." },
     .{ .name = "placeholder", .doc = "Hint text shown while a text entry is empty." },
@@ -332,9 +336,9 @@ pub const reactions_attr_docs = [_]Doc{
 };
 
 pub const anchor_attr_docs = [_]Doc{
-    .{ .name = "anchor", .doc = "dropdown-menu and tooltip: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
-    .{ .name = "anchor-alignment", .doc = "dropdown-menu and tooltip (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
-    .{ .name = "anchor-offset", .doc = "dropdown-menu and tooltip (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
+    .{ .name = "anchor", .doc = "dropdown-menu, tooltip, popover, and menu-surface: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
+    .{ .name = "anchor-alignment", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
+    .{ .name = "anchor-offset", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
 };
 
 pub const event_docs = [_]Doc{
@@ -346,7 +350,7 @@ pub const event_docs = [_]Doc{
     .{ .name = "on-submit", .doc = "Dispatch a Msg on submit: tag or tag:{payload}. Enter in a text field, primary+enter in a textarea; on a list-item, plain Enter dispatches it as the row's primary action while Space keeps the row's select (on-press)." },
     .{ .name = "on-input", .doc = "Names a Msg variant with canvas.TextInputEvent payload; delivers each text edit." },
     .{ .name = "on-scroll", .doc = "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll two-axis state (offset_x/offset_y, velocity_x/velocity_y, viewport_extent_x/viewport_extent_y, content_extent_x/content_extent_y) after wheel, kinetic, keyboard, and accessibility scrolls." },
-    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
+    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu, popover, menu-surface): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
     .{ .name = "on-hold", .doc = "Press-and-hold Msg: a pointer held ~350 ms dispatches it and the release then presses nothing; a quick click dispatches on-press as usual. A right/ctrl-click with no context menu on the route dispatches it immediately. Like on-press, binding it makes any element pressable." },
     .{ .name = "on-resize", .doc = "split element only: names a Msg variant with f32 payload; delivers the applied first-pane fraction after every divider drag, keyboard adjustment, and assistive increment/decrement. Echo it back into value - the delivered fraction never fights the reconcile." },
     .{ .name = "on-terminal", .doc = "terminal element only: names a bare Msg variant with canvas.TerminalState payload; delivers the post-change view state (scrollback, history, cols, rows) after every runtime-applied change - wheel and keyboard scrollback, and the layout-derived grid resize. Echo scrollback back into the attribute - the delivered state never fights the reconcile." },

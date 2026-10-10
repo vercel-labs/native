@@ -367,6 +367,9 @@ pub const elements = [_]ElementInfo{
     .{ .code = 71, .name = "segmented-control", .widget_kind = "segmented_control", .takes_text = true, .icon_attr = true, .a11y_name = .control },
     .{ .code = 72, .name = "virtual-window", .rule_hook = "virtual-window" },
     .{ .code = 73, .name = "virtual-list", .rule_hook = "virtual-list" },
+    .{ .code = 74, .name = "data-grid", .widget_kind = "data_grid", .hit_target = false, .takes_text = true, .takes_children = true },
+    .{ .code = 75, .name = "popover", .widget_kind = "popover", .stacks_children = true, .dismissible = true, .anchorable = true },
+    .{ .code = 76, .name = "menu-surface", .widget_kind = "menu_surface", .dismissible = true, .anchorable = true },
 };
 
 // ------------------------------------------------------------- attributes
@@ -608,6 +611,7 @@ pub const attrs = [_]AttrInfo{
     // A command name is data, retained with the widget until activation.
     .{ .code = 103, .name = "command", .class = .text, .group = .option, .field = "command" },
     .{ .code = 104, .name = "focusable", .class = .flag, .group = .option },
+    .{ .code = 105, .name = "backdrop-blur", .class = .option, .group = .option, .field = "backdrop_blur_token" },
 };
 
 // ----------------------------------------------------------------- events

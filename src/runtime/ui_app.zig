@@ -299,6 +299,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             pack: ?canvas.ThemePack = null,
             color_scheme: ThemeColorScheme = .system,
             accent: ?canvas.Color = null,
+            /// Omission follows the OS; explicit values retain observed
+            /// accessibility appearance in the model during replay.
+            high_contrast: ?bool = null,
+            reduce_motion: ?bool = null,
             /// Adapter-only invalid declaration marker. Zig cores already
             /// pass a typed Color; the TS adapter retains malformed source
             /// text here so rebuild rejects it instead of silently inheriting.
@@ -2059,6 +2063,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 return tokens;
             }
             const state = self.currentThemeState();
+            const high_contrast = state.high_contrast orelse self.system_appearance.high_contrast;
+            const reduce_motion = state.reduce_motion orelse self.system_appearance.reduce_motion;
             // Preserve lazy legacy helper evaluation when a model pack exists.
             const fallback_pack = if (state.pack == null and self.options.theme_fn != null) self.options.theme_fn.?(&self.model) else self.options.theme;
             var pack: canvas.ThemePack = undefined;
@@ -2067,7 +2073,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (self.options.theme_policy) |policy| {
                 const request = [_]u8{
                     1,                                   if (state.pack) |value| themePackByte(value) else 0,        themePackByte(fallback_pack),
-                    themeSchemeByte(state.color_scheme), @intFromBool(self.system_appearance.color_scheme == .dark), @intFromBool(self.system_appearance.high_contrast),
+                    themeSchemeByte(state.color_scheme), @intFromBool(self.system_appearance.color_scheme == .dark), @intFromBool(high_contrast),
                     @intFromBool(state.accent != null),  @intFromBool(self.options.theme_accent != null),
                 };
                 var result: [4]u8 = undefined;
@@ -2090,12 +2096,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .light => .light,
                     .dark => .dark,
                 };
-                accent = if (self.system_appearance.high_contrast) null else state.accent orelse self.options.theme_accent;
+                accent = if (high_contrast) null else state.accent orelse self.options.theme_accent;
             }
             var tokens = canvas.DesignTokens.theme(.{
                 .color_scheme = color_scheme,
-                .contrast = if (self.system_appearance.high_contrast) .high else .standard,
-                .reduce_motion = self.system_appearance.reduce_motion,
+                .contrast = if (high_contrast) .high else .standard,
+                .reduce_motion = reduce_motion,
                 .pack = pack,
             });
             if (accent) |value| tokens = tokens.withOverrides(canvas.accentOverrides(value, color_scheme));

@@ -211,6 +211,7 @@ pub const WidgetAccessibilityNode = types.WidgetAccessibilityNode;
 pub const WidgetAccessibilitySnapshot = types.WidgetAccessibilitySnapshot;
 pub const WidgetAccessibilityActionKind = types.WidgetAccessibilityActionKind;
 pub const WidgetAccessibilityActionEvent = types.WidgetAccessibilityActionEvent;
+pub const WidgetContextMenuActionEvent = types.WidgetContextMenuActionEvent;
 pub const ClipboardData = types.ClipboardData;
 pub const ColorScheme = types.ColorScheme;
 pub const Appearance = types.Appearance;

@@ -234,6 +234,8 @@ export function themeState(model: Model): ThemeState {
     { name: "pack", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStatePack" } } },
     { name: "colorScheme", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStateColorScheme" } } },
     { name: "accent", type: { kind: "optional", inner: { kind: "bytes" } } },
+    { name: "highContrast", type: { kind: "optional", inner: { kind: "bool" } } },
+    { name: "reduceMotion", type: { kind: "optional", inner: { kind: "bool" } } },
   ]);
 });
 

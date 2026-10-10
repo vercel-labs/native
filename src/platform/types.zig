@@ -2551,6 +2551,15 @@ pub const WidgetAccessibilityActionEvent = struct {
     selection: ?WidgetAccessibilityTextRange = null,
 };
 
+/// A declared widget menu invocation, including the target needed to
+/// reconstruct its pending request during session replay.
+pub const WidgetContextMenuActionEvent = struct {
+    window_id: WindowId = 1,
+    label: []const u8,
+    id: u64,
+    item_index: u32,
+};
+
 pub const ClipboardData = struct {
     mime_type: []const u8 = "text/plain",
     bytes: []const u8,
@@ -2607,6 +2616,7 @@ pub const Event = union(enum) {
     gpu_surface_scroll_driver: GpuSurfaceScrollDriverEvent,
     context_menu_action: ContextMenuActionEvent,
     widget_accessibility_action: WidgetAccessibilityActionEvent,
+    widget_context_menu_action: WidgetContextMenuActionEvent,
     /// Audio player reports: load acknowledgment, coarse position ticks
     /// while playing, one completion at natural end, async failures.
     audio: AudioEvent,
@@ -2642,6 +2652,7 @@ pub const Event = union(enum) {
             .gpu_surface_scroll_driver => "gpu_surface_scroll_driver",
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
+            .widget_context_menu_action => "widget_context_menu_action",
             .audio => "audio",
             .video => "video",
         };

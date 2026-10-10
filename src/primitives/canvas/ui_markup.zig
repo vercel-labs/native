@@ -1127,21 +1127,21 @@ pub const split_children_message = "split takes exactly two element children (th
 /// Elements the runtime's dismissal machinery closes (Escape, click
 /// outside, automation/accessibility dismiss) — the markup subset of the
 /// engine's dismissible-surface kinds (`canvas.widgetKindDismissibleSurface`;
-/// popover/menu-surface/tooltip stay Zig views or leaves).
+/// popovers and menu surfaces share the same retained dismissal channel).
 /// Registry-derived from the `dismissible` element predicate.
 pub const known_dismiss_element_names = schema.dismiss_element_names;
 
-pub const on_dismiss_element_message = "on-dismiss is only supported on dismissible surfaces (dialog, drawer, sheet, dropdown-menu) - Escape and click-outside dismiss those, and the Msg lets the model own the close (clear the open flag in update)";
+pub const on_dismiss_element_message = "on-dismiss is only supported on dismissible surfaces (dialog, drawer, sheet, dropdown-menu, popover, menu-surface) - Escape and click-outside dismiss those, and the Msg lets the model own the close (clear the open flag in update)";
 
 /// Elements that may float as anchored surfaces. dropdown-menu and
-/// tooltip are the markup channels; popover/menu-surface stay Zig views
-/// (documented exclusions) and dialogs/drawers/sheets place themselves.
+/// tooltip, popover, and menu-surface are the markup channels;
+/// dialogs/drawers/sheets place themselves.
 /// An anchored tooltip's visibility is RUNTIME-owned (hover intent on
 /// its trigger), unlike the model-owned dropdown.
 /// Registry-derived from the `anchorable` element predicate.
 pub const known_anchor_element_names = schema.anchor_element_names;
 
-pub const anchor_element_message = "anchor is only supported on dropdown-menu and tooltip - it floats the surface against its PARENT's frame (put the dropdown or tooltip beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
+pub const anchor_element_message = "anchor is only supported on dropdown-menu, tooltip, popover, and menu-surface - it floats the surface against its PARENT's frame (put the surface beside its trigger inside a stack); dialogs, drawers, and sheets place themselves";
 pub const anchor_value_message = "anchor takes a literal placement: below or above (either side flips automatically when the surface does not fit and the other side has more room)";
 pub const anchor_alignment_value_message = "anchor-alignment takes a literal alignment: start, end, or stretch (stretch also widens the surface to at least the anchor's width)";
 pub const anchor_offset_value_message = "anchor-offset takes a literal number: the gap in points between the anchor edge and the surface";
@@ -1981,7 +1981,7 @@ pub const bubble_text_attr_message = "text does nothing on bubble - the message 
 /// of minting a new one.
 pub const reactions_alignment_value_names = [_][]const u8{ "start", "center", "end" };
 pub const text_or_children_content_message = "this element takes either one run of text or element children - not both; move the text into a <text> child (and keep label= for the accessible name)";
-pub const table_row_parent_message = "table-row is only allowed inside a table (structure tags in between are fine)";
+pub const table_row_parent_message = "table-row is only allowed inside a table or data-grid (structure tags in between are fine)";
 pub const table_cell_parent_message = "table-cell is only allowed inside a table-row (structure tags in between are fine)";
 pub const template_top_level_message = "template definitions are only allowed at the top of the file, before the view root";
 pub const template_name_message = "template requires a name attribute";
@@ -3195,7 +3195,7 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
             }
             if (std.mem.eql(u8, node.name, "table-row")) {
                 if (parent_element) |parent_name| {
-                    if (!std.mem.eql(u8, parent_name, "table")) return errorAt(node, table_row_parent_message);
+                    if (!std.mem.eql(u8, parent_name, "table") and !std.mem.eql(u8, parent_name, "data-grid")) return errorAt(node, table_row_parent_message);
                 }
             }
             if (std.mem.eql(u8, node.name, "table-cell")) {

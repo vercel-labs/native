@@ -21,17 +21,18 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // (append or slot them anywhere — order carries no meaning) and pin
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
-    try testing.expectEqual(@as(usize, 73), schema.elements.len);
-    try testing.expectEqual(@as(usize, 104), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 76), schema.elements.len);
+    try testing.expectEqual(@as(usize, 105), schema.attrs.len);
     try testing.expectEqual(@as(usize, 15), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
     // runtime-image leaf (67), the video playback composite (68), and
     // the terminal leaf (69), reusable code composite (70), standalone
     // segmented control (71), and the retained virtual-window (72) and
-    // virtual-list (73) authoring composites.
+    // virtual-list (73) authoring composites, plus data-grid (74),
+    // popover (75), and menu-surface (76).
     try testing.expectEqual(
-        @as(u64, 0xaba0356a7c7c8c4d),
+        @as(u64, 0xfbb7ecf41ba92cd0),
         tableFingerprint(schema.ElementInfo, &schema.elements),
     );
     // The attr table runs through the split layout-tween attributes
@@ -53,9 +54,9 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // layout ceiling max-width (98), and the registered-image source
     // rectangle source-x (99), source-y (100), source-width (101), and
     // source-height (102), retained command name (103), and explicit
-    // keyboard eligibility focusable (104).
+    // keyboard eligibility focusable (104), and token backdrop-blur (105).
     try testing.expectEqual(
-        @as(u64, 0x7f85ce729f69e5b5),
+        @as(u64, 0x3406ee8d72535970),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     // The event table runs through the pointer-hover containment pair
@@ -110,7 +111,7 @@ test "registry event scoping names registry elements" {
 test "derived name lists mirror the registry" {
     // The derivations are the vocabulary every consumer reads; hold them
     // to the registry's own predicates.
-    try testing.expectEqual(@as(usize, 57), schema.element_names.len);
+    try testing.expectEqual(@as(usize, 60), schema.element_names.len);
     for (schema.element_names) |name| {
         try testing.expect(schema.elementByName(name).?.rule_hook == null);
     }

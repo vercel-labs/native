@@ -46,7 +46,7 @@
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
 //! system appearance axes; `themeState(model)` subsumes it with scheme and
-//! accent axes through `theme_state_fn`. An exported
+//! accent and optional accessibility axes through `theme_state_fn`. An exported
 //! `statusItem(model): StatusItemState` helper similarly owns one complete
 //! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
 //! collection through `status_items_fn`. Both keep shell, presentation, and
@@ -622,6 +622,19 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 comptime validateLayoutTweensHelper();
                 stamped.layout_tweens = layoutTweensAdapter;
             }
+            const CanvasHooks = @import("ts_canvas_hooks.zig").Hooks(core, Model, App);
+            if (comptime @hasDecl(Model, "canvasChrome")) {
+                if (options.chrome != null) @panic("TsUiApp owns chrome from canvasChrome");
+                stamped.chrome = .{ .prefix_commands = 64, .variable_prefix = true, .build = CanvasHooks.chrome };
+            }
+            if (comptime @hasDecl(Model, "canvasAnimations")) {
+                if (options.animations != null) @panic("TsUiApp owns animations from canvasAnimations");
+                stamped.animations = CanvasHooks.animations;
+            }
+            if (comptime @hasDecl(Model, "canvasFrameMsg")) {
+                if (@hasDecl(core, "frameMsg") or options.on_frame != null) @panic("TsUiApp owns on_frame from canvasFrameMsg; remove frameMsg/custom on_frame");
+                stamped.on_frame = CanvasHooks.frame;
+            }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
             // teaching compile error in the adapter below). A wiring that
@@ -793,6 +806,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 .color_scheme = if (state.colorScheme) |scheme| themeColorScheme(scheme) else .system,
                 .accent = accent,
                 .invalid_accent = if (state.accent != null and accent == null) state.accent else null,
+                .high_contrast = if (comptime @hasField(@TypeOf(state), "highContrast")) state.highContrast else null,
+                .reduce_motion = if (comptime @hasField(@TypeOf(state), "reduceMotion")) state.reduceMotion else null,
             };
         }
 
@@ -853,7 +868,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             const RawState = function.return_type orelse @compileError(teaching);
             const State = statusItemRecordType(RawState, teaching);
             const info = @typeInfo(State).@"struct";
-            if (info.fields.len != 3 or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
+            if ((info.fields.len != 3 and info.fields.len != 5) or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
                 @compileError(teaching);
             }
             if (!optionalEnumType(@FieldType(State, "pack"), &.{ "house", "geist" }) or
@@ -862,6 +877,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             {
                 @compileError(teaching);
             }
+            if (info.fields.len == 5 and (!@hasField(State, "highContrast") or !@hasField(State, "reduceMotion") or @FieldType(State, "highContrast") != ?bool or @FieldType(State, "reduceMotion") != ?bool)) @compileError(teaching);
         }
 
         /// Convert the compiled core's canonical status-item records into

@@ -6,7 +6,8 @@ import fs from "node:fs";
 // Headers identify absent logic-host chrome versus captured native queries;
 // sealed record totals include complete window chrome results.
 // Effect-kind tags, including window execution facts, also identify the format.
-export const journalFormatFingerprint = 0xc443d5c62d0c47d0n;
+// Complete widget menu invocations identify their pending-request owner.
+export const journalFormatFingerprint = 0x5f8233a997f3f874n;
 export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
 
 const requestKeyBase = 0x5453525100000000n;

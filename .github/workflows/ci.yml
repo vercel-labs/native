@@ -117,9 +117,13 @@ jobs:
 
   macos-gpu-perf:
     name: macOS GPU Perf
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -128,7 +132,7 @@ jobs:
       # latency, then a reset-scoped retained-animation cadence sample.
       # Its own job so a shared-runner slowdown is visible in isolation and
       # never blocks the correctness smokes.
-      # Shared macos-14 runners are far noisier than a dev box (first CI run
+      # Shared macOS runners are far noisier than a dev box (first CI run
       # measured a 581 ms cold-start outlier against the 300 ms default), so
       # widen the budgets here instead of weakening the local defaults: this
       # job exists to catch step-function regressions, not runner noise.

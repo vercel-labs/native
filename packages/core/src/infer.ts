@@ -281,7 +281,16 @@ export class IntInference {
           // remains f64 across apps; the native capability validates integer
           // ids/ranges and performs the explicit f32 conversion.
           const theme = sdkLibraryModules.get("@native-sdk/core/theme");
-          if (theme !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(theme)) this.addFloatSlot(node, node.name.text);
+          const events = sdkLibraryModules.get("@native-sdk/core/events");
+          let owner: ts.Node = node.parent;
+          while (!ts.isInterfaceDeclaration(owner) && !ts.isTypeAliasDeclaration(owner) && owner.parent) owner = owner.parent;
+          const canvasRecord = events !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(events) &&
+            (ts.isInterfaceDeclaration(owner) || ts.isTypeAliasDeclaration(owner)) &&
+            ["CanvasFrameEvent", "CanvasColor", "CanvasRect", "CanvasPoint", "CanvasGradientStop", "CanvasChromeCommand", "CanvasChromeContext", "CanvasTransform", "CanvasAnimation"].includes(owner.name.text);
+          // Canvas inputs include fractional native geometry; declarations
+          // retain one f64 ABI across apps. Native checks integer selectors
+          // and durations and explicitly converts GPU scalars to f32.
+          if (canvasRecord || theme !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(theme)) this.addFloatSlot(node, node.name.text);
           else this.addSlot(node, node.name.text);
         }
       } else if (ts.isPropertyDeclaration(node) && node.name && ts.isIdentifier(node.name)) {

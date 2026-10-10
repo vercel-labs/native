@@ -56,17 +56,19 @@ export function themeState(model: Model): ThemeState {
 }
 ```
 
-`ThemeState` has three optional fields:
+`ThemeState` has five optional fields:
 
 ```ts
 export type ThemeState = {
   readonly pack?: "house" | "geist";
   readonly colorScheme?: "light" | "dark" | "system";
   readonly accent?: string; // exactly #rrggbb
+  readonly highContrast?: boolean;
+  readonly reduceMotion?: boolean;
 };
 ```
 
-Change the model through ordinary messages. The helper runs after every committed update. Omitted fields inherit the next lower layer; omitted `colorScheme` and `"system"` both follow the OS. An invalid accent produces a runtime error. High contrast and reduced motion remain OS inputs; high contrast suppresses manifest and model accent overrides.
+Change the model through ordinary messages. The helper runs after every committed update. Omitted fields inherit the next lower layer; omitted `colorScheme` and `"system"` both follow the OS. An invalid accent produces a runtime error. Omitted `highContrast` and `reduceMotion` follow the OS. Explicit values, including `false`, retain model-owned appearance during replay. Effective high contrast suppresses manifest and model accent overrides.
 
 The stock-theme precedence is:
 
@@ -96,7 +98,7 @@ The stock-theme precedence is:
     </tr>
     <tr>
       <td>High contrast / reduced motion</td>
-      <td>OS appearance (high contrast suppresses accent overrides)</td>
+      <td>explicit <code>themeState.highContrast</code> / <code>themeState.reduceMotion</code> → OS appearance (effective high contrast suppresses accent overrides)</td>
     </tr>
     <tr>
       <td>Surface scale / text measurement</td>

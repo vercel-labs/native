@@ -3407,7 +3407,11 @@ fn chromeReplayView(ui: *ChromeReplayApp.Ui, model: *const ChromeReplayModel) Ch
     return ui.column(.{}, .{
         ui.row(.{ .window_drag = true, .height = @max(model.chrome.insets.top, 52) }, .{
             ui.el(.stack, .{ .width = model.chrome.insets.left }, .{}),
-            ui.button(.{ .on_press = .increment }, ui.fmt("Count {d}", .{model.count})),
+            ui.button(.{ .on_press = .increment, .context_menu = &.{
+                .{ .label = "Increment", .msg = .increment },
+                .{ .separator = true },
+                .{ .label = "Disabled", .msg = .increment, .enabled = false },
+            } }, ui.fmt("Count {d}", .{model.count})),
         }),
         ui.text(.{}, ui.fmt("{s} tabs {any}", .{ @tagName(model.chrome.form_factor), model.chrome.tabs_projected })),
     });
@@ -3429,7 +3433,7 @@ fn recordChromePixels(runtime: *core.Runtime, recorder: *session_record.SessionR
     recorder.recordScreenshot(canvas_label, 1, std.hash.Wyhash.hash(0, writer.written()), writer.written().len);
 }
 
-test "OS chrome results replay complete snapshots and pixels through resize fullscreen and accessibility" {
+test "OS chrome results replay complete snapshots and pixels through resize fullscreen accessibility and context menus" {
     const gpa = std.testing.allocator;
     const buffer = try gpa.create(JournalBuffer);
     defer gpa.destroy(buffer);
@@ -3467,12 +3471,25 @@ test "OS chrome results replay complete snapshots and pixels through resize full
         };
         try std.testing.expect(button_id != 0);
         try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{ .window_id = 1, .label = canvas_label, .id = button_id, .action = .press } });
+        const invocation = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} 0", .{ canvas_label, button_id });
+        defer gpa.free(invocation);
+        try recorded.runtime.dispatchAutomationCommand(app, invocation);
         try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
         try recordChromePixels(&recorded.runtime, recorder);
     }
     recorder.finish();
     try std.testing.expect(!recorder.failed);
     try std.testing.expect(recorder.window_chrome_count > 3);
+    try std.testing.expectEqual(@as(u32, 6), state.model.count);
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var invocations: usize = 0;
+    while (try reader.next()) |record| if (record == .event) {
+        // Selections without their pending request cannot replay. The
+        // complete invocation owns the nested selection and chrome facts.
+        try std.testing.expect(record.event != .context_menu_action);
+        if (record.event == .widget_context_menu_action) invocations += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), invocations);
     const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
     defer replayed.destroy(gpa);
     replayed.null_platform.gpu_surfaces = true;
@@ -3485,6 +3502,66 @@ test "OS chrome results replay complete snapshots and pixels through resize full
     try std.testing.expect(report.ok());
     try std.testing.expect(report.checkpoints_verified >= 3);
     try std.testing.expectEqual(@as(u64, 3), report.screenshots_verified);
+    try std.testing.expectEqualDeep(state.model, fresh.model);
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+}
+
+test "rejected widget menu commands leave the journal clean and degraded platform invocations replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-session" });
+    const recorded = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer recorded.destroy(gpa);
+    recorded.null_platform.gpu_surfaces = true;
+    recorded.runtime.options.session_recorder = recorder;
+    recorded.runtime.dispatch_error_policy = .degrade;
+    const state = try ChromeReplayApp.create(std.heap.page_allocator, chromeReplayOptions());
+    defer state.destroy();
+    const app = state.app();
+    try recorded.start(app);
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = .init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+    var button_id: u64 = 0;
+    var plain_id: u64 = 0;
+    for ((try recorded.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| {
+        if (node.widget.kind == .button) button_id = node.widget.id;
+        if (node.widget.kind == .text) plain_id = node.widget.id;
+    }
+    try std.testing.expect(button_id != 0 and plain_id != 0);
+    const event_count = recorder.event_count;
+    const errors = [_]anyerror{ error.ContextMenuItemSeparator, error.ContextMenuItemDisabled, error.ContextMenuItemOutOfRange };
+    for (errors, 1..) |expected, index| {
+        const command = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} {d}", .{ canvas_label, button_id, index });
+        defer gpa.free(command);
+        try std.testing.expectError(expected, recorded.runtime.dispatchAutomationCommand(app, command));
+    }
+    const undeclared = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} 0", .{ canvas_label, plain_id });
+    defer gpa.free(undeclared);
+    try std.testing.expectError(error.ContextMenuUndeclared, recorded.runtime.dispatchAutomationCommand(app, undeclared));
+    try std.testing.expectEqual(event_count, recorder.event_count);
+    try std.testing.expect(recorded.runtime.canvas_widget_context_menu_pending == null);
+    // A platform invocation is already journaled. Its refusal follows
+    // the interactive dispatch policy and must replay without exiting.
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_context_menu_action = .{ .label = canvas_label, .id = button_id, .item_index = 1 } });
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_context_menu_action = .{ .label = canvas_label, .id = button_id, .item_index = 0 } });
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try recordChromePixels(&recorded.runtime, recorder);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer replayed.destroy(gpa);
+    replayed.null_platform.gpu_surfaces = true;
+    replayed.runtime.dispatch_error_policy = .degrade;
+    const fresh = try ChromeReplayApp.create(std.heap.page_allocator, chromeReplayOptions());
+    defer fresh.destroy();
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), buffer.journalBytes(), .{ .verify = true, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(u64, 1), report.screenshots_verified);
     try std.testing.expectEqualDeep(state.model, fresh.model);
     try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
 }

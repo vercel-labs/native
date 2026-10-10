@@ -21,7 +21,7 @@ export interface WindowViewSource extends ViewSources { label: string; source: s
 
 const colorTokenNames = ["background", "surface", "surface_subtle", "surface_pressed", "text", "text_muted", "syntax_plain", "syntax_comment", "syntax_keyword", "syntax_literal", "syntax_function", "syntax_property", "syntax_constant", "border", "accent", "accent_text", "destructive", "destructive_text", "success", "success_text", "warning", "warning_text", "info", "info_text", "focus_ring", "shadow", "scrim", "disabled"];
 
-const nonHitTargetNames = ["row", "column", "stack", "list", "grid", "split", "tree", "breadcrumb", "button-group", "pagination", "radio-group", "tabs", "toggle-group", "badge", "avatar", "tooltip", "separator", "spacer", "table", "table-row", "skeleton", "spinner", "icon"];
+const nonHitTargetNames = ["row", "column", "stack", "list", "grid", "split", "tree", "breadcrumb", "button-group", "pagination", "radio-group", "tabs", "toggle-group", "badge", "avatar", "tooltip", "separator", "spacer", "table", "data-grid", "table-row", "skeleton", "spinner", "icon"];
 
 export function compileView(source: string, contract: ViewContract, options: ViewSources = {}): string {
   return compileViewBundle(source, contract, options, []);
@@ -623,7 +623,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       output.push(`nscvNodes.push({ end: nscvNodes.length + 1, kind: "markdown", text: "", markdownRecipe: ${wordImages ? "nscvMarkdownRecipeWords" : "nscvMarkdownRecipe"}(${source.code}, ${expanded}, ${issue}, ${images})${channels.length ? ", " + channels.join(", ") : ""} });`);
       return;
     }
-    const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", combobox: "combobox", bubble: "bubble", table: "table", "table-row": "data_row", "table-cell": "data_cell", progress: "progress", skeleton: "skeleton", spinner: "spinner", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
+    const kinds: Record<string, string> = { terminal: "terminal", icon: "icon", combobox: "combobox", bubble: "bubble", table: "table", "data-grid": "data_grid", popover: "popover", "menu-surface": "menu_surface", "table-row": "data_row", "table-cell": "data_cell", progress: "progress", skeleton: "skeleton", spinner: "spinner", column: "column", row: "row", stack: "stack", grid: "grid", card: "card", alert: "alert", dialog: "dialog", drawer: "drawer", sheet: "sheet", tooltip: "tooltip", panel: "panel", badge: "badge", input: "input", "text-field": "text_field", textarea: "textarea", code: "textarea", "search-field": "search_field", select: "select", text: "text", button: "button", checkbox: "checkbox", switch: "switch_control", toggle: "toggle", slider: "slider", "status-bar": "status_bar", spacer: "spacer", scroll: "scroll", avatar: "avatar", radio: "radio", "radio-group": "radio_group", "button-group": "button_group", breadcrumb: "breadcrumb", pagination: "pagination", "toggle-group": "toggle_group", "toggle-button": "toggle_button", accordion: "accordion", tabs: "tabs", "segmented-control": "segmented_control", tree: "tree", list: "list", "list-item": "list_item", "dropdown-menu": "dropdown_menu", "menu-item": "menu_item", separator: "separator", split: "split", resizable: "resizable", "media-surface": "media_surface" };
     if (!Object.hasOwn(kinds, node.name)) fail(node, `unsupported element <${node.name}>`);
     if (node.name === "terminal" && (!node.attrs.has("pty") || node.text.trim() || node.children.length || node.attrs.has("text"))) fail(node, "terminal requires pty and no authored content");
     if (node.name === "icon" && (!node.attrs.has("name") || node.text.trim() || node.children.length)) fail(node, "icon requires name and no content");
@@ -634,7 +634,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
     if (reactions.length && node.name !== "bubble") fail(node, "reactions requires bubble");
     if (reactions.length > 1) fail(node, "bubble takes at most one reactions child");
     const contentChildren = node.children.filter(child => child.name !== "context-menu" && child.name !== "reactions");
-    const container = ["bubble", "table", "table-row", "column", "row", "stack", "grid", "card", "alert", "dialog", "drawer", "sheet", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
+    const container = ["bubble", "table", "data-grid", "popover", "menu-surface", "table-row", "column", "row", "stack", "grid", "card", "alert", "dialog", "drawer", "sheet", "scroll", "panel", "radio-group", "button-group", "breadcrumb", "pagination", "toggle-group", "accordion", "tabs", "tree", "list", "list-item", "dropdown-menu", "split", "resizable"].includes(node.name);
     if (node.attrs.get("role") === "treeitem" && !["column", "row", "panel", "list-item"].includes(node.name)) fail(node, "compiled treeitem requires column, row, panel or list-item");
     if (node.attrs.get("role") === "tree" && !["column", "row", "panel", "scroll", "tree"].includes(node.name)) fail(node, "tree role requires a generic container");
     const paragraph = node.name === "text" && contentChildren.length > 0;
@@ -797,6 +797,17 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
           props.push(`${name}: ${JSON.stringify(value)}`);
         }
       }
+      else if (name === "backdrop-blur") {
+        if (value.startsWith("{")) {
+          const expr = binding(value, node, scope);
+          const members = contract.types.enums?.find(item => item.name === expr.type.name)?.members;
+          if (expr.type.kind !== "enum" || !members?.every(member => ["none", "sm", "md"].includes(member))) fail(node, "backdrop-blur requires its closed token vocabulary");
+          props.push(`backdropBlur: ${expr.code}`);
+        } else {
+          if (!["none", "sm", "md"].includes(value)) fail(node, "unsupported backdrop-blur token");
+          props.push(`backdropBlur: ${JSON.stringify(value)}`);
+        }
+      }
       else if (name === "overflow") {
         if (!["clip", "ellipsis"].includes(value)) fail(node, "unsupported overflow");
         props.push(`overflow: ${JSON.stringify(value)}`);
@@ -846,7 +857,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         const expr = key(value, node, scope), prop = name === "key" ? "key" : "globalKey";
         props.push(`${prop}${expr.type.kind === "i64" ? "Int" : expr.type.kind === "bytes" ? "Bytes" : ""}: ${expr.type.kind === "bytes" ? `nscvTextBytes([${expr.code}])` : expr.code}`);
       } else if (["label", "text", "placeholder", "command"].includes(name)) {
-        if (name === "text" && !["input", "text-field", "search-field", "textarea", "combobox", "select", "accordion", "checkbox", "radio", "switch", "toggle", "button", "toggle-button", "table-cell", "status-bar", "badge", "menu-item", "list-item", "avatar", "tooltip", "text", "card", "alert", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header, checkbox or captioned surface");
+        if (name === "text" && !["input", "text-field", "search-field", "textarea", "combobox", "select", "accordion", "checkbox", "radio", "switch", "toggle", "button", "toggle-button", "table-cell", "status-bar", "badge", "menu-item", "list-item", "avatar", "tooltip", "text", "card", "alert", "dialog", "drawer", "sheet", "data-grid"].includes(node.name)) fail(node, "text requires a text-entry widget, select, accordion header, checkbox or captioned surface");
         if (name === "placeholder" && !["input", "text-field", "search-field", "textarea", "combobox", "select"].includes(node.name)) fail(node, "placeholder requires a text-entry widget or select");
         if (name === "text" && node.text.trim()) fail(node, "text attribute cannot be combined with element text");
         const expr = value.startsWith("{") ? binding(value, node, scope) : { code: JSON.stringify(value), type: { kind: "string" } };
@@ -909,7 +920,7 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
       } else if (["on-press", "on-double-press", "on-hold", "on-toggle", "on-change", "on-drag", "on-scroll", "on-terminal", "on-input", "on-submit", "on-dismiss", "on-resize", "on-hover-enter", "on-hover-leave"].includes(name)) {
         const channel = name.slice(3);
         const treeRow = container && node.attrs.get("role") === "treeitem";
-        if (channel === "change" && !treeRow && !["radio", "slider", "list-item"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
+        if (channel === "change" && !treeRow && !["radio", "slider", "list-item"].includes(node.name) || channel === "scroll" && node.name !== "scroll" || channel === "dismiss" && !["dropdown-menu", "popover", "menu-surface", "dialog", "drawer", "sheet"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if ((channel === "input" || channel === "submit" && !treeRow) && !["input", "text-field", "search-field", "textarea", "combobox", "code"].includes(node.name)) fail(node, `${name} is unsupported on ${node.name}`);
         if (channel === "terminal" && node.name !== "terminal") fail(node, "on-terminal requires terminal");
         if (channel === "resize" && node.name !== "split") fail(node, "on-resize requires split");

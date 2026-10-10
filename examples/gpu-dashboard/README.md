@@ -1,22 +1,17 @@
-# Native SDK gpu-dashboard example
+# GPU Dashboard
 
-This example combines native app chrome, a `gpu_surface`, and a retained canvas display list:
+A TypeScript app core and Native markup view own the complete dashboard model, controls, appearance, chrome, retained animations, and frame-status text. scriptc compiles the core and view; the native host supplies AppKit, Metal, retained identities, presentation clocks, and resource lifetime.
 
-- Native toolbar, sidebar, and statusbar controls.
-- A GPU surface registered with explicit presentation settings and a dashboard display list.
-- Retained widget semantics for dashboard lists, forms, data grids, popovers, and scrolling.
-- A glass popover rendered with retained widget backdrop blur.
-- A WebView inspector sibling in the same split layout.
-- Frame diagnostics for canvas profile risk, work units, commands, batches, and dirty regions.
-
-Run with the macOS system backend. The GPU dashboard defaults to `ReleaseFast`; pass `-Doptimize=Debug` only when debugging renderer internals.
+The view includes navigation and metric lists, a data grid, forms, a blurred popover, a menu surface, and scrolling. `canvasChrome`, `canvasAnimations`, and `canvasFrameMsg` declare canvas behavior from model state. Appearance observations remain in the model so replay preserves contrast and reduced motion.
 
 ```sh
 native dev
+native test -Dplatform=null
 ```
 
-Run the headless canvas and scene tests:
+From the SDK repository, run the complete independent native-reference comparison:
 
 ```sh
-native test -Dplatform=null
+zig build test-ts-gpu-dashboard-e2e
+zig build test-ts-canvas-hooks
 ```
