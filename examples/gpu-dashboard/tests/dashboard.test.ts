@@ -15,17 +15,17 @@ test("GPU Dashboard owns complete status storage, controls and sealed replay", a
     reported_planned_frame: false, status_storage: Array(192).fill(0), status_len: 0,
   });
   const cases = [
-    ["Refresh dashboard", "press", "refresh_count", 1],
-    ["Dashboard mode", "press", "mode_count", 1],
-    ["Live render status", "press", "live_count", 1],
-    ["Customers", "press", "nav_selection", 1],
-    ["Activation 74.2%, up 6.1%", "press", "metric_selection", 1],
-    ["High intent", "press", "filter_selection", 2],
-    ["Queued invoices", "press", "activity_selection", 3],
-    ["Auto refresh", "toggle", "auto_refresh", false],
+    ["Refresh dashboard", "button", "press", "refresh_count", 1],
+    ["Dashboard mode", "tab", "press", "mode_count", 1],
+    ["Live render status", "button", "press", "live_count", 1],
+    ["Customers", "listitem", "press", "nav_selection", 1],
+    ["Activation 74.2%, up 6.1%", "listitem", "press", "metric_selection", 1],
+    ["High intent", "menuitem", "press", "filter_selection", 2],
+    ["Queued invoices", "listitem", "press", "activity_selection", 3],
+    ["Auto refresh", "switch", "toggle", "auto_refresh", false],
   ] as const;
-  for (const [name, action, field, expected] of cases) {
-    snapshot = await app.action(findWidget(snapshot, { name }), action);
+  for (const [name, role, action, field, expected] of cases) {
+    snapshot = await app.action(findWidget(snapshot, { role, name }), action);
     snapshot = await app.frame(); snapshots.push(snapshot);
     assert.equal(snapshot.model[field], expected, name);
     assert.equal((snapshot.model.status_storage as number[]).length, 192);

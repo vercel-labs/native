@@ -3,6 +3,7 @@ const sdk = @import("native_sdk");
 const core = @import("gpu_dashboard_core");
 const decoder = @import("gpu_dashboard_decoder");
 const reference = @import("gpu_dashboard_reference_access.zig");
+const manifest = @import("gpu_dashboard_manifest");
 const parity = @import("effects_media_parity.zig");
 const testing = std.testing;
 const canvas = sdk.canvas;
@@ -10,6 +11,10 @@ const Host = sdk.TsCoreHost(core);
 const Adapter = sdk.TsUiApp(core);
 const Ui = canvas.Ui(core.Msg);
 const View = canvas.CompiledMarkupView(core.Model, core.Msg, @embedFile("app.native"));
+
+test "GPU Dashboard shipping shell preserves the complete native scene" {
+    try parity.equal(reference.migrationScene, comptime sdk.app_manifest.shellConfigFrom(manifest));
+}
 
 fn options() Adapter.Options {
     return Adapter.mobileOptions(.{}, .{ .name = "gpu-dashboard", .scene = reference.migrationScene, .canvas_label = "dashboard-canvas", .view = decoder.build });
@@ -87,8 +92,7 @@ test "GPU Dashboard compiled model preserves all fields and status storage tails
         try apply(&native, &fx, .confidence_changed, .{ .confidence_changed = value });
     }
     inline for (.{ "light", "dark" }) |scheme| for ([_]bool{ false, true }) |contrast| for ([_]bool{ false, true }) |motion| {
-        try apply(&native, &fx, .{ .set_appearance = .{ .color_scheme = @field(sdk.ColorScheme, scheme), .high_contrast = contrast, .reduce_motion = motion } },
-            .{ .set_appearance = .{ .colorScheme = @field(core.ColorScheme, scheme), .highContrast = contrast, .reduceMotion = motion } });
+        try apply(&native, &fx, .{ .set_appearance = .{ .color_scheme = @field(sdk.ColorScheme, scheme), .high_contrast = contrast, .reduce_motion = motion } }, .{ .set_appearance = .{ .colorScheme = @field(core.ColorScheme, scheme), .highContrast = contrast, .reduceMotion = motion } });
         try viewParity(&native, Host.model());
     };
     try testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
@@ -106,8 +110,7 @@ test "GPU Dashboard chrome and animation declarations match the independent nati
     state_app.model = Host.runtimeModel().*;
     defer state_app.destroy();
     inline for (.{ "light", "dark" }) |scheme| for ([_]bool{ false, true }) |contrast| for ([_]bool{ false, true }) |motion| {
-        try apply(&native, &fx, .{ .set_appearance = .{ .color_scheme = @field(sdk.ColorScheme, scheme), .high_contrast = contrast, .reduce_motion = motion } },
-            .{ .set_appearance = .{ .colorScheme = @field(core.ColorScheme, scheme), .highContrast = contrast, .reduceMotion = motion } });
+        try apply(&native, &fx, .{ .set_appearance = .{ .color_scheme = @field(sdk.ColorScheme, scheme), .high_contrast = contrast, .reduce_motion = motion } }, .{ .set_appearance = .{ .colorScheme = @field(core.ColorScheme, scheme), .highContrast = contrast, .reduceMotion = motion } });
         const state = ts.theme_state_fn.?(Host.runtimeModel());
         try testing.expectEqual(contrast, state.high_contrast.?);
         try testing.expectEqual(motion, state.reduce_motion.?);

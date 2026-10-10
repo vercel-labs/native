@@ -3407,7 +3407,7 @@ fn chromeReplayView(ui: *ChromeReplayApp.Ui, model: *const ChromeReplayModel) Ch
     return ui.column(.{}, .{
         ui.row(.{ .window_drag = true, .height = @max(model.chrome.insets.top, 52) }, .{
             ui.el(.stack, .{ .width = model.chrome.insets.left }, .{}),
-            ui.button(.{ .on_press = .increment }, ui.fmt("Count {d}", .{model.count})),
+            ui.button(.{ .on_press = .increment, .context_menu = &.{.{ .label = "Increment", .msg = .increment }} }, ui.fmt("Count {d}", .{model.count})),
         }),
         ui.text(.{}, ui.fmt("{s} tabs {any}", .{ @tagName(model.chrome.form_factor), model.chrome.tabs_projected })),
     });
@@ -3429,7 +3429,7 @@ fn recordChromePixels(runtime: *core.Runtime, recorder: *session_record.SessionR
     recorder.recordScreenshot(canvas_label, 1, std.hash.Wyhash.hash(0, writer.written()), writer.written().len);
 }
 
-test "OS chrome results replay complete snapshots and pixels through resize fullscreen and accessibility" {
+test "OS chrome results replay complete snapshots and pixels through resize fullscreen accessibility and context menus" {
     const gpa = std.testing.allocator;
     const buffer = try gpa.create(JournalBuffer);
     defer gpa.destroy(buffer);
@@ -3467,12 +3467,25 @@ test "OS chrome results replay complete snapshots and pixels through resize full
         };
         try std.testing.expect(button_id != 0);
         try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{ .window_id = 1, .label = canvas_label, .id = button_id, .action = .press } });
+        const invocation = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} 0", .{ canvas_label, button_id });
+        defer gpa.free(invocation);
+        try recorded.runtime.dispatchAutomationCommand(app, invocation);
         try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
         try recordChromePixels(&recorded.runtime, recorder);
     }
     recorder.finish();
     try std.testing.expect(!recorder.failed);
     try std.testing.expect(recorder.window_chrome_count > 3);
+    try std.testing.expectEqual(@as(u32, 6), state.model.count);
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var invocations: usize = 0;
+    while (try reader.next()) |record| if (record == .event) {
+        // Selections without their pending request cannot replay. The
+        // complete invocation owns the nested selection and chrome facts.
+        try std.testing.expect(record.event != .context_menu_action);
+        if (record.event == .widget_context_menu_action) invocations += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), invocations);
     const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
     defer replayed.destroy(gpa);
     replayed.null_platform.gpu_surfaces = true;

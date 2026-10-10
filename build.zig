@@ -4614,6 +4614,7 @@ fn tsCoreE2eArtifact(
     const gpu_dashboard_mod = b.createModule(.{ .root_source_file = gpu_dashboard_root, .target = target, .optimize = optimize });
     gpu_dashboard_mod.addImport("native_sdk", desktop_mod);
     gpu_dashboard_mod.addImport("gpu_dashboard_core", gpu_dashboard_fixture.module);
+    gpu_dashboard_mod.addImport("gpu_dashboard_manifest", b.createModule(.{ .root_source_file = b.path("examples/gpu-dashboard/app.zon"), .target = target, .optimize = optimize }));
     const gpu_dashboard_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
     gpu_dashboard_decoder.addImport("native_sdk", desktop_mod);
     gpu_dashboard_decoder.addImport("core.zig", gpu_dashboard_fixture.module);
