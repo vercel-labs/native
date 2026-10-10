@@ -45,7 +45,12 @@ import { fileURLToPath } from "node:url";
 
 const KNOWN_SCHEMA_VERSION = 1;
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pinnedManifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
+let pinnedManifestPath;
+try {
+  pinnedManifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
+} catch (error) {
+  fail(error.message);
+}
 const packagePath = path.join(coreRoot, "package.json");
 
 // Entries whose flip to `static` changes the compiler premise beneath

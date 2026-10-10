@@ -54,7 +54,7 @@ export function webPanes(model: Model): readonly WebViewPane[] {
 export function statusItem(model: Model): StatusItemState {
   return { iconPath: asciiBytes(""), tooltip: utf8Bytes("Native SDK Canvas Preview"),
     activationCommand: asciiBytes(""), alternateActivationCommand: asciiBytes(""), openCommand: asciiBytes(""),
-    presentation: { title: asciiBytes("NS"), width: 0, tone: "normal", iconOpacity: 1, monospaced: false },
+    presentation: { title: asciiBytes("NS"), width: 0, tone: "normal", iconOpacity: 1, monospaced: false, fontSize: 0 },
     items: [
       { id: 1, label: utf8Bytes("Show Example"), command: asciiBytes("app.example"), separator: false,
         enabled: true, detail: asciiBytes(""), role: "command", key: asciiBytes(""),

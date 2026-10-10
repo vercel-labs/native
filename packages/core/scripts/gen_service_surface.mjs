@@ -37,7 +37,13 @@ import { fileURLToPath } from "node:url";
 const KNOWN_SCHEMA_VERSION = 1;
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(coreRoot, "..", "..");
-const manifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
+let manifestPath;
+try {
+  manifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
+} catch (error) {
+  console.error(`gen_service_surface: ${error.message}`);
+  process.exit(2);
+}
 const outputRel = "skill-data/ts-services/references/service-surface.md";
 const outputPath = path.join(repoRoot, outputRel);
 

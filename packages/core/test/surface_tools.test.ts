@@ -77,6 +77,22 @@ function diffToolFixture(pin: string, manifestVersion: string) {
   return path.join(scriptDir, "surface_manifest_diff.mjs");
 }
 
+test("surface tools report an absent release cache with exit 2 and no stack trace", () => {
+  const fixture = generatorFixture([]);
+  try {
+    const core = path.join(fixture.root, "packages", "core");
+    fs.copyFileSync(diffScript, path.join(core, "scripts", "surface_manifest_diff.mjs"));
+    fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ nativeToolchain: { scriptc: scriptcPin } }));
+    fs.copyFileSync(path.join(pkg, "scripts", "scriptc-toolchain.json"), path.join(core, "scripts", "scriptc-toolchain.json"));
+    for (const script of [fixture.script, path.join(core, "scripts", "surface_manifest_diff.mjs")]) {
+      const result = spawnSync(process.execPath, [script, "--check"], { encoding: "utf8", env: { ...process.env, NATIVE_SDK_SCRIPTC_CACHE: path.join(fixture.root, "missing-cache") } });
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /scriptc.*not installed/);
+      assert.doesNotMatch(result.stderr, /\n\s+at /);
+    }
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
 test("surface_manifest_diff categorizes every change class by stable id", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-"));
   const oldManifest = writeManifest(dir, "old.json", "0.0.1", [

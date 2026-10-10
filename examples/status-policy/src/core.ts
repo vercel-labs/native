@@ -67,13 +67,13 @@ export function statusItems(model: Model): readonly StatusItemDescriptor[] {
   const control: StatusItemDescriptor = {
     id: 200, visible: true, iconPath: asciiBytes(""), tooltip: asciiBytes("Workspace controls"),
     activationCommand: asciiBytes(""), alternateActivationCommand: asciiBytes(""), openCommand: asciiBytes(""),
-    presentation: { title: asciiBytes("DESK"), width: 58, tone: "normal", iconOpacity: 1, monospaced: true },
+    presentation: { title: asciiBytes("DESK"), width: 58, tone: "normal", iconOpacity: 1, monospaced: true, fontSize: 0 },
     items: [row(asciiBytes("Add from controls"), asciiBytes("control.add"), true)],
   };
   const notes: StatusItemDescriptor = {
     id: 300, visible: true, iconPath: asciiBytes(""), tooltip: asciiBytes("Workspace notes"),
     activationCommand: asciiBytes(""), alternateActivationCommand: asciiBytes(""), openCommand: asciiBytes(""),
-    presentation: { title: asciiBytes("NOTES"), width: 62, tone: "normal", iconOpacity: 1, monospaced: false },
+    presentation: { title: asciiBytes("NOTES"), width: 62, tone: "normal", iconOpacity: 1, monospaced: false, fontSize: 0 },
     items: [row(asciiBytes("Hide all items"), asciiBytes("workspace.hide"), true)],
   };
   if (model.compact) return model.reverse ? [control, session] : [session, control];
