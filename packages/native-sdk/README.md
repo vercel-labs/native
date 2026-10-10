@@ -10,7 +10,7 @@ The default app core uses a checked TypeScript subset and compiles to native cod
 npm install -g @native-sdk/cli
 ```
 
-The install runs no scripts: the `native` binary arrives as a per-platform optional dependency (`@native-sdk/cli-<platform>`), and this package carries the SDK source your apps build against, so `native init` and `native dev` work offline after install. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
+The `native` binary arrives as a per-platform optional dependency (`@native-sdk/cli-<platform>`). Installation also downloads the exact scriptc release, verifies its checksum, and installs the matching compiler API and runtime packs into `~/.native/toolchains/scriptc/`. This package carries the SDK source your apps build against, so `native init` and `native dev` work offline after installation. If npm install scripts are disabled, run `node packages/core/scripts/install_scriptc.mjs` from the installed CLI package before building. `NATIVE_SDK_SCRIPTC_CACHE` selects another toolchain cache directory. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
 
 ## Use
 

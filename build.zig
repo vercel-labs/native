@@ -6,11 +6,11 @@ test "complete root test sharding" {
     std.testing.refAllDecls(test_shards);
 }
 
-fn repositoryScriptcBin(b: *std.Build) []const u8 {
-    return b.pathFromRoot(if (b.graph.host.result.os.tag == .windows)
-        "packages/core/node_modules/.bin/scriptc.cmd"
-    else
-        "packages/core/node_modules/.bin/scriptc");
+// Installing the archive extractor opts this checkout into compiler tests.
+// The build drivers then require a complete checksum-pinned release cache;
+// disabling npm install scripts must not silently skip compiler qualification.
+fn repositoryScriptcInstallMarker(b: *std.Build) []const u8 {
+    return b.pathFromRoot("packages/core/node_modules/tar/package.json");
 }
 
 const PlatformOption = enum {
@@ -1276,6 +1276,9 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&gallery_driver_run.step);
         b.step("test-component-gallery", "Compare every component gallery specimen and replay across view backends").dependOn(&gallery_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
+        for ([_][]const u8{ "scriptc_toolchain.test.ts", "compiler_command.test.ts", "external_core_compiler.test.ts", "package_manifest.test.ts" }) |file| {
+            native_api_tests.addFileArg(b.path(b.fmt("packages/core/test/{s}", .{file})));
+        }
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/control_appearance.test.ts"));
         native_api_tests.addFileArg(b.path("packages/core/test/component_construction.test.ts"));
@@ -1763,8 +1766,8 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
         .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
         .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
-        .{ .path = "build.zig", .pattern = "fn repositoryScriptcBin" },
-        .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
+        .{ .path = "build.zig", .pattern = "fn repositoryScriptcInstallMarker" },
+        .{ .path = "build.zig", .pattern = "packages/core/node_modules/tar/package.json" },
         .{ .path = "build.zig", .pattern = "compile.addArg(\"--compiler-package-origin\");" },
         .{ .path = "build/app.zig", .pattern = "compile.addFileInput(dep.path(\"packages/core/scripts/run_library_compiler.mjs\"))" },
         .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
@@ -4330,7 +4333,7 @@ fn tsCoreE2eArtifact(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER") == null) {
         b.build_root.handle.access(
             b.graph.io,
-            repositoryScriptcBin(b),
+            repositoryScriptcInstallMarker(b),
             .{},
         ) catch return null;
     }
@@ -5252,6 +5255,8 @@ fn externalServiceFixture(
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
     compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc-toolchain.json"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArg("--manifest");
@@ -5564,6 +5569,8 @@ fn externalCoreFixtureModule(
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
     compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc-toolchain.json"));
     compile.addFileInput(b.path("packages/core/scripts/run_library_compiler.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);

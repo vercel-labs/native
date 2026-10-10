@@ -117,32 +117,19 @@ if (cliAliasPin !== coreAliasPin) {
   console.error(`Pin mismatch: package.json dependencies["@typescript/old"]=${cliAliasPin}, expected ${coreAliasPin} from packages/core devDependencies`);
   errors++;
 }
-// The external core compiler rides the same way: a REGULAR dependency of
-// the CLI so npm installs it in the same transaction, resolved from
-// packages/core by node's ancestor walk. The profile's determinism-fence
-// tables are release-pinned data, so both manifests must carry one EXACT
-// pin (packages/core's dependencies entry is the authority).
-const coreCompilerPin = coreJson.dependencies?.scriptc;
-const cliCompilerPin = packageJson.dependencies?.scriptc;
-if (!coreCompilerPin) {
-  console.error('packages/core/package.json is missing the exact external core compiler pin in dependencies');
-  errors++;
-} else if (!/^\d+\.\d+\.\d+$/.test(coreCompilerPin)) {
-  console.error(`packages/core/package.json dependencies pin ${coreCompilerPin} is a range, not an exact version pin`);
+// Both installation entry points must select the same verified release.
+const coreCompilerPin = coreJson.nativeToolchain?.scriptc;
+const cliCompilerPin = packageJson.nativeToolchain?.scriptc;
+const toolchain = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'scripts', 'scriptc-toolchain.json'), 'utf-8'));
+if (!/^\d+\.\d+\.\d+$/.test(coreCompilerPin ?? '') || cliCompilerPin !== coreCompilerPin || toolchain.version !== coreCompilerPin) {
+  console.error('scriptc release pins must agree across both packages and the toolchain manifest');
   errors++;
 }
-if (cliCompilerPin !== coreCompilerPin) {
-  console.error(`Pin mismatch: package.json carries external core compiler pin ${cliCompilerPin}, expected ${coreCompilerPin} from packages/core dependencies`);
-  errors++;
-}
-// The library-sidecar lane calls the matching compiler API from Node.
-// Keep that package in the CLI install and the checkout's dev install at the
-// same exact release as the native command and its surface manifest.
-const coreCompilerApiPin = coreJson.devDependencies?.['@scriptc/compiler'];
-const cliCompilerApiPin = packageJson.dependencies?.['@scriptc/compiler'];
-if (coreCompilerApiPin !== coreCompilerPin || cliCompilerApiPin !== coreCompilerPin) {
-  console.error(`Pin mismatch: @scriptc/compiler must be ${coreCompilerPin} in packages/core devDependencies and package.json dependencies (found ${coreCompilerApiPin}/${cliCompilerApiPin})`);
-  errors++;
+for (const pkg of [coreJson, packageJson]) {
+  if (pkg.dependencies?.scriptc || pkg.dependencies?.['@scriptc/compiler'] || pkg.devDependencies?.['@scriptc/compiler']) {
+    console.error('scriptc is installed from the release manifest; remove npm compiler dependencies');
+    errors++;
+  }
 }
 const coreLock = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package-lock.json'), 'utf-8'));
 if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !== expectedVersion) {

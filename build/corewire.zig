@@ -14,6 +14,8 @@ pub fn profileArchive(b: *std.Build, sdk: *std.Build, node: []const u8) std.Buil
     compile.setName("native corewire projections (scriptc)");
     compile.addFileArg(sdk.path("tools/corewire/build_profile.mjs"));
     compile.addFileInput(sdk.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(sdk.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(sdk.path("packages/core/scripts/scriptc-toolchain.json"));
     compile.addArg("--stage");
     compile.addDirectoryArg(source.getDirectory());
     compile.addArg("--manifest");

@@ -11,7 +11,7 @@ import { checkFile, type FrontendOptions, type FrontendResult } from "../src/fro
 
 export const scriptcPin: string = JSON.parse(
   fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
-).dependencies.scriptc;
+).nativeToolchain.scriptc;
 
 export function withTempModule<T>(source: string, run: (entry: string) => T): T {
   const tmp = path.join(os.tmpdir(), `tac-test-${process.pid}-${Math.random().toString(36).slice(2)}.ts`);

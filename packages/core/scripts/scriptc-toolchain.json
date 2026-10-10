@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "version": "0.2.7",
+  "repository": "vercel-labs/scriptc",
+  "releases": {
+    "darwin-arm64": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-darwin-arm64.tar.gz",
+      "bytes": 58493415,
+      "sha256": "30b604eb38079dcb49148a192d9c315452f4f779cdf7dbb2a34d5ae4f7209c34"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-darwin-x64.tar.gz",
+      "bytes": 61180617,
+      "sha256": "eb8306b237974e0cd39cb7d77230179ca36106440fbc787a8c8644dacc92fdc6"
+    },
+    "linux-arm64-gnu": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-linux-arm64-gnu.tar.gz",
+      "bytes": 69987894,
+      "sha256": "bbbf5ee3469509a9071f9b67d84b60187496ba1275b73e1d4e301258cd3c0d53"
+    },
+    "linux-arm64-musl": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-linux-arm64-musl.tar.gz",
+      "bytes": 79857811,
+      "sha256": "bb389fce184f22288564497d645d4bb5bee643d67041219ef07ec458e65aec8b"
+    },
+    "linux-x64-gnu": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-linux-x64-gnu.tar.gz",
+      "bytes": 73362719,
+      "sha256": "fde3a55eaa2ec2c9b3cec688e7c9aa454cf122284d0efac4c71f3024e279f60f"
+    },
+    "linux-x64-musl": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-linux-x64-musl.tar.gz",
+      "bytes": 79272499,
+      "sha256": "c20626a86f0ec7a5da8b0a3a7f75771d4701a179cfc4e2c3fb711a1a71bd8f33"
+    },
+    "win32-x64-msvc": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.2.7/scriptc-0.2.7-win32-x64-msvc.tar.gz",
+      "bytes": 86098874,
+      "sha256": "86f053b434516177ca115dde6c0704e76efe106b10bd79b5126e696c3910a22a"
+    }
+  },
+  "packages": {
+    "compiler": {
+      "name": "@scriptc/compiler",
+      "version": "0.2.7",
+      "url": "https://registry.npmjs.org/@scriptc/compiler/-/compiler-0.2.7.tgz",
+      "integrity": "sha512-iLVxQX+YHJmo+obGx0o/+qRU/SGQj8fHuQQe3scIFqzKCdG/3WOxtYuKAE77nWZKjKy6GBa2EggLePojy1tRoQ=="
+    },
+    "typescript": {
+      "name": "typescript",
+      "version": "7.0.2",
+      "url": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
+      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA=="
+    },
+    "typescript5": {
+      "name": "typescript",
+      "version": "5.9.3",
+      "url": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="
+    },
+    "runtime-ios-arm64": {
+      "name": "@scriptc/runtime-ios-arm64",
+      "version": "0.2.7",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-arm64/-/runtime-ios-arm64-0.2.7.tgz",
+      "integrity": "sha512-B27DtlZLQ9Bax0fK8cPfgnxss9Rebdwl23uCFlKZOmJrDfvnJzu917a4cSdvlfJLKFXmjozGxv9SMXG7aRySVg=="
+    },
+    "runtime-ios-simulator-arm64": {
+      "name": "@scriptc/runtime-ios-simulator-arm64",
+      "version": "0.2.7",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-simulator-arm64/-/runtime-ios-simulator-arm64-0.2.7.tgz",
+      "integrity": "sha512-1EGVjOveIHUIOdKaRqcLUvj3qaMM4qMi3E5e0Z1BY/siVDP206gZef8pbn/HiD8Q3i9mXeiXpCTT2OjJrAgItg=="
+    },
+    "runtime-android-arm64": {
+      "name": "@scriptc/runtime-android-arm64",
+      "version": "0.2.7",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-android-arm64/-/runtime-android-arm64-0.2.7.tgz",
+      "integrity": "sha512-PTatYOKH33wyO/FKG7aFx4Tg+Y6CO4EksAykYIaxPz+s5ZGkvDU6ataQfekAl38FJ1tqA28E5uLaIHVyHQ2Drw=="
+    },
+    "runtime-wasm32-wasi": {
+      "name": "@scriptc/runtime-wasm32-wasi",
+      "version": "0.2.7",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-wasm32-wasi/-/runtime-wasm32-wasi-0.2.7.tgz",
+      "integrity": "sha512-xXvv83UZu9fqIHZ6q2AFfupvb7GhLoFCP6qqXuYJHKQaALXi4IV1SEcDccVa/J1kSUPEHNeFEQFzFXUBUJRddg=="
+    }
+  },
+  "runtimeAbi": 8,
+  "typescriptNativeVersion": "7.0.2"
+}

@@ -3,17 +3,19 @@
 // sidecar for the SDK's byte-bearing contracts in one compile.
 
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { compilerApiEntry } from "./scriptc_toolchain.mjs";
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length !== 6 || args[0] !== "--profile" || args[2] !== "--out" || args[4] !== "--version") {
+  if (![6, 8].includes(args.length) || args[0] !== "--profile" || args[2] !== "--out" || args[4] !== "--version") {
     console.error("usage: run_library_compiler.mjs --profile <profile.json> --out <archive> --version <exact-version>");
     return 2;
   }
 
   let compiler;
   try {
-    compiler = await import("@scriptc/compiler");
+    compiler = await import(pathToFileURL(compilerApiEntry(args.length === 8 && args[6] === "--origin" ? args[7] : import.meta.url)));
   } catch (error) {
     console.error(`the pinned @scriptc/compiler package is missing: ${error instanceof Error ? error.message : String(error)} — reinstall @native-sdk/cli or run npm ci in packages/core`);
     return 2;

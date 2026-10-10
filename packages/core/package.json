@@ -16,7 +16,8 @@
   "files": [
     "sdk",
     "compile-surface",
-    "testing"
+    "testing",
+    "scripts"
   ],
   "exports": {
     ".": {
@@ -46,14 +47,18 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.ts\"",
-    "build:declarations": "node scripts/gen_declarations.mjs"
+    "build:declarations": "node scripts/gen_declarations.mjs",
+    "toolchain:install": "node scripts/install_scriptc.mjs",
+    "postinstall": "node scripts/install_scriptc.mjs"
   },
   "devDependencies": {
-    "@scriptc/compiler": "0.2.5",
     "@types/node": "24.19.0",
     "@typescript/old": "npm:typescript@6.0.3"
   },
   "dependencies": {
-    "scriptc": "0.2.5"
+    "tar": "7.5.22"
+  },
+  "nativeToolchain": {
+    "scriptc": "0.2.7"
   }
 }

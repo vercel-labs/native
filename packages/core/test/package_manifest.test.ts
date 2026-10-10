@@ -46,7 +46,7 @@ test("provenance metadata names the real repository", () => {
 });
 
 test("the artifact contains the core, compile surface, and native testing API", () => {
-  assert.deepEqual(manifest.files, ["sdk", "compile-surface", "testing"]);
+  assert.deepEqual(manifest.files, ["sdk", "compile-surface", "testing", "scripts"]);
   // A bin entry would drag its target file into the tarball behind the
   // `files` allowlist and break the copy-equals-publish contract.
   assert.equal(manifest.bin, undefined);
@@ -75,17 +75,16 @@ test("exports resolve core and testing modules to shipped sources, types include
   assert.equal(manifest.types, "./sdk/core.ts");
 });
 
-test("the one runtime dependency is the exact-pinned external core compiler", () => {
-  // One dependency, exact-pinned: every TypeScript-core build resolves
-  // the compiler from this package's own node_modules, and an exact pin
-  // is what makes the profile's release-pinned fence table trustworthy
-  // (this manifest is the one place the pin lives). No bin joins it —
-  // installing the package must never put a toolchain on a consumer's
-  // PATH.
-  const pin = manifest.dependencies?.scriptc;
+test("core and CLI select the same checksum-pinned release toolchain", () => {
+  const pin = manifest.nativeToolchain.scriptc;
   assert.match(pin, /^\d+\.\d+\.\d+$/);
-  assert.deepEqual(manifest.dependencies, { scriptc: pin });
-  assert.equal(cliManifest.dependencies?.scriptc, pin, "the published CLI and @native-sdk/core must ship one compiler release");
-  assert.equal(manifest.devDependencies?.["@scriptc/compiler"], pin, "the checkout's sidecar compiler must match scriptc");
-  assert.equal(cliManifest.dependencies?.["@scriptc/compiler"], pin, "the published CLI's sidecar compiler must match scriptc");
+  assert.equal(cliManifest.nativeToolchain.scriptc, pin);
+  assert.equal(manifest.dependencies.scriptc, undefined);
+  assert.equal(cliManifest.dependencies.scriptc, undefined);
+  const release = JSON.parse(fs.readFileSync(path.join(pkg, "scripts", "scriptc-toolchain.json"), "utf8"));
+  assert.equal(release.version, pin);
+  assert.equal(release.packages.compiler.version, pin);
+  assert.equal(Object.keys(release.releases).length, 7);
+  assert.equal(manifest.scripts.postinstall, "node scripts/install_scriptc.mjs");
+  assert.equal(cliManifest.scripts.postinstall, "node packages/core/scripts/install_scriptc.mjs");
 });

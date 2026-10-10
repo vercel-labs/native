@@ -19,9 +19,13 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
   compiler="$NATIVE_SDK_CORE_COMPILER"
-elif [ -x "$repo/packages/core/node_modules/.bin/scriptc" ]; then
-  compiler="$repo/packages/core/node_modules/.bin/scriptc"
+elif compiler="$(node "$repo/packages/core/scripts/invoke_scriptc.mjs" --path 2>/dev/null)"; then
+  :
 else
+  if [ -f "$repo/packages/core/node_modules/tar/package.json" ]; then
+    echo "fence-check: FAILED — the scriptc release installation is incomplete; run npm run toolchain:install in packages/core" >&2
+    exit 2
+  fi
   echo "fence-check: skipped — run \`npm ci --prefix $repo/packages/core\` (or set NATIVE_SDK_CORE_COMPILER) to run the determinism-fence negative control"
   exit 0
 fi

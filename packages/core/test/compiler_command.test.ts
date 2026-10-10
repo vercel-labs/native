@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { installedRelease } from "../scripts/scriptc_toolchain.mjs";
 import { compilerArgv, publishedScriptcArgv } from "../scripts/compiler_command.mjs";
 
 test("Windows npm scriptc shims execute the package's published bin through Node", () => {
@@ -70,5 +71,5 @@ test("published scriptc command follows the native package bin", () => {
   const coreRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const argv = publishedScriptcArgv(path.join(coreRoot, "package.json"), { node: "node24" });
   assert.equal(argv.length, 1);
-  assert.match(argv[0], /scriptc[/\\]bin[/\\]scriptc\.exe$/);
+  assert.equal(argv[0], path.join(installedRelease(path.join(coreRoot, "package.json"))!.root, "release", "bin", process.platform === "win32" ? "scriptc.exe" : "scriptc"));
 });

@@ -162,7 +162,7 @@ const compileEnv = zigCcCompile
 // the release the SDK pins — the exact-pinned dependency of
 // packages/core (the ONE place the pin lives).
 const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
-const pin = manifest.dependencies?.scriptc;
+const pin = manifest.nativeToolchain?.scriptc ?? manifest.dependencies?.scriptc;
 if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
   console.error("the SDK's packages/core/package.json carries no exact external core compiler pin — the SDK tree is broken; reinstall or re-clone it");
   process.exit(2);
@@ -190,7 +190,7 @@ try {
   const libraryHelper = path.join(path.dirname(fileURLToPath(import.meta.url)), "run_library_compiler.mjs");
   const buildCommand = args["compiler-package-origin"] ? process.execPath : argv0[0];
   const buildArgs = args["compiler-package-origin"]
-    ? [libraryHelper, "--profile", "profile.json", "--out", args.name, "--version", pin]
+    ? [libraryHelper, "--profile", "profile.json", "--out", args.name, "--version", pin, "--origin", args["compiler-package-origin"]]
     : [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name];
   const build = spawnSync(buildCommand, buildArgs, {
     cwd: work,

@@ -22,10 +22,10 @@
 // package.json (the bundled version every scaffold pin follows), and
 // package-lock.json (npm only strips the tarball ROOT lockfile; nested
 // ones ship). The frontend's TypeScript toolchain and the external core
-// compiler do NOT ride in the payload: the @typescript/old alias and
-// scriptc are regular dependencies of @native-sdk/cli, installed by npm
-// in the same transaction and resolved from packages/core by node's
-// ancestor walk. test/ stays out: repo-dev surface, never build inputs.
+// compiler do NOT ride in the payload: @typescript/old is a regular npm
+// dependency, while the packaged release installer prepares scriptc's
+// verified native distribution, matching API and runtime packs in the
+// toolchain cache. The scripts and exact release manifest ship here. test/ stays out: repo-dev surface, never build inputs.
 
 import { cpSync, copyFileSync, mkdirSync, rmSync } from 'fs';
 import { dirname, join } from 'path';

@@ -141,9 +141,10 @@ function throwIsLexicallyCaught(node: ts.ThrowStatement): boolean {
 function pinnedScriptcVersion(): string {
   const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as {
+    nativeToolchain?: { scriptc?: unknown };
     dependencies?: { scriptc?: unknown };
   };
-  const pin = manifest.dependencies?.scriptc;
+  const pin = manifest.nativeToolchain?.scriptc ?? manifest.dependencies?.scriptc;
   if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
     throw new Error("packages/core/package.json carries no exact scriptc pin");
   }

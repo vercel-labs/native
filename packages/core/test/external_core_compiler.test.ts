@@ -71,7 +71,7 @@ fs.writeFileSync("core.contract.json", JSON.stringify({ build_id: "global-siblin
     const sourceScripts = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts");
     const fixtureScripts = path.join(sdkCore, "scripts");
     fs.mkdirSync(fixtureScripts);
-    for (const name of ["run_external_core_compiler.mjs", "run_library_compiler.mjs", "compiler_command.mjs"]) {
+    for (const name of ["run_external_core_compiler.mjs", "run_library_compiler.mjs", "compiler_command.mjs", "scriptc_toolchain.mjs"]) {
       fs.copyFileSync(path.join(sourceScripts, name), path.join(fixtureScripts, name));
     }
     const script = path.join(fixtureScripts, "run_external_core_compiler.mjs");

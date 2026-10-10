@@ -14,7 +14,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const coreRoot = path.resolve(here, "..");
 const repoRoot = path.resolve(coreRoot, "..", "..");
 const compilerArgv = publishedScriptcArgv(path.join(coreRoot, "package.json"));
-const compilerVersion = JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"), "utf8")).dependencies.scriptc;
+const compilerVersion = JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"), "utf8")).nativeToolchain.scriptc;
 
 const candidates = [
   { name: "escape-string-regexp", version: "5.0.0", source: 'import escape from "escape-string-regexp";\nconsole.log(escape("a.b"));\n' },

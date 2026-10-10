@@ -36,9 +36,8 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@scriptc/compiler": "0.2.5",
     "@typescript/old": "npm:typescript@6.0.3",
-    "scriptc": "0.2.5"
+    "tar": "7.5.22"
   },
   "optionalDependencies": {
     "@native-sdk/cli-darwin-arm64": "0.10.1",
@@ -62,7 +61,11 @@
     "scripts:check": "node --check bin/native.js && node --check scripts/copy-native.js && node --check scripts/copy-framework.js && node --check scripts/sync-version.js && node --check scripts/check-version-sync.js && node --check scripts/check-framework-sync.js && node --check scripts/check-runtime-types.js && node scripts/copy-framework.js && node scripts/check-framework-sync.js && node scripts/check-runtime-types.js",
     "build:native": "npm run version:sync && cd ../.. && zig build && node packages/native-sdk/scripts/copy-native.js",
     "build:binaries": "bash scripts/build-binaries.sh",
-    "prepack": "node scripts/copy-framework.js"
+    "prepack": "node scripts/copy-framework.js",
+    "postinstall": "node packages/core/scripts/install_scriptc.mjs"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "nativeToolchain": {
+    "scriptc": "0.2.7"
+  }
 }

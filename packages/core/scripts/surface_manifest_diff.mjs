@@ -39,13 +39,13 @@
 // input (unresolvable spec, unknown schema version).
 
 import fs from "node:fs";
+import { compilerSurfacePath } from "./scriptc_toolchain.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const KNOWN_SCHEMA_VERSION = 1;
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const pinnedManifestPath = path.join(
-  coreRoot, "node_modules", "@scriptc", "compiler", "surface-manifest.json");
+const pinnedManifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
 const packagePath = path.join(coreRoot, "package.json");
 
 // Entries whose flip to `static` changes the compiler premise beneath
@@ -95,8 +95,8 @@ function declaredCompilerPin() {
   } catch (error) {
     fail(`cannot read the scriptc pin from ${packagePath}: ${error.message}`);
   }
-  const pin = pkg.dependencies?.scriptc;
-  if (typeof pin !== "string") fail(`${packagePath} has no dependencies.scriptc pin`);
+  const pin = pkg.nativeToolchain?.scriptc ?? pkg.dependencies?.scriptc;
+  if (typeof pin !== "string") fail(`${packagePath} has no exact scriptc pin`);
   return pin;
 }
 

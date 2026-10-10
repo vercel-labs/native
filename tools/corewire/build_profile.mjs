@@ -18,7 +18,8 @@ for (const key of ["stage", "manifest", "out", "host-platform", "zig-exe"]) {
   if (!args[key]) throw new Error(`missing --${key}`);
 }
 const manifest = path.resolve(args.manifest);
-const pin = JSON.parse(fs.readFileSync(manifest, "utf8")).dependencies?.scriptc;
+const sdk = JSON.parse(fs.readFileSync(manifest, "utf8"));
+const pin = sdk.nativeToolchain?.scriptc ?? sdk.dependencies?.scriptc;
 if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) throw new Error("the SDK must pin an exact scriptc release");
 const command = args.compiler ? compilerArgv(args.compiler) : publishedScriptcArgv(manifest);
 const version = spawnSync(command[0], [...command.slice(1), "-v"], { encoding: "utf8" });

@@ -190,7 +190,7 @@ function printNpmStaticTeaching() {
 }
 
 const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
-const pin = manifest.dependencies?.scriptc;
+const pin = manifest.nativeToolchain?.scriptc ?? manifest.dependencies?.scriptc;
 const contract = JSON.parse(fs.readFileSync(args.contract, "utf8"));
 if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
   console.error("packages/core/package.json carries no exact scriptc pin");

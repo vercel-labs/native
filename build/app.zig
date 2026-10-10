@@ -835,6 +835,10 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
 /// published entrypoint marks a compiler that accepts the field.
 fn scriptcProfileOptimization(b: *std.Build, dep: *std.Build.Dependency, optimize: std.builtin.OptimizeMode) ?[]const u8 {
     const sdk_root = tsSdkRoot(b.allocator, b.graph.io, dep);
+    const release_marker = b.pathJoin(&.{ sdk_root, "packages", "core", "scripts", "scriptc-toolchain.json" });
+    if (std.Io.Dir.cwd().access(b.graph.io, release_marker, .{})) |_| {
+        return if (optimize == .Debug) "dev" else "release";
+    } else |_| {}
     var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
     while (true) {
         if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
@@ -1184,6 +1188,8 @@ fn tsCoreStage(
         if (build_trace) service_compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
         service_compile.addFileArg(dep.path("packages/core/scripts/run_external_service_compiler.mjs"));
         service_compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
+        service_compile.addFileInput(dep.path("packages/core/scripts/scriptc_toolchain.mjs"));
+        service_compile.addFileInput(dep.path("packages/core/scripts/scriptc-toolchain.json"));
         service_compile.addArg("--stage");
         service_compile.addDirectoryArg(service_stage_dir);
         service_compile.addArg("--manifest");
@@ -1320,6 +1326,8 @@ fn tsCoreStage(
     if (build_trace) compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
     compile.addFileArg(dep.path("packages/core/scripts/run_external_core_compiler.mjs"));
     compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(dep.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(dep.path("packages/core/scripts/scriptc-toolchain.json"));
     compile.addFileInput(dep.path("packages/core/scripts/run_library_compiler.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);

@@ -30,13 +30,14 @@
 // Exit 2: the compiler manifest is not installed or unreadable.
 
 import fs from "node:fs";
+import { compilerSurfacePath } from "./scriptc_toolchain.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const KNOWN_SCHEMA_VERSION = 1;
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(coreRoot, "..", "..");
-const manifestPath = path.join(coreRoot, "node_modules", "@scriptc", "compiler", "surface-manifest.json");
+const manifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
 const outputRel = "skill-data/ts-services/references/service-surface.md";
 const outputPath = path.join(repoRoot, outputRel);
 
@@ -201,7 +202,7 @@ if (existing === null) {
 
 // 2. Pin sanity: the installed manifest is the pinned compiler's.
 const pkg = JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"), "utf8"));
-const pin = pkg.dependencies?.scriptc;
+const pin = pkg.nativeToolchain?.scriptc ?? pkg.dependencies?.scriptc;
 if (manifest.compilerVersion !== pin) {
   problems.push(`installed compiler manifest is ${manifest.compilerVersion} but packages/core/package.json pins scriptc ${pin} — run \`npm ci --include=dev\` in packages/core`);
 }

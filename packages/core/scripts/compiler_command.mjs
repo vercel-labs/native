@@ -5,6 +5,7 @@
 // executable there; older JavaScript bins still run through Node.
 
 import fs from "node:fs";
+import { installedRelease } from "./scriptc_toolchain.mjs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -56,6 +57,8 @@ export function compilerArgv(command, options = {}) {
 // support for older toolchain fixtures and explicit version probes.
 export function publishedScriptcArgv(origin, options = {}) {
   const node = options.node ?? process.execPath;
+  const release = installedRelease(origin, options);
+  if (release) return [path.join(release.root, "release", "bin", process.platform === "win32" ? "scriptc.exe" : "scriptc")];
   const packageJson = createRequire(origin).resolve("scriptc/package.json");
   const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8"));
   const declared = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.scriptc;
