@@ -395,7 +395,7 @@ function integerSlots(s: CoreContract, out: Diagnostic[]): void {
 }
 export function validateCore(input: CoreInput): Diagnostic[] {
   const s = input.sidecar, out: Diagnostic[] = [];
-  if (s.wire_version !== 9) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 9, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
+  if (s.wire_version !== 10) flag(out, "wire_version", `this SDK's command-wire vocabulary is generation 10, the sidecar declares ${input.wire_text} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi_version !== 2) flag(out, "abi_version", `this generator binds core ABI version 2, the sidecar declares ${input.abi_text} — upgrade the SDK or pin the compiler release that matches it`);
   if (s.abi.snapshot_format !== 1) flag(out, "abi.snapshot_format", `this generator decodes snapshot format 1, the sidecar declares ${input.snapshot_text} — upgrade the SDK or pin the compiler release that matches it`);
   names(s, out);

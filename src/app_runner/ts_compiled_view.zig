@@ -84,9 +84,11 @@ const Record = struct {
     wrap: ?bool = null,
     submitOnEnter: bool = false,
     key: ?[]const u8 = null,
+    keyBytes: ?ByteText = null,
     keyInt: ?i64 = null,
     keySlot: usize = 0,
     globalKey: ?[]const u8 = null,
+    globalKeyBytes: ?ByteText = null,
     globalKeyInt: ?i64 = null,
     columns: usize = 0,
     virtualized: bool = false,
@@ -314,7 +316,10 @@ fn decodeVirtual(ui: *Ui, bytes: []const u8, virtuals: []const ResolvedVirtual) 
 fn node(ui: *Ui, records: []const Record, index: usize, parent_end: usize, depth: usize, virtuals: []const ResolvedVirtual, parent_kind: ?@FieldType(Record, "kind")) !Ui.Node {
     if (depth > 64) return error.ViewTooDeep;
     var value = records[index];
+    if (value.keyBytes != null and value.key != null or value.globalKeyBytes != null and value.globalKey != null) return error.InvalidView;
     value.text = byteText(value.textBytes, value.text);
+    if (value.keyBytes) |bytes| value.key = bytes.bytes;
+    if (value.globalKeyBytes) |bytes| value.globalKey = bytes.bytes;
     value.label = byteText(value.labelBytes, value.label);
     value.placeholder = byteText(value.placeholderBytes, value.placeholder);
     value.icon = byteText(value.iconBytes, value.icon);
@@ -1422,6 +1427,35 @@ pub fn testByteTextRecords() !void {
             }
         }
     } else return error.SkipZigTest;
+}
+
+test "compiled byte keys own raw empty local and global identities and reject conflicting encodings" {
+    try testByteKeyRecords();
+}
+
+pub fn testByteKeyRecords() !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const bytes = try ui.arena.dupe(u8,
+        \\{"format":2,"nodes":[{"end":3,"kind":"column","text":"","keyBytes":[255,0,192,175]},
+        \\{"end":2,"kind":"text","keyBytes":[],"text":"empty"},
+        \\{"end":3,"kind":"text","globalKeyBytes":[128,0],"text":"global"}]}
+    );
+    const result = try decode(&ui, bytes);
+    @memset(bytes, 0xA5);
+    try std.testing.expectEqualStrings("\xff\x00\xc0\xaf", result.key.?.str);
+    try std.testing.expectEqualStrings("", result.nodes[0].key.?.str);
+    try std.testing.expectEqualStrings("\x80\x00", result.nodes[1].global_key.?.str);
+    for ([_][]const u8{
+        "\"keyBytes\":[],\"key\":\"ignored\"",             "\"keyBytes\":[],\"keyInt\":1",
+        "\"globalKeyBytes\":[],\"globalKey\":\"ignored\"", "\"globalKeyBytes\":[],\"globalKeyInt\":1",
+        "\"keyBytes\":[256]",                              "\"globalKeyBytes\":[-1]",
+        "\"keyBytes\":[1.5]",                              "\"globalKeyBytes\":[true]",
+    }) |fields| {
+        const malformed = try std.fmt.allocPrint(ui.arena, "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"text\",\"text\":\"\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, malformed));
+    }
 }
 
 pub fn testTerminalRecords() !void {

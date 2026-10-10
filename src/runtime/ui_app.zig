@@ -1711,6 +1711,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
                     .window_execution => try self.effects.pushReplayWindowExecution(record),
+                    .channel_source => try self.effects.pushReplayChannelSource(record),
                     .credentials => try self.effects.feedCredentialsResult(
                         record.key,
                         record.credentials_operation,

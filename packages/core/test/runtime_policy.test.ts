@@ -997,7 +997,7 @@ test("replay admission refuses every truncated packet and invalid flags", () => 
   for (let at = 247; at < 256; at++) if (at !== 248) { bytes[at] = 1; assert.throws(() => native_effect_policy(bytes)); bytes[at] = 0; }
 });
 test("replay decisions retain external truth and reject hostile scalar words", () => {
-  for (let kind = 1; kind <= 19; kind++) {
+  for (let kind = 1; kind <= 20; kind++) {
     const request = replayRequest(kind), frozen = request.slice();
     const result = native_effect_policy(request); assert.equal(result.length,8); assert.deepEqual(request,frozen);
     assert.equal(result[2],kind === 6 ? 1 : 0);
@@ -1019,7 +1019,7 @@ test("window execution records remain external facts and unknown kinds refuse ad
     const result = native_effect_policy(request);
     assert.deepEqual([...result], Array(8).fill(0));
   }
-  assert.throws(() => native_effect_policy(replayRequest(20)));
+  assert.throws(() => native_effect_policy(replayRequest(21)));
 });
 
 test("replay sequencing preserves refusal precedence and one-drain back-pressure", () => {

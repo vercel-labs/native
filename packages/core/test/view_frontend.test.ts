@@ -613,6 +613,25 @@ test("keyed iteration stamps every emitted sibling and respects explicit identit
   assert.deepEqual(nodes.slice(1).map((n: any) => [n.keyInt ?? n.key, n.keySlot ?? 0]), [[3, 0], [3, 1], ["own", 0], [1, 0], [1, 1], ["own", 0]]);
 });
 
+test("byte-valued keys preserve malformed UTF-8, NUL and empty identities on every loop sibling", () => {
+  const markup = '<column key="{status}"><text global-key="{status}">Global</text><for each="cards" as="c" key="title"><text>{c.title}</text><text>second</text><text key="own">third</text><text global-key="{c.title}">fourth</text></for></column>';
+  const input = { ...kanbanContract, types: { ...kanbanContract.types, structs: kanbanContract.types.structs.map(record => record.name === "Model" ? { ...record, fields: [...record.fields, { name: "status", type: { kind: "bytes" as const } }] } : record) } };
+  const generated = compileView(markup, input);
+  const js = ts.transpile(generated, { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS });
+  const raw = [0xFF, 0, 0xC0, 0xAF, 65];
+  const model = { status: new Uint8Array(raw), cards: [{ title: new Uint8Array(raw) }, { title: new Uint8Array() }] };
+  const exports: { native_view?: () => Uint8Array } = {};
+  runInNewContext(js, { exports, TextEncoder, TextDecoder, nscfCommitted: model });
+  const nodes = JSON.parse(new TextDecoder().decode(exports.native_view!())).nodes;
+  assert.deepEqual(nodes[0].keyBytes, raw);
+  assert.deepEqual(nodes[1].globalKeyBytes, raw);
+  assert.deepEqual(nodes.slice(2).map((node: any) => [node.keyBytes ?? node.key ?? null, node.globalKeyBytes ?? null, node.keySlot ?? 0]), [[raw, null, 0], [raw, null, 1], ["own", null, 0], [null, raw, 0], [[], null, 0], [[], null, 1], ["own", null, 0], [null, [], 0]]);
+  for (const node of nodes) if (node.keyBytes !== undefined || node.globalKeyBytes !== undefined) {
+    assert.equal(node.key, undefined);
+    assert.equal(node.globalKey, undefined);
+  }
+});
+
 test("imports, templates, loop paths and event shapes refuse ambiguous or unsafe input", () => {
   const cases = [
     ['<import src="../secret.native"/><text/>', /escapes/],
@@ -685,7 +704,7 @@ test("the complete feed view uses native input constructors and committed servic
   assert.equal(input.input, feedContract.msg.arms.findIndex(arm => arm.name === "url_edit"));
   assert.deepEqual(input.submit, [1, feedContract.msg.arms.findIndex(arm => arm.name === "refresh")]);
   assert.ok(view().some((node: any) => node.text === "日本語" && node.wrap));
-  assert.ok(view().some((node: any) => node.key === "https://example.com/1"));
+  assert.deepEqual(view().find((node: any) => node.keyBytes !== undefined).keyBytes, [...bytes("https://example.com/1")]);
   model.phase = "loading";
   assert.ok(view().some((node: any) => node.kind === "badge"));
   model.phase = "failed";

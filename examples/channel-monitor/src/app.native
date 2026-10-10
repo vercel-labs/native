@@ -1,0 +1,14 @@
+<column gap="8" padding="12" background="background">
+  <row gap="8" cross="center">
+    <button variant="primary" on-press="start" disabled="{monitoring}">Start monitor</button>
+    <button variant="destructive" on-press="stop" disabled="{stopped}">Stop</button>
+    <spacer grow="1" />
+    <text foreground="text_muted">{statusText}</text>
+  </row>
+  <scroll grow="1" background="surface" radius="md">
+    <column gap="2" padding="8">
+      <for each="visible" as="l" key="line"><text>{l.line}</text></for>
+    </column>
+  </scroll>
+  <status-bar>{totals}</status-bar>
+</column>

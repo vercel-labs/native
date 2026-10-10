@@ -437,6 +437,21 @@ pub const HostChannelBinding = struct {
     acquire_fn: *const fn (context: *anyopaque, key: u64) ?ChannelHandle,
 };
 
+/// Loop-thread startup only. Implementations copy arguments before returning
+/// and may retain the generation-safe handle; they must not reenter the UI.
+pub const HostChannelSourceBinding = struct {
+    context: *anyopaque,
+    start_fn: *const fn (context: *anyopaque, name: []const u8, payload: []const u8, handle: ChannelHandle) anyerror!void,
+};
+pub const EffectChannelSourceState = enum(u8) { skipped, started, failed };
+pub const EffectChannelSourceResult = struct {
+    key: u64,
+    state: EffectChannelSourceState,
+    bytes: []const u8 = "",
+};
+pub const max_channel_source_payload = 4096;
+const max_channel_source_request = 1 + max_effect_host_name_bytes + 4 + max_channel_source_payload;
+
 pub const HostCallCompletion = struct {
     key: u64,
     ok: bool,
@@ -2038,6 +2053,8 @@ pub const EffectResultKind = enum(u8) {
     /// delivery. `code` is 0 for focus and 1 for close; the complete copied
     /// request and correlated reply ride `payload` and `stderr_tail`.
     window_execution = 19,
+    /// Immediate external producer startup; request rides payload, error rides stderr_tail.
+    channel_source = 20,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -4492,6 +4509,15 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const ReplayChannelSource = struct {
+            key: u64,
+            state: EffectChannelSourceState,
+            request_len: usize,
+            request: [max_channel_source_request]u8,
+            failure_len: u8,
+            failure: [255]u8,
+        };
+
         const ReplayWindowExecution = struct {
             key: u64,
             closed: bool,
@@ -4890,6 +4916,11 @@ pub fn Effects(comptime Msg: type) type {
         /// requests reject loudly in real mode, and the fake executor
         /// parks requests for `feedHostResult` regardless.
         host_calls: ?HostCallBinding = null,
+        channel_sources: ?HostChannelSourceBinding = null,
+        replay_channel_sources: [64]ReplayChannelSource = undefined,
+        replay_channel_source_len: usize = 0,
+        replay_channel_source_diverged: bool = false,
+        channel_source_reply: [255]u8 = undefined,
         /// Capability-installed record-store service. Store commands are
         /// SDK-reserved routed requests, so their results reuse the request
         /// journal/replay path while the database handle stays host-owned.
@@ -6375,7 +6406,8 @@ pub fn Effects(comptime Msg: type) type {
         /// against a different key. A leftover or mismatched record
         /// means the replayed updates issued different loads than the
         /// recording — divergence, not success.
-        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence, ReplayWindowDivergence }!void {
+        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence, ReplayWindowDivergence, ReplayChannelSourceDivergence }!void {
+            if (self.replay_channel_source_diverged or self.replay_channel_source_len != 0) return error.ReplayChannelSourceDivergence;
             if (self.replay_window_diverged or self.replay_window_execution_len != 0) return error.ReplayWindowDivergence;
             for (&self.slots) |*slot| if (slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
             if (self.replay_audio_diverged) return error.ReplayAudioDivergence;
@@ -7735,11 +7767,76 @@ pub fn Effects(comptime Msg: type) type {
             return .{ .shared = shared, .generation = generation };
         }
 
-        /// The thread-safe posting handle of the OPEN channel with
-        /// `key`, for callers that did not keep `openChannel`'s return
-        /// (an embedder resolving a channel a transpiled core opened).
-        /// Null while no open channel holds the key — including the
-        /// `.closing` window, where posts could no longer land anyway.
+        /// Capture startup truth before publishing the issuing dispatch. The
+        /// handle must come from this open, never a same-key old occupancy.
+        /// Returned failure bytes are borrowed until the next source start.
+        pub fn startChannelSource(self: *Self, key: u64, handle: ?ChannelHandle, name: []const u8, payload: []const u8) EffectChannelSourceResult {
+            std.debug.assert(name.len > 0 and name.len <= max_effect_host_name_bytes and payload.len <= max_channel_source_payload);
+            var request: [max_channel_source_request]u8 = undefined;
+            request[0] = @intCast(name.len);
+            @memcpy(request[1..][0..name.len], name);
+            std.mem.writeInt(u32, request[1 + name.len ..][0..4], @intCast(payload.len), .little);
+            @memcpy(request[5 + name.len ..][0..payload.len], payload);
+            const encoded = request[0 .. 5 + name.len + payload.len];
+            if (self.replay) {
+                if (self.replay_channel_source_len == 0) {
+                    self.replay_channel_source_diverged = true;
+                    return .{ .key = key, .state = .failed, .bytes = "replay_diverged" };
+                }
+                const entry = &self.replay_channel_sources[0];
+                if (entry.key != key or !std.mem.eql(u8, encoded, entry.request[0..entry.request_len]) or
+                    ((entry.state == .skipped) != (handle == null))) self.replay_channel_source_diverged = true;
+                const state = entry.state;
+                const len = entry.failure_len;
+                @memcpy(self.channel_source_reply[0..len], entry.failure[0..len]);
+                self.replay_channel_source_len -= 1;
+                std.mem.copyForwards(ReplayChannelSource, self.replay_channel_sources[0..self.replay_channel_source_len], self.replay_channel_sources[1 .. self.replay_channel_source_len + 1]);
+                return .{ .key = key, .state = state, .bytes = self.channel_source_reply[0..len] };
+            }
+            var result: EffectChannelSourceResult = .{ .key = key, .state = .skipped };
+            if (handle) |live| {
+                if (live.live()) {
+                    result.state = .started;
+                    const outcome = if (self.channel_sources) |binding|
+                        binding.start_fn(binding.context, name, payload, live)
+                    else if (self.executor == .fake)
+                        error.UnsupportedChannelSource
+                    else
+                        @import("channel_sources.zig").start(name, payload, live);
+                    outcome catch |err| {
+                        result.state = .failed;
+                        const failure = @errorName(err);
+                        result.bytes = failure[0..@min(failure.len, self.channel_source_reply.len)];
+                    };
+                }
+            }
+            self.journalNote(.{ .kind = .channel_source, .key = key, .code = @intFromEnum(result.state), .payload = encoded, .stderr_tail = result.bytes });
+            return result;
+        }
+
+        pub fn pushReplayChannelSource(self: *Self, record: EffectResultRecord) !void {
+            const canonical: EffectResultRecord = .{ .kind = .channel_source, .key = record.key, .code = record.code, .payload = record.payload, .stderr_tail = record.stderr_tail };
+            if (!self.replay or record.kind != .channel_source or record.code < 0 or record.code > 2 or
+                !std.meta.eql(record, canonical) or record.payload.len < 6 or record.payload.len > max_channel_source_request or
+                record.stderr_tail.len > 255 or (record.code == 2) != (record.stderr_tail.len != 0)) return error.ReplayDamagedRecord;
+            const name_len: usize = record.payload[0];
+            if (name_len == 0 or record.payload.len < 5 + name_len or
+                !std.unicode.utf8ValidateSlice(record.payload[1..][0..name_len]) or
+                std.mem.readInt(u32, record.payload[1 + name_len ..][0..4], .little) != record.payload.len - 5 - name_len or
+                record.payload.len - 5 - name_len > max_channel_source_payload) return error.ReplayDamagedRecord;
+            if (self.replay_channel_source_len == self.replay_channel_sources.len) return error.ReplayChannelSourceDivergence;
+            const entry = &self.replay_channel_sources[self.replay_channel_source_len];
+            entry.key = record.key;
+            entry.state = @enumFromInt(record.code);
+            entry.request_len = record.payload.len;
+            @memcpy(entry.request[0..record.payload.len], record.payload);
+            entry.failure_len = @intCast(record.stderr_tail.len);
+            @memcpy(entry.failure[0..record.stderr_tail.len], record.stderr_tail);
+            self.replay_channel_source_len += 1;
+        }
+
+        /// Resolve the open occupancy's generation-safe posting handle.
+        /// Closing and absent occupancies have no handle.
         pub fn channelHandle(self: *Self, key: u64) ?ChannelHandle {
             for (&self.channel_slots) |*slot| {
                 if (slot.state == .open and slot.key == key) {

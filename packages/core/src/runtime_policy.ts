@@ -2870,7 +2870,7 @@ function appDispatchPolicy(request: Uint8Array): Uint8Array {
  * this boundary. All damage predicates precede regeneration in the consumer.
  */
 function sessionReplayPolicy(request: Uint8Array): Uint8Array {
-  if (request.length !== 256 || request[1]! < 1 || request[1]! > 19 || request[2]! > 4 ||
+  if (request.length !== 256 || request[1]! < 1 || request[1]! > 20 || request[2]! > 4 ||
       request[3]! > 8 || request[4]! > 2 || request[5]! > 9 || request[6]! > 14 ||
       request[7]! > 2 || request[8]! > 4 || request[9]! > 5 || request[10]! > 2 ||
       request[11]! > 6 || request[12]! > 2 || request[13]! > 6 || request[14]! > 6 || request[15]! > 3)
