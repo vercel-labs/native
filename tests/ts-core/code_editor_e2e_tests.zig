@@ -22,12 +22,19 @@ const RuntimeFixture = struct {
         harness.null_platform.gpu_surfaces = true;
         harness.runtime.options.session_recorder = recorder;
         _ = try harness.null_platform.platform().services.createWindow(.{
-            .id = 1, .label = "main", .title = "Native SDK Code Editor", .default_frame = .init(0, 0, 1120, 720),
+            .id = 1,
+            .label = "main",
+            .title = "Native SDK Code Editor",
+            .default_frame = .init(0, 0, 1120, 720),
         });
         harness.runtime.options.security.permissions = &.{ "view", "command" };
         const state = try Adapter.create(testing.allocator, .{}, .{
-            .name = "code-editor", .scene = reference.shell_scene, .on_command = core.commandMsg,
-            .canvas_label = "code-editor-canvas", .view = decoder.buildRuntime, .window_view = decoder.buildRuntimeWindow,
+            .name = "code-editor",
+            .scene = reference.shell_scene,
+            .on_command = core.commandMsg,
+            .canvas_label = "code-editor-canvas",
+            .view = decoder.buildRuntime,
+            .window_view = decoder.buildRuntimeWindow,
         });
         errdefer state.destroy();
         state.effects.executor = .real;
@@ -44,8 +51,13 @@ const RuntimeFixture = struct {
     }
     fn frame(self: RuntimeFixture, id: sdk.platform.WindowId, label: []const u8) !void {
         try self.harness.runtime.dispatchPlatformEvent(self.state.app(), .{ .gpu_surface_frame = .{
-            .window_id = id, .label = label, .size = .init(1120, 720), .scale_factor = 2,
-            .frame_index = 1, .timestamp_ns = 9007199254740993, .nonblank = true,
+            .window_id = id,
+            .label = label,
+            .size = .init(1120, 720),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 9007199254740993,
+            .nonblank = true,
         } });
     }
     fn command(self: RuntimeFixture, id: sdk.platform.WindowId, name: []const u8) !void {
@@ -202,7 +214,8 @@ test "window execution facts require one exact request and matching terminal" {
             continue;
         }
         // A changed label and a changed capability cannot claim the fact.
-        fx.hostRequest(.{ .key = 9,
+        fx.hostRequest(.{
+            .key = 9,
             .name = if (scenario == 2) "native-sdk.window.closeResult" else "native-sdk.window.focusResult",
             .payload = if (scenario == 3) &.{ 1, 7, 4, 0, 'e', 'l', 's', 'e' } else &payload,
         });
@@ -274,6 +287,58 @@ test "window execution facts preserve focus and close checkpoints before delayed
     replay.harness.null_platform.fail_next_close_window = true;
     const report = try sdk.runtime.replaySession(&replay.harness.runtime, replay.state.app(), buffer.bytes.items, .{ .require_same_platform = false });
     try testing.expect(report.ok() and report.checkpoints_verified >= 2);
+    try testing.expectEqual(fingerprint, replay.harness.runtime.sessionStateFingerprint());
+    try testing.expectEqualSlices(u8, model, core.persistenceSnapshot());
+    try testing.expect(replay.harness.null_platform.fail_next_close_window);
+}
+
+test "fake window replies journal execution after the request's settled checkpoint" {
+    const Buffer = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        fn write(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.bytes.appendSlice(testing.allocator, bytes);
+        }
+    };
+    var buffer: Buffer = .{};
+    defer buffer.bytes.deinit(testing.allocator);
+    const recorder = try testing.allocator.create(sdk.runtime.SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = sdk.runtime.SessionRecorder.init(.{ .context = &buffer, .write_fn = Buffer.write });
+    recorder.begin(.{ .app_name = "code-editor", .platform_name = "test" });
+    var fingerprint: u64 = 0;
+    var model: []u8 = undefined;
+    {
+        const live = try RuntimeFixture.make(recorder, true);
+        defer live.destroy();
+        live.state.effects.executor = .fake;
+        const runtime = &live.harness.runtime;
+        const app = live.state.app();
+        for ([_][]const u8{ "new-window", "close-tab" }) |command| {
+            try runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = command, .window_id = 1 } });
+            // A full checkpoint occurs while the synthetic result is parked.
+            try runtime.dispatchPlatformEvent(app, .frame_requested);
+            const request = live.state.effects.pendingHostAt(0).?;
+            var output: [128]u8 = undefined;
+            const len = try @import("desktop_files.zig").replyHeaderFor(&output, request.payload, "");
+            try live.state.effects.feedHostResult(request.key, true, output[0..len]);
+            try runtime.dispatchPlatformEvent(app, .wake);
+            try runtime.dispatchPlatformEvent(app, .frame_requested);
+        }
+        try testing.expect(!core.snapshotModel().pending_close_main);
+        try testing.expectEqual(@as(?i64, null), core.snapshotModel().pending_focus_session);
+        try testing.expectError(error.WindowNotFound, runtime.canvasWidgetLayout(1, "code-editor-canvas"));
+        fingerprint = runtime.sessionStateFingerprint();
+        model = try testing.allocator.dupe(u8, core.persistenceSnapshot());
+        recorder.finish();
+        try testing.expect(recorder.finished and !recorder.failed and recorder.effect_count >= 4);
+    }
+    defer testing.allocator.free(model);
+    const replay = try RuntimeFixture.make(null, false);
+    defer replay.destroy();
+    replay.harness.null_platform.fail_next_close_window = true;
+    const report = try sdk.runtime.replaySession(&replay.harness.runtime, replay.state.app(), buffer.bytes.items, .{ .require_same_platform = false });
+    try testing.expect(report.ok() and report.checkpoints_verified >= 4);
     try testing.expectEqual(fingerprint, replay.harness.runtime.sessionStateFingerprint());
     try testing.expectEqualSlices(u8, model, core.persistenceSnapshot());
     try testing.expect(replay.harness.null_platform.fail_next_close_window);
@@ -611,7 +676,6 @@ test "compiled Code Editor retains complete documents, hashes, queued saves and 
     try pair.step(.{ .close_tab = 0 }, .{ .close_tab = 0 });
 }
 
-
 fn answerWindow(fx: *Host.Fx, failure: []const u8) !void {
     const request = fx.pendingHostAt(0).?;
     var reply: [128]u8 = undefined;
@@ -694,7 +758,6 @@ test "compiled Code Editor validates complete read outcomes and exact hash bound
     }
 }
 
-
 test "compiled Code Editor preserves lazy expansion, rename remapping and every callback" {
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -751,7 +814,6 @@ test "compiled Code Editor retains complete Unicode editing, composition and sav
         try pair.file(outcome, "");
     }
 }
-
 
 test "compiled Code Editor preserves exclusive rename races and case-only changes" {
     var tmp = testing.tmpDir(.{ .iterate = true });
@@ -830,8 +892,12 @@ test "desktop capabilities reject malformed boundaries and preserve complete dir
 
 const CapabilitySpy = struct {
     calls: usize = 0,
-    fn external(_: *anyopaque, _: []const u8) anyerror!void { return error.UnexpectedOsCall; }
-    fn local(_: *anyopaque, _: i64, _: sdk.platform.LocalTimeStyle, _: []u8) anyerror![]const u8 { return error.UnexpectedOsCall; }
+    fn external(_: *anyopaque, _: []const u8) anyerror!void {
+        return error.UnexpectedOsCall;
+    }
+    fn local(_: *anyopaque, _: i64, _: sdk.platform.LocalTimeStyle, _: []u8) anyerror![]const u8 {
+        return error.UnexpectedOsCall;
+    }
     fn execute(context: *anyopaque, _: []const u8, _: []const u8, _: []u8) anyerror![]const u8 {
         const self: *CapabilitySpy = @ptrCast(@alignCast(context));
         self.calls += 1;
@@ -865,21 +931,25 @@ const DeferredCapabilitySpy = struct {
     values: [8]u8 = @splat(0),
     calls: usize = 0,
     reenter: bool = false,
-    fn result(_: sdk.EffectHostResult) core.Msg { return .window_retry; }
+    fn result(_: sdk.EffectHostResult) core.Msg {
+        return .window_retry;
+    }
     fn issue(self: *DeferredCapabilitySpy, key: u64, payload: []const u8) void {
         self.fx.hostRequest(.{ .key = key, .name = "native-sdk.window.focusResult", .payload = payload, .on_result = result });
     }
     fn execute(context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 {
         const self: *DeferredCapabilitySpy = @ptrCast(@alignCast(context));
         try testing.expectEqualStrings("native-sdk.window.focusResult", name);
-        self.values[self.calls] = payload[0]; self.calls += 1;
+        self.values[self.calls] = payload[0];
+        self.calls += 1;
         if (self.reenter and payload[0] == 'C') {
             self.reenter = false;
             self.issue(1, "D"); // replace the active native call's occupancy
             self.fx.flushDesktopCapabilities(); // nested flush cannot execute it
             try testing.expectEqualStrings("C", payload); // original storage lives
         }
-        output[0] = payload[0]; return output[0..1];
+        output[0] = payload[0];
+        return output[0..1];
     }
 };
 test "deferred desktop capabilities preserve issue order, replacement, cancellation and reentrant ownership" {
@@ -889,8 +959,11 @@ test "deferred desktop capabilities preserve issue order, replacement, cancellat
     var spy: DeferredCapabilitySpy = .{ .fx = &fx };
     fx.bindSystemServices(.{ .context = &spy, .open_external_url_fn = CapabilitySpy.external, .reveal_path_fn = CapabilitySpy.external, .format_local_time_fn = CapabilitySpy.local, .execute_capability_fn = DeferredCapabilitySpy.execute });
     var transient = [_]u8{'A'};
-    spy.issue(1, &transient); transient[0] = 'Z';
-    spy.issue(2, "B"); spy.issue(1, "C"); spy.issue(3, "X");
+    spy.issue(1, &transient);
+    transient[0] = 'Z';
+    spy.issue(2, "B");
+    spy.issue(1, "C");
+    spy.issue(3, "X");
     fx.cancel(3);
     try testing.expectEqual(@as(usize, 0), spy.calls);
     spy.reenter = true;
@@ -1039,8 +1112,11 @@ test "complete Code Editor snapshot retains all 85 full-capacity documents witho
             document.saved_hash = owned_hash;
             document_slot.* = document;
             expected.browser.documents[document_index] = .{
-                .entry_index = @intCast(document_index), .editor = try reference.EditorBuffer.init(testing.allocator, text),
-                .state = .text, .saved_len = text.len, .saved_hash = hash,
+                .entry_index = @intCast(document_index),
+                .editor = try reference.EditorBuffer.init(testing.allocator, text),
+                .state = .text,
+                .saved_len = text.len,
+                .saved_hash = hash,
             };
             if (document_index < 16) {
                 pinned[document_index] = @floatFromInt(document_index);

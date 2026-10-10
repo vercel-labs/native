@@ -9701,7 +9701,7 @@ pub fn Effects(comptime Msg: type) type {
                 const index = self.findActiveSlot(entry.key) orelse break;
                 const slot = &self.slots[index];
                 const name = if (entry.closed) "native-sdk.window.closeResult" else "native-sdk.window.focusResult";
-                if (slot.kind != .host or !slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running or
+                if (slot.kind != .host or !slot.fake or (self.defer_desktop_capabilities and !slot.desktop_waiting) or slot.state.load(.acquire) != .running or
                     !std.mem.eql(u8, slot.hostName(), name) or !std.mem.eql(u8, slot.fetchPayload(), entry.request[0..entry.request_len])) break;
                 if (slot.replay_window_reply_len != 0) {
                     self.replay_window_diverged = true;
@@ -13720,6 +13720,10 @@ pub fn Effects(comptime Msg: type) type {
             };
             const slot = &self.slots[slot_index];
             if (self.replay and desktopWindowSuccess(slot.hostName(), slot.fetchPayload(), bytes)) {
+                // Test-owned replies can arrive after the request's settled
+                // view flush. Their execution fact belongs to this completion
+                // boundary; live facts are normally claimed by the flush.
+                self.flushReplayWindowExecutions();
                 if (!ok or slot.replay_window_reply_len == 0 or !std.mem.eql(u8, bytes, slot.replay_window_reply[0..slot.replay_window_reply_len])) return error.ReplayWindowDivergence;
             } else if (self.replay and slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
             slot.replay_window_reply_len = 0;
@@ -13731,7 +13735,12 @@ pub fn Effects(comptime Msg: type) type {
                 delivered_ok = false;
                 delivered = "host result over budget";
             }
-            if (slot.fake and !self.replay and delivered_ok) self.restoreDesktopWindowResult(slot, delivered);
+            if (slot.fake and !self.replay and delivered_ok) {
+                if (desktopWindowSuccess(slot.hostName(), slot.fetchPayload(), delivered)) {
+                    self.journalNote(.{ .kind = .window_execution, .key = key, .code = @intFromBool(std.mem.eql(u8, slot.hostName(), "native-sdk.window.closeResult")), .payload = slot.fetchPayload(), .stderr_tail = delivered });
+                }
+                self.restoreDesktopWindowResult(slot, delivered);
+            }
             @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
             slot.body_len = delivered.len;
             var entry: Entry = .{
