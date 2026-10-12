@@ -92,6 +92,12 @@ fn shellWindowFrom(comptime window: anytype) types.ShellWindow {
     if (@hasField(@TypeOf(window), "close_policy")) {
         out.close_policy = enumField(types.WindowClosePolicy, window.close_policy, "close_policy");
     }
+    if (@hasField(@TypeOf(window), "window_controls_offset_x")) {
+        out.window_controls_offset_x = window.window_controls_offset_x;
+    }
+    if (@hasField(@TypeOf(window), "window_controls_offset_y")) {
+        out.window_controls_offset_y = window.window_controls_offset_y;
+    }
     if (@hasField(@TypeOf(window), "views")) {
         var views: []const types.ShellView = &.{};
         for (window.views) |view| {
@@ -293,6 +299,8 @@ test "shellConfigFrom converts a rich scene without exhausting the branch quota"
         .titlebar = "hidden_inset_tall",
         .min_width = 1144,
         .min_height = 720,
+        .window_controls_offset_x = 4,
+        .window_controls_offset_y = 8,
         .views = .{
             rich_view,
             .{ .label = "side", .kind = "sidebar", .edge = "right", .axis = "row", .width = 240 },
@@ -336,6 +344,12 @@ test "shellConfigFrom converts a rich scene without exhausting the branch quota"
     try std.testing.expectEqual(@as(usize, 3), scene.windows.len);
     try std.testing.expectEqual(types.WindowTitlebarStyle.hidden_inset_tall, scene.windows[0].titlebar);
     try std.testing.expectEqual(types.WindowRestorePolicy.center_on_primary, scene.windows[0].restore_policy);
+    // A declared offset survives the ZON read; a window that declares
+    // none reads zero, the sentinel the host checks before applying.
+    try std.testing.expectEqual(@as(f32, 4), scene.windows[0].window_controls_offset_x);
+    try std.testing.expectEqual(@as(f32, 8), scene.windows[0].window_controls_offset_y);
+    try std.testing.expectEqual(@as(f32, 0), scene.windows[1].window_controls_offset_x);
+    try std.testing.expectEqual(@as(f32, 0), scene.windows[1].window_controls_offset_y);
     try std.testing.expectEqual(@as(usize, 4), scene.windows[0].views.len);
     try std.testing.expectEqual(types.ShellEdge.left, scene.windows[0].views[0].edge.?);
     try std.testing.expectEqual(types.ShellAxis.column, scene.windows[0].views[0].axis.?);
