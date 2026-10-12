@@ -10,7 +10,7 @@ pub const max_views: usize = platform.max_windows + platform.max_views + platfor
 // cannot import the runtime); a lockstep test in
 // canvas_widget_layout_tests.zig fails if they drift, so snapshots never
 // silently truncate widget enumeration below the node budget.
-pub const max_widgets_per_view: usize = 1024;
+pub const max_widgets_per_view: usize = 2048;
 pub const max_widgets: usize = platform.max_views * max_widgets_per_view;
 
 pub const Window = struct {
