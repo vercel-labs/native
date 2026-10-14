@@ -1414,6 +1414,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
         \\    const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
         \\    const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
+        \\    const layer_shell = b.option(bool, "layer-shell", "Link gtk4-layer-shell so always_on_top windows become Wayland layer surfaces (default: false)") orelse false;
         \\    const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
         \\    const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
         \\    const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
@@ -1501,7 +1502,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    if (target.result.os.tag == .windows and optimize != .Debug) {
         \\        exe.subsystem = .windows;
         \\    }
-        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+        \\    linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, web_layer, layer_shell, native_sdk_path, cef_dir, cef_auto_install);
         \\    b.installArtifact(exe);
         \\
         \\    const frontend_install = b.addSystemCommand(&.{ "npm", "install", "--prefix", "frontend" });
@@ -1559,7 +1560,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        if (target.result.os.tag == .windows and package_optimize != .Debug) {
         \\            built.subsystem = .windows;
         \\        }
-        \\        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, native_sdk_path, cef_dir, cef_auto_install);
+        \\        linkPlatform(b, target, package_app_mod, built, selected_platform, web_engine, web_layer, layer_shell, native_sdk_path, cef_dir, cef_auto_install);
         \\        break :pkg built;
         \\    };
         \\
@@ -1785,7 +1786,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    });
         \\}
         \\
-        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, native_sdk_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
+        \\fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, layer_shell: bool, native_sdk_path: []const u8, cef_dir: []const u8, cef_auto_install: bool) void {
         \\    if (platform == .macos) {
         \\        switch (web_engine) {
         \\            .system => {
@@ -1836,7 +1837,13 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    } else if (platform == .linux) {
         \\        switch (web_engine) {
         \\            .system => if (web_layer) {
-        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{} });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = if (layer_shell) &.{"-DNATIVE_SDK_HAS_LAYER_SHELL=1"} else &.{} });
+        \\                // gtk4-layer-shell interposes libwayland-client, so it
+        \\                // must precede the libwayland gtk4 pulls in.
+        \\                if (layer_shell) {
+        \\                    app_mod.linkSystemLibrary("gtk4-layer-shell-0", .{});
+        \\                    app_mod.linkSystemLibrary("wayland-client", .{});
+        \\                }
         \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
         \\                app_mod.linkSystemLibrary("dl", .{});
@@ -1856,7 +1863,11 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\                // informational pragma is dangerous); a stubbed host
         \\                // teaches at runtime by reporting WebViewNotFound the
         \\                // moment an app actually uses a WebView.
-        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+        \\                app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/linux/gtk_host.c"), .flags = if (layer_shell) &.{ "-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB", "-DNATIVE_SDK_HAS_LAYER_SHELL=1" } else &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+        \\                if (layer_shell) {
+        \\                    app_mod.linkSystemLibrary("gtk4-layer-shell-0", .{});
+        \\                    app_mod.linkSystemLibrary("wayland-client", .{});
+        \\                }
         \\                app_mod.linkSystemLibrary("gtk4", .{});
         \\                app_mod.linkSystemLibrary("dl", .{});
         \\            },

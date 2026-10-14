@@ -2696,6 +2696,26 @@ fn externalModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.R
 // Reproduced with a 10-line `zig cc` program against both the 14.5 and
 // 26.0 SDKs. Release builds never hit it (no UBSan), which is why only
 // Debug-built examples (standardOptimizeOption default) crashed.
+/// `-Dlayer-shell=true` builds the GTK host with gtk4-layer-shell, so
+/// `always_on_top` windows become wlr-layer-shell surfaces on compositors
+/// that offer the protocol (KDE Plasma, Sway, Hyprland, niri, ...): the
+/// one way a Wayland client can stay above other windows on every
+/// workspace and choose its own position. Opt-in because, unlike the
+/// host's dlopen'd extras, the library cannot be loaded at runtime: it
+/// interposes libwayland-client and only works when linked ahead of it, so
+/// enabling it makes it a hard runtime dependency of the binary.
+fn linuxLayerShell(b: *std.Build) bool {
+    return b.option(bool, "layer-shell", "Link gtk4-layer-shell so always_on_top windows become Wayland layer surfaces (default: false)") orelse false;
+}
+
+/// Ahead of gtk4 on purpose: gtk4-layer-shell interposes libwayland-client
+/// symbols and only wins when it precedes the libwayland gtk4 pulls in.
+/// wayland-client itself is for the host's relative-pointer binding.
+fn linkLinuxLayerShell(app_mod: *std.Build.Module) void {
+    app_mod.linkSystemLibrary("gtk4-layer-shell-0", .{});
+    app_mod.linkSystemLibrary("wayland-client", .{});
+}
+
 fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, app_mod: *std.Build.Module, exe: *std.Build.Step.Compile, platform: PlatformOption, web_engine: WebEngineOption, web_layer: bool, cef_dir: []const u8, cef_auto_install: bool) void {
     addPlatformLinkSearchPaths(b, platform, web_engine, cef_dir, app_mod);
     if (platform == .macos) {
@@ -2750,7 +2770,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
     } else if (platform == .linux) {
         switch (web_engine) {
             .system => if (web_layer) {
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{} });
+                const layer_shell = linuxLayerShell(b);
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = if (layer_shell) &.{"-DNATIVE_SDK_HAS_LAYER_SHELL=1"} else &.{} });
+                if (layer_shell) linkLinuxLayerShell(app_mod);
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("webkitgtk-6.0", .{});
                 app_mod.linkSystemLibrary("dl", .{});
@@ -2770,7 +2792,9 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
                 // informational pragma is dangerous); a stubbed host
                 // teaches at runtime by reporting WebViewNotFound the
                 // moment an app actually uses a WebView.
-                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+                const layer_shell = linuxLayerShell(b);
+                app_mod.addCSourceFile(.{ .file = dep.path("src/platform/linux/gtk_host.c"), .flags = if (layer_shell) &.{ "-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB", "-DNATIVE_SDK_HAS_LAYER_SHELL=1" } else &.{"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB"} });
+                if (layer_shell) linkLinuxLayerShell(app_mod);
                 app_mod.linkSystemLibrary("gtk4", .{});
                 app_mod.linkSystemLibrary("dl", .{});
             },
