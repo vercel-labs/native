@@ -2506,6 +2506,39 @@ static void punchHiddenCaptionButtonHole(Host *host, const NativeView &view, HWN
     FillRect(dc, &local, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
 }
 
+/* Flip-model presentation bypasses the GDI bitmap. Exclude the caption
+ * cluster from the child window itself, letting the parent's zero-alpha
+ * caption pixels expose the DWM buttons. Keep the backing and input
+ * coordinates intact. Geometry is re-evaluated for resize/DPI/view moves. */
+static void syncGpuSurfaceCaptionRegion(Host *host, const NativeView &view, HWND hwnd) {
+    auto owner = host->windows.find(view.window_id);
+    if (owner == host->windows.end() || !windowUsesHiddenTitlebar(owner->second)) return;
+    RECT client = {};
+    RECT cluster = {};
+    if (!GetClientRect(hwnd, &client) || !captionButtonsClientRect(owner->second.hwnd, &cluster)) return;
+    const POINT origin = childOriginInParentClient(hwnd, owner->second.hwnd);
+    OffsetRect(&cluster, -origin.x, -origin.y);
+    RECT overlap = {};
+    HRGN region = CreateRectRgnIndirect(&client);
+    if (!region) return;
+    if (IntersectRect(&overlap, &client, &cluster)) {
+        HRGN buttons = CreateRectRgnIndirect(&overlap);
+        if (!buttons) { DeleteObject(region); return; }
+        const int combined = CombineRgn(region, region, buttons, RGN_DIFF);
+        DeleteObject(buttons);
+        if (combined == ERROR) { DeleteObject(region); return; }
+    }
+    HRGN previous = CreateRectRgn(0, 0, 0, 0);
+    const bool unchanged = previous && GetWindowRgn(hwnd, previous) != ERROR && EqualRgn(previous, region);
+    if (previous) DeleteObject(previous);
+    if (unchanged || !SetWindowRgn(hwnd, region, FALSE)) {
+        DeleteObject(region);
+    } else {
+        InvalidateRect(owner->second.hwnd, nullptr, FALSE);
+    }
+    /* A successful SetWindowRgn transfers region ownership to User32. */
+}
+
 /* Keep the DWM caption material behind the punched button hole matched
  * to the app's own header: sample the presented pixel just leading of
  * the cluster at its vertical middle and push it as the Windows 11
@@ -3333,6 +3366,7 @@ static LRESULT CALLBACK gpuSurfaceProc(HWND hwnd, UINT message, WPARAM wparam, L
             }
             break;
         case WM_PAINT: {
+            syncGpuSurfaceCaptionRegion(host, *view, hwnd);
             RECT paint_rects[kGpuPaintRegionRectCap] = {};
             size_t paint_rect_count = gpuSurfaceUpdateRegionRects(
                 hwnd, paint_rects, kGpuPaintRegionRectCap);
@@ -5658,6 +5692,18 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARA
                  * zero custom gesture code. */
                 if (windowDragRegionHit(host, *chrome_window, point)) return HTCAPTION;
                 return HTCLIENT;
+            }
+            case WM_PAINT: {
+                PAINTSTRUCT paint = {};
+                HDC dc = BeginPaint(hwnd, &paint);
+                RECT cluster = {};
+                if (dc && captionButtonsClientRect(hwnd, &cluster)) {
+                    /* The flip child leaves this region to its parent.
+                     * Zero alpha exposes the DWM caption material. */
+                    FillRect(dc, &cluster, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+                }
+                EndPaint(hwnd, &paint);
+                return 0;
             }
             case WM_ACTIVATE:
                 /* Composition restarts (session reconnect, driver reset)
