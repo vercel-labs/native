@@ -16,7 +16,7 @@ export function baseContract(): Contract {
     msg: { name: "Msg", arms: [{ name: "bump", member: null, payload: { kind: "void" } }, { name: "label_set", member: "body", payload: { kind: "bytes" } }], unbound: [] },
     init_returns_cmd: false, update_returns_cmd: true, has_subscriptions: false, has_migrate: false,
     channels: { command_msg: false, frame_msg: false, key_msg: false, pinch_msg: false, drop_msg: false, appearance_msg: null, chrome_msg: null, env_msgs: [] },
-    abi: { prefix: "nsc_core_", exports: ["abi_version", "build_id", "set_panic_sink", "init", "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"], snapshot_format: 1 },
+    abi: { prefix: "nsc_core_", exports: ["abi_version", "build_id", "set_panic_sink", "init", "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record", "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"], snapshot_format: 1 },
     integer_slots: [{ slot: "Model.count", class: "i64" }], deterministic: true, async_free: true,
   };
 }

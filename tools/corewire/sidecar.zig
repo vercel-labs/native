@@ -305,6 +305,7 @@ pub const unconditional_exports = [_][]const u8{
     "restore_model",
     "migrate_model",
     "helper_call",
+    "native_model_json",
 };
 
 pub const conditional_exports = [_][]const u8{
@@ -569,7 +570,7 @@ pub const minimal_valid_json =
     \\      "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
     \\      "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
     \\      "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-    \\      "persist_snapshot", "restore_model", "migrate_model", "helper_call"],
+    \\      "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"],
     \\    "snapshot_format": 1
     \\  },
     \\  "integer_slots": [
@@ -622,7 +623,7 @@ test "drop_msg infers from the ABI export for older format-1 emitters" {
     // The pinned external compiler predates the additive channel flag but
     // preserves profile-declared exports in the authoritative ABI list.
     var source = try std.mem.replaceOwned(u8, arena, minimal_valid_json, "    \"drop_msg\": false,\n", "");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"drop_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"native_model_json\"]", "\"native_model_json\", \"drop_msg\"]");
     var diags = Diagnostics{ .arena = arena };
     const parsed = try read(arena, source, &diags);
     try std.testing.expect(parsed.channels.drop_msg);
@@ -1118,15 +1119,15 @@ test "V10: an empty integer_slots list is valid when nothing spells i64" {
 test "V11: an unknown export suffix refuses" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"mystery_entry\"]");
-    try expectRefusal(source, "abi.exports[22]", "not an export suffix of ABI version 2");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"native_model_json\"]", "\"native_model_json\", \"mystery_entry\"]");
+    try expectRefusal(source, "abi.exports[23]", "not an export suffix of ABI version 2");
 }
 
 test "V11: the optional native view extension is unique and follows channels" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const source = try replaced(arena, minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"native_view\"]");
+    const source = try replaced(arena, minimal_valid_json, "\"native_model_json\"]", "\"native_model_json\", \"native_view\"]");
     const valid = try readValid(arena, source);
     try testing.expect(abiHasExport(valid.abi, "native_view"));
     const windows = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_window_view\"]");
@@ -1178,56 +1179,56 @@ test "V11: the optional native view extension is unique and follows channels" {
     const effect_valid = try readValid(arena, effect);
     try testing.expect(abiHasExport(effect_valid.abi, "native_effect_policy"));
     const effect_duplicate = try replaced(arena, effect, "\"native_effect_policy\"]", "\"native_effect_policy\", \"native_effect_policy\"]");
-    try expectRefusal(effect_duplicate, "abi.exports[39]", "out of canonical order");
+    try expectRefusal(effect_duplicate, "abi.exports[40]", "out of canonical order");
     const window = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_window_policy\"]");
     const window_policy_valid = try readValid(arena, window);
     try testing.expect(abiHasExport(window_policy_valid.abi, "native_window_policy"));
     const window_policy_duplicate = try replaced(arena, window, "\"native_window_policy\"]", "\"native_window_policy\", \"native_window_policy\"]");
-    try expectRefusal(window_policy_duplicate, "abi.exports[39]", "out of canonical order");
+    try expectRefusal(window_policy_duplicate, "abi.exports[40]", "out of canonical order");
     const theme = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_theme_policy\"]");
     const theme_valid = try readValid(arena, theme);
     try testing.expect(abiHasExport(theme_valid.abi, "native_theme_policy"));
     const theme_duplicate = try replaced(arena, theme, "\"native_theme_policy\"]", "\"native_theme_policy\", \"native_theme_policy\"]");
-    try expectRefusal(theme_duplicate, "abi.exports[39]", "out of canonical order");
+    try expectRefusal(theme_duplicate, "abi.exports[40]", "out of canonical order");
     const status = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_status_policy\"]");
     const status_valid = try readValid(arena, status);
     try testing.expect(abiHasExport(status_valid.abi, "native_status_policy"));
     const status_duplicate = try replaced(arena, status, "\"native_status_policy\"]", "\"native_status_policy\", \"native_status_policy\"]");
-    try expectRefusal(status_duplicate, "abi.exports[39]", "out of canonical order");
+    try expectRefusal(status_duplicate, "abi.exports[40]", "out of canonical order");
     const db_duplicate = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_db_policy\"]");
-    try expectRefusal(db_duplicate, "abi.exports[38]", "out of canonical order");
+    try expectRefusal(db_duplicate, "abi.exports[39]", "out of canonical order");
     const timer_duplicate = try replaced(arena, timer, "\"native_timer_policy\"]", "\"native_timer_policy\", \"native_timer_policy\"]");
-    try expectRefusal(timer_duplicate, "abi.exports[37]", "out of canonical order");
+    try expectRefusal(timer_duplicate, "abi.exports[38]", "out of canonical order");
     const text_duplicate = try replaced(arena, text, "\"native_text_policy\"]", "\"native_text_policy\", \"native_text_policy\"]");
-    try expectRefusal(text_duplicate, "abi.exports[36]", "out of canonical order");
+    try expectRefusal(text_duplicate, "abi.exports[37]", "out of canonical order");
     const resizable_duplicate = try replaced(arena, resizable, "\"native_resizable_policy\"]", "\"native_resizable_policy\", \"native_resizable_policy\"]");
-    try expectRefusal(resizable_duplicate, "abi.exports[35]", "out of canonical order");
+    try expectRefusal(resizable_duplicate, "abi.exports[36]", "out of canonical order");
     const scroll_duplicate = try replaced(arena, scroll, "\"native_scroll_policy\"]", "\"native_scroll_policy\", \"native_scroll_policy\"]");
-    try expectRefusal(scroll_duplicate, "abi.exports[34]", "out of canonical order");
+    try expectRefusal(scroll_duplicate, "abi.exports[35]", "out of canonical order");
     const split_duplicate = try replaced(arena, split, "\"native_split_policy\"]", "\"native_split_policy\", \"native_split_policy\"]");
-    try expectRefusal(split_duplicate, "abi.exports[33]", "out of canonical order");
+    try expectRefusal(split_duplicate, "abi.exports[34]", "out of canonical order");
     const slider_duplicate = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_slider_policy\"]");
-    try expectRefusal(slider_duplicate, "abi.exports[32]", "out of canonical order");
+    try expectRefusal(slider_duplicate, "abi.exports[33]", "out of canonical order");
     const accordion_duplicate = try replaced(arena, accordion, "\"native_accordion_policy\"]", "\"native_accordion_policy\", \"native_accordion_policy\"]");
-    try expectRefusal(accordion_duplicate, "abi.exports[31]", "out of canonical order");
+    try expectRefusal(accordion_duplicate, "abi.exports[32]", "out of canonical order");
     const toggle_duplicate = try replaced(arena, toggle, "\"native_toggle_policy\"]", "\"native_toggle_policy\", \"native_toggle_policy\"]");
-    try expectRefusal(toggle_duplicate, "abi.exports[30]", "out of canonical order");
+    try expectRefusal(toggle_duplicate, "abi.exports[31]", "out of canonical order");
     const menu_duplicate = try replaced(arena, menu, "\"native_menu_policy\"]", "\"native_menu_policy\", \"native_menu_policy\"]");
-    try expectRefusal(menu_duplicate, "abi.exports[29]", "out of canonical order");
+    try expectRefusal(menu_duplicate, "abi.exports[30]", "out of canonical order");
     const list_duplicate = try replaced(arena, list, "\"native_list_policy\"]", "\"native_list_policy\", \"native_list_policy\"]");
-    try expectRefusal(list_duplicate, "abi.exports[28]", "out of canonical order");
+    try expectRefusal(list_duplicate, "abi.exports[29]", "out of canonical order");
     const tree_duplicate = try replaced(arena, tree, "\"native_tree_policy\"]", "\"native_tree_policy\", \"native_tree_policy\"]");
-    try expectRefusal(tree_duplicate, "abi.exports[27]", "out of canonical order");
+    try expectRefusal(tree_duplicate, "abi.exports[28]", "out of canonical order");
     const tabs_duplicate = try replaced(arena, tabs, "\"native_tabs_policy\"]", "\"native_tabs_policy\", \"native_tabs_policy\"]");
-    try expectRefusal(tabs_duplicate, "abi.exports[26]", "out of canonical order");
+    try expectRefusal(tabs_duplicate, "abi.exports[27]", "out of canonical order");
     const policy_duplicate = try replaced(arena, policy, "\"native_radio_policy\"]", "\"native_radio_policy\", \"native_radio_policy\"]");
-    try expectRefusal(policy_duplicate, "abi.exports[25]", "out of canonical order");
+    try expectRefusal(policy_duplicate, "abi.exports[26]", "out of canonical order");
     const window_duplicate = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_window_view\"]");
-    try expectRefusal(window_duplicate, "abi.exports[24]", "out of canonical order");
+    try expectRefusal(window_duplicate, "abi.exports[25]", "out of canonical order");
     const duplicate = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_view\"]");
-    try expectRefusal(duplicate, "abi.exports[23]", "out of canonical order");
-    const reordered = try replaced(arena, source, "\"helper_call\", \"native_view\"", "\"native_view\", \"helper_call\"");
-    try expectRefusal(reordered, "abi.exports[21]", "expected the unconditional export");
+    try expectRefusal(duplicate, "abi.exports[24]", "out of canonical order");
+    const reordered = try replaced(arena, source, "\"native_model_json\", \"native_view\"", "\"native_view\", \"native_model_json\"");
+    try expectRefusal(reordered, "abi.exports[22]", "expected the unconditional export");
 }
 
 test "V11: a missing unconditional export refuses with the expected suffix" {

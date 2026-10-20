@@ -135,6 +135,7 @@ const signatures: Signature[] = [
   { suffix: "restore_model", name: "restore_model", params: ["bytes"] },
   { suffix: "migrate_model", name: "migrate_model", params: ["bytes", "f64"] },
   { suffix: "helper_call", name: "helper_call", params: ["u32", "bytes"] },
+  { suffix: "native_model_json", name: "native_model_json", params: [] },
   { suffix: "command_msg", name: "abi_command_msg", params: ["bytes"] },
   { suffix: "frame_msg", name: "abi_frame_msg", params: ["f64", "f64", "f64", "f64"] },
   { suffix: "frame_msg_ns", name: "abi_frame_msg_ns", params: ["f64", "f64", "f64", "f64", "bytes", "bytes"] },

@@ -63,6 +63,9 @@ test("nested unions in helper arguments retain their decoder type imports", () =
 // recovers every complete facade from the exact-audio projection.
 // Exact subprocess and cancellation records are independently audited:
 // removing only their encoder cases recovers every preceding complete facade.
+// The committed-model JSON export is independently audited: removing its
+// export-list entry, profile line, mirror accessor and attestation line,
+// and the facade's model JSON block recovers every preceding complete pin.
 const goldens = JSON.parse(fs.readFileSync(new URL("core_goldens.json", import.meta.url), "utf8")) as Record<string, {
   status: number; diagnostics: string; hashes: Record<string, string>;
   check_status: number; check_diagnostics: string;
@@ -122,7 +125,7 @@ test("parameterized arena helpers and retained integer estimators keep the attes
     assert.match(mirror, /@bitCast\(@as\(u64, @intCast\(index\)\)\)/);
     assert.match(facade, /rows\(nscfCommitted,/);
     assert.match(facade, /estimate\(nscfCommitted,/);
-    for (const name of ["virtualExtentHelper", "virtualExtentEstimate", "shim_root", "has_windows", "RuntimeModel", "RuntimeResult", "decoded_model", "restoreCommittedModel"]) {
+    for (const name of ["virtualExtentHelper", "virtualExtentEstimate", "shim_root", "has_windows", "RuntimeModel", "RuntimeResult", "decoded_model", "restoreCommittedModel", "modelJson"]) {
       const conflicting = structuredClone(contract);
       conflicting.model_helpers[1].name = name;
       conflicting.integer_slots.find(slot => slot.slot === "helpers.estimate.params[0]")!.slot = `helpers.${name}.params[0]`;

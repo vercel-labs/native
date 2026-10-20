@@ -71,6 +71,24 @@ const Journal = struct {
     }
 };
 
+/// Compiled-model cores write their committed model's JSON themselves;
+/// other cores render the decoded model with `std.json`. Both spell byte
+/// arrays as numbers, so non-UTF-8 bytes and embedded NULs stay lossless.
+fn writeModel(comptime Adapter: type, json: *std.json.Stringify) !void {
+    if (comptime Adapter.Host.projects_model_json) {
+        try json.print("{s}", .{Adapter.Host.modelJson()});
+    } else {
+        json.options.emit_strings_as_arrays = true;
+        try json.write(Adapter.Host.model().*);
+        json.options.emit_strings_as_arrays = false;
+    }
+}
+
+fn modelJsonAlloc(comptime Adapter: type, allocator: std.mem.Allocator) ![]u8 {
+    if (comptime Adapter.Host.projects_model_json) return allocator.dupe(u8, Adapter.Host.modelJson());
+    return std.json.Stringify.valueAlloc(allocator, Adapter.Host.model().*, .{ .emit_strings_as_arrays = true });
+}
+
 pub fn run(comptime Adapter: type, init: std.process.Init, options: Adapter.Options) !void {
     try runWithCoreOptions(Adapter, init, options, .{});
 }
@@ -207,10 +225,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
             try json.objectField("viewBackend");
             try json.write(Adapter.view_backend);
             try json.objectField("model");
-            // Byte arrays stay lossless, including non-UTF8 and embedded NUL.
-            json.options.emit_strings_as_arrays = true;
-            try json.write(Adapter.Host.model().*);
-            json.options.emit_strings_as_arrays = false;
+            try writeModel(Adapter, &json);
             try json.objectField("fingerprint");
             var id_buffer: [32]u8 = undefined;
             try json.write(try std.fmt.bufPrint(&id_buffer, "{x}", .{self.harness.runtime.sessionStateFingerprint()}));
@@ -655,7 +670,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                     recorder.finish();
                     if (recorder.failed) return error.RecordingFailed;
                     const fingerprint = value.harness.runtime.sessionStateFingerprint();
-                    const model_before = try std.json.Stringify.valueAlloc(gpa, Adapter.Host.model().*, .{ .emit_strings_as_arrays = true });
+                    const model_before = try modelJsonAlloc(Adapter, gpa);
                     defer gpa.free(model_before);
                     value.destroy();
                     host = null;
@@ -672,7 +687,7 @@ pub fn runWithSecurity(comptime Adapter: type, init: std.process.Init, options: 
                         }
                         return error.ReplayMismatch;
                     }
-                    const model_after = try std.json.Stringify.valueAlloc(gpa, Adapter.Host.model().*, .{ .emit_strings_as_arrays = true });
+                    const model_after = try modelJsonAlloc(Adapter, gpa);
                     defer gpa.free(model_after);
                     if (!std.mem.eql(u8, model_before, model_after)) return error.ReplayModelMismatch;
                     try response.writeAll("\"replay\":");

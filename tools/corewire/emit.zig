@@ -236,7 +236,7 @@ test "a u64 attestation on chrome geometry refuses at check time" {
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"], "snapshot_format": 1},
         \\  "integer_slots": [{"slot": "Buttons.x", "class": "u64"}],
         \\  "deterministic": true, "async_free": true
         \\}
@@ -408,7 +408,7 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"], "snapshot_format": 1},
         \\  "integer_slots": [], "deterministic": true, "async_free": true
         \\}
     ;
@@ -445,7 +445,7 @@ test "channel glue speaks the sidecar's message union name" {
     // Rename the union to "Event" and wire the key channel.
     var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"name\": \"Msg\"", "\"name\": \"Event\"");
     source = try std.mem.replaceOwned(u8, arena, source, "\"key_msg\": false", "\"key_msg\": true");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"native_model_json\"]", "\"native_model_json\", \"key_msg\"]");
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const Event = union(enum) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn keyMsg(key: KeyEvent) ?Event {") != null);
@@ -856,7 +856,7 @@ test "a chrome arm holding its insets by reference refuses" {
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
         \\    "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
         \\    "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call"], "snapshot_format": 1},
+        \\    "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"], "snapshot_format": 1},
         \\  "integer_slots": [], "deterministic": true, "async_free": true
         \\}
     ;

@@ -1782,11 +1782,14 @@ pub fn build(b: *std.Build) void {
         trap_run.expectExitCode(73);
         _ = trap_run.captureStdErr(.{});
         const mixed_return_abi_run = b.addRunArtifact(ts_core_artifacts.mixed_return_abi_laws);
-        const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suites, including mixed update returns (requires node and `npm ci` in packages/core)");
+        const model_json_abi_run = b.addRunArtifact(ts_core_artifacts.model_json_abi_laws);
+        const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suites, including mixed update returns and model JSON (requires node and `npm ci` in packages/core)");
         abi_laws_step.dependOn(&abi_laws_run.step);
         abi_laws_step.dependOn(&trap_run.step);
         test_step.dependOn(&trap_run.step);
         abi_laws_step.dependOn(&mixed_return_abi_run.step);
+        abi_laws_step.dependOn(&model_json_abi_run.step);
+        test_step.dependOn(&model_json_abi_run.step);
         test_step.dependOn(&abi_laws_run.step);
         test_step.dependOn(&mixed_return_abi_run.step);
         // The cross-execution battery staging: the host-fixture and
@@ -4520,6 +4523,7 @@ const TsCoreE2eArtifacts = struct {
     /// The mixed-return ABI regression: a real compiled core whose update
     /// returns both bare Model and [Model, Cmd] through the generated facade.
     mixed_return_abi_laws: *std.Build.Step.Compile,
+    model_json_abi_laws: *std.Build.Step.Compile,
     /// Per-fixture contract artifacts for an external core toolchain:
     /// the effective contract sidecar and its TypeScript facade/profile
     /// projections, installed by the stage-core-contracts step.
@@ -4745,6 +4749,13 @@ fn tsCoreE2eArtifact(
         .entry = "tests/ts-core/mixed_return_fixture.ts",
         .src_dir = mixed_return_src.getDirectory(),
         .name = "mixed_return_core",
+    });
+    const model_json_src = b.addWriteFiles();
+    _ = model_json_src.addCopyFile(b.path("tests/ts-core/model_json_fixture.ts"), "model_json_fixture.ts");
+    const model_json_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/model_json_fixture.ts",
+        .src_dir = model_json_src.getDirectory(),
+        .name = "model_json_core",
     });
 
     const e2e_mod = module(b, target, optimize, "tests/ts-core/host_e2e_tests.zig");
@@ -5482,6 +5493,9 @@ fn tsCoreE2eArtifact(
     const mixed_return_abi_mod = module(b, target, optimize, "tests/sidecar/mixed_return_abi_tests.zig");
     mixed_return_abi_mod.addImport("mixed_return_core", mixed_return_fixture.module);
 
+    const model_json_abi_mod = module(b, target, optimize, "tests/sidecar/model_json_abi_tests.zig");
+    model_json_abi_mod.addImport("model_json_core", model_json_fixture.module);
+
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
@@ -5548,6 +5562,7 @@ fn tsCoreE2eArtifact(
         .external_core_trap = b.addExecutable(.{ .name = "external-core-trap", .root_module = trap_mod, .use_llvm = @import("build/app.zig").useLlvmWorkaround(target) }),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
         .mixed_return_abi_laws = filteredTestArtifact(b, mixed_return_abi_mod, "mixed-return-abi-tests", &.{}),
+        .model_json_abi_laws = filteredTestArtifact(b, model_json_abi_mod, "model-json-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
     };
 }

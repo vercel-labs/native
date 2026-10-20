@@ -10,6 +10,9 @@
 //!   - snapshot fidelity: the committed-model snapshot decodes through
 //!     the mirror's declared types and re-encodes to the same bytes,
 //!     every cycle;
+//!   - model JSON fidelity: the core's own JSON rendering of the
+//!     committed model equals `std.json` over the decoded mirror with
+//!     byte strings as arrays, every cycle;
 //!   - command bytes: the one command-producing arm (`stamp`) returns
 //!     the `now` op's pinned wire bytes; every other cycle returns an
 //!     empty command buffer;
@@ -60,11 +63,23 @@ fn rawFrameMsg(width: f64, height: f64, timestamp_ms: f64, interval_ms: f64) []c
     return ptr[0..len];
 }
 
+/// The archive's own JSON rendering of its committed model
+/// (result-arena resident, like the snapshot).
+fn rawModelJson() []const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    abi.native_model_json(&ptr, &len);
+    return ptr[0..len];
+}
+
 /// Snapshot fidelity: the archive's raw snapshot bytes must equal the
 /// canonical re-encoding of the mirror's decoded committed root — the
-/// decoder and the archive's encoder agree on every byte.
+/// decoder and the archive's encoder agree on every byte. The archive's
+/// model JSON must equal `std.json` over that same decoded root.
 fn expectSnapshotFidelity(model: *const shim_core.Model, arena: std.mem.Allocator) !void {
     try testing.expectEqualSlices(u8, rawSnapshot(), corewire_rt.encodeAlloc(shim_core.Model, model.*, arena));
+    const expected = try std.json.Stringify.valueAlloc(arena, model.*, .{ .emit_strings_as_arrays = true });
+    try testing.expectEqualStrings(expected, rawModelJson());
 }
 
 /// The selection sample follows the sidecar's classes: a signed focus

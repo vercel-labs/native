@@ -174,6 +174,12 @@ export fn nsc_core_helper_call(helper: u32, args: [*]const u8, args_len: usize, 
     noCore();
 }
 
+export fn nsc_core_native_model_json(out: *[*]const u8, out_len: *usize) void {
+    out.* = &empty;
+    out_len.* = 0;
+    noCore();
+}
+
 export fn nsc_core_collect() void {}
 
 // Channel entries return the bytes envelope ([produced u8][tag u8]

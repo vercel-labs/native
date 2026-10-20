@@ -641,7 +641,7 @@ class ContractEmitter {
       '"frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", ' +
       '"dispatch_number", "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", ' +
       '"dispatch_record", "dispatch_text_input", "dispatch_scroll_state", ' +
-      '"subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"';
+      '"subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json"';
     if (hasCommand) abiExports += ', "command_msg"';
     if (hasFrame) abiExports += ', "frame_msg", "frame_msg_ns"';
     if (hasKey) abiExports += ', "key_msg"';

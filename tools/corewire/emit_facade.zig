@@ -146,6 +146,22 @@ test "migration hooks produce a closed status-prefixed snapshot seam" {
     try testing.expect(std.mem.indexOf(u8, generated, "catch {") != null);
 }
 
+test "the model JSON export writes declared fields under their attested classes" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const generated = try facadeFromJson(arena, sidecar_mod.minimal_valid_json);
+    try testing.expect(std.mem.indexOf(u8, generated, "export function native_model_json(): Uint8Array {\n  const sink = nscfNewSink();\n  nscfJsonOfModel(sink, nscfCommitted);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "  nscfJsonText(sink, \"{\\\"count\\\":\");\n  nscfJsonI64(sink, value.count);\n  nscfJsonText(sink, \",\\\"label\\\":\");\n  nscfJsonBytes(sink, value.label);\n  nscfJsonText(sink, \"}\");\n") != null);
+    // Only the writers the model reaches are emitted.
+    try testing.expect(std.mem.indexOf(u8, generated, "function nscfJsonF64") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "function nscfJsonU64") == null);
+    const unsigned = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"u64\"}");
+    const unsigned_generated = try facadeFromJson(arena, unsigned);
+    try testing.expect(std.mem.indexOf(u8, unsigned_generated, "  nscfJsonU64(sink, value.count);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, unsigned_generated, "function nscfJsonI64") == null);
+}
+
 test "member facts spell the author's payload property names" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -339,7 +355,7 @@ test "wired channels emit abi entries and the generic payload packer" {
     const arena = arena_state.allocator();
     var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"key_msg\": false", "\"key_msg\": true");
     source = try std.mem.replaceOwned(u8, arena, source, "\"frame_msg\": false", "\"frame_msg\": true");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"frame_msg\", \"key_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"native_model_json\"]", "\"native_model_json\", \"frame_msg\", \"key_msg\"]");
     const generated = try facadeFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "frameMsg as nscfChanFrameMsg,") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "keyMsg as nscfChanKeyMsg,") != null);
@@ -371,7 +387,7 @@ test "scalar primitive message payload aliases share dispatch and channel encode
     source = try std.mem.replaceOwned(u8, arena, source, "\"unbound\": [\"label_set\"]", "\"unbound\": []");
     source = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"Msg.count_set\", \"class\": \"i64\"}");
     source = try std.mem.replaceOwned(u8, arena, source, "\"key_msg\": false", "\"key_msg\": true");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"native_model_json\"]", "\"native_model_json\", \"key_msg\"]");
 
     const generated = try facadeFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "if (tag === nscfTag_blob) return nscfCommit(coreUpdate(nscfCommitted, { kind: \"blob\", blob: payload }));") != null);

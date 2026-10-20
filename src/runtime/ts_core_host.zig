@@ -871,6 +871,18 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             return if (comptime use_runtime_model) core.snapshotModel() else model_root;
         }
 
+        /// Compiled-model cores render their committed model as JSON
+        /// themselves. Reference views and hand-written cores do not.
+        pub const projects_model_json = use_runtime_model and @hasDecl(core, "modelJson");
+
+        /// The core's own JSON rendering of the committed model, in the
+        /// shape `std.json` gives `model()` with byte strings as arrays.
+        /// Borrowed until the next core call.
+        pub fn modelJson() []const u8 {
+            if (comptime !projects_model_json) @compileError("ts core host: this core does not render its model as JSON");
+            return core.modelJson();
+        }
+
         /// Replace the committed core model from canonical snapshot bytes.
         /// Reference mode refreshes its mirror; compiled mode keeps its handle. Generated external cores expose the inverse
         /// of `modelSnapshot`; hand-written test cores intentionally do not.

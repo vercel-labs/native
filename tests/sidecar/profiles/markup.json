@@ -27,6 +27,7 @@
     { "export": "restore_model", "symbol": "nsc_core_restore_model", "params": ["bytes"], "returns": "bytes" },
     { "export": "migrate_model", "symbol": "nsc_core_migrate_model", "params": ["bytes", "f64"], "returns": "bytes" },
     { "export": "helper_call", "symbol": "nsc_core_helper_call", "params": ["u32", "bytes"], "returns": "bytes" },
+    { "export": "native_model_json", "symbol": "nsc_core_native_model_json", "params": [], "returns": "bytes" },
     { "export": "abi_frame_msg", "symbol": "nsc_core_frame_msg", "params": ["f64", "f64", "f64", "f64"], "returns": "bytes" },
     { "export": "abi_key_msg", "symbol": "nsc_core_key_msg", "params": ["bytes", "u8", "u8", "u8", "u8"], "returns": "bytes" },
     { "export": "abi_pinch_msg", "symbol": "nsc_core_pinch_msg", "params": ["f64", "bytes", "u32", "f64", "f64", "f64"], "returns": "bytes" },
