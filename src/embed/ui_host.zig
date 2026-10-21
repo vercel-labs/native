@@ -200,6 +200,7 @@ pub fn UiAppHostWithStorageCredentialsAndImages(
                 .bundle_id = credentials_service,
             });
             self.null_platform.gpu_surfaces = true;
+            self.null_platform.keyboard_input = false;
             // Audio is declined until the shim registers a real service
             // (`native_sdk_app_set_audio_service`): without one,
             // `fx.playAudio` degrades to one explicit `.failed` Msg

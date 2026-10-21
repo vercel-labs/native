@@ -137,6 +137,22 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
 });
 
+test("NS1075 keeps keyboard input behind its manifest permission", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly ok: boolean; }
+export type Msg = { readonly kind: "go" } | { readonly kind: "done"; readonly bytes: Uint8Array };
+export function initialModel(): Model { return { ok: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind === "go") return [model, Cmd.keyboard.sendChord({ key: "v", modifiers: ["primary"] }, { ok: "done", err: "done" })];
+  return model;
+}
+`;
+  assert.equal(check(source, { permissions: ["keyboard_input"] }).ok, true);
+  const missing = check(source, { permissions: ["clipboard"] });
+  assert.equal(missing.diagnostics.filter((d) => d.id === "NS1075").length, 1);
+});
+
 test("NS1073 reserves the core credential request namespace for typed factories", () => {
   const result = check(`
 import { Cmd } from "@native-sdk/core";

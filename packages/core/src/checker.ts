@@ -3337,6 +3337,19 @@ export class SubsetChecker {
         }
       }
 
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "keyboard" &&
+        ts.isIdentifier(node.expression.expression.expression) &&
+        this.cmdNames.has(node.expression.expression.expression.text) &&
+        this.isSdkReference(node.expression.expression.expression) &&
+        !this.permissions.has("keyboard_input")
+      ) {
+        this.report("NS1075", "`Cmd.keyboard.*` requires the `keyboard_input` permission in app.zon.", node);
+      }
+
       // NS1073 — the core credential wire names belong to the typed factory.
       // Raw Cmd.request payloads are app-controlled bytes and cannot state
       // the credential record contract safely at the authoring boundary.

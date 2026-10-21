@@ -147,6 +147,9 @@ pub const NotificationCommandEvent = types.NotificationCommandEvent;
 pub const CredentialKey = types.CredentialKey;
 pub const Credential = types.Credential;
 pub const LocalTimeStyle = types.LocalTimeStyle;
+pub const keyboard_input = types.keyboard_input;
+pub const KeyChord = types.KeyChord;
+pub const KeyboardInputAccess = types.KeyboardInputAccess;
 pub const StatusItemId = types.StatusItemId;
 pub const primary_status_item_id = types.primary_status_item_id;
 pub const TrayItemId = types.TrayItemId;
@@ -273,4 +276,7 @@ test {
     _ = @import("null_platform_tests.zig");
     _ = @import("macos/key_codes.zig");
     _ = @import("windows/key_codes.zig");
+    _ = @import("keyboard_input.zig");
+    _ = @import("macos/keyboard_input.zig");
+    _ = @import("windows/keyboard_input.zig");
 }

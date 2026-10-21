@@ -139,6 +139,24 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
         }
 
+        /// Post a key chord to the focused app; requires the `keyboard_input` manifest permission.
+        pub fn sendKeyChord(self: *Runtime, chord: platform.KeyChord) anyerror!void {
+            try requireKeyboardInput(self);
+            try self.options.platform.services.sendKeyChord(chord);
+        }
+
+        /// Report the OS grant for synthesized input; `prompt` asks the OS to show its grant prompt.
+        pub fn keyboardInputAccess(self: *Runtime, prompt: bool) anyerror!platform.KeyboardInputAccess {
+            try requireKeyboardInput(self);
+            return self.options.platform.services.keyboardInputAccess(prompt);
+        }
+
+        fn requireKeyboardInput(self: *Runtime) error{PermissionDenied}!void {
+            if (!authorization.hasPermission(self.authorization_policy, self.options.security.permissions, security.permission_keyboard_input)) {
+                return error.PermissionDenied;
+            }
+        }
+
         pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
             if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
             if (self.command_policy) |policy| try status_validation.options(policy, options) else try validateTrayOptions(options);

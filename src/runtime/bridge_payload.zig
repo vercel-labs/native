@@ -130,6 +130,7 @@ pub fn platformFeatureFromString(value: []const u8) ?platform.PlatformFeature {
     if (std.mem.eql(u8, value, "windowHideOnClose")) return .window_hide_on_close;
     if (std.mem.eql(u8, value, "videoPlayback")) return .video_playback;
     if (std.mem.eql(u8, value, "globalShortcuts")) return .global_shortcuts;
+    if (std.mem.eql(u8, value, "keyboardInput")) return .keyboard_input;
     return null;
 }
 

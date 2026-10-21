@@ -1242,6 +1242,15 @@ export interface NotificationSpec {
 /// effect because the user's locale and time zone are ambient host state.
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
+/// Manifest modifier names: `primary` is Command on macOS and Control elsewhere; `alt` aliases `option`.
+export type KeyboardModifier = "primary" | "command" | "control" | "option" | "alt" | "shift";
+
+/// `key` is from the shortcut key vocabulary, such as "v", "enter", "arrowleft", or "f5".
+export interface KeyChord {
+  readonly key: string;
+  readonly modifiers?: readonly KeyboardModifier[];
+}
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -1560,6 +1569,24 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function keyboardModifierBits(modifiers: readonly KeyboardModifier[] | undefined): number {
+  let primary = false;
+  let command = false;
+  let control = false;
+  let option = false;
+  let shift = false;
+  if (modifiers !== undefined) {
+    for (const modifier of modifiers) {
+      if (modifier === "primary") primary = true;
+      else if (modifier === "command") command = true;
+      else if (modifier === "control") control = true;
+      else if (modifier === "option" || modifier === "alt") option = true;
+      else if (modifier === "shift") shift = true;
+    }
+  }
+  return (primary ? 1 : 0) + (command ? 2 : 0) + (control ? 4 : 0) + (option ? 8 : 0) + (shift ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -2001,6 +2028,19 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Keyboard input for whichever app has focus; requires the `keyboard_input` permission.
+  keyboard: {
+    /// Press one chord, such as `{ key: "v", modifiers: ["primary"] }` to paste; ok carries empty bytes.
+    sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.sendChord", { key: utf8Bytes(chord.key), modifiers: keyboardModifierBits(chord.modifiers) }, route);
+    },
+
+    /// Ok carries `granted`, `denied`, or `not_required`; `prompt` lets the OS show its grant prompt.
+    accessStatus<M extends Msgish>(options: { readonly prompt?: boolean }, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in

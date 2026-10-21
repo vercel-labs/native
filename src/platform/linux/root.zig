@@ -485,6 +485,7 @@ pub const LinuxPlatform = struct {
             // what is missing.
             .video_playback => false,
             .global_shortcuts => false,
+            .keyboard_input => false,
         };
     }
 

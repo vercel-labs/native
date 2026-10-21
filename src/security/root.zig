@@ -9,6 +9,7 @@ pub const permission_clipboard = "clipboard";
 pub const permission_network = "network";
 pub const permission_notifications = "notifications";
 pub const permission_credentials = "credentials";
+pub const permission_keyboard_input = "keyboard_input";
 
 pub const ExternalLinkAction = enum(c_int) {
     deny = 0,

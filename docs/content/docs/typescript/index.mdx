@@ -367,6 +367,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>App-scoped access to the OS credential store; get returns secret bytes, missing items route <code>miss</code>, and the manifest must declare the <code>credentials</code> capability and permission</td>
     </tr>
     <tr>
+      <td><code>Cmd.keyboard.sendChord(chord, route)</code> / <code>Cmd.keyboard.accessStatus(&#123; prompt? &#125;, route)</code></td>
+      <td>Send a key chord to whichever app has keyboard focus, or check the OS grant; requires the <code>keyboard_input</code> permission (<a href="/docs/keyboard-shortcuts#keyboard-input">Keyboard input</a>)</td>
+    </tr>
+    <tr>
       <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code></td>
       <td>Format an epoch timestamp as localized <code>date</code>, <code>time</code>, or <code>datetime</code> text in the host's current time zone</td>
     </tr>

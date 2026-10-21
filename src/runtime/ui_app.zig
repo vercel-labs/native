@@ -1716,6 +1716,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .format_local_time_fn = effectsFormatLocalTime,
                 .execute_capability_fn = effectsExecuteCapability,
                 .replay_window_result_fn = effectsRestoreWindowResult,
+                .keyboard_input = .{
+                    .context = runtime,
+                    .send_key_chord_fn = effectsSendKeyChord,
+                    .access_fn = effectsKeyboardInputAccess,
+                },
             });
             if (runtime.options.session_recorder) |recorder| {
                 if (self.options.recording_policy) |policy| recorder.recording_policy = policy;
@@ -7229,6 +7234,16 @@ fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
 fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     return runtime.formatLocalTime(timestamp_ms, style, buffer);
+}
+
+fn effectsSendKeyChord(context: *anyopaque, chord: platform.KeyChord) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.sendKeyChord(chord);
+}
+
+fn effectsKeyboardInputAccess(context: *anyopaque, prompt: bool) anyerror!platform.KeyboardInputAccess {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.keyboardInputAccess(prompt);
 }
 
 /// The build storage pinned under a presented native context menu:

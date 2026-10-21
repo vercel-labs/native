@@ -983,6 +983,7 @@ fn tsCoreStage(
     relational_capability: bool,
     credentials_capability: bool,
     credentials_permission: bool,
+    keyboard_input_permission: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
     service_carrier_choice: ServiceCarrierOption,
@@ -1096,6 +1097,7 @@ fn tsCoreStage(
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (credentials_capability) check.addArgs(&.{ "--capability", "credentials" });
     if (credentials_permission) check.addArgs(&.{ "--permission", "credentials" });
+    if (keyboard_input_permission) check.addArgs(&.{ "--permission", "keyboard_input" });
     // Activate the cross-tier registry check even when discovery found no
     // roots: the empty set must reject a core that declares a window.
     check.addArg("--window-views");
@@ -1882,6 +1884,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.relational_capability,
             app_config.credentials_capability,
             app_config.credentials_permission,
+            app_config.keyboard_input_permission,
             app_config.persist_version,
             app_config.service_packages,
             service_carrier_choice,
@@ -3026,6 +3029,7 @@ const AppManifestBuildConfig = struct {
     relational_capability: bool = false,
     credentials_capability: bool = false,
     credentials_permission: bool = false,
+    keyboard_input_permission: bool = false,
     filesystem_permission: bool = false,
     max_image_pixel_bytes: usize = 1024 * 1024,
     updates_enabled: bool = false,
@@ -3132,6 +3136,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8, manifest_name: []
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
+        .keyboard_input_permission = hasManifestPermission(raw.permissions, "keyboard_input"),
         .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .max_image_pixel_bytes = raw.images.max_image_pixel_bytes,
         .updates_enabled = raw.updates != null,

@@ -96,3 +96,15 @@ The arm receives the shortcut `id` and a `state`:
 - `rejected`: the binding is invalid (unknown key, no modifier on a letter or text-entry key, or a bad id).
 
 Supported on macOS and Windows. Linux reports `unsupported`. Zig cores use `fx.setGlobalShortcuts` and `fx.clearGlobalShortcuts`.
+## Keyboard input
+
+An app can also send key chords to whichever app has keyboard focus, for example to paste a transcript with `primary+V`. Chords use the key names and modifiers above, but need no modifier, so `{ key: "enter" }` presses Return. Declare the `keyboard_input` permission; on macOS the user must also trust the app in System Settings > Privacy & Security > Accessibility.
+
+```ts
+Cmd.keyboard.sendChord({ key: "v", modifiers: ["primary"] }, { key: "paste", ok: "pasted", err: "paste_failed" });
+Cmd.keyboard.accessStatus({ prompt: true }, { key: "access", ok: "access_checked", err: "access_failed" });
+```
+
+`sendChord` resolves with empty bytes. `accessStatus` resolves with `granted`, `denied`, or `not_required`; `prompt: true` lets macOS show its own dialog. Errors are `rejected` (no permission), `unsupported`, `invalid_request`, `denied` (no Accessibility grant, nothing posted), `blocked`, and `failed`. Zig cores use `fx.sendKeyChord` and `fx.keyboardAccessStatus`.
+
+macOS and Windows post input (`CGEventPost` and `SendInput`; Windows cannot reach elevated windows). Linux, iOS, and Android report `unsupported`. There is no WebView bridge command, and replay, the fake executor, and the core devhost never post input.

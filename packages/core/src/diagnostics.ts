@@ -548,6 +548,13 @@ export const rules = {
     why: "The runtime canonicalizes raw paths and refuses access outside this app's data/config/cache/state/logs/temp roots unless the manifest grants filesystem access; catching literal external paths at check time avoids shipping a guaranteed rejection.",
     class: "guarantee",
   },
+  NS1075: {
+    id: "NS1075",
+    title: "keyboard input requires explicit permission",
+    fix: "Add `\"keyboard_input\"` to app.zon's `permissions`, or remove the `Cmd.keyboard.*` call.",
+    why: "Typing into other apps is default-deny: the runtime answers every undeclared keyboard request with `rejected`, so a missing grant is caught at check time instead of shipping a command that can never succeed.",
+    class: "guarantee",
+  },
   NS1420: {
     id: "NS1420",
     title: "declare stable SQL in src/queries.sql",
