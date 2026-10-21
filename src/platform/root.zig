@@ -265,4 +265,6 @@ pub fn installHeadlessImageCodec(
 test {
     std.testing.refAllDecls(@This());
     _ = @import("null_platform_tests.zig");
+    _ = @import("macos/key_codes.zig");
+    _ = @import("windows/key_codes.zig");
 }
