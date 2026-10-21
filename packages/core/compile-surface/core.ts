@@ -1139,6 +1139,7 @@ export const Cmd = {
 export type SubData =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "global_shortcut"; readonly id: string; readonly key: Uint8Array; readonly modifiers: number; readonly msgKind: string }
   | { readonly op: "db_live"; readonly key: string; readonly pageKind: string; readonly doneKind: string; readonly errKind: string; readonly sql: string; readonly params: ReadonlyArray<DbValue>; readonly tables: readonly string[] }
   | { readonly op: "batch"; readonly subs: readonly SubData[] };
 
@@ -1151,9 +1152,24 @@ export const Sub = {
     return { op: "timer", key, everyMs, msgKind };
   },
 
+  globalShortcut(id: string, binding: GlobalShortcutBinding, msgKind: string): SubData {
+    return { op: "global_shortcut", id, key: binding.key, modifiers:
+      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
+  },
+
   // @native-sqlite-generated-subs
 
   batch(subs: readonly SubData[]): SubData {
     return { op: "batch", subs };
   },
 };
+
+export interface GlobalShortcutBinding {
+  readonly key: Uint8Array;
+  readonly primary?: boolean;
+  readonly command?: boolean;
+  readonly control?: boolean;
+  readonly option?: boolean;
+  readonly shift?: boolean;
+}

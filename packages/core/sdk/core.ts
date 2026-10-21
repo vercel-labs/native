@@ -302,7 +302,7 @@ export { asciiBytes, utf8Bytes } from "./bytes.ts";
 /// Every app Msg is a discriminated union on a string `kind` tag.
 export type Msgish = { readonly kind: string };
 
-import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
+import { type GlobalShortcutEvent, type GlobalShortcutState, type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
 
 /// Fill the canonical defaults for a model-declared secondary window.
 export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
@@ -699,6 +699,27 @@ export type ChannelSourceKind<M extends Msgish> = M extends Msgish
       : never
     : never
   : never;
+
+export type GlobalShortcutKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof GlobalShortcutEvent]
+    ? [keyof GlobalShortcutEvent] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & GlobalShortcutEvent
+        ? [GlobalShortcutState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+/// A key from the app shortcut vocabulary plus modifiers. `primary` is
+/// Command on macOS and Control elsewhere.
+export interface GlobalShortcutBinding {
+  readonly key: Uint8Array;
+  readonly primary?: boolean;
+  readonly command?: boolean;
+  readonly control?: boolean;
+  readonly option?: boolean;
+  readonly shift?: boolean;
+}
 
 /// The native capture source. "microphone" captures the selected/default
 /// input device; "system" captures the process-independent desktop output
@@ -2457,6 +2478,7 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "global_shortcut"; readonly id: string; readonly key: Uint8Array; readonly modifiers: number; readonly msgKind: string }
   | {
       readonly op: "db_live";
       readonly key: string;
@@ -2478,6 +2500,15 @@ export const Sub = {
   /// its single number payload field.
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
+  },
+
+  /// A system-wide shortcut that fires while other apps have focus. It is
+  /// registered while declared and re-registered when the binding changes;
+  /// every report dispatches the named arm with `id` and a GlobalShortcutState.
+  globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M> {
+    return { op: "global_shortcut", id, key: binding.key, modifiers:
+      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
   },
 
   // @native-sqlite-generated-subs

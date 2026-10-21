@@ -1430,6 +1430,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-audio-exact", "Compare exact compiled audio capabilities, ownership and effect replay").dependOn(&audio_exact_run.step);
         ts_core_e2e_step.dependOn(&audio_exact_run.step);
         test_step.dependOn(&audio_exact_run.step);
+        const global_shortcut_run = b.addRunArtifact(ts_core_artifacts.global_shortcut);
+        b.step("test-ts-global-shortcut", "Drive a compiled global shortcut through the effects engine and the null platform host").dependOn(&global_shortcut_run.step);
+        ts_core_e2e_step.dependOn(&global_shortcut_run.step);
+        test_step.dependOn(&global_shortcut_run.step);
         const spawn_exact_run = b.addRunArtifact(ts_core_artifacts.spawn_exact);
         b.step("test-ts-spawn-exact", "Compare exact compiled subprocess routing, ownership and effect replay").dependOn(&spawn_exact_run.step);
         ts_core_e2e_step.dependOn(&spawn_exact_run.step);
@@ -4460,6 +4464,7 @@ const TsCoreE2eArtifacts = struct {
     gpu_dashboard: *std.Build.Step.Compile,
     canvas_layers: *std.Build.Step.Compile,
     audio_exact: *std.Build.Step.Compile,
+    global_shortcut: *std.Build.Step.Compile,
     spawn_exact: *std.Build.Step.Compile,
     boot_images: *std.Build.Step.Compile,
     deck: *std.Build.Step.Compile,
@@ -4866,6 +4871,15 @@ fn tsCoreE2eArtifact(
     const audio_exact_mod = module(b, target, optimize, "tests/ts-core/audio_exact_effect_tests.zig");
     audio_exact_mod.addImport("native_sdk", desktop_mod);
     audio_exact_mod.addImport("audio_exact_core", audio_exact_fixture.module);
+
+    const global_shortcut_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/global-shortcut/core.ts",
+        .src_dir = b.path("tests/ts-core/global-shortcut"),
+        .name = "global_shortcut_core",
+    });
+    const global_shortcut_mod = module(b, target, optimize, "tests/ts-core/global_shortcut_e2e_tests.zig");
+    global_shortcut_mod.addImport("native_sdk", desktop_mod);
+    global_shortcut_mod.addImport("global_shortcut_core", global_shortcut_fixture.module);
 
     const spawn_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
         .entry = "tests/ts-core/spawn-exact/core.ts",
@@ -5515,6 +5529,7 @@ fn tsCoreE2eArtifact(
         .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
         .canvas_layers = filteredTestArtifact(b, canvas_layers_mod, "ts-canvas-layers-e2e-tests", &.{}),
         .audio_exact = filteredTestArtifact(b, audio_exact_mod, "ts-audio-exact-effect-tests", &.{}),
+        .global_shortcut = filteredTestArtifact(b, global_shortcut_mod, "ts-global-shortcut-e2e-tests", &.{}),
         .spawn_exact = filteredTestArtifact(b, spawn_exact_mod, "ts-spawn-exact-effect-tests", &.{}),
         .boot_images = filteredTestArtifact(b, boot_images_mod, "ts-boot-images-tests", &.{}),
         .deck = filteredTestArtifact(b, deck_mod, "ts-deck-e2e-tests", &.{}),

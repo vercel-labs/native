@@ -97,6 +97,13 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>macOS system-engine host (an MTAudioProcessingTap on the app's single AVPlayer feeding a vDSP FFT — local files, cache entries, and streams alike), Windows system WebView (process-scoped WASAPI loopback capture of THIS app's audio session only — never other apps' audio — with an in-box FFT), and Linux system WebView (GStreamer's <code>spectrum</code> element as the playbin's audio-filter; requires gst-plugins-good, probed live); hosts that cannot analyze — macOS Chromium, pre-2004 Windows, spectrum-less GStreamer setups, iOS, Android — report <code>audio_spectrum</code> unsupported and simply never send the events: no spectrum events</td>
     </tr>
     <tr>
+      <td>Global shortcuts</td>
+      <td><code>Sub.globalShortcut(id, binding, arm)</code> / <code>fx.setGlobalShortcuts(options)</code> / <code>fx.clearGlobalShortcuts(key)</code></td>
+      <td>None.</td>
+      <td>None. See <a href="/docs/keyboard-shortcuts#global-shortcuts">Keyboard Shortcuts</a>.</td>
+      <td>macOS and Windows; Linux reports <code>unsupported</code></td>
+    </tr>
+    <tr>
       <td>File drops</td>
       <td><code>Event.files_dropped</code></td>
       <td><code>window.zero.on("drop:files")</code></td>

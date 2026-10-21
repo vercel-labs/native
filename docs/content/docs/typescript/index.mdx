@@ -586,6 +586,8 @@ export function subscriptions(model: Model): Sub<Msg> {
 }
 ```
 
+`Sub.globalShortcut(id, binding, arm)` declares a system-wide shortcut; see [Global shortcuts](/docs/keyboard-shortcuts#global-shortcuts).
+
 Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.fetch`'s response lines, `Cmd.spawn`'s stdout lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
 
 ## Text input from markup

@@ -447,6 +447,11 @@ export interface AudioCaptureEvent {
     readonly droppedPending: number;
     readonly droppedTotal: number;
 }
+export type GlobalShortcutState = "registered" | "pressed" | "released" | "conflict" | "unsupported" | "rejected";
+export interface GlobalShortcutEvent {
+    readonly id: Uint8Array;
+    readonly state: GlobalShortcutState;
+}
 /** Retained viewport facts supplied to a windowed-list row query. */
 export interface VirtualListRange {
     readonly start_index: number;
