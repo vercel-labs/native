@@ -2088,3 +2088,45 @@ test "reference renderer scale-once image panels replay byte-identical samples a
     try std.testing.expectEqual(@as(u64, 3), memo.image_scale_misses);
     try std.testing.expectEqualSlices(u8, &baseline, &pixels);
 }
+
+test "live pixel surfaces may composite presentation-only media textures" {
+    const frame_pixels = [_]u8{
+        255, 0, 0, 255,
+        255, 0, 0, 255,
+        255, 0, 0, 255,
+        255, 0, 0, 255,
+    };
+    const images = [_]ReferenceImage{.{
+        .id = 7,
+        .width = 2,
+        .height = 2,
+        .pixels = &frame_pixels,
+        .presentation_only = true,
+    }};
+    const commands = [_]RenderCommand{.{
+        .command = .{ .draw_image = .{
+            .id = 1,
+            .image_id = 7,
+            .dst = geometry.RectF.init(0, 0, 2, 2),
+            .fit = .stretch,
+            .sampling = .nearest,
+        } },
+        .local_bounds = geometry.RectF.init(0, 0, 2, 2),
+        .bounds = geometry.RectF.init(0, 0, 2, 2),
+    }};
+
+    // Deterministic paths keep the placeholder policy: the draw is absent.
+    var deterministic_pixels: [2 * 2 * 4]u8 = undefined;
+    const deterministic = (try ReferenceRenderSurface.init(2, 2, &deterministic_pixels)).withImages(&images);
+    deterministic.clear(Color.rgb8(0, 0, 0));
+    try deterministic.renderPass(.{ .full_repaint = true, .commands = &commands }, Color.rgb8(0, 0, 0));
+    try expectPixelRgba8(.{ 0, 0, 0, 255 }, deterministic, 0, 0);
+
+    // Live pixel hosts opt in: the producer frame composites.
+    var live_pixels: [2 * 2 * 4]u8 = undefined;
+    const live = (try ReferenceRenderSurface.init(2, 2, &live_pixels)).withImages(&images).withPresentationImages(true);
+    live.clear(Color.rgb8(0, 0, 0));
+    try live.renderPass(.{ .full_repaint = true, .commands = &commands }, Color.rgb8(0, 0, 0));
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, live, 0, 0);
+    try expectPixelRgba8(.{ 255, 0, 0, 255 }, live, 1, 1);
+}
