@@ -1751,6 +1751,27 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.effects.ptyResize(key, cols, rows);
         }
 
+        /// Install the byte transport for terminal sessions that do not
+        /// come from a local PTY. Call this before the first terminal
+        /// build; the store keeps the emulator, grid, selection, IME,
+        /// and scrollback.
+        pub fn setTerminalTransport(self: *Self, transport: terminal_session.ExternalTransport) void {
+            self.terminal_sessions.setExternalTransport(transport);
+        }
+
+        /// Feed output bytes from the external transport into the
+        /// terminal session bound to `key`. Loop-thread only, like every
+        /// other store call.
+        pub fn feedTerminalBytes(self: *Self, key: u64, bytes: []const u8) void {
+            self.terminal_sessions.feedExternal(key, bytes);
+        }
+
+        /// End an externally fed terminal session. The grid reports a
+        /// stopped session and queued input is dropped.
+        pub fn feedTerminalExit(self: *Self, key: u64) void {
+            self.terminal_sessions.feedExternalExit(key);
+        }
+
         /// Session-replay control (`App.replay_fn`): arm the effects
         /// channel into replay mode before the first replayed event, and
         /// feed journaled results into the stub executor. `.timer`
