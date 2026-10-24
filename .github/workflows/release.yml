@@ -26,9 +26,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - name: Compare package.json version to npm and check GitHub release
         id: check
         run: |
@@ -155,7 +157,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
+          node-version: "24.22.1"
           registry-url: "https://registry.npmjs.org"
 
       # Publishing uses npm trusted publishing (OIDC): the job's id-token
@@ -174,6 +176,8 @@ jobs:
       # npmjs.com trusted-publisher configuration must exist BEFORE that
       # flip lands.
 
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - name: Check version sync
         run: npm --prefix packages/native-sdk run version:check
 
