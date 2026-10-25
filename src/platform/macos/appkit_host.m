@@ -1138,6 +1138,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
 - (NSMenuItem *)commandMenuItem:(NSString *)title command:(NSString *)command key:(NSString *)key modifiers:(uint32_t)modifiers enabled:(BOOL)enabled checked:(BOOL)checked;
 - (void)menuCommandItemClicked:(NSMenuItem *)menuItem;
+- (BOOL)routeTextHistoryKey:(NSString *)key modifiers:(NSEventModifierFlags)modifiers window:(NSWindow *)window sender:(id)sender;
 - (void)menuWillOpen:(NSMenu *)menu;
 - (NativeSdkStatusItemEntry *)statusEntryForId:(uint32_t)identifier;
 - (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
@@ -7566,13 +7567,13 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 // same Command+Z / Command+Shift+Z route as physical keyboard events.
 - (void)undo:(id)sender {
     (void)sender;
-    if (![self focusedTextAccessibilityElement]) return;
+    if (![self focusedTextAccessibilityElement] || [self hasMarkedText]) return;
     [self emitSyntheticKeyDownWithKey:@"z" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand)];
 }
 
 - (void)redo:(id)sender {
     (void)sender;
-    if (![self focusedTextAccessibilityElement]) return;
+    if (![self focusedTextAccessibilityElement] || [self hasMarkedText]) return;
     [self emitSyntheticKeyDownWithKey:@"z" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand | NativeSdkShortcutModifierShift)];
 }
 
@@ -10493,6 +10494,7 @@ static NSString *NativeSdkSigningTeamIdentifier(NSString *bundlePath) {
 }
 
 - (void)menuCommandItemClicked:(NSMenuItem *)menuItem {
+    if ([self routeTextHistoryKey:menuItem.keyEquivalent modifiers:menuItem.keyEquivalentModifierMask window:NSApp.keyWindow ?: self.window sender:menuItem]) return;
     NSString *command = [menuItem.representedObject isKindOfClass:[NSString class]] ? (NSString *)menuItem.representedObject : @"";
     if (command.length == 0) return;
     const char *commandBytes = [command UTF8String];
@@ -12731,10 +12733,48 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     [self scheduleBridgeFrames];
 }
 
+- (BOOL)routeTextHistoryKey:(NSString *)key modifiers:(NSEventModifierFlags)modifiers window:(NSWindow *)window sender:(id)sender {
+    NSEventModifierFlags chord = modifiers & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
+    // The explicit standard key binding, not the localized title or app command
+    // identifier, gives custom menu items the same editing semantics as keys.
+    if (![key.lowercaseString isEqualToString:@"z"] ||
+        (chord != NSEventModifierFlagCommand && chord != (NSEventModifierFlagCommand | NSEventModifierFlagShift))) return NO;
+    SEL action = (chord & NSEventModifierFlagShift) ? @selector(redo:) : @selector(undo:);
+    NSResponder *first = window.firstResponder;
+    if ([first isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
+        NativeSdkMetalSurfaceView *surface = (NativeSdkMetalSurfaceView *)first;
+        if (![surface focusedTextAccessibilityElement]) return NO;
+        if (![surface hasMarkedText]) [NSApp sendAction:action to:surface from:sender];
+        return YES;
+    }
+    if ([first isKindOfClass:[NSTextView class]] && [(NSTextView *)first isEditable]) {
+        if (![(NSTextView *)first hasMarkedText]) [NSApp sendAction:action to:first from:sender];
+        return YES;
+    }
+    for (NSView *view = [first isKindOfClass:[NSView class]] ? (NSView *)first : nil;
+         view; view = view.superview) {
+        if (![view isKindOfClass:[WKWebView class]]) continue;
+        if ([first conformsToProtocol:@protocol(NSTextInputClient)] && [(id<NSTextInputClient>)first hasMarkedText]) return YES;
+        // Stay inside WebKit's responder subtree; an empty editor must not
+        // fall through to a window/application history target.
+        for (NSResponder *target = first; target; target = target.nextResponder) {
+            if ([target isKindOfClass:[NSWindow class]] || target == NSApp || target == view.superview) break;
+            if ([target respondsToSelector:action]) {
+                [NSApp sendAction:action to:target from:sender];
+                break;
+            }
+            if (target == view) break;
+        }
+        return YES;
+    }
+    return NO;
+}
+
 - (BOOL)handleShortcutEvent:(NSEvent *)event {
     if (event.type != NSEventTypeKeyDown) return NO;
     NSString *key = NativeSdkShortcutKeyForEvent(event);
     if (key.length == 0) return NO;
+    if ([self routeTextHistoryKey:key modifiers:event.modifierFlags window:event.window ?: NSApp.keyWindow sender:nil]) return YES;
     BOOL usesImplicitShift = NativeSdkShortcutUsesImplicitShift(key, event);
 
     for (NSUInteger pass = 0; pass < (usesImplicitShift ? 2 : 1); pass++) {

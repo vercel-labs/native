@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <WebKit/WebKit.h>
 #import "../../src/platform/macos/appkit_host.h"
 
 // The isolated host links no updater engine. Unexpected updater use must fail
@@ -25,10 +26,58 @@ int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t
 @property(nonatomic, assign) NSRect surfaceFrame;
 @end
 @interface NativeSdkMetalSurfaceView : NSView
+@property(nonatomic, copy) NSString *markedText;
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityElements;
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityRootElements;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (void)stopDisplayTimer;
+- (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers;
+@end
+
+@interface NativeSdkAppKitHost : NSObject
+@property(nonatomic, strong) NSWindow *window;
+- (BOOL)handleShortcutEvent:(NSEvent *)event;
+- (void)setShortcutsWithIds:(const char *const *)ids idLengths:(const size_t *)idLengths keys:(const char *const *)keys keyLengths:(const size_t *)keyLengths modifiers:(const uint32_t *)modifiers count:(size_t)count;
+- (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
+- (void)emitEvent:(native_sdk_appkit_event_t)event;
+- (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
+@end
+
+@interface ShortcutHostProbe : NativeSdkAppKitHost
+@property(nonatomic, strong) NSString *lastShortcut;
+@property(nonatomic, strong) NSString *lastMenuCommand;
+@end
+@implementation ShortcutHostProbe
+- (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event {
+    self.lastShortcut = identifier;
+}
+- (void)emitEvent:(native_sdk_appkit_event_t)event {
+    if (event.kind == NATIVE_SDK_APPKIT_EVENT_MENU_COMMAND) {
+        self.lastMenuCommand = [[NSString alloc] initWithBytes:event.command_name length:event.command_name_len encoding:NSUTF8StringEncoding];
+    }
+}
+@end
+
+@interface HistorySurfaceProbe : NativeSdkMetalSurfaceView
+@property(nonatomic, assign) NSUInteger historyEvents;
+@property(nonatomic, assign) uint32_t lastModifiers;
+@end
+@implementation HistorySurfaceProbe
+- (void)emitSyntheticKeyDownWithKey:(NSString *)key modifiers:(uint32_t)modifiers {
+    if (![key isEqualToString:@"z"]) abort();
+    self.historyEvents++;
+    self.lastModifiers = modifiers;
+}
+@end
+
+@interface FocusableView : NSView
+@property(nonatomic, assign) NSUInteger undoEvents;
+@property(nonatomic, assign) NSUInteger redoEvents;
+@end
+@implementation FocusableView
+- (BOOL)acceptsFirstResponder { return YES; }
+- (void)undo:(id)sender { self.undoEvents++; }
+- (void)redo:(id)sender { self.redoEvents++; }
 @end
 
 static void expect(BOOL condition, NSString *message) {
@@ -66,10 +115,99 @@ static NativeSdkMetalSurfaceView *surface(void) {
     return view;
 }
 
+static void testTextHistoryShortcutRouting(void) {
+    ShortcutHostProbe *host = [[ShortcutHostProbe alloc] init];
+    const char *ids[] = { "project.undo", "project.redo" }, *keys[] = { "z", "z" };
+    const size_t idLengths[] = { 12, 12 }, keyLengths[] = { 1, 1 };
+    const uint32_t primary = 1u << 0, command = 1u << 1, shift = 1u << 4;
+    const uint32_t modifiers[] = { primary, primary | shift };
+    [host setShortcutsWithIds:ids idLengths:idLengths keys:keys keyLengths:keyLengths modifiers:modifiers count:2];
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 320, 200) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+    window.releasedWhenClosed = NO;
+    host.window = window;
+    NSMenu *previousMenu = NSApp.mainMenu;
+    const char *titles[] = { "History" }, *labels[] = { "Back", "Forward" }, *commands[] = { "edit-undo", "edit-redo" };
+    const size_t titleLengths[] = { 7 }, labelLengths[] = { 4, 7 }, commandLengths[] = { 9, 9 };
+    const uint32_t menuIndices[] = { 0, 0 };
+    const int separators[] = { 0, 0 }, enabled[] = { 1, 1 }, checked[] = { 0, 0 };
+    [host setMenusWithTitles:titles titleLengths:titleLengths count:1 itemMenuIndices:menuIndices itemLabels:labels itemLabelLengths:labelLengths itemCommands:commands itemCommandLengths:commandLengths itemKeys:keys itemKeyLengths:keyLengths itemModifiers:modifiers itemSeparators:separators itemEnabled:enabled itemChecked:checked itemCount:2];
+    NSMenu *historyMenu = [NSApp.mainMenu itemAtIndex:1].submenu;
+    [window makeKeyAndOrderFront:nil];
+    NSEvent *undo = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand timestamp:0 windowNumber:window.windowNumber context:nil characters:@"z" charactersIgnoringModifiers:@"z" isARepeat:NO keyCode:6];
+    NSEvent *redo = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand | NSEventModifierFlagShift timestamp:0 windowNumber:window.windowNumber context:nil characters:@"Z" charactersIgnoringModifiers:@"Z" isARepeat:NO keyCode:6];
+    HistorySurfaceProbe *canvas = [[HistorySurfaceProbe alloc] initWithFrame:window.contentView.bounds];
+    [canvas stopDisplayTimer];
+    [window.contentView addSubview:canvas];
+    expect([window makeFirstResponder:canvas], @"Canvas did not take keyboard focus");
+    native_sdk_appkit_widget_accessibility_node_t editor = { .id = 1, .role = NATIVE_SDK_APPKIT_WIDGET_ROLE_TEXTBOX, .state_flags = NATIVE_SDK_APPKIT_WIDGET_STATE_ENABLED | NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED };
+    [canvas updateWidgetAccessibilityWithNodes:&editor count:1];
+    expect([host handleShortcutEvent:undo] && canvas.historyEvents == 1 && canvas.lastModifiers == (primary | command), @"Empty canvas history fell through to project Undo");
+    editor.state_flags |= NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO | NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO;
+    [canvas updateWidgetAccessibilityWithNodes:&editor count:1];
+    expect([host handleShortcutEvent:redo] && canvas.historyEvents == 2 && canvas.lastModifiers == (primary | command | shift), @"Canvas Redo did not use the runtime history bridge");
+    canvas.markedText = @"composition";
+    expect([host handleShortcutEvent:undo] && [host handleShortcutEvent:redo] && canvas.historyEvents == 2 && [canvas.markedText isEqualToString:@"composition"], @"History shortcut changed active composition");
+    expect(host.lastShortcut == nil, @"Focused canvas emitted a project shortcut");
+    [historyMenu performActionForItemAtIndex:0];
+    expect(canvas.historyEvents == 2 && host.lastMenuCommand == nil, @"Custom menu changed canvas composition");
+    canvas.markedText = @"";
+    editor.state_flags &= ~(NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO | NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO);
+    [canvas updateWidgetAccessibilityWithNodes:&editor count:1];
+    [historyMenu performActionForItemAtIndex:0];
+    [historyMenu performActionForItemAtIndex:1];
+    expect(canvas.historyEvents == 4 && host.lastMenuCommand == nil, @"Custom menu fell through empty canvas history");
+    [canvas updateWidgetAccessibilityWithNodes:NULL count:0];
+    expect([host handleShortcutEvent:undo] && [host.lastShortcut isEqualToString:@"project.undo"], @"Project Undo did not resume outside editing");
+    expect([host handleShortcutEvent:redo] && [host.lastShortcut isEqualToString:@"project.redo"], @"Project Redo did not resume outside editing");
+    [historyMenu performActionForItemAtIndex:0];
+    expect([host.lastMenuCommand isEqualToString:@"edit-undo"], @"Custom menu lost project Undo outside editing");
+    [historyMenu performActionForItemAtIndex:1];
+    expect([host.lastMenuCommand isEqualToString:@"edit-redo"], @"Custom menu lost project Redo outside editing");
+    host.lastMenuCommand = nil;
+    host.lastShortcut = nil;
+
+    NSTextView *text = [[NSTextView alloc] initWithFrame:window.contentView.bounds];
+    text.editable = YES;
+    text.allowsUndo = YES;
+    [window.contentView addSubview:text];
+    expect([window makeFirstResponder:text], @"Native editor did not take keyboard focus");
+    expect([host handleShortcutEvent:undo] && [host handleShortcutEvent:redo], @"Native empty-history events escaped to project shortcuts");
+    text.string = @"before";
+    [text.undoManager removeAllActions];
+    [text.undoManager beginUndoGrouping];
+    [text insertText:@"after" replacementRange:NSMakeRange(0, text.string.length)];
+    [text.undoManager endUndoGrouping];
+    expect([text.string isEqualToString:@"after"] && text.undoManager.canUndo, @"Native edit did not create undo history");
+    [NSApp sendEvent:undo];
+    expect([text.string isEqualToString:@"before"] && host.lastMenuCommand == nil, @"Custom key equivalent stole native text Undo");
+    [historyMenu performActionForItemAtIndex:1];
+    expect([text.string isEqualToString:@"after"] && host.lastMenuCommand == nil, @"Custom menu did not perform native text Redo");
+    [text setMarkedText:@"composition" selectedRange:NSMakeRange(0, 0) replacementRange:NSMakeRange(NSNotFound, 0)];
+    expect(text.hasMarkedText && [host handleShortcutEvent:undo] && [host handleShortcutEvent:redo] && text.hasMarkedText, @"Native IME composition changed");
+    [historyMenu performActionForItemAtIndex:0];
+    expect(text.hasMarkedText && host.lastMenuCommand == nil, @"Custom menu stole native IME history");
+    expect(host.lastShortcut == nil, @"Native editor emitted a project shortcut");
+
+    WKWebView *web = [[WKWebView alloc] initWithFrame:window.contentView.bounds];
+    FocusableView *webResponder = [[FocusableView alloc] initWithFrame:web.bounds];
+    [web addSubview:webResponder];
+    [window.contentView addSubview:web];
+    expect([window makeFirstResponder:webResponder], @"Web subtree did not take keyboard focus");
+    expect([host handleShortcutEvent:undo] && [host handleShortcutEvent:redo] && host.lastShortcut == nil && webResponder.undoEvents == 1 && webResponder.redoEvents == 1, @"Web responder history was not dispatched");
+    [historyMenu performActionForItemAtIndex:0];
+    [historyMenu performActionForItemAtIndex:1];
+    expect(webResponder.undoEvents == 2 && webResponder.redoEvents == 2 && host.lastMenuCommand == nil, @"Custom menu escaped Web responder history");
+    expect([window makeFirstResponder:canvas] && [host handleShortcutEvent:undo] && [host.lastShortcut isEqualToString:@"project.undo"], @"Project Undo did not resume after leaving Web content");
+    [window close];
+    NSApp.mainMenu = previousMenu;
+    puts("AppKit text history: custom menus, native keyboard dispatch, canvas, IME, Web responders and project shortcuts passed");
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         notifications = [NSMutableArray array];
+        testTextHistoryShortcutRouting();
         NativeSdkMetalSurfaceView *view = surface();
         native_sdk_appkit_widget_accessibility_node_t nodes[3] = {0};
         nodes[0].id = UINT64_MAX; nodes[0].role = NATIVE_SDK_APPKIT_WIDGET_ROLE_GROUP;
