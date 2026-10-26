@@ -7164,6 +7164,23 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
     [driver.contentView setBoundsOrigin:NSMakePoint(setX ? offsetX : current.x, setY ? offsetY : current.y)];
     [driver reflectScrolledClipView:driver.contentView];
     self.applyingScrollDriverOffset = NO;
+    const NSPoint settledOrigin = driver.contentView.bounds.origin;
+    if ((setX && fabs(settledOrigin.x - offsetX) > 0.5) ||
+        (setY && fabs(settledOrigin.y - offsetY) > 0.5)) {
+        if (self.reconcilingScrollDrivers) {
+            __weak NativeSdkMetalSurfaceView *weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+                if (!strongSelf || driver.superview != strongSelf) return;
+                const NSPoint liveOrigin = driver.contentView.bounds.origin;
+                [strongSelf queueScrollDriverEventWithId:driver.driverId
+                                                offsetX:liveOrigin.x
+                                                offsetY:liveOrigin.y];
+            });
+        } else {
+            [self queueScrollDriverEventWithId:driver.driverId offsetX:settledOrigin.x offsetY:settledOrigin.y];
+        }
+    }
     // A queued (frame-coalesced) report for THIS driver predates the
     // programmatic write: rewrite it to the offsets the clip view
     // actually settled on, so the stale pair can never re-land and

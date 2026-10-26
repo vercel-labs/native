@@ -24,12 +24,38 @@ int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t
 @property(nonatomic, assign) BOOL canRedo;
 @property(nonatomic, assign) NSRect surfaceFrame;
 @end
+@interface NativeSdkAppKitHost : NSObject
+- (void)emitEvent:(native_sdk_appkit_event_t)event;
+@end
 @interface NativeSdkMetalSurfaceView : NSView
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityElements;
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityRootElements;
+@property(nonatomic, assign) NativeSdkAppKitHost *host;
+@property(nonatomic, assign) uint64_t windowId;
+@property(nonatomic, strong) NSString *surfaceLabel;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
+- (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount;
 - (void)stopDisplayTimer;
+@end
+
+@interface CapturingScrollDriverHost : NativeSdkAppKitHost
+@property(nonatomic, strong) NSMutableArray<NSDictionary *> *events;
+@end
+
+@implementation CapturingScrollDriverHost
+- (instancetype)init {
+    self = [super init];
+    if (self) _events = [NSMutableArray array];
+    return self;
+}
+- (void)emitEvent:(native_sdk_appkit_event_t)event {
+    [self.events addObject:@{
+        @"kind": @(event.kind),
+        @"driver_id": @(event.widget_id),
+        @"offset_x": @(event.scroll_driver_offset_x),
+    }];
+}
 @end
 
 @interface CapturingAccessibilitySurface : NativeSdkMetalSurfaceView
@@ -86,9 +112,49 @@ static NativeSdkMetalSurfaceView *surface(void) {
     return view;
 }
 
+static void testClampedScrollDriverWrite(void) {
+    NativeSdkMetalSurfaceView *view = [[NativeSdkMetalSurfaceView alloc] initWithFrame:NSMakeRect(0, 0, 500, 200)];
+    [view stopDisplayTimer];
+    CapturingScrollDriverHost *host = [[CapturingScrollDriverHost alloc] init];
+    view.host = host;
+    view.windowId = 1;
+    view.surfaceLabel = @"scroll-driver-test";
+
+    native_sdk_appkit_scroll_driver_t driver = {
+        .driver_id = 7,
+        .width = 339,
+        .height = 37,
+        .content_width = 339,
+        .content_height = 37,
+        .offset_x = 0,
+        .set_offset_x = 1,
+        .scrolls_x = 1,
+    };
+    [view setScrollDrivers:&driver count:1 occluders:NULL occluderCount:0];
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    [host.events removeAllObjects];
+
+    driver.offset_x = 85;
+    [view setScrollDrivers:&driver count:1 occluders:NULL occluderCount:0];
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    expect(host.events.count == 1, @"Clamped programmatic scroll-driver write did not emit exactly one event");
+    NSDictionary *clampedEvent = host.events[0];
+    expect([clampedEvent[@"kind"] integerValue] == NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_SCROLL_DRIVER &&
+           [clampedEvent[@"driver_id"] unsignedLongLongValue] == driver.driver_id &&
+           [clampedEvent[@"offset_x"] doubleValue] == 0,
+           @"Clamped programmatic scroll-driver event did not report the settled origin");
+
+    [host.events removeAllObjects];
+    driver.content_width = 500;
+    [view setScrollDrivers:&driver count:1 occluders:NULL occluderCount:0];
+    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    expect(host.events.count == 0, @"In-range programmatic scroll-driver write emitted an extra event");
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
+        testClampedScrollDriverWrite();
         notifications = [NSMutableArray array];
         NativeSdkMetalSurfaceView *view = surface();
         native_sdk_appkit_widget_accessibility_node_t nodes[3] = {0};
@@ -186,7 +252,7 @@ int main(void) {
             releasedSurface = owned;
         }
         expect(releasedSurface == nil && retainedElement.surfaceView == nil && retainedElement.accessibilityActionNames.count == 0 && ![retainedElement accessibilityPerformPress], @"OS control retained a surface or actions without explicit clearing");
-        puts("AppKit accessibility: 1000 stable updates, complete fields, role reset, reparenting, retirement and lifetime passed");
+        puts("AppKit accessibility: 1000 stable updates, complete fields, role reset, reparenting, retirement, lifetime and scroll-driver clamp reporting passed");
     }
     return 0;
 }

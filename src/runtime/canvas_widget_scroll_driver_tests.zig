@@ -52,6 +52,65 @@ fn horizontalTabFixtureLayout(nodes: []canvas.WidgetLayoutNode, selected_id: can
     return canvas.layoutWidgetTree(strip, geometry.RectF.init(0, 0, 360, 37), nodes);
 }
 
+const tabCloseViewport = geometry.RectF.init(38, 0, 339.002, 37);
+const tabCloseTabWidth: f32 = 424.0 / 3.0;
+const tabCloseDriverId: u64 = 1;
+const tabCloseProjectButtonId: canvas.ObjectId = 7;
+const tabCloseProjectCommand = "tabs.close.project";
+
+fn tabCloseFixtureLayout(nodes: []canvas.WidgetLayoutNode, include_project: bool, offset_x: f32) !canvas.WidgetLayoutTree {
+    const children = [_]canvas.Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(0, 0, tabCloseTabWidth, 37), .state = .{ .selected = true }, .semantics = .{ .role = .tab, .label = "Workflow" } },
+        .{ .id = 3, .kind = .stack, .frame = geometry.RectF.init(tabCloseTabWidth, 0, tabCloseTabWidth, 37), .semantics = .{ .role = .tab, .label = "Other" } },
+        .{ .id = 4, .kind = .button, .frame = geometry.RectF.init(tabCloseTabWidth - 24, 6, 24, 24), .text = "×", .command = "tabs.close.workflow" },
+        .{ .id = 5, .kind = .button, .frame = geometry.RectF.init(2 * tabCloseTabWidth - 24, 6, 24, 24), .text = "×", .command = "tabs.close.other" },
+        .{ .id = 6, .kind = .stack, .frame = geometry.RectF.init(2 * tabCloseTabWidth, 0, tabCloseTabWidth, 37), .semantics = .{ .role = .tab, .label = "Project" } },
+        .{ .id = tabCloseProjectButtonId, .kind = .button, .frame = geometry.RectF.init(3 * tabCloseTabWidth - 24, 6, 24, 24), .text = "×", .command = tabCloseProjectCommand },
+    };
+    const strip = canvas.Widget{
+        .id = tabCloseDriverId,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .value_x = offset_x,
+        .children = if (include_project) &children else children[0..4],
+    };
+    return canvas.layoutWidgetTree(strip, tabCloseViewport, nodes);
+}
+
+fn installTabCloseFixture(runtime: *Runtime, include_project: bool) !void {
+    var nodes: [7]canvas.WidgetLayoutNode = undefined;
+    const layout = try tabCloseFixtureLayout(&nodes, include_project, 0);
+    _ = try runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+const TabCloseApp = struct {
+    close_count: u32 = 0,
+    offset_before_removal: f32 = 0,
+
+    fn app(self: *@This()) App {
+        return .{
+            .context = self,
+            .name = "tab-close-scroll-driver",
+            .source = platform.WebViewSource.html("<h1>Tabs</h1>"),
+            .event_fn = event,
+        };
+    }
+
+    fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        switch (event_value) {
+            .command => |command| {
+                if (!std.mem.eql(u8, command.name, tabCloseProjectCommand)) return;
+                const before = try runtime.canvasWidgetLayout(1, "canvas");
+                self.offset_before_removal = before.findById(tabCloseDriverId).?.widget.value_x;
+                self.close_count += 1;
+                try installTabCloseFixture(runtime, false);
+            },
+            else => {},
+        }
+    }
+};
+
 test "layout install publishes native scroll drivers and suppresses engine scrollbars" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -745,6 +804,128 @@ test "activating a tab minimally reveals it without shifting an already visible 
     try std.testing.expectEqual(@as(f32, 180), retained.findById(1).?.widget.value_x);
     try std.testing.expectEqualDeep(geometry.RectF.init(180, 0, 180, 37), retained.findById(4).?.frame);
     try std.testing.expectEqual(@as(f32, 180), harness.null_platform.scrollDrivers()[0].offset_x);
+}
+
+fn pressProjectClose(app: App, runtime: *Runtime) !void {
+    try runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = tabCloseProjectButtonId,
+        .action = .press,
+    } });
+}
+
+fn settleTabCloseDriver(app: App, runtime: *Runtime) !void {
+    try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = tabCloseDriverId,
+        .offset_x = 0,
+        .timestamp_ns = 1_000_000_000,
+    } });
+}
+
+test "offscreen AX close reconciles a clamped tab strip twice" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: TabCloseApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 640, 80),
+    });
+
+    for (0..2) |attempt| {
+        try installTabCloseFixture(&harness.runtime, true);
+        const before = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        try std.testing.expectEqual(@as(f32, 0), before.findById(tabCloseDriverId).?.widget.value_x);
+        try std.testing.expectEqual(@as(f32, 38), before.findById(2).?.frame.x);
+        try std.testing.expect(before.findById(2).?.widget.state.selected);
+        try std.testing.expectEqual(@as(f32, 438), before.findById(tabCloseProjectButtonId).?.frame.x);
+
+        try pressProjectClose(app, &harness.runtime);
+
+        const requested_driver = harness.null_platform.scrollDrivers()[0];
+        const requested_offset = requested_driver.offset_x;
+        const after_removal = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const removal_offset = after_removal.findById(tabCloseDriverId).?.widget.value_x;
+        const survivor_x_before_callback = after_removal.findById(2).?.frame.x;
+        const removal_content_width = harness.null_platform.scrollDrivers()[0].content_size.width;
+        try std.testing.expectApproxEqAbs(@as(f32, 84.998), requested_offset, 0.01);
+        try std.testing.expect(requested_driver.set_offset_x);
+        try std.testing.expectApproxEqAbs(app_state.offset_before_removal, removal_offset, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 84.998), removal_offset, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, -46.998), survivor_x_before_callback, 0.01);
+        try std.testing.expect(after_removal.findById(2).?.widget.state.selected);
+        try std.testing.expect(removal_content_width <= tabCloseViewport.width);
+
+        try settleTabCloseDriver(app, &harness.runtime);
+
+        const after_callback = try harness.runtime.canvasWidgetLayout(1, "canvas");
+        const callback_offset = after_callback.findById(tabCloseDriverId).?.widget.value_x;
+        const survivor_x_after_callback = after_callback.findById(2).?.frame.x;
+        try std.testing.expectEqual(@as(f32, 0), callback_offset);
+        try std.testing.expectEqual(@as(f32, 38), survivor_x_after_callback);
+        try std.testing.expect(after_callback.findById(2).?.widget.state.selected);
+        try std.testing.expectEqual(@as(u32, @intCast(attempt + 1)), app_state.close_count);
+    }
+}
+
+test "visible AX tab close settles to the viewport origin after a native clamp callback" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: TabCloseApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 640, 80),
+    });
+    try installTabCloseFixture(&harness.runtime, true);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = tabCloseDriverId,
+        .offset_x = 84.998,
+        .timestamp_ns = 1_000_000_000,
+    } });
+
+    const visible_before = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const close_frame = visible_before.findById(tabCloseProjectButtonId).?.frame;
+    try std.testing.expect(close_frame.x >= tabCloseViewport.x);
+    try std.testing.expect(close_frame.x + close_frame.width <= tabCloseViewport.x + tabCloseViewport.width);
+
+    try pressProjectClose(app, &harness.runtime);
+
+    const requested_offset = harness.null_platform.scrollDrivers()[0].offset_x;
+    const after_removal = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const removal_offset = after_removal.findById(tabCloseDriverId).?.widget.value_x;
+    const survivor_x_before_callback = after_removal.findById(2).?.frame.x;
+    const removal_content_width = harness.null_platform.scrollDrivers()[0].content_size.width;
+    try std.testing.expectApproxEqAbs(@as(f32, 84.998), requested_offset, 0.01);
+    try std.testing.expectApproxEqAbs(app_state.offset_before_removal, removal_offset, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -46.998), survivor_x_before_callback, 0.01);
+    try std.testing.expect(after_removal.findById(2).?.widget.state.selected);
+    try std.testing.expect(removal_content_width <= tabCloseViewport.width);
+
+    try settleTabCloseDriver(app, &harness.runtime);
+
+    const after_callback = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const callback_offset = after_callback.findById(tabCloseDriverId).?.widget.value_x;
+    const survivor_x_after_callback = after_callback.findById(2).?.frame.x;
+    try std.testing.expectEqual(@as(f32, 0), callback_offset);
+    try std.testing.expectEqual(@as(f32, 38), survivor_x_after_callback);
+    try std.testing.expect(after_callback.findById(2).?.widget.state.selected);
+    try std.testing.expectEqual(@as(u32, 1), app_state.close_count);
 }
 
 test "a horizontal-only region's driver pins its vertical range" {
