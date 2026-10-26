@@ -493,6 +493,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) BOOL canUndo;
 @property(nonatomic, assign) BOOL canRedo;
 @property(nonatomic, assign) NSRect surfaceFrame;
+- (void)publishAccessibilityValue:(id)value;
 - (BOOL)emitSetTextAccessibilityValue:(id)value;
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
@@ -1643,6 +1644,18 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
         return;
     }
     [super accessibilitySetValue:value forAttribute:attribute];
+}
+
+- (void)setAccessibilityValue:(id)value {
+    if ([self accessibilityIsAttributeSettable:NSAccessibilityValueAttribute]) {
+        [self emitSetTextAccessibilityValue:value];
+        return;
+    }
+    [super setAccessibilityValue:value];
+}
+
+- (void)publishAccessibilityValue:(id)value {
+    [super setAccessibilityValue:value];
 }
 
 - (BOOL)emitSetTextAccessibilityValue:(id)value {
@@ -5907,7 +5920,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (!reused || index >= previous.count || previous[index] != element) layoutChanged = YES;
         // Optional fields must return to exactly the fresh-element defaults.
         // Reusing an editor as a label must not retain selection or scroll data.
-        element.accessibilityValue = defaults.accessibilityValue;
+        [element publishAccessibilityValue:defaults.accessibilityValue];
         element.accessibilityValueDescription = defaults.accessibilityValueDescription;
         element.accessibilityMinValue = defaults.accessibilityMinValue;
         element.accessibilityMaxValue = defaults.accessibilityMaxValue;
@@ -5933,9 +5946,9 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         element.accessibilityIdentifier = [NSString stringWithFormat:@"native-sdk-widget-%llu", node.id];
         element.accessibilityLabel = name;
         if (node.has_value) {
-            element.accessibilityValue = [NSString stringWithFormat:@"%.3f", node.value];
+            [element publishAccessibilityValue:[NSString stringWithFormat:@"%.3f", node.value]];
         } else if (textValue.length > 0) {
-            element.accessibilityValue = textValue;
+            [element publishAccessibilityValue:textValue];
         }
         if (placeholder.length > 0 && [element respondsToSelector:@selector(setAccessibilityPlaceholderValue:)]) {
             element.accessibilityPlaceholderValue = placeholder;
@@ -5967,7 +5980,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             if (node.has_scroll_viewport_extent && node.has_scroll_content_extent) {
                 element.accessibilityMaxValue = @(MAX(0, node.scroll_content_extent - node.scroll_viewport_extent));
             }
-            element.accessibilityValue = @(node.scroll_offset);
+            [element publishAccessibilityValue:@(node.scroll_offset)];
         }
         if (textValue.length > 0) {
             NSRange visibleRange = NSMakeRange(0, textValue.length);

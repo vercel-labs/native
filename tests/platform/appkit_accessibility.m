@@ -28,7 +28,27 @@ int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityElements;
 @property(nonatomic, strong) NSArray<NativeSdkWidgetAccessibilityElement *> *widgetAccessibilityRootElements;
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count;
+- (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
 - (void)stopDisplayTimer;
+@end
+
+@interface CapturingAccessibilitySurface : NativeSdkMetalSurfaceView
+@property(nonatomic, assign) NSUInteger actionCount;
+@property(nonatomic, assign) uint64_t actionWidgetId;
+@property(nonatomic, assign) NSInteger actionKind;
+@property(nonatomic, copy) NSString *actionText;
+@end
+
+@implementation CapturingAccessibilitySurface
+- (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange {
+    (void)selectedRange;
+    (void)hasSelectedRange;
+    self.actionCount += 1;
+    self.actionWidgetId = widgetId;
+    self.actionKind = action;
+    self.actionText = text;
+    return YES;
+}
 @end
 
 static void expect(BOOL condition, NSString *message) {
@@ -90,6 +110,21 @@ int main(void) {
         nodes[2].state_flags = NATIVE_SDK_APPKIT_WIDGET_STATE_ENABLED; nodes[2].action_flags = NATIVE_SDK_APPKIT_WIDGET_ACTION_PRESS;
         [view updateWidgetAccessibilityWithNodes:nodes count:3];
         NativeSdkWidgetAccessibilityElement *editor = view.widgetAccessibilityElements[1], *button = view.widgetAccessibilityElements[2];
+        CapturingAccessibilitySurface *capturing = [[CapturingAccessibilitySurface alloc] initWithFrame:NSMakeRect(0, 0, 320, 200)];
+        [capturing stopDisplayTimer];
+        [capturing updateWidgetAccessibilityWithNodes:nodes count:3];
+        NativeSdkWidgetAccessibilityElement *capturedEditor = capturing.widgetAccessibilityElements[1];
+        [capturedEditor setAccessibilityValue:@"new query"];
+        expect(capturing.actionCount == 1 && capturing.actionWidgetId == nodes[1].id &&
+               capturing.actionKind == NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_SET_TEXT &&
+               [capturing.actionText isEqualToString:@"new query"],
+               @"modern setAccessibilityValue: did not dispatch the text action");
+        NativeSdkWidgetAccessibilityElement *capturedButton = capturing.widgetAccessibilityElements[2];
+        [capturedButton setAccessibilityValue:@"not editable"];
+        expect(capturing.actionCount == 1 && [capturedButton.accessibilityValue isEqualToString:@"not editable"],
+               @"modern setAccessibilityValue: dispatched an action for a non-editable element");
+        [capturing updateWidgetAccessibilityWithNodes:nodes count:3];
+        expect(capturing.actionCount == 1, @"snapshot publication fed back as a text edit");
         for (NSUInteger i = 0; i < 1000; i++) {
             @autoreleasepool {
                 nodes[2].has_value = 1; nodes[2].value = i;
