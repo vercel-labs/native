@@ -1271,6 +1271,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const unsolicited_caret_no_op = if (!frame_view.gpu_canvas_frame_requested_at_dispatch and
                 stable_presented_canvas and
                 caller_render_override_count == 0 and
+                frame_view.canvas_frame_presented_caller_override_count == 0 and
                 (frame_options.previous_render_overrides.len == 0 or
                     (frame_options.previous_render_overrides.len == 1 and
                         frame_options.previous_render_overrides[0].id == frame_view.canvas_widget_caret_blink_id)))
@@ -1289,7 +1290,8 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             } else false;
             // The ordinary no-op still requires empty override sets. This
             // exception only skips planning when there are no caller
-            // overrides and the previous set is empty or caret-only.
+            // overrides, no prior caller overrides, and the previous set
+            // is empty or caret-only.
             const no_op = unsolicited_caret_no_op or (if (admission) |program|
                 program.no_op
             else
@@ -1610,6 +1612,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try self.views[index].copyPresentedCanvasSummaryWithPolicy(display_list, canvas_frame.surface_size, canvas_frame.scale, frame_options.render_cache_policy);
                 self.views[index].recordCanvasFrame(canvas_frame);
                 self.views[index].gpu_canvas_last_presented_frame_timestamp_ns = frame_options.timestamp_ns;
+                self.views[index].canvas_frame_presented_caller_override_count = caller_render_override_count;
                 try self.views[index].copyCanvasFrameRenderOverrides(frame_options.render_overrides);
                 const render_animation_active = if (frame_options.render_override_policy) |owner|
                     render_animation_policy.finishFrame(&self.views[index], frame_options.timestamp_ns, owner)

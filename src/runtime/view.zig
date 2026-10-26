@@ -489,6 +489,7 @@ pub const RuntimeView = struct {
     gpu_canvas_frame_requested: bool = false,
     gpu_canvas_frame_requested_at_dispatch: bool = false,
     gpu_canvas_last_presented_frame_timestamp_ns: u64 = 0,
+    canvas_frame_presented_caller_override_count: usize = 0,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
