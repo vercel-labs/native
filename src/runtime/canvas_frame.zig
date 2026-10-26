@@ -1248,6 +1248,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             );
             if (frame_options.previous_render_overrides.len == 0) frame_options.previous_render_overrides = self.views[index].canvasFrameRenderOverrides();
             const display_list = self.views[index].canvasDisplayList();
+            const caller_render_override_count = frame_options.render_overrides.len;
             var cache_workspace: ?canvas.RenderCacheWorkspace = null;
             defer if (cache_workspace) |*workspace| workspace.deinit();
             const render_overrides = if (frame_options.render_override_policy) |owner| blk: {
@@ -1267,32 +1268,28 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const canvas_surface_changed = if (admission) |program| program.surface_changed else !sizesEqual(self.views[index].presented_canvas_surface_size, frame_options.surface_size) or self.views[index].presented_canvas_scale != frame_options.scale;
             const frame_view = &self.views[index];
             const stable_presented_canvas = !frame_options.full_repaint and frame_view.presented_canvas_valid and !canvas_changed and !canvas_surface_changed;
-            const caret_tooltip_intent_armed = frame_view.canvasTooltipIntentArmed();
-            const caret_blink_only_for_idle_gate = !caret_tooltip_intent_armed and canvasRenderAnimationsOnlyCaretBlink(
-                frame_view.canvasRenderAnimations(),
-                frame_view.canvas_widget_caret_blink_id,
-                frame_options.timestamp_ns,
-            );
-            var caret_boundaries_unchanged = false;
-            if (caret_blink_only_for_idle_gate) {
-                for (frame_view.canvasRenderAnimations()) |animation| {
-                    if (animation.id != frame_view.canvas_widget_caret_blink_id) continue;
-                    caret_boundaries_unchanged = canvasCaretBlinkBoundariesPassed(animation, frame_options.timestamp_ns) ==
-                        canvasCaretBlinkBoundariesPassed(animation, frame_view.gpu_canvas_last_presented_frame_timestamp_ns);
-                    break;
+            const unsolicited_caret_no_op = if (!frame_view.gpu_canvas_frame_requested_at_dispatch and
+                stable_presented_canvas and
+                caller_render_override_count == 0 and
+                (frame_options.previous_render_overrides.len == 0 or
+                    (frame_options.previous_render_overrides.len == 1 and
+                        frame_options.previous_render_overrides[0].id == frame_view.canvas_widget_caret_blink_id)))
+            caret_idle_gate: {
+                if (frame_view.canvasTooltipIntentArmed()) break :caret_idle_gate false;
+                const render_animations = frame_view.canvasRenderAnimations();
+                if (!canvasRenderAnimationsOnlyCaretBlink(render_animations, frame_view.canvas_widget_caret_blink_id, frame_options.timestamp_ns)) {
+                    break :caret_idle_gate false;
                 }
-            }
-            // The ordinary no-op requires empty override sets. The
-            // unsolicited-caret exception also permits identical
-            // explicit overrides; changed overrides must take the plan
-            // path so retained cache actions are recorded.
-            const caret_overrides_unchanged = canvas_frame_helpers.canvasRenderOverridesEqualIgnoringId(
-                frame_options.render_overrides,
-                frame_options.previous_render_overrides,
-                frame_view.canvas_widget_caret_blink_id,
-            );
-            const unsolicited_caret_no_op = !frame_view.gpu_canvas_frame_requested_at_dispatch and
-                stable_presented_canvas and caret_blink_only_for_idle_gate and caret_boundaries_unchanged and caret_overrides_unchanged;
+                for (render_animations) |animation| {
+                    if (animation.id != frame_view.canvas_widget_caret_blink_id) continue;
+                    break :caret_idle_gate canvasCaretBlinkBoundariesPassed(animation, frame_options.timestamp_ns) ==
+                        canvasCaretBlinkBoundariesPassed(animation, frame_view.gpu_canvas_last_presented_frame_timestamp_ns);
+                }
+                break :caret_idle_gate false;
+            } else false;
+            // The ordinary no-op still requires empty override sets. This
+            // exception only skips planning when there are no caller
+            // overrides and the previous set is empty or caret-only.
             const no_op = unsolicited_caret_no_op or (if (admission) |program|
                 program.no_op
             else

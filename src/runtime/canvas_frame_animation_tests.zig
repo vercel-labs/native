@@ -653,11 +653,7 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const initial_render_overrides = [_]canvas.CanvasRenderOverride{
-        .{ .id = 100, .opacity = 0.4 },
-        .{ .id = 101, .opacity = 0.4 },
-    };
-    var app_state = TestApp{ .render_overrides = &initial_render_overrides };
+    var app_state = TestApp{};
     const app = app_state.app();
     try harness.start(app);
 
@@ -774,13 +770,9 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     try std.testing.expect(app_state.frame_requires_render);
     try std.testing.expectEqual(@as(usize, 0), app_state.text_layout_upload_count);
     const presented_overrides = view.canvasFrameRenderOverrides();
-    try std.testing.expectEqual(@as(usize, 3), presented_overrides.len);
+    try std.testing.expectEqual(@as(usize, 1), presented_overrides.len);
     try std.testing.expectEqual(blink_id, presented_overrides[0].id);
     try std.testing.expect(presented_overrides[0].opacity.? < 0.1);
-    try std.testing.expectEqual(@as(canvas.ObjectId, 100), presented_overrides[1].id);
-    try std.testing.expectEqual(@as(f32, 0.4), presented_overrides[1].opacity.?);
-    try std.testing.expectEqual(@as(canvas.ObjectId, 101), presented_overrides[2].id);
-    try std.testing.expectEqual(@as(f32, 0.4), presented_overrides[2].opacity.?);
     try std.testing.expectEqual(requests_after_focus + 1, harness.null_platform.gpu_surface_frame_request_count);
     const blink_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
     try std.testing.expect(blink_wake.active);
@@ -793,6 +785,21 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .timestamp_ns = 2_016_669_667,
     } });
     try std.testing.expect(!app_state.frame_requires_render);
+    const initial_explicit_overrides = [_]canvas.CanvasRenderOverride{
+        .{ .id = 100, .opacity = 0.4 },
+        .{ .id = 101, .opacity = 0.4 },
+    };
+    app_state.render_overrides = &initial_explicit_overrides;
+    try canvas_frame.RuntimeCanvasFrames(Runtime).requestCanvasFrameForView(&harness.runtime, 0);
+    try std.testing.expectEqual(requests_after_focus + 2, harness.null_platform.gpu_surface_frame_request_count);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 4,
+        .timestamp_ns = 2_050_000_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
     const changed_explicit_overrides = [_]canvas.CanvasRenderOverride{
         .{ .id = 100, .opacity = 0.5 },
         .{ .id = 101, .opacity = 0.4 },
@@ -802,7 +809,7 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 4,
+        .frame_index = 5,
         .timestamp_ns = 2_100_000_000,
     } });
     try std.testing.expect(app_state.frame_requires_render);
@@ -814,24 +821,38 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 5,
+        .frame_index = 6,
         .timestamp_ns = 2_200_000_000,
     } });
-    try std.testing.expect(!app_state.frame_requires_render);
+    try std.testing.expectEqual(@as(usize, 1), app_state.path_geometry_retain_count);
+    try std.testing.expectEqual(@as(usize, 1), app_state.image_retain_count);
+    try std.testing.expect(app_state.layer_retain_count > 0);
+    try std.testing.expectEqual(@as(usize, 1), app_state.visual_effect_retain_count);
     app_state.render_overrides = &.{};
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 6,
+        .frame_index = 7,
         .timestamp_ns = 2_300_000_000,
     } });
     try std.testing.expect(app_state.frame_requires_render);
+    const caret_collision_override = [_]canvas.CanvasRenderOverride{.{ .id = blink_id, .opacity = 0.5 }};
+    app_state.render_overrides = &caret_collision_override;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 7,
+        .frame_index = 8,
+        .timestamp_ns = 2_400_000_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+    app_state.render_overrides = &.{};
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 9,
         .timestamp_ns = 2_500_000_000,
     } });
     try std.testing.expect(app_state.frame_requires_render);
@@ -841,7 +862,7 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 8,
+        .frame_index = 10,
         .timestamp_ns = 3_016_669_667,
     } });
     try std.testing.expect(app_state.frame_requires_render);
@@ -859,7 +880,7 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 9,
+        .frame_index = 11,
         .timestamp_ns = 3_033_333_000,
     } });
     try std.testing.expect(app_state.frame_requires_render);
@@ -867,7 +888,7 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
         .window_id = 1,
         .label = "canvas",
         .size = geometry.SizeF.init(240, 120),
-        .frame_index = 10,
+        .frame_index = 12,
         .timestamp_ns = 3_050_000_000,
     } });
     try std.testing.expect(app_state.frame_requires_render);
