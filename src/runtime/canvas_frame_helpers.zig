@@ -529,8 +529,41 @@ pub fn canvasRenderOverrideNoop(override: canvas.CanvasRenderOverride) bool {
     return canvasRenderOverrideOpacityNoop(override.opacity) and canvasRenderOverrideTransformNoop(override.transform);
 }
 
+pub fn canvasRenderOverridesEqualIgnoringId(left: []const canvas.CanvasRenderOverride, right: []const canvas.CanvasRenderOverride, ignored_id: canvas.ObjectId) bool {
+    var left_count: usize = 0;
+    for (left) |override| {
+        if (override.id != ignored_id) left_count += 1;
+    }
+    var right_count: usize = 0;
+    for (right) |override| {
+        if (override.id != ignored_id) right_count += 1;
+    }
+    if (left_count != right_count) return false;
+
+    for (left) |override| {
+        if (override.id == ignored_id) continue;
+        var found = false;
+        for (right) |candidate| {
+            if (candidate.id != override.id) continue;
+            if (candidate.opacity != override.opacity or !canvasRenderOverrideTransformsEqual(candidate.transform, override.transform)) return false;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
 pub fn canvasRenderAnimationFinalOverrideNoop(animation: canvas.CanvasRenderAnimation) bool {
     return canvasRenderOverrideOpacityNoop(animation.to_opacity) and canvasRenderOverrideTransformNoop(animation.to_transform);
+}
+
+fn canvasRenderOverrideTransformsEqual(left: ?canvas.Affine, right: ?canvas.Affine) bool {
+    if (left) |left_transform| {
+        if (right) |right_transform| return canvasAffinesEqual(left_transform, right_transform);
+        return false;
+    }
+    return right == null;
 }
 
 fn canvasRenderOverrideOpacityNoop(opacity: ?f32) bool {

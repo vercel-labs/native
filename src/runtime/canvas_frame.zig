@@ -1282,14 +1282,17 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     break;
                 }
             }
-            // A no-op frame reuses the presented pixels: unchanged
-            // canvas and surface, no full repaint, and an EMPTY override
-            // set on both sides (a NONEMPTY override set always takes the
-            // plan path below — its cache plans carry the retain counts
-            // that keep the view's render caches warm, so an equal-set
-            // frame is deliberately NOT a no-op).
+            // The ordinary no-op requires empty override sets. The
+            // unsolicited-caret exception also permits identical
+            // explicit overrides; changed overrides must take the plan
+            // path so retained cache actions are recorded.
+            const caret_overrides_unchanged = canvas_frame_helpers.canvasRenderOverridesEqualIgnoringId(
+                frame_options.render_overrides,
+                frame_options.previous_render_overrides,
+                frame_view.canvas_widget_caret_blink_id,
+            );
             const unsolicited_caret_no_op = !frame_view.gpu_canvas_frame_requested_at_dispatch and
-                stable_presented_canvas and caret_blink_only_for_idle_gate and caret_boundaries_unchanged;
+                stable_presented_canvas and caret_blink_only_for_idle_gate and caret_boundaries_unchanged and caret_overrides_unchanged;
             const no_op = unsolicited_caret_no_op or (if (admission) |program|
                 program.no_op
             else
