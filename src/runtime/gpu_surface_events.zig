@@ -38,6 +38,18 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             return composition.plan(view.canvas_widget_surface_scope_policy, mode, input, facts);
         }
         pub fn dispatchGpuSurfaceFrame(self: *Runtime, app: runtime_api.App(Runtime), frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+            const requested_index = runtimeFindViewIndex(self, frame_event.window_id, frame_event.label);
+            const previous_dispatch_request = if (requested_index) |index| blk: {
+                const view = &self.views[index];
+                const previous = view.gpu_canvas_frame_requested_at_dispatch;
+                view.gpu_canvas_frame_requested_at_dispatch = view.gpu_canvas_frame_requested;
+                break :blk previous;
+            } else null;
+            defer if (previous_dispatch_request) |previous| {
+                if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {
+                    self.views[index].gpu_canvas_frame_requested_at_dispatch = previous;
+                }
+            };
             // Media-surface adoption rides the compositor's
             // presented-frame clock: staged producer frames (latest
             // wins) are sampled once per frame event, BEFORE view state

@@ -1265,13 +1265,35 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             const admission = if (frame_options.render_cache_policy) |owner| coordination.plan(frame_facts, .admission, owner) else null;
             const canvas_changed = if (admission) |program| program.canvas_changed else self.views[index].canvas_revision != self.views[index].presented_canvas_revision;
             const canvas_surface_changed = if (admission) |program| program.surface_changed else !sizesEqual(self.views[index].presented_canvas_surface_size, frame_options.surface_size) or self.views[index].presented_canvas_scale != frame_options.scale;
+            const frame_view = &self.views[index];
+            const stable_presented_canvas = !frame_options.full_repaint and frame_view.presented_canvas_valid and !canvas_changed and !canvas_surface_changed;
+            const caret_tooltip_intent_armed = frame_view.canvasTooltipIntentArmed();
+            const caret_blink_only_for_idle_gate = !caret_tooltip_intent_armed and canvasRenderAnimationsOnlyCaretBlink(
+                frame_view.canvasRenderAnimations(),
+                frame_view.canvas_widget_caret_blink_id,
+                frame_options.timestamp_ns,
+            );
+            var caret_boundaries_unchanged = false;
+            if (caret_blink_only_for_idle_gate) {
+                for (frame_view.canvasRenderAnimations()) |animation| {
+                    if (animation.id != frame_view.canvas_widget_caret_blink_id) continue;
+                    caret_boundaries_unchanged = canvasCaretBlinkBoundariesPassed(animation, frame_options.timestamp_ns) ==
+                        canvasCaretBlinkBoundariesPassed(animation, frame_view.gpu_canvas_last_presented_frame_timestamp_ns);
+                    break;
+                }
+            }
             // A no-op frame reuses the presented pixels: unchanged
             // canvas and surface, no full repaint, and an EMPTY override
             // set on both sides (a NONEMPTY override set always takes the
             // plan path below — its cache plans carry the retain counts
             // that keep the view's render caches warm, so an equal-set
             // frame is deliberately NOT a no-op).
-            const no_op = if (admission) |program| program.no_op else !frame_options.full_repaint and self.views[index].presented_canvas_valid and !canvas_changed and !canvas_surface_changed and frame_options.previous_render_overrides.len == 0 and frame_options.render_overrides.len == 0;
+            const unsolicited_caret_no_op = !frame_view.gpu_canvas_frame_requested_at_dispatch and
+                stable_presented_canvas and caret_blink_only_for_idle_gate and caret_boundaries_unchanged;
+            const no_op = unsolicited_caret_no_op or (if (admission) |program|
+                program.no_op
+            else
+                stable_presented_canvas and frame_options.previous_render_overrides.len == 0 and frame_options.render_overrides.len == 0);
             if (no_op) {
                 const canvas_frame = canvas.CanvasFrame{
                     .gpu_plan_policy = frame_options.render_cache_policy,
@@ -1587,6 +1609,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 try self.views[index].copyCanvasFrameTextLayoutCache(canvas_frame.text_layout_cache_plan.entries);
                 try self.views[index].copyPresentedCanvasSummaryWithPolicy(display_list, canvas_frame.surface_size, canvas_frame.scale, frame_options.render_cache_policy);
                 self.views[index].recordCanvasFrame(canvas_frame);
+                self.views[index].gpu_canvas_last_presented_frame_timestamp_ns = frame_options.timestamp_ns;
                 try self.views[index].copyCanvasFrameRenderOverrides(frame_options.render_overrides);
                 const render_animation_active = if (frame_options.render_override_policy) |owner|
                     render_animation_policy.finishFrame(&self.views[index], frame_options.timestamp_ns, owner)

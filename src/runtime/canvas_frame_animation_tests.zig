@@ -615,8 +615,28 @@ test "runtime classifies render animation final overrides for cleanup" {
 
 test "runtime caret blink parks the frame pump and wakes at sweep boundaries; blur goes idle" {
     const TestApp = struct {
+        frame_requires_render: bool = false,
+        text_layout_upload_count: usize = 0,
+
         fn app(self: *@This()) App {
-            return .{ .context = self, .name = "gpu-canvas-caret-blink-scheduling", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+            return .{ .context = self, .name = "gpu-canvas-caret-blink-scheduling", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .gpu_surface_frame => |frame_event| {
+                    const frame = try runtime.nextCanvasFrame(frame_event.window_id, frame_event.label, .{
+                        .frame_index = frame_event.frame_index,
+                        .timestamp_ns = frame_event.timestamp_ns,
+                        .surface_size = frame_event.size,
+                        .scale = frame_event.scale_factor,
+                    }, runtime.canvasFrameScratchStorage());
+                    self.frame_requires_render = frame.requiresRender();
+                    self.text_layout_upload_count = frame.text_layout_cache_plan.uploadCount();
+                },
+                else => {},
+            }
         }
     };
 
@@ -661,14 +681,20 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     try std.testing.expectEqual(blink_id, view.canvas_widget_caret_blink_id);
     try std.testing.expectEqual(@as(u64, 1_500_000_000), view.canvasRenderAnimations()[0].start_ns);
 
-    const storage = canvasFrameScratchStorage(&harness.runtime);
     const requests_after_focus = harness.null_platform.gpu_surface_frame_request_count;
     // Presenting the focus frame must NOT re-arm the display-grid pump
     // (the pre-fix behavior requested a frame per present — the
     // focused-input CPU burn): the blink is the view's only time-work,
     // so the frame parks the pump and the framework's one-shot caret
     // wake carries the next boundary instead.
-    _ = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1, .timestamp_ns = 1_000_000_000 }, storage);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
     try std.testing.expectEqual(requests_after_focus, harness.null_platform.gpu_surface_frame_request_count);
     const parked_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
     try std.testing.expect(parked_wake.active);
@@ -695,8 +721,15 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     // caret toggled off), reuses the field's cached text layout (no new
     // layout uploads — bounded frame work), and parks the pump again.
     view.gpu_timestamp_ns = 2_000_003_000;
-    const blink_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 2, .timestamp_ns = 2_000_003_000 }, storage);
-    try std.testing.expectEqual(@as(usize, 0), blink_frame.text_layout_cache_plan.uploadCount());
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 2,
+        .timestamp_ns = 2_000_003_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+    try std.testing.expectEqual(@as(usize, 0), app_state.text_layout_upload_count);
     const presented_overrides = view.canvasFrameRenderOverrides();
     try std.testing.expectEqual(@as(usize, 1), presented_overrides.len);
     try std.testing.expectEqual(blink_id, presented_overrides[0].id);
@@ -705,6 +738,60 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     const blink_wake = harness.null_platform.startedTimer(platform.caret_blink_timer_id).?;
     try std.testing.expect(blink_wake.active);
     try std.testing.expectEqual(@as(u64, 499_997_000), blink_wake.interval_ns);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 3,
+        .timestamp_ns = 2_016_669_667,
+    } });
+    try std.testing.expect(!app_state.frame_requires_render);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 4,
+        .timestamp_ns = 2_500_000_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 3_000_000_000).?);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 5,
+        .timestamp_ns = 3_016_669_667,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+
+    const spinner = canvas.Widget{
+        .id = 5,
+        .kind = .spinner,
+        .frame = geometry.RectF.init(180, 20, 20, 20),
+    };
+    var spinner_nodes: [3]canvas.WidgetLayoutNode = undefined;
+    const spinner_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ text_field, spinner } }, geometry.RectF.init(0, 0, 240, 120), &spinner_nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", spinner_layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 6,
+        .timestamp_ns = 3_033_333_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(240, 120),
+        .frame_index = 7,
+        .timestamp_ns = 3_050_000_000,
+    } });
+    try std.testing.expect(app_state.frame_requires_render);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
 
     // Blur drops the blink (the animation is removed, nothing arms
     // another wake) — and a STALE wake left over from the parked pump
@@ -714,8 +801,8 @@ test "runtime caret blink parks the frame pump and wakes at sweep boundaries; bl
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), view.canvas_widget_caret_blink_id);
     try std.testing.expectEqual(@as(usize, 0), view.canvas_render_animation_count);
     const requests_after_blur = harness.null_platform.gpu_surface_frame_request_count;
-    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 2_600_000_000).?);
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(platform.caret_blink_timer_id, 3_600_000_000).?);
     try std.testing.expectEqual(requests_after_blur, harness.null_platform.gpu_surface_frame_request_count);
     try std.testing.expect(!harness.null_platform.startedTimer(platform.caret_blink_timer_id).?.active);
-    try std.testing.expect(harness.null_platform.fireTimer(platform.caret_blink_timer_id, 2_700_000_000) == null);
+    try std.testing.expect(harness.null_platform.fireTimer(platform.caret_blink_timer_id, 3_700_000_000) == null);
 }

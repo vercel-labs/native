@@ -487,6 +487,8 @@ pub const RuntimeView = struct {
     /// arrives): the signal that a deferred accessibility publish has a
     /// post-present flush coming.
     gpu_canvas_frame_requested: bool = false,
+    gpu_canvas_frame_requested_at_dispatch: bool = false,
+    gpu_canvas_last_presented_frame_timestamp_ns: u64 = 0,
     widget_revision: u64 = 0,
     widget_tokens: canvas.DesignTokens = .{},
     widget_scroll_states: [max_canvas_widget_nodes_per_view]canvas.ScrollState = undefined,
