@@ -1057,7 +1057,14 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
                 const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
                 const source_moved = if (previous_source) |source_entry| source_selected != source_entry.selected else false;
-                const selected = if (source_moved)
+                // `finalizeNode` stamps this existing semantic bit when an
+                // app binds the press message that selects a row. Such rows
+                // are model-controlled on every rebuild; handler-less rows
+                // retain the runtime echo until their source moves.
+                const app_controlled = copy.widget.semantics.actions.press;
+                const selected = if (app_controlled)
+                    source_selected
+                else if (source_moved)
                     source_selected
                 else
                     entry.state.selected or entry.value >= 0.5;

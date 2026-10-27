@@ -1049,6 +1049,77 @@ test "uncontrolled toggle-buttons keep their retained state across rebuilds" {
     try std.testing.expect(!retained.findById(32).?.widget.state.selected);
 }
 
+const TreeItemSelectionTestApp = struct {
+    fn app(self: *@This()) App {
+        return .{ .context = self, .name = "gpu-treeitem-selection-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+    }
+};
+
+const TreeItemSelectionFixture = struct {
+    fn layout(selected_id: ?canvas.ObjectId, handler_rows: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+        var rows = [_]canvas.Widget{
+            .{
+                .id = 51,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(0, 0, 0, 28),
+                .text = "Fix login crash",
+                .semantics = .{ .role = .treeitem, .actions = .{ .press = handler_rows } },
+            },
+            .{
+                .id = 52,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(0, 32, 0, 28),
+                .text = "Ship settings window",
+                .semantics = .{ .role = .treeitem, .actions = .{ .press = handler_rows } },
+            },
+        };
+        if (selected_id) |id| {
+            for (&rows) |*row| {
+                if (row.id == id) row.state = .{ .selected = true };
+            }
+        }
+        const root = canvas.Widget{ .id = 50, .kind = .tree, .frame = geometry.RectF.init(0, 0, 240, 120), .children = &rows };
+        return canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 120), nodes);
+    }
+
+    fn selectedCount(tree: canvas.WidgetLayoutTree) usize {
+        var count: usize = 0;
+        for (tree.nodes) |node| {
+            if (node.widget.semantics.role == .treeitem and node.widget.state.selected) count += 1;
+        }
+        return count;
+    }
+};
+
+fn expectOnlyTreeItemSelected(runtime: *Runtime, expected_id: canvas.ObjectId) !void {
+    const other_id: canvas.ObjectId = if (expected_id == 51) 52 else 51;
+    const retained = try runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(expected_id).?.widget.state.selected);
+    try std.testing.expect(!retained.findById(other_id).?.widget.state.selected);
+    try std.testing.expectEqual(@as(usize, 1), TreeItemSelectionFixture.selectedCount(retained));
+
+    const semantics = runtimeViewWidgetSemantics(&runtime.views[0]);
+    try std.testing.expectEqual(@as(?f32, 1), canvasWidgetSemanticsById(semantics, expected_id).?.value);
+    try std.testing.expectEqual(@as(?f32, 0), canvasWidgetSemanticsById(semantics, other_id).?.value);
+}
+
+fn dispatchTreeItemPointerPress(runtime: *Runtime, app: App) !void {
+    try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_down,
+        .x = 20,
+        .y = 44,
+    } });
+    try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .pointer_up,
+        .x = 20,
+        .y = 44,
+    } });
+}
+
 test "model-side selection move between treeitems leaves exactly one wash" {
     // Selectable rows used to retain their runtime `selected`
     // unconditionally, so a MODEL-side selection move (clear row A,
@@ -1058,52 +1129,11 @@ test "model-side selection move between treeitems leaves exactly one wash" {
     // the selected bool — a source-side flip wins, so the explicit
     // `selected = false` clears the retained echo; a static source
     // keeps the retained (uncontrolled) selection.
-    const TestApp = struct {
-        fn app(self: *@This()) App {
-            return .{ .context = self, .name = "gpu-treeitem-selection-reconcile", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
-        }
-    };
-
-    const Tree = struct {
-        fn layout(selected_id: ?canvas.ObjectId, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
-            var rows = [_]canvas.Widget{
-                .{
-                    .id = 51,
-                    .kind = .list_item,
-                    .frame = geometry.RectF.init(0, 0, 0, 28),
-                    .text = "Fix login crash",
-                    .semantics = .{ .role = .treeitem, .actions = .{ .press = true } },
-                },
-                .{
-                    .id = 52,
-                    .kind = .list_item,
-                    .frame = geometry.RectF.init(0, 32, 0, 28),
-                    .text = "Ship settings window",
-                    .semantics = .{ .role = .treeitem, .actions = .{ .press = true } },
-                },
-            };
-            if (selected_id) |id| {
-                for (&rows) |*row| {
-                    if (row.id == id) row.state = .{ .selected = true };
-                }
-            }
-            const root = canvas.Widget{ .id = 50, .kind = .tree, .frame = geometry.RectF.init(0, 0, 240, 120), .children = &rows };
-            return canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 120), nodes);
-        }
-
-        fn selectedCount(tree: canvas.WidgetLayoutTree) usize {
-            var count: usize = 0;
-            for (tree.nodes) |node| {
-                if (node.widget.semantics.role == .treeitem and node.widget.state.selected) count += 1;
-            }
-            return count;
-        }
-    };
 
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    var app_state: TestApp = .{};
+    var app_state: TreeItemSelectionTestApp = .{};
     const app = app_state.app();
     try harness.start(app);
 
@@ -1118,24 +1148,24 @@ test "model-side selection move between treeitems leaves exactly one wash" {
     // runtime echoes the selection immediately and the model's rebuild
     // confirms it (`selected = true` on A).
     var nodes: [8]canvas.WidgetLayoutNode = undefined;
-    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Tree.layout(null, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(null, false, &nodes));
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 51, .action = .select });
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(51).?.widget.state.selected);
-    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Tree.layout(51, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, false, &nodes));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(51).?.widget.state.selected);
-    try std.testing.expectEqual(@as(usize, 1), Tree.selectedCount(retained));
+    try std.testing.expectEqual(@as(usize, 1), TreeItemSelectionFixture.selectedCount(retained));
 
     // The model MOVES the selection (composer creates a task: clear A,
     // select B). The explicit source `false` clears A's retained echo —
     // exactly ONE row carries the wash, with no pointer interaction.
-    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Tree.layout(52, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, false, &nodes));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(!retained.findById(51).?.widget.state.selected);
     try std.testing.expectEqual(@as(f32, 0), retained.findById(51).?.widget.value);
     try std.testing.expect(retained.findById(52).?.widget.state.selected);
-    try std.testing.expectEqual(@as(usize, 1), Tree.selectedCount(retained));
+    try std.testing.expectEqual(@as(usize, 1), TreeItemSelectionFixture.selectedCount(retained));
 
     // Semantics report the same single selection (the snapshot channel
     // that exposed the stale `state=[selected]`).
@@ -1145,19 +1175,81 @@ test "model-side selection move between treeitems leaves exactly one wash" {
 
     // An unrelated rebuild replaying the same source keeps the single
     // wash.
-    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Tree.layout(52, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, false, &nodes));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expectEqual(@as(usize, 1), Tree.selectedCount(retained));
+    try std.testing.expectEqual(@as(usize, 1), TreeItemSelectionFixture.selectedCount(retained));
     try std.testing.expect(retained.findById(52).?.widget.state.selected);
 
     // The uncontrolled contract survives: with the source static, a
     // pointer selection still wins and is retained across rebuilds.
     try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 51, .action = .select });
-    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try Tree.layout(52, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, false, &nodes));
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
     try std.testing.expect(retained.findById(51).?.widget.state.selected);
     try std.testing.expect(!retained.findById(52).?.widget.state.selected);
-    try std.testing.expectEqual(@as(usize, 1), Tree.selectedCount(retained));
+    try std.testing.expectEqual(@as(usize, 1), TreeItemSelectionFixture.selectedCount(retained));
+}
+
+test "refused pointer treeitem selection restores identical source" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TreeItemSelectionTestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+
+    try dispatchTreeItemPointerPress(&harness.runtime, app);
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+
+    // The app refuses the selection because its model still owns A, then
+    // rebuilds the identical source (A=true, B=false).
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+}
+
+test "refused automation treeitem selection restores identical source" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TreeItemSelectionTestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 52, .action = .select });
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+
+    // The app refuses the selection because its model still owns A, then
+    // rebuilds the identical source (A=true, B=false).
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
 }
 
 test "runtime drives retained settings and data grid workflow" {
