@@ -35,7 +35,7 @@ pub fn TimelineItem(comptime Msg: type) type {
             meta: []const u8 = "",
             connector: bool = true,
             on_press: ?Msg = null,
-            selected: bool = false,
+            selected: ?bool = null,
         };
 
         pub fn build(ui: *Ui, options: Options) Ui.Node {

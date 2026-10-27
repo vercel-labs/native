@@ -295,12 +295,27 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             options.style.quiet_hover = markup.expr.truthyWithPolicy(owner, try self.evalAttrExpression(scope, node, attribute));
         }
 
-        fn setOptionFieldOwned(self: *Self, owner: markup.expr.Policy, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
+        fn defaultedEmptyBinding(scope: *Scope, owner: ?markup.expr.Policy, attribute: markup.MarkupAttr) bool {
+            return switch (markup.attrTypedWithPolicy(owner, attribute)) {
+                .binding => |path| if (scope.lookup(pathHead(path))) |entry|
+                    entry.defaulted and pathTail(path) == null
+                else
+                    false,
+                else => false,
+            };
+        }
+
+        fn setOptionFieldOwned(self: *Self, owner: markup.expr.Policy, scope: *Scope, node: markup.MarkupNode, options: anytype, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
             const T = @TypeOf(@field(options, field));
             const optional = @typeInfo(T) == .optional;
             const Target = if (optional) @typeInfo(T).optional.child else T;
             const class = comptime if (optional and @typeInfo(Target) != .bool and @typeInfo(Target) != .@"enum" and @typeInfo(Target) != .float) 0 else value_programs.typeClass(Target);
+            const omitted_empty = if (comptime optional and @typeInfo(Target) == .bool and std.mem.eql(u8, field, "selected"))
+                defaultedEmptyBinding(scope, owner, attribute)
+            else
+                false;
             const value = try self.evalAttrExpression(scope, node, attribute);
+            if (omitted_empty and value == .string and value.string.len == 0) return;
             const within = if (comptime class == 4) value == .integer and value.integer >= 0 and value.integer <= std.math.maxInt(Target) else false;
             const action = value_programs.decide(owner, 4, &.{ class, value_programs.kind(value), @intFromBool(within) });
             if (action.action == 255) return self.failVoid(node, value_programs.message(action.code));
@@ -2081,7 +2096,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 },
                 8 => {
                     const attribute = node.attrs[step.fields[0]];
-                    options.selected = markup.expr.truthyWithPolicy(scope.expression_policy, try self.evalAttrExpression(scope, node, attribute));
+                    try self.setOptionFieldOwned(owner, scope, node, &options, "selected", attribute);
                 },
                 9 => {
                     const attribute = node.attrs[step.fields[0]];
@@ -3934,7 +3949,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "selected")) {
-                    options.selected = markup.expr.truthyWithPolicy(scope.expression_policy, try self.evalAttrExpression(scope, node, attribute));
+                    try self.setOptionFieldReference(scope, node, &options, "selected", attribute);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "on-press")) {
@@ -4929,8 +4944,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             return self.setOptionFieldReference(scope, node, options, field, attribute);
         }
 
-        fn setOptionFieldReference(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
+        fn setOptionFieldReference(self: *Self, scope: *Scope, node: markup.MarkupNode, options: anytype, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
             const FieldType = @TypeOf(@field(options, field));
+            const omitted_empty = if (comptime @typeInfo(FieldType) == .optional and @typeInfo(@typeInfo(FieldType).optional.child) == .bool and std.mem.eql(u8, field, "selected"))
+                defaultedEmptyBinding(scope, null, attribute)
+            else
+                false;
             const value = try self.evalAttrExpression(scope, node, attribute);
             switch (@typeInfo(FieldType)) {
                 .float => @field(options, field) = switch (value) {
@@ -4940,7 +4959,11 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 },
                 .bool => @field(options, field) = markup.expr.truthyWithPolicy(scope.expression_policy, value),
                 .optional => |optional| switch (@typeInfo(optional.child)) {
-                    .bool => @field(options, field) = markup.expr.truthyWithPolicy(scope.expression_policy, value),
+                    .bool => {
+                        if (!(omitted_empty and value == .string and value.string.len == 0)) {
+                            @field(options, field) = markup.expr.truthyWithPolicy(scope.expression_policy, value);
+                        }
+                    },
                     .@"enum" => {
                         const text = switch (value) {
                             .string => |text| text,

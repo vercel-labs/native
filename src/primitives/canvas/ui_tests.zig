@@ -557,6 +557,28 @@ test "typed handlers imply accessibility actions" {
     try testing.expect(canvas.semanticActions(without_handler).select);
 }
 
+test "authored selection marks elements controlled only when present" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.el(.list_item, .{ .selected = false }, .{}),
+        ui.el(.list_item, .{ .selected = true }, .{}),
+        ui.el(.list_item, .{}, .{}),
+    }));
+
+    const selected_false = tree.root.children[0];
+    const selected_true = tree.root.children[1];
+    const omitted = tree.root.children[2];
+    try testing.expect(!selected_false.state.selected);
+    try testing.expect(selected_false.runtime_flags.selection_controlled);
+    try testing.expect(selected_true.state.selected);
+    try testing.expect(selected_true.runtime_flags.selection_controlled);
+    try testing.expect(!omitted.state.selected);
+    try testing.expect(!omitted.runtime_flags.selection_controlled);
+}
+
 test "avatar and image sugar carry registered image ids" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

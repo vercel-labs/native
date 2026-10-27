@@ -571,7 +571,9 @@ pub fn Ui(comptime Msg: type) type {
             /// elements.
             axis: canvas.ScrollAxes = .vertical,
             checked: bool = false,
-            selected: bool = false,
+            /// Selection value. `null` leaves exclusive selection to the
+            /// runtime; either authored boolean makes it source-controlled.
+            selected: ?bool = null,
             /// Disclosure state for tree rows (`role = .treeitem`): null
             /// = a leaf (no disclosure), false = collapsed (Right
             /// expands via `on_toggle`), true = expanded (Left collapses
@@ -3309,7 +3311,7 @@ pub fn Ui(comptime Msg: type) type {
             /// title/description/meta text fall through to the root
             /// (dragging still selects the text).
             on_press: ?Msg = null,
-            selected: bool = false,
+            selected: ?bool = null,
         };
 
         /// One timeline/ledger item: leading status indicator (plus
@@ -3995,11 +3997,12 @@ pub fn Ui(comptime Msg: type) type {
                 .resize_origin = options.resize_origin,
                 .tooltip_delay_ms = options.tooltip_delay,
             };
+            widget.runtime_flags.selection_controlled = options.selected != null;
             if (self.construction_policy) |policy| {
                 construction.element(policy, &widget, options);
                 return widget;
             }
-            widget.state.selected = options.checked or options.selected;
+            widget.state.selected = options.checked or (options.selected orelse false);
             widget.layout.min_size = .{ .width = @max(options.width, options.min_width), .height = options.height };
             // Authored sizes are definite; resizable width seeds a frame
             // that the drag capability may grow beyond that initial size.

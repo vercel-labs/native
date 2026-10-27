@@ -1940,6 +1940,18 @@ const ImportCompiled = canvas.CompiledMarkupImports(
     &fixture.import_view_sources,
 );
 
+const timeline_item_component_source =
+    "<template name=\"timeline-item\" args=\"title description= meta= indicator= icon= variant=outline connector=true selected= key= global_key=\">" ++
+    "<timeline-item title=\"{title}\" description=\"{description}\" meta=\"{meta}\" indicator=\"{indicator}\" icon=\"{icon}\" variant=\"{variant}\" connector=\"{connector}\" selected=\"{selected}\" key=\"{key}\" global-key=\"{global_key}\" />" ++
+    "</template>";
+const timeline_item_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "omitted.native", .source = "<import src=\"components/timeline-item.native\"/><use template=\"timeline-item\" title=\"Queued\" connector=\"false\"/>" },
+    .{ .path = "explicit-false.native", .source = "<import src=\"components/timeline-item.native\"/><use template=\"timeline-item\" title=\"Queued\" connector=\"false\" selected=\"false\"/>" },
+    .{ .path = "components/timeline-item.native", .source = timeline_item_component_source },
+};
+const OmittedTimelineItemCompiled = canvas.CompiledMarkupImports(fixture.TemplateModel, fixture.TemplateMsg, "omitted.native", &timeline_item_sources);
+const ExplicitFalseTimelineItemCompiled = canvas.CompiledMarkupImports(fixture.TemplateModel, fixture.TemplateMsg, "explicit-false.native", &timeline_item_sources);
+
 fn interpretImports(arena: std.mem.Allocator, model: *const fixture.TemplateModel) !TemplateUi.Tree {
     const document = try fixture.resolveImportSet(arena, &fixture.import_view_sources, "view.native");
     var view = TemplateInterpreter.fromDocument(document);
@@ -1950,6 +1962,25 @@ fn interpretImports(arena: std.mem.Allocator, model: *const fixture.TemplateMode
 fn compileImports(arena: std.mem.Allocator, model: *const fixture.TemplateModel) !TemplateUi.Tree {
     var ui = TemplateUi.init(arena);
     return ui.finalize(ImportCompiled.build(&ui, model));
+}
+
+test "compiled timeline-item template keeps omitted selection distinct from explicit false" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.templateTestModel();
+
+    var omitted_ui = TemplateUi.init(arena);
+    const omitted_tree = try omitted_ui.finalize(OmittedTimelineItemCompiled.build(&omitted_ui, &model));
+    const omitted_row = omitted_tree.root;
+    try testing.expect(!omitted_row.runtime_flags.selection_controlled);
+    try testing.expect(!omitted_row.state.selected);
+
+    var explicit_false_ui = TemplateUi.init(arena);
+    const explicit_false_tree = try explicit_false_ui.finalize(ExplicitFalseTimelineItemCompiled.build(&explicit_false_ui, &model));
+    const explicit_false_row = explicit_false_tree.root;
+    try testing.expect(explicit_false_row.runtime_flags.selection_controlled);
+    try testing.expect(!explicit_false_row.state.selected);
 }
 
 test "compiled imports with slots and defaults match the interpreter and the hand-written view" {

@@ -276,7 +276,10 @@ pub const WidgetRuntimeFlags = packed struct(u8) {
     /// The callback accepts tagged scroll requests, independently of an
     /// optional tree role sharing this scroll container's callback slot.
     compiled_scroll_policy: bool = false,
-    _reserved: u5 = 0,
+    /// `Ui.ElementOptions.selected` was authored, including an explicit
+    /// false. Unset selections remain runtime-controlled.
+    selection_controlled: bool = false,
+    _reserved: u4 = 0,
 };
 
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them

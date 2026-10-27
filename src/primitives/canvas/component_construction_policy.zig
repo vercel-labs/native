@@ -49,7 +49,7 @@ fn guardEnum(comptime T: type, comptime names: anytype) void {
 
 pub fn element(policy: Policy, widget: *Widget, options: anytype) void {
     var input: [40]u8 = @splat(0);
-    input[0..6].* = .{ 17, 0, @intCast(@intFromEnum(widget.kind)), @intCast(@intFromEnum(options.size)), @as(u8, @intFromBool(options.checked)) | (@as(u8, @intFromBool(options.selected)) << 1) | (@as(u8, @intFromBool(options.padding != null)) << 2), @intCast(@intFromEnum(options.cross)) };
+    input[0..6].* = .{ 17, 0, @intCast(@intFromEnum(widget.kind)), @intCast(@intFromEnum(options.size)), @as(u8, @intFromBool(options.checked)) | (@as(u8, @intFromBool(options.selected orelse false)) << 1) | (@as(u8, @intFromBool(options.padding != null)) << 2), @intCast(@intFromEnum(options.cross)) };
     const values = [_]f32{ options.width, options.height, options.min_width, options.max_width, options.padding orelse 0, options.gap, options.value };
     for (values, 0..) |value, i| putFloat(input[8 + i * 4 ..][0..4], value);
     // These facts describe the target's max-number zero convention,

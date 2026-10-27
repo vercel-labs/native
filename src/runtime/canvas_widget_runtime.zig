@@ -1046,23 +1046,13 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 copy.widget.frame.width = width;
             },
             .radio, .list_item, .menu_item, .data_cell, .segmented_control => {
-                // Exclusive selectables follow the slider/scroll
-                // reconcile rule on their selected bool: a source-side
-                // FLIP wins — a model that moved its selection clears
-                // the old row's retained wash with an explicit
-                // `selected = false` and lights the new one — while a
-                // source that replays the same value keeps the retained
-                // (pointer-driven) selection, so uncontrolled lists and
-                // trees keep working with zero app wiring.
+                // Authored selection is source-controlled even when it
+                // repeats the same value. Uncontrolled selectables keep
+                // the existing source-flip-wins, otherwise-retained rule.
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
                 const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
                 const source_moved = if (previous_source) |source_entry| source_selected != source_entry.selected else false;
-                // `finalizeNode` stamps this existing semantic bit when an
-                // app binds the press message that selects a row. Such rows
-                // are model-controlled on every rebuild; handler-less rows
-                // retain the runtime echo until their source moves.
-                const app_controlled = copy.widget.semantics.actions.press;
-                const selected = if (app_controlled)
+                const selected = if (copy.widget.runtime_flags.selection_controlled)
                     source_selected
                 else if (source_moved)
                     source_selected

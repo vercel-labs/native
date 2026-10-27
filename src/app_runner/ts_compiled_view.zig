@@ -142,7 +142,7 @@ const Record = struct {
     variant: @FieldType(Ui.ElementOptions, "variant") = .default,
     checked: bool = false,
     disabled: bool = false,
-    selected: bool = false,
+    selected: ?bool = null,
     focusable: bool = false,
     autofocus: bool = false,
     expanded: ?bool = null,
@@ -486,7 +486,7 @@ fn nodeRecord(ui: *Ui, records: []const Record, index: usize, parent_end: usize,
     if (value.kind == .code) {
         if (value.codeLanguage == null or value.codeEditable == null or value.codeNumbered == null or value.wrap == null or value.codeLineDigits != null or
             paragraph or value.placeholder.len != 0 or value.submitOnEnter or value.submit != null or value.contextMenu.len != 0 or value.autofocus or
-            value.disabled or value.selected or value.checked or value.padding != null or value.gap != 0 or value.maxWidth != 0 or
+            value.disabled or (value.selected orelse false) or value.checked or value.padding != null or value.gap != 0 or value.maxWidth != 0 or
             value.role != .none or value.focusable or value.windowDrag or value.image != 0 or value.icon.len != 0 or value.command.len != 0 or
             value.press != null or value.doublePress != null or value.hold != null or value.drag != null or value.hoverEnter != null or value.hoverLeave != null or
             value.background != null or value.foreground != null or value.borderColor != null or value.focusRing != null or value.radius != null)
@@ -796,6 +796,22 @@ test "compiled per-side padding keeps uniform defaults and rejects invalid exten
         const actions = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":3,\"kind\":\"input_group\",\"text\":\"\"}},{{\"end\":2,\"kind\":\"textarea\",\"text\":\"\"}},{{\"end\":3,\"kind\":\"input_group_actions\",\"text\":\"\",\"{s}\":0}}]}}", .{field});
         try std.testing.expectError(error.InvalidView, decode(&ui, actions));
     }
+}
+
+test "compiled grouped input preserves authored selection presence" {
+    if (comptime enabled) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]struct { source: []const u8, controlled: bool }{
+            .{ .source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"role\":\"treeitem\"}]}", .controlled = false },
+            .{ .source = "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"list_item\",\"text\":\"\",\"role\":\"treeitem\",\"selected\":false}]}", .controlled = true },
+        }) |case| {
+            var ui = Ui.init(arena.allocator());
+            const tree = try ui.finalize(try decode(&ui, case.source));
+            try std.testing.expectEqual(case.controlled, tree.root.runtime_flags.selection_controlled);
+            try std.testing.expect(!tree.root.state.selected);
+        }
+    } else return error.SkipZigTest;
 }
 
 test "compiled image records preserve exact identities fit and independent native ownership" {

@@ -407,6 +407,24 @@ test "template expansion builds the hand-written tree with ids from the expansio
     try testing.expectEqual(pear_button.id, findByText(rebuilt.root, .button, "pear").?.id);
 }
 
+test "dynamic markup distinguishes omitted selection from explicit false" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source = "<column><list-item>Uncontrolled</list-item><list-item selected=\"false\">Controlled</list-item></column>";
+    var view = try InboxMarkup.init(arena, source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &Model{}));
+    const omitted = tree.root.children[0];
+    const explicit_false = tree.root.children[1];
+
+    try testing.expect(!omitted.runtime_flags.selection_controlled);
+    try testing.expect(explicit_false.runtime_flags.selection_controlled);
+    try testing.expect(!omitted.state.selected);
+    try testing.expect(!explicit_false.state.selected);
+}
+
 test "style token references resolve against tokens at finalize time" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

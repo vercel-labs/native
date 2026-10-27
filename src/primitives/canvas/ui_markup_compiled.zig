@@ -151,6 +151,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             /// True when a value arg came from a declaration default rather
             /// than an explicit use-site argument.
             defaulted: bool = false,
+            /// True when that declaration default is the empty literal,
+            /// the template spelling for an omitted optional prop.
+            default_empty: bool = false,
             const Kind = enum { item, value_arg, slice_arg, slot, virtual };
         };
 
@@ -2191,7 +2194,8 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     options.connector = markup.expr.truthyWithPolicy(ui.expression_policy, evalExpr(node, entries, comptime node.attr("connector").?, ui, model, scope));
                 } else @panic("unavailable static builder channel"),
                 8 => if (comptime (node.attr("selected") != null)) {
-                    options.selected = markup.expr.truthyWithPolicy(ui.expression_policy, evalExpr(node, entries, comptime node.attr("selected").?, ui, model, scope));
+                    const raw = comptime node.attr("selected").?;
+                    setOption(node, "selected", "selected", raw, entries, ui, model, scope, &options);
                 } else @panic("unavailable static builder channel"),
                 9 => if (comptime (node.attr("on-press") != null)) {
                     // Reuse the full message-attr machinery (payload bindings
@@ -2280,7 +2284,8 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 options.connector = markup.expr.truthyWithPolicy(ui.expression_policy, evalExpr(node, entries, comptime node.attr("connector").?, ui, model, scope));
             }
             if (comptime (node.attr("selected") != null)) {
-                options.selected = markup.expr.truthyWithPolicy(ui.expression_policy, evalExpr(node, entries, comptime node.attr("selected").?, ui, model, scope));
+                const raw = comptime node.attr("selected").?;
+                setOptionReference(node, "selected", "selected", raw, entries, ui, model, scope, &options);
             }
             if (comptime (node.attr("on-press") != null)) {
                 // Reuse the full message-attr machinery (payload bindings
@@ -3025,7 +3030,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 var entries: []const ScopeEntry = &.{};
                 for (specs) |spec| {
                     entries = entries ++ &[_]ScopeEntry{switch (spec.kind) {
-                        .value => .{ .name = spec.name, .kind = .value_arg, .variant = spec.variant, .defaulted = spec.defaulted },
+                        .value => .{ .name = spec.name, .kind = .value_arg, .variant = spec.variant, .defaulted = spec.defaulted, .default_empty = spec.defaulted and spec.raw.len == 0 },
                         .slice => .{ .name = spec.name, .kind = .slice_arg, .Item = spec.Item },
                         .virtual => .{ .name = spec.name, .kind = .virtual, .Item = canvas.VirtualListRange },
                     }};
@@ -3422,10 +3427,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             }
         }
 
-        fn setOption(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime attribute_name: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
+        fn setOption(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime attribute_name: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: anytype) void {
             if (ui.expression_policy) |owner| {
-                const FieldType = @FieldType(Ui.ElementOptions, zig_field);
+                const FieldType = @TypeOf(@field(options, zig_field));
                 const Target = if (@typeInfo(FieldType) == .optional) @typeInfo(FieldType).optional.child else FieldType;
+                if (comptime @typeInfo(FieldType) == .optional and @typeInfo(Target) == .bool and std.mem.eql(u8, zig_field, "selected") and defaultedEmptyBinding(entries, raw)) return;
                 // Literal enums keep their positioned compile-time diagnostics.
                 if (comptime @typeInfo(Target) == .@"enum" and markup.parseAttrExpression(raw).? == .literal) {
                     setOptionReference(node, zig_field, attribute_name, raw, entries, ui, model, scope, options);
@@ -3438,8 +3444,8 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             setOptionReference(node, zig_field, attribute_name, raw, entries, ui, model, scope, options);
         }
 
-        fn setOptionReference(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime attribute_name: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {
-            const FieldType = @FieldType(Ui.ElementOptions, zig_field);
+        fn setOptionReference(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime attribute_name: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: anytype) void {
+            const FieldType = @TypeOf(@field(options, zig_field));
             const variant = comptime attrExprVariant(node, entries, attribute_name, raw);
             switch (comptime @typeInfo(FieldType)) {
                 .float => {
@@ -3452,7 +3458,11 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 },
                 .bool => @field(options, zig_field) = markup.expr.truthyWithPolicy(ui.expression_policy, attrExprValue(node, entries, attribute_name, raw, ui, model, scope)),
                 .optional => |optional| switch (@typeInfo(optional.child)) {
-                    .bool => @field(options, zig_field) = markup.expr.truthyWithPolicy(ui.expression_policy, attrExprValue(node, entries, attribute_name, raw, ui, model, scope)),
+                    .bool => {
+                        if (comptime !std.mem.eql(u8, zig_field, "selected") or !defaultedEmptyBinding(entries, raw)) {
+                            @field(options, zig_field) = markup.expr.truthyWithPolicy(ui.expression_policy, attrExprValue(node, entries, attribute_name, raw, ui, model, scope));
+                        }
+                    },
                     .@"enum" => {
                         comptime requireVariant(variant, &.{.string}, node, "expected an option name");
                         const expression = comptime markup.parseAttrExpression(raw).?;
@@ -4047,6 +4057,17 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (std.mem.eql(u8, entries[index].name, head)) return index;
                 }
                 return null;
+            }
+        }
+
+        fn defaultedEmptyBinding(comptime entries: []const ScopeEntry, comptime raw: []const u8) bool {
+            comptime {
+                const expression = markup.parseAttrExpression(raw) orelse return false;
+                if (expression != .binding) return false;
+                const path = expression.binding;
+                if (interpreter.pathTail(path) != null) return false;
+                const index = scopeIndex(entries, interpreter.pathHead(path)) orelse return false;
+                return entries[index].default_empty;
             }
         }
 

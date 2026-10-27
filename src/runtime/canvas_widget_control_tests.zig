@@ -1056,21 +1056,23 @@ const TreeItemSelectionTestApp = struct {
 };
 
 const TreeItemSelectionFixture = struct {
-    fn layout(selected_id: ?canvas.ObjectId, handler_rows: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
+    fn layout(selected_id: ?canvas.ObjectId, controlled: bool, nodes: []canvas.WidgetLayoutNode) !canvas.WidgetLayoutTree {
         var rows = [_]canvas.Widget{
             .{
                 .id = 51,
                 .kind = .list_item,
                 .frame = geometry.RectF.init(0, 0, 0, 28),
                 .text = "Fix login crash",
-                .semantics = .{ .role = .treeitem, .actions = .{ .press = handler_rows } },
+                .semantics = .{ .role = .treeitem, .actions = .{ .press = true } },
+                .runtime_flags = .{ .selection_controlled = controlled },
             },
             .{
                 .id = 52,
                 .kind = .list_item,
                 .frame = geometry.RectF.init(0, 32, 0, 28),
                 .text = "Ship settings window",
-                .semantics = .{ .role = .treeitem, .actions = .{ .press = handler_rows } },
+                .semantics = .{ .role = .treeitem, .actions = .{ .press = true } },
+                .runtime_flags = .{ .selection_controlled = controlled },
             },
         };
         if (selected_id) |id| {
@@ -1117,6 +1119,16 @@ fn dispatchTreeItemPointerPress(runtime: *Runtime, app: App) !void {
         .kind = .pointer_up,
         .x = 20,
         .y = 44,
+    } });
+}
+
+fn dispatchTreeItemKeyboardSelect(runtime: *Runtime, app: App, id: canvas.ObjectId) !void {
+    runtime.views[0].canvas_widget_focused_id = id;
+    try runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
     } });
 }
 
@@ -1207,6 +1219,9 @@ test "refused pointer treeitem selection restores identical source" {
 
     var nodes: [8]canvas.WidgetLayoutNode = undefined;
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+    try dispatchTreeItemPointerPress(&harness.runtime, app);
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, true, &nodes));
     try expectOnlyTreeItemSelected(&harness.runtime, 52);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
@@ -1238,6 +1253,9 @@ test "refused automation treeitem selection restores identical source" {
 
     var nodes: [8]canvas.WidgetLayoutNode = undefined;
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+    try dispatchAutomationWidgetAction(&harness.runtime, app, .{ .view_label = "canvas", .id = 52, .action = .select });
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, true, &nodes));
     try expectOnlyTreeItemSelected(&harness.runtime, 52);
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
@@ -1248,6 +1266,37 @@ test "refused automation treeitem selection restores identical source" {
 
     // The app refuses the selection because its model still owns A, then
     // rebuilds the identical source (A=true, B=false).
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+}
+
+test "refused keyboard treeitem selection restores identical source" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TreeItemSelectionTestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+    });
+
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try dispatchTreeItemKeyboardSelect(&harness.runtime, app, 52);
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(52, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
+    try expectOnlyTreeItemSelected(&harness.runtime, 51);
+    try dispatchTreeItemKeyboardSelect(&harness.runtime, app, 52);
+    try expectOnlyTreeItemSelected(&harness.runtime, 52);
+
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try TreeItemSelectionFixture.layout(51, true, &nodes));
     try expectOnlyTreeItemSelected(&harness.runtime, 51);
 }

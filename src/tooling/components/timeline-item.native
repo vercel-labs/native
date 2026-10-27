@@ -17,6 +17,6 @@
 
      Deleting this file costs nothing; `native eject component timeline-item`
      writes it again. -->
-<template name="timeline-item" args="title description= meta= indicator= icon= variant=outline connector=true selected=false key= global_key=">
+<template name="timeline-item" args="title description= meta= indicator= icon= variant=outline connector=true selected= key= global_key=">
   <timeline-item title="{title}" description="{description}" meta="{meta}" indicator="{indicator}" icon="{icon}" variant="{variant}" connector="{connector}" selected="{selected}" key="{key}" global-key="{global_key}" />
 </template>
