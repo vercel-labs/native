@@ -138,3 +138,46 @@ test "idle app consumes an automation command promptly via the arrival watcher" 
         cwd.openFile(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/command-1.txt", .{automation_dir}), .{}),
     );
 }
+
+test "blocked automation publication preserves app dispatch and recovers on the next frame" {
+    const io = std.testing.io;
+    var dir_buffer: [80]u8 = undefined;
+    const directory = try automation.watcher.testDirectory(&dir_buffer, ".zig-cache/test-automation-publish-recovery");
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, directory);
+    defer cwd.deleteTree(io, directory) catch {};
+
+    const harness = try support.TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ProbeApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+    harness.runtime.options.automation = automation.Server.init(io, directory, "Recovery");
+
+    inline for (.{ "snapshot.txt", "accessibility.txt", "windows.txt" }, 0..) |name, index| {
+        var path_buffer: [128]u8 = undefined;
+        const output = try std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ directory, name });
+        cwd.deleteFile(io, output) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        // A directory at the destination deterministically blocks replacement
+        // on every host, without depending on a reader's timing or share flags.
+        try cwd.createDirPath(io, output);
+        harness.runtime.invalidate();
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try std.testing.expectEqual(index + 1, harness.runtime.dispatchErrors().len);
+        try std.testing.expectEqualStrings("automation.publish", harness.runtime.dispatchErrors()[index].event());
+        try std.testing.expect(harness.runtime.invalidated);
+        try std.testing.expect(harness.null_platform.takeFrameRequest() != null);
+
+        try cwd.deleteDir(io, output);
+        try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try std.testing.expectEqual(index + 1, harness.runtime.dispatchErrors().len);
+        const restored = try cwd.openFile(io, output, .{});
+        restored.close(io);
+        app_state.probed = false;
+        try harness.runtime.dispatchCommand(app, .{ .name = "app.probe" });
+        try std.testing.expect(app_state.probed);
+    }
+}

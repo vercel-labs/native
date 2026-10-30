@@ -638,7 +638,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             try consumeAutomationCommand(self, app);
             if (!self.invalidated) return;
 
-            try publishAutomation(self);
+            const automation_published = publishAutomation(self);
             self.frame_index += 1;
             self.last_diagnostics = .{
                 .frame_index = self.frame_index,
@@ -649,7 +649,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             };
             self.command_count = 0;
             self.dirty_region_count = 0;
-            self.invalidated = false;
+            self.invalidated = !automation_published;
             log(self, "runtime.frame", "frame published", &.{
                 trace.uint("frame", self.frame_index),
                 trace.uint("dirty_regions", self.last_diagnostics.dirty_region_count),
@@ -658,6 +658,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 recordDispatchError(self, "lifecycle", err);
                 if (self.dispatch_error_policy == .propagate) return err;
             };
+            if (!automation_published) self.options.platform.services.requestFrame() catch {};
         }
 
         fn AutomationSnapshotMethods() type {
@@ -951,9 +952,16 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             return error.AsyncBridgeResponseLimitReached;
         }
 
-        fn publishAutomation(self: *Runtime) anyerror!void {
-            const server = self.options.automation orelse return;
-            try server.publish(automationSnapshot(self, server.title));
+        fn publishAutomation(self: *Runtime) bool {
+            const server = self.options.automation orelse return true;
+            // A reader can temporarily block atomic replacement on Windows.
+            // Status publication must not terminate the app's frame callback;
+            // retain the failure for the driver and retry on the next frame.
+            server.publish(automationSnapshot(self, server.title)) catch |err| {
+                recordDispatchErrorDetail(self, "automation.publish", err, server.directory);
+                return false;
+            };
+            return true;
         }
 
         fn consumeAutomationCommand(self: *Runtime, app: App) anyerror!void {
