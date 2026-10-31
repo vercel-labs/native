@@ -1,0 +1,718 @@
+// The end-to-end fixture core: a small status poller exercising every
+// v2 effect record — an init-command request, keyed replace and cancel,
+// a fire-and-forget bytes command, Cmd.now, a model-gated timer
+// subscription, the named engine ops (readFile/writeFile/fetch/
+// clipboard) plus the one-shot delay, and the streaming ops (a line-
+// streamed fetch, a real subprocess spawn with line/exit routing and
+// mid-stream cancel, and the audio and video event streams with their
+// control verbs), plus pty spawn and its seven-field event
+// record. Keeping pty here makes the generated facade compile as part of
+// the real external-core lane, not only the frontend conformance pass.
+// Transpiled at build time by the repo's own transpiler (never committed
+// as Zig) and driven through the real runtime by
+// tests/ts-core/host_e2e_tests.zig.
+
+import { Cmd, Sub, asciiBytes, utf8Bytes, windowDescriptor } from "@native-sdk/core";
+import { type AudioState, type FrameEvent, type StatusItemState, type WindowDescriptor } from "@native-sdk/core/events";
+
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+
+export type ImageState =
+  | "loaded" | "rejected" | "not_found" | "io_failed" | "connect_failed"
+  | "tls_failed" | "protocol_failed" | "timed_out" | "http_status"
+  | "cancelled" | "too_large" | "unsupported" | "decode_failed" | "registry_full"
+  | "alloc_failed";
+
+export type ChannelState = "data" | "closed" | "rejected";
+
+export type PtyState = "output" | "exit";
+
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+
+export interface Model {
+  readonly polling: boolean;
+  readonly ticks: number;
+  readonly lastTickAt: number;
+  readonly stampMs: number;
+  readonly failures: number;
+  readonly status: Uint8Array;
+  readonly lastErr: Uint8Array;
+  readonly saved: number;
+  readonly code: number;
+  readonly firedAt: number;
+  readonly lines: number;
+  readonly lastLine: Uint8Array;
+  readonly exitCode: number;
+  readonly audioState: AudioState;
+  readonly posMs: number;
+  readonly durMs: number;
+  readonly playing: boolean;
+  readonly bands: Uint8Array;
+  readonly audioEvents: number;
+  readonly videoState: VideoState;
+  readonly vPosMs: number;
+  readonly vDurMs: number;
+  readonly vPlaying: boolean;
+  readonly vW: number;
+  readonly vH: number;
+  readonly videoEvents: number;
+  readonly cover: number;
+  readonly coverW: number;
+  readonly coverH: number;
+  readonly imageState: ImageState;
+  readonly imageStatus: number;
+  readonly imageResults: number;
+  // The echoed ImageId of the last image result — how concurrent loads
+  // sharing the one event arm stay distinguishable in update.
+  readonly lastImageId: number;
+  // Model-owned dynamic ImageIds: the bridge validates these at
+  // runtime (the emitter's NS1030 gate covers literals only).
+  readonly nextCover: number;
+  readonly topId: number;
+  // Model-owned expectedBytes values the emitter's literal gate never
+  // sees: a fractional count the bridge must map to "unknown size"
+  // (never truncate into a wrong verification size), and a whole one
+  // it must carry through exactly.
+  readonly fracBytes: number;
+  readonly wholeBytes: number;
+  // Dynamic invalid store limit: the facade must keep it on the host's
+  // rejection path instead of truncating it into the default limit.
+  readonly fracStoreLimit: number;
+  // The expectedBytes wire boundary, model-owned like topId: 2^53 - 1
+  // is the last exactly-carried count, and 2^53 (which 2^53 + 1
+  // aliases on the f64 wire) must map to "unknown size" — there is no
+  // one honest count to verify against.
+  readonly topBytes: number;
+  // Holds 2^53 by design — past the i64 class's provable ±(2^53 − 1)
+  // window, so this slot stays f64-classed in every contract.
+  readonly pastBytes: number;
+  readonly chanState: ChannelState;
+  readonly chanEvents: number;
+  // Rejection delivery-order probe for the mixed refused batches: each
+  // rejection Msg takes the next sequence number, so assertions read
+  // which family's rejection reached update first — Cmd.batch's
+  // performed-in-order contract, pinned across effect families.
+  readonly rejectSeq: number;
+  readonly chanRejectAt: number;
+  readonly imgRejectAt: number;
+  readonly fileTotal: number;
+  readonly fileExists: boolean;
+  readonly settingsOpen: boolean;
+}
+
+export type Msg =
+  | { readonly kind: "toggle" }
+  | { readonly kind: "enable" }
+  | { readonly kind: "disable" }
+  | { readonly kind: "refresh" }
+  | { readonly kind: "abort" }
+  | { readonly kind: "stamp" }
+  | { readonly kind: "note" }
+  | { readonly kind: "loaded"; readonly body: Uint8Array }
+  | { readonly kind: "failed"; readonly why: Uint8Array }
+  | { readonly kind: "tick"; readonly at: number }
+  | { readonly kind: "stamped"; readonly at: number }
+  | { readonly kind: "save" }
+  | { readonly kind: "load" }
+  | { readonly kind: "file_stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
+  | { readonly kind: "stat_file" }
+  | { readonly kind: "append_file" }
+  | { readonly kind: "delete_file" }
+  | { readonly kind: "stream_read" }
+  | { readonly kind: "stream_open" }
+  | { readonly kind: "stream_chunk" }
+  | { readonly kind: "stream_close" }
+  | { readonly kind: "stream_out_of_order" }
+  | { readonly kind: "stream_piece"; readonly bytes: Uint8Array }
+  | { readonly kind: "stream_done"; readonly total: number }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "get" }
+  | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "stream" }
+  | { readonly kind: "streamed"; readonly status: number }
+  | { readonly kind: "cancel_stream" }
+  | { readonly kind: "share" }
+  | { readonly kind: "paste" }
+  | { readonly kind: "later" }
+  | { readonly kind: "halt" }
+  | { readonly kind: "boomed"; readonly at: number }
+  | { readonly kind: "run" }
+  | { readonly kind: "hang" }
+  | { readonly kind: "kill" }
+  | { readonly kind: "lined"; readonly text: Uint8Array }
+  | { readonly kind: "ended"; readonly code: number }
+  | { readonly kind: "play" }
+  | { readonly kind: "pause_music" }
+  | { readonly kind: "set_volume" }
+  | { readonly kind: "stop_music" }
+  | { readonly kind: "audio_evt"; readonly state: AudioState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly bands: Uint8Array }
+  | { readonly kind: "play_clip" }
+  | { readonly kind: "pause_clip" }
+  | { readonly kind: "stop_clip" }
+  | { readonly kind: "video_evt"; readonly state: VideoState; readonly positionMs: number; readonly durationMs: number; readonly playing: boolean; readonly buffering: boolean; readonly width: number; readonly height: number }
+  | { readonly kind: "show_cover" }
+  | { readonly kind: "show_cover_again" }
+  | { readonly kind: "load_next" }
+  | { readonly kind: "load_top" }
+  | { readonly kind: "load_past" }
+  | { readonly kind: "load_flood" }
+  | { readonly kind: "load_frac" }
+  | { readonly kind: "load_sized" }
+  | { readonly kind: "load_top_bytes" }
+  | { readonly kind: "load_past_bytes" }
+  | { readonly kind: "cancel_cover" }
+  | { readonly kind: "cancel_missing" }
+  | { readonly kind: "evict_first" }
+  | { readonly kind: "evict_cover" }
+  | { readonly kind: "evict_missing" }
+  | { readonly kind: "image_done"; readonly id: number; readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number }
+  | { readonly kind: "watch" }
+  | { readonly kind: "mix_reject" }
+  | { readonly kind: "mix_reject_flip" }
+  | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
+  | { readonly kind: "notify" }
+  | { readonly kind: "store_put" }
+  | { readonly kind: "store_get" }
+  | { readonly kind: "store_delete" }
+  | { readonly kind: "store_scan" }
+  | { readonly kind: "store_many" }
+  | { readonly kind: "db_exec" }
+  | { readonly kind: "db_query" }
+  | { readonly kind: "credential_set" }
+  | { readonly kind: "credential_get" }
+  | { readonly kind: "credential_delete" }
+  | { readonly kind: "open_pty" }
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
+  | { readonly kind: "store_scan_invalid" }
+  | { readonly kind: "open_settings" }
+  | { readonly kind: "close_settings"; readonly reason: Uint8Array };
+
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [
+    {
+      polling: true,
+      ticks: 0,
+      lastTickAt: -1,
+      stampMs: -1,
+      failures: 0,
+      status: new Uint8Array(0),
+      lastErr: new Uint8Array(0),
+      saved: 0,
+      code: -1,
+      firedAt: -1,
+      lines: 0,
+      lastLine: new Uint8Array(0),
+      exitCode: -1,
+      audioState: "rejected",
+      posMs: -1,
+      durMs: -1,
+      playing: false,
+      bands: new Uint8Array(0),
+      audioEvents: 0,
+      videoState: "rejected",
+      vPosMs: -1,
+      vDurMs: -1,
+      vPlaying: false,
+      vW: -1,
+      vH: -1,
+      videoEvents: 0,
+      cover: 0,
+      coverW: -1,
+      coverH: -1,
+      imageState: "rejected",
+      imageStatus: -1,
+      imageResults: 0,
+      lastImageId: -1,
+      nextCover: 100,
+      topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
+      fracBytes: 1.5,
+      wholeBytes: 4096,
+      fracStoreLimit: 0.5,
+      topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
+      pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
+      chanState: "closed",
+      chanEvents: 0,
+      rejectSeq: 0,
+      chanRejectAt: -1,
+      imgRejectAt: -1,
+      fileTotal: 0,
+      fileExists: false,
+      settingsOpen: false,
+    },
+    Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
+  ];
+}
+
+export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "toggle":
+      return [{ ...model, polling: !model.polling }, Cmd.none];
+    case "enable":
+      return [{ ...model, polling: true }, Cmd.none];
+    case "disable":
+      return [{ ...model, polling: false }, Cmd.none];
+    case "refresh":
+      return [model, Cmd.request("status.read", model.status, { key: "status", ok: "loaded", err: "failed" })];
+    case "abort":
+      return [model, Cmd.cancel("status")];
+    case "stamp":
+      return [model, Cmd.now("stamped")];
+    case "note":
+      return [model, Cmd.host("blob.put", asciiBytes("hi"))];
+    case "loaded":
+      return [{ ...model, status: msg.body }, Cmd.none];
+    case "failed":
+      return [{ ...model, failures: (model.failures < 9007199254740991 ? model.failures + 1 : 9007199254740991), lastErr: msg.why }, Cmd.none];
+    case "tick":
+      return [{ ...model, ticks: (model.ticks < 9007199254740991 ? model.ticks + 1 : 9007199254740991), lastTickAt: msg.at }, Cmd.none];
+    case "stamped":
+      return [{ ...model, stampMs: msg.at }, Cmd.none];
+    case "save":
+      // The e2e suite runs with the repo root as cwd; the store lives
+      // under the zig cache like every tmp-dir test artifact.
+      return [model, Cmd.writeFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "load":
+      return [model, Cmd.readFile(asciiBytes(".zig-cache/tmp/ts-core-e2e/store.bin"), { key: "file", ok: "loaded", err: "failed" })];
+    case "file_stat":
+      return [{ ...model, fileTotal: msg.size, fileExists: msg.exists }, Cmd.none];
+    case "stat_file":
+      return [model, Cmd.statFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "file_stat", err: "failed" })];
+    case "append_file":
+      return [model, Cmd.appendFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "delete_file":
+      return [model, Cmd.deleteFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "wrote", err: "failed" })];
+    case "stream_open":
+      return [model, Cmd.writeFileStream("file-stream", asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { ok: "wrote", err: "failed" })];
+    case "stream_chunk":
+      return [model, Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" })];
+    case "stream_close":
+      return [model, Cmd.writeFileClose("file-stream", { ok: "wrote", err: "failed" })];
+    case "stream_out_of_order":
+      return [model, Cmd.batch([
+        Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" }),
+        Cmd.writeFileChunk("file-stream", model.status, { ok: "wrote", err: "failed" }),
+      ])];
+    case "stream_read":
+      return [model, Cmd.readFileStream(asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { key: "read-stream", chunk: "stream_piece", done: "stream_done", err: "failed" })];
+    case "stream_piece":
+      return [{ ...model, status: msg.bytes }, Cmd.none];
+    case "stream_done":
+      return [{ ...model, fileTotal: msg.total }, Cmd.none];
+    case "wrote":
+      return [{ ...model, saved: (model.saved < 9007199254740991 ? model.saved + 1 : 9007199254740991) }, Cmd.none];
+    case "get":
+      return [
+        model,
+        Cmd.fetch(
+          { url: asciiBytes("https://status.test/feed"), method: "POST", headers: { accept: "text/plain" }, body: model.status, timeoutMs: 750 },
+          { key: "get", ok: "fetched", err: "failed" },
+        ),
+      ];
+    case "fetched":
+      return [{ ...model, code: msg.status, status: msg.body }, Cmd.none];
+    case "stream":
+      return [
+        model,
+        Cmd.fetch(
+          { url: asciiBytes("https://status.test/events"), method: "POST", headers: { accept: "text/event-stream" }, body: model.status, timeoutMs: 60000, maxLineBytes: 65536 },
+          { key: "events", line: "lined", ok: "streamed", err: "failed" },
+        ),
+      ];
+    case "streamed":
+      return [{ ...model, code: msg.status }, Cmd.none];
+    case "cancel_stream":
+      return [model, Cmd.cancel("events")];
+    case "share":
+      return [model, Cmd.clipboardWrite(model.status)];
+    case "paste":
+      return [model, Cmd.clipboardRead({ key: "clip", ok: "loaded", err: "failed" })];
+    case "later":
+      return [model, Cmd.delay("boom", 150, "boomed")];
+    case "halt":
+      return [model, Cmd.cancel("boom")];
+    case "boomed":
+      return [{ ...model, firedAt: msg.at }, Cmd.none];
+    case "run":
+      // A real, hermetic child: two stdout lines, then a clean exit.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("printf 'one\\ntwo\\n'")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "hang":
+      // A child that outlives the test unless cancelled mid-stream.
+      return [model, Cmd.spawn([asciiBytes("/bin/sh"), asciiBytes("-c"), asciiBytes("sleep 30")], { key: "job", line: "lined", exit: "ended", err: "failed" })];
+    case "kill":
+      return [model, Cmd.cancel("job")];
+    case "lined":
+      return [{ ...model, lines: (model.lines < 9007199254740991 ? model.lines + 1 : 9007199254740991), lastLine: msg.text }, Cmd.none];
+    case "ended":
+      return [{ ...model, exitCode: msg.code }, Cmd.none];
+    case "play":
+      return [model, Cmd.audioPlay("track", { path: asciiBytes("music/track.mp3") }, { event: "audio_evt" })];
+    case "pause_music":
+      return [model, Cmd.audioPause("track")];
+    case "set_volume":
+      // The engine's remembered volume verb (0..1), on the fixture's
+      // test-only path: the soundboard example carries no volume control
+      // (parity with its Zig original), so the capability stays proven
+      // here.
+      return [model, Cmd.audioSetVolume("track", 0.8)];
+    case "stop_music":
+      return [model, Cmd.audioStop("track")];
+    case "audio_evt":
+      return [{
+        ...model,
+        audioState: msg.state,
+        posMs: msg.positionMs,
+        durMs: msg.durationMs,
+        playing: msg.playing,
+        bands: msg.bands,
+        audioEvents: (model.audioEvents < 9007199254740991 ? model.audioEvents + 1 : 9007199254740991),
+      }, Cmd.none];
+    case "play_clip":
+      // The media-surface id a video widget would bind: the decoded
+      // frames feed that texture channel platform-side; only the
+      // transport events below reach the core.
+      return [model, Cmd.videoLoad("clip", { surface: 5, path: asciiBytes("media/clip.mp4") }, { event: "video_evt" })];
+    case "pause_clip":
+      return [model, Cmd.videoPause("clip")];
+    case "stop_clip":
+      return [model, Cmd.videoStop("clip")];
+    case "video_evt":
+      return [{
+        ...model,
+        videoState: msg.state,
+        vPosMs: msg.positionMs,
+        vDurMs: msg.durationMs,
+        vPlaying: msg.playing,
+        vW: msg.width,
+        vH: msg.height,
+        videoEvents: (model.videoEvents < 9007199254740991 ? model.videoEvents + 1 : 9007199254740991),
+      }, Cmd.none];
+    case "show_cover":
+      // The runtime ImageId the views bind; the model only adopts it
+      // on a loaded result (the store-the-id-on-success discipline).
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png"), url: asciiBytes("https://cdn.test/cover.png") }, { event: "image_done" })];
+    case "show_cover_again":
+      // A duplicate live id: the bridge rejects it (state "rejected")
+      // — one load per id at a time, the spawn discipline.
+      return [model, Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" })];
+    case "load_next":
+      // Dynamic ids straight off the model: each dispatch parks one
+      // more in-flight load, so the e2e suite can fill the bridge's
+      // 16-entry image table and prove the 17th answers "rejected"
+      // (never a crash) while the 16 live loads stay healthy.
+      return [{ ...model, nextCover: (model.nextCover < 9007199254740991 ? model.nextCover + 1 : 9007199254740991) }, Cmd.imageLoad(model.nextCover, { path: asciiBytes("art/flood.png") }, { event: "image_done" })];
+    case "load_top":
+      // 2^53 - 1 reaching the bridge as a DYNAMIC value the emitter's
+      // literal gate never sees: the last id every tier carries
+      // exactly, so it must park a live load.
+      return [model, Cmd.imageLoad(model.topId, { path: asciiBytes("art/top.png") }, { event: "image_done" })];
+    case "load_past":
+      // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot
+      // carry exactly. Dynamic values answer "rejected" at runtime, the
+      // runtime twin of the emitter's compile-time literal gate.
+      return [model, Cmd.imageLoad(model.topId + 1, { path: asciiBytes("art/past.png") }, { event: "image_done" })];
+    case "load_flood":
+      // Seventeen loads in ONE command value: against a full image
+      // table every one must answer "rejected" at the post-cycle
+      // boundary — one result per load, however many one batch stages.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(200, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(201, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(202, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(203, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(204, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(205, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(206, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(207, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(208, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(209, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(210, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(211, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(212, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(213, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(214, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(215, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+        Cmd.imageLoad(216, { path: asciiBytes("art/flood.png") }, { event: "image_done" }),
+      ])];
+    case "load_frac":
+      // A fractional expectedBytes reaching the bridge as a DYNAMIC
+      // value the emitter's literal gate never sees: not a
+      // representable whole byte count, so the bridge hands the engine
+      // "unknown size" (0) — truncating to 1 would make the cache
+      // verify against a size the app never declared.
+      return [model, Cmd.imageLoad(61, { url: asciiBytes("https://cdn.test/frac.png"), cachePath: asciiBytes("cache/frac.png"), expectedBytes: model.fracBytes }, { event: "image_done" })];
+    case "load_sized":
+      // The whole-number control: a dynamic representable count rides
+      // the wire into the engine exactly.
+      return [model, Cmd.imageLoad(62, { url: asciiBytes("https://cdn.test/sized.png"), cachePath: asciiBytes("cache/sized.png"), expectedBytes: model.wholeBytes }, { event: "image_done" })];
+    case "load_top_bytes":
+      // 2^53 - 1 as a DYNAMIC count: the last one the f64 wire carries
+      // exactly, so it must install as the verification size verbatim.
+      return [model, Cmd.imageLoad(63, { url: asciiBytes("https://cdn.test/top.png"), cachePath: asciiBytes("cache/top.png"), expectedBytes: model.topBytes }, { event: "image_done" })];
+    case "load_past_bytes":
+      // 2^53 as a DYNAMIC count — and 2^53 + 1 arrives as this exact
+      // wire value (the f64 grid steps by 2 there), so there is no one
+      // honest count to verify against. The bridge maps it to "unknown
+      // size" (0), joining the fractionals: installing it would make
+      // every real download miss verification and re-fetch on launch.
+      return [model, Cmd.imageLoad(64, { url: asciiBytes("https://cdn.test/past.png"), cachePath: asciiBytes("cache/past.png"), expectedBytes: model.pastBytes }, { event: "image_done" })];
+    case "cancel_cover":
+      // The numeric-id cancel: ends the in-flight load under id 21
+      // loudly (its own event arm delivers state "cancelled") and
+      // frees the id for a same-id retry.
+      return [model, Cmd.imageCancel(21)];
+    case "cancel_missing":
+      // An id with no live load: the documented no-op — no result, no
+      // crash, nothing to report on.
+      return [model, Cmd.imageCancel(555)];
+    case "evict_first":
+      // The gallery eviction move: free the registry slot under the
+      // first dynamic id, so a full 16-slot registry accepts one more
+      // image. Synchronous registry surgery — no result Msg.
+      return [model, Cmd.imageUnregister(100)];
+    case "evict_cover":
+      // Unregister aimed at the cover id — in the e2e it lands both
+      // while a load is IN FLIGHT (a registry miss: no-op, and the
+      // load's terminal still registers) and while the id is
+      // registered under a live reload (the slot frees now, and the
+      // reload's terminal re-registers it).
+      return [model, Cmd.imageUnregister(21)];
+    case "evict_missing":
+      // An id with no registration: the documented no-op — no result,
+      // no crash, nothing to report on.
+      return [model, Cmd.imageUnregister(888)];
+    case "image_done":
+      // The echoed id IS the adopted id — the store-the-id-on-success
+      // discipline reads it off the result instead of hardcoding it.
+      if (msg.state === "loaded")
+        return [{ ...model, cover: msg.id, coverW: msg.width, coverH: msg.height, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id }, Cmd.none];
+      if (msg.state === "rejected")
+        return [{ ...model, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id, rejectSeq: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991), imgRejectAt: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991) }, Cmd.none];
+      return [{ ...model, imageState: msg.state, imageStatus: msg.status, imageResults: (model.imageResults < 9007199254740991 ? model.imageResults + 1 : 9007199254740991), lastImageId: msg.id }, Cmd.none];
+    case "watch":
+      return [model, Cmd.channelOpen(41, { event: "chan_evt" })];
+    case "mix_reject":
+      // The mixed refused batch: BOTH records are refused (duplicate
+      // live key/id), and Cmd.batch's performed-in-order contract
+      // extends to the rejections — the channel rejection dispatches
+      // first because its record comes first.
+      return [model, Cmd.batch([
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+      ])];
+    case "mix_reject_flip":
+      // The reverse order, so the pin is stream order — never one
+      // family blocked ahead of the other.
+      return [model, Cmd.batch([
+        Cmd.imageLoad(21, { path: asciiBytes("art/cover.png") }, { event: "image_done" }),
+        Cmd.channelOpen(41, { event: "chan_evt" }),
+      ])];
+    case "chan_evt":
+      if (msg.state === "rejected")
+        return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991), rejectSeq: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991), chanRejectAt: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991) }, Cmd.none];
+      return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991) }, Cmd.none];
+    case "notify":
+      return [model, Cmd.showNotification({
+        id: asciiBytes("build-status"),
+        title: model.status,
+        subtitle: asciiBytes("native-sdk"),
+        body: asciiBytes("TS core notification"),
+        actionLabel: asciiBytes("Pause polling"),
+        actionCommand: asciiBytes("core.toggle"),
+      })];
+    case "store_put":
+      return [model, Cmd.store.set("fixture/one", model.status, { key: "store", ok: "wrote", err: "failed" })];
+    case "store_get":
+      return [model, Cmd.store.get("fixture/one", { key: "store", ok: "loaded", err: "failed" })];
+    case "store_delete":
+      return [model, Cmd.store.delete("fixture/one", { key: "store", ok: "wrote", err: "failed" })];
+    case "store_scan":
+      return [model, Cmd.store.scan("fixture/café/", { limit: 7, after: utf8Bytes("fixture/café/🚀") }, { key: "store", ok: "loaded", err: "failed" })];
+    case "store_scan_invalid":
+      // Keep this value model-derived so the facade must preserve a dynamic
+      // invalid number for the host's over_bound rejection path.
+      return [model, Cmd.store.scan("", { limit: model.fracStoreLimit }, { key: "store", ok: "loaded", err: "failed" })];
+    case "store_many":
+      return [model, Cmd.store.setMany([
+        ["fixture/one", asciiBytes("one")],
+        ["fixture/two", model.status],
+        ["fixture/café/🚀/next", asciiBytes("page")],
+      ], { key: "store", ok: "wrote", err: "failed" })];
+    case "db_exec":
+      return [model, Cmd.db.exec([
+        ["CREATE TABLE relational_fixture(id INTEGER PRIMARY KEY, label TEXT NOT NULL, score REAL, body BLOB, enabled INTEGER NOT NULL, absent TEXT)", []],
+        ["INSERT INTO relational_fixture(id,label,score,body,enabled,absent) VALUES(?,?,?,?,?,?)", [7, "café", 1.5, model.status, true, null]],
+      ], { key: "relational", ok: "wrote", err: "failed" })];
+    case "db_query":
+      return [model, Cmd.db.query(
+        "SELECT id,label,score,body,enabled,absent FROM relational_fixture WHERE id=? AND enabled=?",
+        [7, true],
+        { key: "relational", page: "loaded", done: "wrote", err: "failed" },
+      )];
+    case "credential_set":
+      return [model, Cmd.credentials.set("api-token", model.status, { key: "credential", ok: "wrote", err: "failed" })];
+    case "credential_get":
+      return [model, Cmd.credentials.get("api-token", { key: "credential", ok: "loaded", err: "failed" })];
+    case "credential_delete":
+      return [model, Cmd.credentials.delete("api-token", { key: "credential", ok: "wrote", err: "failed" })];
+    case "open_pty":
+      return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
+    case "pty_evt":
+      return [{ ...model, status: msg.key }, Cmd.none];
+    case "open_settings":
+      return [{ ...model, settingsOpen: true }, Cmd.none];
+    case "close_settings":
+      return [{ ...model, settingsOpen: false, status: msg.reason }, Cmd.none];
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  if (!model.polling) return Sub.none;
+  return Sub.timer("tick", 100, "tick");
+}
+
+/// The generated launcher owns this shell helper: it installs the
+/// status item from the committed boot model, then re-derives title and
+/// menu after every model-changing dispatch.
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/tray.svg"),
+    tooltip: utf8Bytes("TypeScript status fixture · UTF-8 😀"),
+    activationCommand: asciiBytes("core.refresh"),
+    alternateActivationCommand: asciiBytes("core.toggle"),
+    openCommand: asciiBytes("core.refresh"),
+    presentation: {
+      title: asciiBytes(model.polling ? "TS ON" : "TS OFF"),
+      width: model.polling ? 64 : 72,
+      tone: model.polling ? "normal" : "warning",
+      iconOpacity: model.polling ? 1 : 0.5,
+      monospaced: true,
+      fontSize: model.polling ? 12 : 13,
+      fontWeight: model.polling ? "medium" : "semibold",
+    },
+    items: [
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: false,
+        detail: asciiBytes(""),
+        role: "hero",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        metric: {
+          primaryText: asciiBytes(model.polling ? "2,494 requests" : "1,240 requests"),
+          secondaryText: utf8Bytes("Today · production"),
+          accessibilityLabel: asciiBytes(model.polling ? "2,494 requests today" : "1,240 requests today"),
+        },
+      },
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: true,
+        detail: asciiBytes(""),
+        role: "segmented",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        segmented: {
+          options: [
+            { id: 11, label: asciiBytes("On"), command: asciiBytes("core.enable"), selected: model.polling, enabled: true },
+            { id: 12, label: asciiBytes("Off"), command: asciiBytes("core.disable"), selected: !model.polling, enabled: true },
+          ],
+        },
+      },
+      {
+        id: 0,
+        label: asciiBytes(""),
+        command: asciiBytes(""),
+        separator: false,
+        enabled: false,
+        detail: asciiBytes(""),
+        role: "chart",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+        chart: {
+          values: model.polling ? [0.25, 0.5, 0.75, 1] : [1, 0.75, 0.5, 0.25],
+          minValue: 0,
+          maxValue: 1,
+          leadingCaption: asciiBytes("Load"),
+          trailingSummary: asciiBytes(model.polling ? "rising" : "falling"),
+          accessibilityLabel: asciiBytes(model.polling ? "Load rising" : "Load falling"),
+        },
+      },
+      {
+        id: 1,
+        label: model.polling ? utf8Bytes("Pause polling…") : utf8Bytes("Resume polling…"),
+        command: asciiBytes("core.toggle"),
+        separator: false,
+        enabled: true,
+        detail: model.polling ? utf8Bytes("configured ✓") : utf8Bytes("warning ⚠"),
+        role: "agent",
+        key: asciiBytes(""),
+        modifiers: { primary: false, command: false, control: false, option: false, shift: false },
+      },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      {
+        id: 2,
+        label: asciiBytes("Refresh now"),
+        command: asciiBytes("core.refresh"),
+        separator: false,
+        enabled: model.polling,
+        detail: asciiBytes(""),
+        role: "command",
+        key: asciiBytes("r"),
+        modifiers: { primary: true, command: false, control: false, option: false, shift: false },
+      },
+    ],
+  };
+}
+
+export function commandMsg(name: string): Msg | null {
+  if (name === "core.enable") return { kind: "enable" };
+  if (name === "core.disable") return { kind: "disable" };
+  if (name === "core.toggle") return { kind: "toggle" };
+  if (name === "core.refresh") return { kind: "refresh" };
+  if (name === "core.open-settings") return { kind: "open_settings" };
+  if (name === "core.close-settings:manual") return { kind: "close_settings", reason: asciiBytes("manual") };
+  if (name === "core.close-settings:payload") return { kind: "close_settings", reason: asciiBytes("payload") };
+  return null;
+}
+
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    title: asciiBytes("Settings"),
+    width: 320,
+    height: 240,
+    resizable: false,
+    titlebar: "chromeless",
+    transparent: true,
+    closePolicy: model.polling ? "hide" : "quit",
+    onCloseCommand: asciiBytes("core.close-settings:payload"),
+  })];
+}
+
+
+// A bounded host projection; the committed graph remains in TypeScript.
+export interface HostViewState {
+  readonly ticks: number;
+  readonly failures: number;
+  readonly status: Uint8Array;
+  readonly polling: boolean;
+}
+export function hostViewState(model: Model): HostViewState {
+  return { ticks: model.ticks, failures: model.failures, status: model.status, polling: model.polling };
+}
+
+// A distinct surface size isolates presented-frame probes from timer tests.
+export function frameMsg(model: Model, frame: FrameEvent): Msg | null {
+  if (frame.width === 731 && frame.height === 257 && frame.intervalMs === 16) {
+    if (frame.timestampMs === 23 && model.polling) return { kind: "disable" };
+    if (frame.timestampMs === 24 && !model.polling) return { kind: "enable" };
+  }
+  return null;
+}

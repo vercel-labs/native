@@ -1,0 +1,30 @@
+{
+  "name": "ts-tag-input-core",
+  "description": "Exercises the text seam of the subset: a tag-input core that parses comma-separated bytes, trims, drops empties, and dedupes case-insensitively - all in Uint8Array discipline, where string methods are the reflex and the checker says no.",
+  "prompt": "This workspace holds a TypeScript app core (see README.md; the deliverable is src/core.ts, written in the app-core subset — the authoring guide is .claude/skills/ts-core/SKILL.md). Replace the starter counter with a tag-input core.\n\nRequirements:\n- A list of tags. Each tag has a stable numeric id and a name (bytes). The model starts with no tags and an empty draft.\n- A draft text entry: edits replace the draft bytes.\n- Submitting parses the draft as comma-separated tag names: split on commas, trim ASCII spaces from each piece, drop empty pieces. A piece that duplicates an existing tag name or an earlier piece in the same submit — compared case-insensitively over ASCII letters — is dropped too. Survivors are appended in order, each stored with its trimmed original casing and a fresh id, and the draft is cleared (submit always clears the draft, even when nothing survives).\n- Removing a tag by id deletes exactly that tag.\n\nThe exact contract (the grader compiles against it):\n- export interface Model with fields: tags (readonly array of Tag), nextId (number), draft (Uint8Array). Tag fields: id (number), name (Uint8Array).\n- export type Msg with exactly these arms: { kind: \"draft_edit\", text: Uint8Array }, { kind: \"submit\" }, { kind: \"remove\", id: number }.\n- export function initialModel(): Model, export function update(model: Model, msg: Msg): Model, export function tagCount(model: Model): number, export function hasTag(model: Model, name: Uint8Array): boolean (case-insensitive over ASCII letters).\n\nCheck your work with the transpiler command in README.md until it exits clean, and make sure the behavior above actually holds (node can import the module directly). When you are done, summarize what you built.",
+  "frontend": "ts-core",
+  "timeoutMs": 900000,
+  "maxTurns": 50,
+  "checks": [
+    {
+      "type": "ts_transpile"
+    },
+    {
+      "type": "ts_harness",
+      "description": "comma parsing with trim and empty-drop, case-insensitive dedupe across and within submits, ordered append, draft clearing, removal by id"
+    },
+    {
+      "type": "llm_judge",
+      "criteria": [
+        "Text is handled in the subset idiom throughout: parsing, trimming, and comparison all work on bytes; no string code-unit access smuggled in.",
+        "The parser is factored into small pure helpers (split/trim/equality) instead of one tangled loop in update.",
+        "Dedupe semantics are exact: case folding covers only ASCII letters, first occurrence wins, existing tags and same-submit pieces both count.",
+        "The code reads like plain idiomatic TypeScript within the subset's constraints."
+      ],
+      "files": ["src/core.ts"],
+      "minScore": 6,
+      "advisory": true,
+      "description": "quality of the byte-level text handling beyond compliance"
+    }
+  ]
+}

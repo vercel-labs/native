@@ -151,6 +151,7 @@ int native_sdk_app_text_input_state(void *app, native_sdk_text_input_state_t *ou
 typedef double (*native_sdk_text_measure_fn)(void *context, uint64_t font_id, double size, const char *text, uintptr_t text_len);
 int native_sdk_app_set_text_measure(void *app, native_sdk_text_measure_fn measure, void *context);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);
+int native_sdk_app_set_data_root(void *app, const char *path, uintptr_t len);
 uintptr_t native_sdk_app_widget_semantics_count(void *app);
 int native_sdk_app_widget_semantics_at(void *app, uintptr_t index, native_sdk_widget_semantics_t *out);
 int native_sdk_app_widget_semantics_by_id(void *app, uint64_t id, native_sdk_widget_semantics_t *out);

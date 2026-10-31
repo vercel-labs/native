@@ -37,6 +37,21 @@ fn scrollFixtureLayout(nodes: []canvas.WidgetLayoutNode, offset: f32) !canvas.Wi
     return canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 72), nodes);
 }
 
+fn horizontalTabFixtureLayout(nodes: []canvas.WidgetLayoutNode, selected_id: canvas.ObjectId) !canvas.WidgetLayoutTree {
+    const tabs = [_]canvas.Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(0, 0, 180, 37), .state = .{ .selected = selected_id == 2 }, .semantics = .{ .role = .tab, .label = "One" } },
+        .{ .id = 3, .kind = .stack, .frame = geometry.RectF.init(180, 0, 180, 37), .state = .{ .selected = selected_id == 3 }, .semantics = .{ .role = .tab, .label = "Two" } },
+        .{ .id = 4, .kind = .stack, .frame = geometry.RectF.init(360, 0, 180, 37), .state = .{ .selected = selected_id == 4 }, .semantics = .{ .role = .tab, .label = "Three" } },
+    };
+    const strip = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &tabs,
+    };
+    return canvas.layoutWidgetTree(strip, geometry.RectF.init(0, 0, 360, 37), nodes);
+}
+
 test "layout install publishes native scroll drivers and suppresses engine scrollbars" {
     const harness = try TestHarness().create(std.testing.allocator, .{});
     defer harness.destroy(std.testing.allocator);
@@ -58,7 +73,8 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
 
     // The install pushed one driver: region frame, rebased content extent
     // (viewport 72, content 120 -> max offset 48 -> content height 120),
-    // the source offset, and set_offset (a fresh driver adopts it).
+    // the source offset, and the set-offset flags (a fresh driver
+    // adopts both axes).
     try std.testing.expect(harness.null_platform.scroll_driver_set_count >= 1);
     try std.testing.expectEqualStrings("canvas", harness.null_platform.scrollDriverLabel());
     const drivers = harness.null_platform.scrollDrivers();
@@ -68,7 +84,7 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expectEqual(@as(f32, 180), drivers[0].content_size.width);
     try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
     try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_y);
-    try std.testing.expect(drivers[0].set_offset);
+    try std.testing.expect(drivers[0].set_offset_y);
     // Edge behavior defaults off: the native scroller pins at the
     // content edges unless the region (or the scroll-physics token)
     // opts into rubber-band.
@@ -77,7 +93,7 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     // The retained scroll node is marked natively driven and the engine
     // scrollbar (widget part slots 2 and 3) is not emitted.
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(retained.nodes[0].widget.runtime_flags.native_scroll);
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     for (display_list.commands) |command| {
@@ -95,6 +111,39 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expect(snapshot.widgets[0].scroll.present);
     try std.testing.expectEqual(@as(f32, 24.0), snapshot.widgets[0].scroll.offset);
     try std.testing.expectEqual(@as(f32, 120.0), snapshot.widgets[0].scroll.content_extent);
+}
+
+test "programmatic scroll offsets clamp before native drivers adopt them" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // Apps deliberately use an out-of-range source value for "scroll to
+    // end". Clamp that intent against the laid-out content BEFORE the
+    // native driver or retained frames can expose the raw displacement.
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try scrollFixtureLayout(&nodes, 1_000_000);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 48), retained.nodes[0].widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -48, 180, 32), retained.nodes[1].frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 40, 180, 32), retained.nodes[3].frame);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(f32, 48), drivers[0].offset_y);
+    try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
 }
 
 test "a region's rubber-band opt-in reaches its driver spec" {
@@ -169,7 +218,7 @@ test "driver offsets scroll retained scroll views and pass through overscroll" {
     try std.testing.expect(harness.runtime.invalidated);
     try std.testing.expect(harness.runtime.pendingDirtyRegions().len >= 1);
     // The driver owns physics: no engine velocity was introduced.
-    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity);
+    try std.testing.expectEqual(@as(f32, 0), harness.runtime.views[0].widget_scroll_states[0].velocity_y);
 
     // Rubber-band overscroll passes through so the bounce is visible;
     // the engine performs no kinetic recovery of its own.
@@ -184,6 +233,16 @@ test "driver offsets scroll retained scroll views and pass through overscroll" {
     try std.testing.expectEqual(@as(f32, -10), retained.nodes[0].widget.value);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 10, 180, 32), retained.nodes[1].frame);
     try std.testing.expect(!harness.runtime.views[0].canvasWidgetKineticScrollActive());
+
+    // A controlled model may immediately echo that driver offset through
+    // on-scroll. It is still the live user bounce, not a programmatic
+    // source move, so the rebuild must preserve it without clamping.
+    var echo_nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const echo_layout = try scrollFixtureLayout(&echo_nodes, -10);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", echo_layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, -10), retained.nodes[0].widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 10, 180, 32), retained.nodes[1].frame);
 
     // The OS scroller settles the bounce and reports the rested offset.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
@@ -251,9 +310,9 @@ test "driver offsets deliver canvas_widget_scroll observation events" {
     } });
     try std.testing.expectEqual(@as(u32, 1), app_state.scroll_event_count);
     try std.testing.expectEqual(@as(canvas.ObjectId, 1), app_state.last_id);
-    try std.testing.expectEqual(@as(f32, 24), app_state.last_scroll.offset);
-    try std.testing.expectEqual(@as(f32, 72), app_state.last_scroll.viewport_extent);
-    try std.testing.expectEqual(@as(f32, 120), app_state.last_scroll.content_extent);
+    try std.testing.expectEqual(@as(f32, 24), app_state.last_scroll.offset_y);
+    try std.testing.expectEqual(@as(f32, 72), app_state.last_scroll.viewport_extent_y);
+    try std.testing.expectEqual(@as(f32, 120), app_state.last_scroll.content_extent_y);
 
     // An echo of the applied offset changes nothing and observes nothing.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
@@ -371,7 +430,7 @@ test "driver-scrolled offsets survive rebuilds until the source offset changes" 
     try std.testing.expectEqual(@as(f32, 40), retained.nodes[0].widget.value);
     try std.testing.expect(harness.null_platform.scroll_driver_set_offset_count > pushes_before);
     try std.testing.expectEqual(@as(f32, 40), harness.null_platform.scrollDrivers()[0].offset_y);
-    try std.testing.expect(harness.null_platform.scrollDrivers()[0].set_offset);
+    try std.testing.expect(harness.null_platform.scrollDrivers()[0].set_offset_y);
 }
 
 test "scroll drivers stay unpublished without platform support" {
@@ -393,7 +452,7 @@ test "scroll drivers stay unpublished without platform support" {
 
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.scroll_driver_set_count);
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(!retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(!retained.nodes[0].widget.runtime_flags.native_scroll);
 
     // Engine scrollbar still draws for engine-owned scrolling.
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
@@ -467,7 +526,7 @@ test "windowed virtual lists ride the native scroll driver with the full virtual
     // The retained region is natively driven: engine scrollbar and
     // engine physics stand down.
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(retained.nodes[0].widget.runtime_flags.native_scroll);
 
     // A driver-reported offset scrolls the window (the optimistic echo
     // translates the built rows; the app's rebuild re-windows).
@@ -489,7 +548,7 @@ test "windowed virtual lists ride the native scroll driver with the full virtual
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", legacy_layout);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.scrollDrivers().len);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(!retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(!retained.nodes[0].widget.runtime_flags.native_scroll);
 }
 
 test "a rebuild mid-overscroll keeps the driver's offset and pushes nothing" {
@@ -579,4 +638,244 @@ test "a rebuild restores the retained scroll offset with translated descendants"
     try std.testing.expectEqualDeep(geometry.RectF.init(0, -24, 180, 32), retained.findById(2).?.frame);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 20, 180, 32), retained.findById(3).?.frame);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 64, 180, 32), retained.findById(4).?.frame);
+}
+
+test "a two-axis region's driver carries both content dimensions and follows offset_x reports" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A BOTH-axes region: content reaches x = 460 and y = 120 inside a
+    // 180 x 72 viewport, so the driver's content size must exceed the
+    // frame on both dimensions.
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 120) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const region = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .both,
+        .value = 12,
+        .value_x = 24,
+        .children = &tiles,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(region, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    // Rebased: frame + (content - viewport) on each axis.
+    try std.testing.expectEqual(@as(f32, 460), drivers[0].content_size.width);
+    try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
+    try std.testing.expectEqual(@as(f32, 24), drivers[0].offset_x);
+    try std.testing.expectEqual(@as(f32, 12), drivers[0].offset_y);
+    try std.testing.expect(drivers[0].set_offset_x);
+    try std.testing.expect(drivers[0].set_offset_y);
+    try std.testing.expect(drivers[0].scrolls_x);
+    try std.testing.expect(drivers[0].scrolls_y);
+
+    // A driver report with both offsets lands on both axes: the widget
+    // adopts the offsets and the descendants translate to match.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_x = 60,
+        .offset_y = 30,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 60), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 30), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-60, -30, 140, 120), retained.findById(2).?.frame);
+}
+
+test "activating a tab minimally reveals it without shifting an already visible tab" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 360, 37),
+    });
+    var initial_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try horizontalTabFixtureLayout(&initial_nodes, 2));
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_x = 60,
+        .timestamp_ns = 1_000_000_000,
+    } });
+
+    // Tab Two occupies content x=180..360, already wholly inside the
+    // standing 60..420 viewport. Activating it preserves the offset exactly.
+    var visible_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try horizontalTabFixtureLayout(&visible_nodes, 3));
+    var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 60), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqualDeep(geometry.RectF.init(120, 0, 180, 37), retained.findById(3).?.frame);
+
+    // Tab Three ends at x=540, 120 points past that viewport. The reveal
+    // moves by only those 120 points instead of snapping it to the leading edge.
+    var hidden_nodes: [4]canvas.WidgetLayoutNode = undefined;
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", try horizontalTabFixtureLayout(&hidden_nodes, 4));
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 180), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqualDeep(geometry.RectF.init(180, 0, 180, 37), retained.findById(4).?.frame);
+    try std.testing.expectEqual(@as(f32, 180), harness.null_platform.scrollDrivers()[0].offset_x);
+}
+
+test "a horizontal-only region's driver pins its vertical range" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // Content is both WIDE and TALL, but the region grants only the
+    // horizontal axis: the driver's content height pins to the frame so
+    // the OS scroller can never travel vertically, and a stray vertical
+    // report must not displace content.
+    const tiles = [_]canvas.Widget{
+        .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 140, 200) },
+        .{ .id = 3, .kind = .panel, .frame = geometry.RectF.init(320, 0, 140, 60) },
+    };
+    const shelf = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .scroll_axes = .horizontal,
+        .children = &tiles,
+    };
+    var nodes: [4]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(shelf, geometry.RectF.init(0, 0, 180, 72), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(f32, 460), drivers[0].content_size.width);
+    try std.testing.expectEqual(@as(f32, 72), drivers[0].content_size.height);
+    try std.testing.expect(drivers[0].scrolls_x);
+    try std.testing.expect(!drivers[0].scrolls_y);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
+        .window_id = 1,
+        .label = "canvas",
+        .driver_id = 1,
+        .offset_x = 40,
+        .offset_y = 50,
+        .timestamp_ns = 1_000_000_000,
+    } });
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 40), retained.findById(1).?.widget.value_x);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(1).?.widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(-40, 0, 140, 200), retained.findById(2).?.frame);
+}
+
+test "floating surfaces push occluders that block underlying drivers but not their own" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // A horizontal shelf (id 1) with an ANCHORED popover above part of
+    // it (id 4); the popover holds its own scroll region (id 5). The
+    // popover occludes the shelf where they overlap, but never its own
+    // scroll region.
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .scroll_view, .scroll_axes = .horizontal, .frame = geometry.RectF.init(0, 0, 180, 72) }, .frame = geometry.RectF.init(0, 0, 180, 72), .depth = 0 },
+        .{ .widget = .{ .id = 2, .kind = .panel, .frame = geometry.RectF.init(0, 0, 400, 60) }, .frame = geometry.RectF.init(0, 0, 400, 60), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 4, .kind = .popover, .frame = geometry.RectF.init(40, 10, 100, 50), .layout = .{ .anchor = .{ .placement = .below } } }, .frame = geometry.RectF.init(40, 10, 100, 50), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 5, .kind = .scroll_view, .frame = geometry.RectF.init(44, 14, 92, 42) }, .frame = geometry.RectF.init(44, 14, 92, 42), .depth = 2, .parent_index = 2 },
+        .{ .widget = .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(44, 14, 92, 200) }, .frame = geometry.RectF.init(44, 14, 92, 200), .depth = 3, .parent_index = 3 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.scroll_occluder_count);
+    try std.testing.expectEqualDeep(geometry.RectF.init(40, 10, 100, 50), harness.null_platform.scroll_occluders[0].frame);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 2), drivers.len);
+    // The shelf is blocked by the popover (bit 0)...
+    try std.testing.expectEqual(@as(u64, 1), drivers[0].id);
+    try std.testing.expectEqual(@as(u32, 1), drivers[0].occluder_mask);
+    // ...while the popover's own scroll region is exempt.
+    try std.testing.expectEqual(@as(u64, 5), drivers[1].id);
+    try std.testing.expectEqual(@as(u32, 0), drivers[1].occluder_mask);
+    // And the nested chain rides the parent ids.
+    try std.testing.expectEqual(@as(u64, 0), drivers[0].parent_id);
+    try std.testing.expectEqual(@as(u64, 1), drivers[1].parent_id);
+}
+
+test "lower-layer later surfaces do not occlude a modal scroll driver" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 160),
+    });
+
+    // The modal mounts before a default anchored popover, but its effective
+    // layer is higher. Its nested scroll driver must therefore ignore both
+    // its own modal catcher and the later surface painted beneath it.
+    const nodes = [_]canvas.WidgetLayoutNode{
+        .{ .widget = .{ .id = 1, .kind = .stack }, .frame = geometry.RectF.init(0, 0, 240, 160), .depth = 0 },
+        .{ .widget = .{ .id = 10, .kind = .dialog, .scrim = true }, .frame = geometry.RectF.init(20, 20, 200, 120), .depth = 1, .parent_index = 0 },
+        .{ .widget = .{ .id = 11, .kind = .scroll_view }, .frame = geometry.RectF.init(30, 30, 180, 80), .depth = 2, .parent_index = 1 },
+        .{ .widget = .{ .id = 12, .kind = .panel }, .frame = geometry.RectF.init(30, 30, 180, 200), .depth = 3, .parent_index = 2 },
+        .{ .widget = .{ .id = 20, .kind = .popover, .layout = .{ .anchor = .{} } }, .frame = geometry.RectF.init(40, 40, 100, 60), .depth = 1, .parent_index = 0 },
+    };
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.scroll_occluder_count);
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(u64, 11), drivers[0].id);
+    try std.testing.expectEqual(@as(u32, 0), drivers[0].occluder_mask);
 }

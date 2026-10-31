@@ -16,14 +16,7 @@
 //! The library form stays available — call sites you have not migrated
 //! keep rendering the stock item, and deleting this file costs nothing
 //! (`native eject component timeline-item` writes it again).
-//!
-//! The composition, in one glance: a leading status indicator (badge or
-//! dot, plus a hairline connector toward the next item), a
-//! title/description/meta content column, and — when pressable — a
-//! trailing chevron with `on_press` bound to the item's root, so presses
-//! on the plain text fall through to the item.
 
-const std = @import("std");
 const native_sdk = @import("native_sdk");
 const canvas = native_sdk.canvas;
 
@@ -34,31 +27,13 @@ pub fn TimelineItem(comptime Msg: type) type {
         pub const Options = struct {
             key: ?canvas.UiKey = null,
             global_key: ?canvas.UiKey = null,
-            /// Indicator badge text ("3"); empty (with no `icon`)
-            /// renders a small dot. Prefer `icon` for symbols — text
-            /// glyphs outside the bundled font render as tofu boxes on
-            /// the reference/screenshot paths.
             indicator: []const u8 = "",
-            /// Vector icon indicator (registry name, e.g. "check"):
-            /// drawn inside the badge with the variant's tint. Wins the
-            /// badge's content slot alongside `indicator` text.
             icon: []const u8 = "",
-            /// Indicator color variant — map item outcomes here (primary
-            /// for done, destructive for errors, outline for stopped, ...).
             variant: canvas.WidgetVariant = .outline,
             title: []const u8,
-            /// Wrapped muted preview under the title.
             description: []const u8 = "",
-            /// Muted trailing meta line ("claude · sonnet · 1m 12s").
             meta: []const u8 = "",
-            /// Hairline connector from the indicator toward the next
-            /// item; clear it on the last item.
             connector: bool = true,
-            /// Whole-item press: adds a trailing chevron and binds the
-            /// press to the item's root, focusable with role `listitem`.
-            /// A click anywhere on the item dispatches — presses on the
-            /// title/description/meta text fall through to the root
-            /// (dragging still selects the text).
             on_press: ?Msg = null,
             selected: bool = false,
         };
@@ -95,7 +70,6 @@ pub fn TimelineItem(comptime Msg: type) type {
                 content_len += 1;
             }
             const content = ui.el(.column, .{ .grow = 1, .gap = 2 }, .{content_nodes[0..content_len]});
-
             const item_semantics = canvas.WidgetSemantics{
                 .role = .listitem,
                 .label = options.title,
@@ -113,12 +87,6 @@ pub fn TimelineItem(comptime Msg: type) type {
                 row_len += 1;
             }
             const row_node = ui.el(.row, .{ .gap = 10, .padding = 8 }, .{row_children[0..row_len]});
-
-            // The press binds to the item's root: a bound handler makes
-            // the stack a hit target, and presses on the plain
-            // title/description/meta text fall through to it (dragging
-            // still selects the text). No overlay, no duplicated
-            // handlers.
             return ui.el(.stack, .{
                 .key = options.key,
                 .global_key = options.global_key,

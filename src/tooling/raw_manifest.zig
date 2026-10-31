@@ -1,6 +1,10 @@
 const web_engine = @import("web_engine.zig");
 
 pub const RawManifest = struct {
+    /// Editor-only JSON Schema association. The manifest tooling ignores the
+    /// value after parsing; app.json scaffolds point it at the published SDK
+    /// schema so editors can complete and validate the full manifest surface.
+    @"$schema": ?[]const u8 = null,
     id: []const u8,
     name: []const u8,
     display_name: ?[]const u8 = null,
@@ -10,12 +14,33 @@ pub const RawManifest = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    /// Whether the app launches with a Dock/app-switcher presence on
+    /// macOS. False selects the accessory activation policy before any
+    /// startup window is created; the runtime dock-presence command may
+    /// still promote or demote the app later.
+    dock_visible: bool = true,
+    persist: ?RawPersist = null,
+    images: RawImages = .{},
+    service_packages: []const RawServicePackage = &.{},
+    /// Which carrier runs src/services operations: "auto" (the default child
+    /// carrier), "in_process", or "child".
+    service_carrier: []const u8 = "auto",
+    /// In-process service pool width (1-16); 0 keeps the runtime default
+    /// (min(4, cores)).
+    service_pool_size: u8 = 0,
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
+    webview_layer: []const u8 = "auto",
+    /// How a TypeScript core compiles: "external" (the default and only
+    /// lane — the external core compiler). The removed transpiled
+    /// lane's spelling is refused with a teaching at validation.
+    core_compiler: []const u8 = "external",
     theme: ?[]const u8 = null,
+    theme_accent: ?[]const u8 = null,
     cef: RawCef = .{},
     frontend: ?RawFrontend = null,
     security: RawSecurity = .{},
+    assets: RawAssets = .{},
     windows: []const RawWindow = &.{},
     shell: RawShell = .{},
     commands: []const RawCommand = &.{},
@@ -23,6 +48,36 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+    updates: RawUpdates = .{},
+    dmg: RawDmg = .{},
+};
+
+pub const RawUpdates = struct {
+    feed_url: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    check_on_start: bool = false,
+};
+
+pub const RawImages = struct {
+    max_image_pixel_bytes: usize = 1024 * 1024,
+};
+
+pub const RawServicePackage = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
+};
+
+pub const RawPersist = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: RawPersistRestore,
+};
+
+pub const RawPersistRestore = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
 };
 
 pub const RawCef = struct {
@@ -58,6 +113,25 @@ pub const RawSecurity = struct {
     navigation: RawNavigation = .{},
 };
 
+/// Launch-registered assets (the TypeScript-core wiring's image channel):
+/// each image is read once at launch and registered on the installing
+/// frame under its declared `ImageId` — the id markup avatar bindings
+/// reference.
+pub const RawAssets = struct {
+    images: []const RawImageAsset = &.{},
+    fonts: []const RawFontAsset = &.{},
+};
+
+pub const RawFontAsset = struct {
+    id: u64,
+    path: []const u8,
+};
+
+pub const RawImageAsset = struct {
+    id: u64,
+    path: []const u8,
+};
+
 pub const RawNavigation = struct {
     allowed_origins: []const []const u8 = &.{},
     external_links: RawExternalLinks = .{},
@@ -78,8 +152,15 @@ pub const RawWindow = struct {
     resizable: bool = true,
     restore_state: bool = true,
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
 };
 
 pub const RawShell = struct {
@@ -115,8 +196,15 @@ pub const RawShellWindow = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
     views: []const RawShellView = &.{},
 };
 
@@ -190,4 +278,38 @@ pub const RawFileAssociation = struct {
 pub const RawUrlScheme = struct {
     scheme: []const u8,
     role: []const u8 = "viewer",
+};
+
+pub const RawDmgPosition = struct {
+    x: u16,
+    y: u16,
+};
+
+/// One visible Finder item in an explicitly art-directed DMG. `app` names
+/// the packaged bundle (and may override its DMG-only display name),
+/// `applications` creates the conventional alias,
+/// `file` copies a project-relative file or directory, and `link` creates a
+/// symlink to an absolute path. An explicit list replaces the legacy fixed
+/// app/Applications pair.
+pub const RawDmgItem = struct {
+    kind: []const u8,
+    path: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    position: RawDmgPosition,
+};
+
+/// Finder presentation for the macOS archive produced by
+/// `native package --target macos --archive`. The defaults are a complete
+/// drag-to-Applications layout; apps only declare this block when they want
+/// to art-direct it.
+pub const RawDmg = struct {
+    volume_name: ?[]const u8 = null,
+    background: ?[]const u8 = null,
+    window_width: u16 = 660,
+    window_height: u16 = 400,
+    icon_size: u16 = 128,
+    app_position: RawDmgPosition = .{ .x = 166, .y = 182 },
+    applications_position: RawDmgPosition = .{ .x = 486, .y = 182 },
+    applications_link: bool = true,
+    items: []const RawDmgItem = &.{},
 };

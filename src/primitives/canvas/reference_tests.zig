@@ -1415,6 +1415,64 @@ test "reference renderer blurs transparent colors without dark fringes" {
     try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 2, 0);
 }
 
+test "bundled sans weights render matching glyph faces" {
+    const font_ttf = canvas.font_ttf;
+    const width = 64;
+    const height = 48;
+    const bounds = geometry.RectF.init(0, 0, width, height);
+    var actual: [width * height * 4]u8 = undefined;
+    var expected: [width * height * 4]u8 = undefined;
+    var coverage: [3]u64 = undefined;
+    const cases = .{
+        .{ canvas.default_sans_font_id, &font_ttf.geist_regular },
+        .{ canvas.default_sans_medium_font_id, &font_ttf.geist_medium },
+        .{ canvas.default_sans_bold_font_id, &font_ttf.geist_bold },
+    };
+    inline for (cases, 0..) |case, index| {
+        // Explicit glyph placement isolates face selection from measurement.
+        // The expected pixels use the same face as an application-registered
+        // resource, independently of the reserved-id fallback mapping.
+        const glyphs = [_]Glyph{.{
+            .id = case[1].glyphIndex('H'),
+            .x = 0,
+            .y = 0,
+            .advance = 32 * case[1].advance(case[1].glyphIndex('H')) / case[1].units_per_em,
+            .text_len = 1,
+        }};
+        var commands = [_]RenderCommand{.{
+            .command = .{ .draw_text = .{
+                .id = 1,
+                .font_id = case[0],
+                .size = 32,
+                .origin = geometry.PointF.init(8, 36),
+                .color = Color.rgb8(255, 255, 255),
+                .text = "H",
+                .glyphs = &glyphs,
+            } },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        }};
+        const pass = canvas.CanvasRenderPass{
+            .surface_size = geometry.SizeF.init(width, height),
+            .full_repaint = true,
+            .commands = &commands,
+        };
+        const surface = try ReferenceRenderSurface.init(width, height, &actual);
+        try surface.renderPass(pass, Color.rgba8(0, 0, 0, 0));
+
+        commands[0].command.draw_text.font_id = canvas.min_registered_font_id;
+        const fonts = [_]canvas.ReferenceFont{.{ .id = canvas.min_registered_font_id, .face = case[1] }};
+        const control = (try ReferenceRenderSurface.init(width, height, &expected)).withFonts(&fonts);
+        try control.renderPass(pass, Color.rgba8(0, 0, 0, 0));
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+        coverage[index] = 0;
+        for (0..width * height) |pixel| coverage[index] += actual[pixel * 4 + 3];
+    }
+    try std.testing.expect(coverage[0] > 0);
+    try std.testing.expect(coverage[1] > coverage[0]);
+    try std.testing.expect(coverage[2] > coverage[1]);
+}
+
 test "reference renderer draws proxy text runs" {
     const commands = [_]CanvasCommand{.{ .draw_text = .{
         .id = 1,
@@ -1729,6 +1787,69 @@ test "reference renderer bilinear-filters scaled images" {
     try expectPixelRgba8(.{ 207, 137, 137, 255 }, surface, 1, 1);
     try expectPixelRgba8(.{ 207, 225, 225, 255 }, surface, 2, 2);
     try expectPixelRgba8(.{ 255, 255, 255, 255 }, surface, 3, 3);
+}
+
+test "reference renderer keeps linear atlas crops inside their source rectangle" {
+    const commands = [_]CanvasCommand{.{ .draw_image = .{
+        .id = 1,
+        .image_id = 42,
+        .src = geometry.RectF.init(1, 1, 2, 2),
+        .dst = geometry.RectF.init(0, 0, 4, 4),
+    } }};
+
+    // A green 2x2 tile surrounded by red atlas neighbors. Scaling the
+    // crop 2x must stay green through its edge pixels; full-image clamp
+    // would blend red into every side through the bilinear taps.
+    var image_pixels: [4 * 4 * 4]u8 = undefined;
+    for (0..16) |index| {
+        image_pixels[index * 4 + 0] = 255;
+        image_pixels[index * 4 + 1] = 0;
+        image_pixels[index * 4 + 2] = 0;
+        image_pixels[index * 4 + 3] = 255;
+    }
+    for (1..3) |y| {
+        for (1..3) |x| {
+            const index = (y * 4 + x) * 4;
+            image_pixels[index + 0] = 0;
+            image_pixels[index + 1] = 255;
+            image_pixels[index + 2] = 0;
+        }
+    }
+    const images = [_]ReferenceImage{.{
+        .id = 42,
+        .width = 4,
+        .height = 4,
+        .pixels = &image_pixels,
+    }};
+
+    var render_commands: [1]RenderCommand = undefined;
+    var render_batches: [1]RenderBatch = undefined;
+    var resources: [1]RenderResource = undefined;
+    var resource_cache_entries: [1]RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [1]RenderResourceCacheAction = undefined;
+    var glyphs: [0]GlyphAtlasEntry = .{};
+    var changes: [0]DiffChange = .{};
+    const frame = try (DisplayList{ .commands = &commands }).framePlan(null, .{
+        .surface_size = geometry.SizeF.init(4, 4),
+    }, .{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    });
+
+    var pixels: [4 * 4 * 4]u8 = undefined;
+    const surface = (try ReferenceRenderSurface.init(4, 4, &pixels)).withImages(&images);
+    try surface.renderPass(frame.renderPass(), Color.rgb8(0, 0, 0));
+
+    for (0..4) |y| {
+        for (0..4) |x| {
+            try expectPixelRgba8(.{ 0, 255, 0, 255 }, surface, x, y);
+        }
+    }
 }
 
 test "reference renderer nearest-filters scaled images" {

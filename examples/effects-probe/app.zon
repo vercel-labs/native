@@ -12,7 +12,6 @@
                 .title = "Native SDK Effects Probe",
                 .width = 560,
                 .height = 480,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "probe-canvas", .kind = "gpu_surface", .fill = true, .role = "Effects probe canvas", .accessibility_label = "Effects probe", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

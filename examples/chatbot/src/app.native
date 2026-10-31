@@ -1,0 +1,142 @@
+<!-- The chat client's whole view tier: one markup file over the TS core's
+     model, bound by the names core.ts wrote (fields and exported helpers
+     bind verbatim). The custom hidden titlebar carries only a New chat
+     icon button, and its drag region stays clear of the traffic lights
+     through core.ts's chromeMsg channel. The conversation is a
+     controlled scroll of right-aligned user bubbles and full-width
+     assistant text that grows as SSE deltas arrive, with honest sending
+     and failed rows, and the composer
+     is an input group over the core's byte-splice engine — Enter
+     and the arrow button dispatch the same `send` arm, while that action
+     becomes an immediate stream-cancelling Stop button during a reply. Until the Gateway API key
+     arrives through the env channel, the teaching panel
+     explains the setup and the app issues zero requests. -->
+<column background="background">
+  <!-- The header IS the titlebar (tall hidden-inset chrome), matching the
+       Kanban example. There is deliberately no visible title text. -->
+  <row height="{headerHeight}" padding="12" cross="center" window-drag="true" label="Chat header">
+    <spacer width="{chromeLeading}" />
+    <spacer grow="1" />
+    <button size="icon" variant="ghost" icon="plus" on-press="clear" label="New chat"></button>
+  </row>
+  <separator />
+  <!-- The titlebar stays edge-to-edge. Everything below it fills narrow
+       windows and centers at a readable 960pt ceiling in wide ones. -->
+  <row grow="1" main="center" label="Chat body">
+    <column grow="1" max-width="960" label="Chat content">
+      <if test="{unconfigured}">
+        <!-- The teaching state: no request ever leaves an unconfigured app
+             — the panel names exactly what is missing. -->
+        <column grow="1" padding="24" main="center" cross="center" label="Setup">
+          <panel padding="24" background="surface" radius="lg" width="520" label="Connect a model">
+            <column gap="12">
+              <text><span weight="bold">Connect a model</span></text>
+              <text size="sm" foreground="text_muted">This app streams OpenAI-compatible chat completions from Vercel AI Gateway. Set AI_GATEWAY_API_KEY and relaunch — the core receives it once, at install, through the env channel.</text>
+              <row gap="8" cross="center">
+                <text size="sm" grow="1">AI_GATEWAY_API_KEY</text>
+                <if test="{keyMissing}">
+                  <text size="sm" foreground="destructive">missing</text>
+                </if>
+                <else>
+                  <text size="sm" foreground="success">set</text>
+                </else>
+              </row>
+              <text size="sm" foreground="text_muted">The default model is openai/gpt-5.6-luna. Once connected, use the prompt's model selector for Luna, Terra, or Sol, or set NATIVE_SDK_CHAT_MODEL to another creator/model id from the Gateway catalog.</text>
+            </column>
+          </panel>
+        </column>
+      </if>
+      <else>
+        <if test="{emptyConversation}">
+          <column grow="1" padding="24" gap="12" main="center" cross="center" label="Empty conversation">
+            <text size="display" text-alignment="center"><span weight="bold">What can I help with?</span></text>
+            <text size="lg" foreground="text_muted" text-alignment="center">Ask a question, write code, or explore ideas.</text>
+          </column>
+        </if>
+        <else>
+          <scroll grow="1" label="Conversation" value="{chatScrollTop}" on-scroll="chat_scrolled">
+            <!-- Bottom breathing room belongs to the scrolling history,
+                 so it is present only at the tail instead of becoming a
+                 permanent gutter above the prompt. -->
+            <column padding="24" label="Conversation history">
+              <column gap="10" label="Conversation entries">
+                <for each="turnRows" as="t" key="id">
+                  <if test="{t.user}">
+                    <row key="{t.id}" gap="8" label="You said">
+                      <spacer grow="1" min-width="64" />
+                      <bubble variant="primary">
+                        <text wrap="true">{t.text}</text>
+                      </bubble>
+                    </row>
+                  </if>
+                  <else>
+                    <row key="{t.id}" gap="8" label="The model said">
+                      <text wrap="true" grow="1">{t.text}</text>
+                    </row>
+                  </else>
+                </for>
+                <if test="{sending}">
+                  <row gap="8" label="Reply pending">
+                    <if test="{waitingForFirstToken}">
+                      <text grow="1" foreground="text_muted">…</text>
+                    </if>
+                    <else>
+                      <text wrap="true" grow="1">{pendingReplyLabel}</text>
+                    </else>
+                  </row>
+                </if>
+                <if test="{failed}">
+                  <panel padding="12" background="surface" radius="lg" label="Request failed">
+                    <row gap="10" cross="center">
+                      <icon name="alert" width="14" height="14" foreground="destructive" />
+                      <column gap="2" grow="1">
+                        <text size="sm" foreground="destructive">Request failed</text>
+                        <text size="sm" foreground="text_muted">{failReasonLabel}</text>
+                      </column>
+                      <button size="sm" variant="ghost" icon="refresh-cw" on-press="retry" label="Retry request">Retry</button>
+                    </row>
+                  </panel>
+                </if>
+              </column>
+              <!-- A real flow child extends the scrollable content beyond
+                   the last wrapped line; container padding alone can stay
+                   pinned to the viewport when descendants overflow it. -->
+              <spacer height="24" label="Conversation tail padding" />
+            </column>
+          </scroll>
+        </else>
+        <!-- No top inset: scrolling content meets the prompt border.
+             Side and bottom insets remain as explicit siblings. -->
+        <column label="Composer">
+          <row>
+            <spacer width="12" />
+            <input-group grow="1" height="96" label="Prompt composer">
+              <textarea text="{draftText}" placeholder="Message the model…" autofocus="{promptAutofocus}" submit-on-enter="true" on-input="draft_edit" on-submit="send" label="Message" />
+              <input-group-actions>
+                <stack width="148">
+                  <select size="sm" width="148" on-press="toggle_model_picker" label="Model selector">{modelNameLabel}</select>
+                  <if test="{modelPickerOpen}">
+                    <dropdown-menu anchor="below" anchor-alignment="stretch" on-dismiss="close_model_picker" label="Models">
+                      <menu-item on-press="pick_model_luna" selected="{modelIsLuna}">GPT-5.6 Luna</menu-item>
+                      <menu-item on-press="pick_model_terra" selected="{modelIsTerra}">GPT-5.6 Terra</menu-item>
+                      <menu-item on-press="pick_model_sol" selected="{modelIsSol}">GPT-5.6 Sol</menu-item>
+                    </dropdown-menu>
+                  </if>
+                </stack>
+                <spacer grow="1" />
+                <if test="{sending}">
+                  <button size="icon" variant="primary" icon="x" on-press="stop" label="Stop generating"></button>
+                </if>
+                <else>
+                  <button size="icon" variant="primary" icon="arrow-up" disabled="{sendDisabled}" on-press="send" label="Send message"></button>
+                </else>
+              </input-group-actions>
+            </input-group>
+            <spacer width="12" />
+          </row>
+          <spacer height="12" />
+        </column>
+      </else>
+    </column>
+  </row>
+</column>

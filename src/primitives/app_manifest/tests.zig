@@ -88,6 +88,7 @@ const validateUrl = validation.validateUrl;
 const validateIcons = validation.validateIcons;
 const validatePermissions = validation.validatePermissions;
 const validateCapabilities = validation.validateCapabilities;
+const validateImages = validation.validateImages;
 const validateBridge = validation.validateBridge;
 const validateFrontend = validation.validateFrontend;
 const validateBridgeOrigin = validation.validateBridgeOrigin;
@@ -103,6 +104,41 @@ test "valid minimal manifest" {
     };
 
     try validateManifest(manifest);
+}
+
+test "updates require paired HTTPS feed and Ed25519 public key" {
+    try validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .check_on_start = true,
+    });
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+    }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{
+        .feed_url = "http://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+    }));
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "not-a-public-key",
+    }));
+}
+
+test "accessory startup requires the tray capability" {
+    const tray_capabilities = [_]Capability{.tray};
+    try validateManifest(.{
+        .identity = .{ .id = "com.example.menu", .name = "menu" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .capabilities = &tray_capabilities,
+        .dock_visible = false,
+    });
+
+    try std.testing.expectError(error.MissingTrayCapability, validateManifest(.{
+        .identity = .{ .id = "com.example.stranded", .name = "stranded" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .dock_visible = false,
+    }));
 }
 
 test "manifest validates shell windows and views" {
@@ -617,7 +653,10 @@ test "app id validation" {
     try validateAppId("com.example.app", .reverse_dns);
     try validateAppId("my-tool", .simple);
 
+    const oversized_id = [_]u8{'a'} ** (types.max_app_id_bytes + 1);
+
     try std.testing.expectError(error.InvalidId, validateAppId("", .reverse_dns));
+    try std.testing.expectError(error.InvalidId, validateAppId(&oversized_id, .simple));
     try std.testing.expectError(error.InvalidId, validateAppId("example", .reverse_dns));
     try std.testing.expectError(error.InvalidId, validateAppId("Com.example.app", .reverse_dns));
     try std.testing.expectError(error.InvalidId, validateAppId("com/example/app", .reverse_dns));
@@ -734,12 +773,15 @@ test "bridge validation catches duplicate commands and invalid origins" {
 test "security validation catches invalid navigation and external policies" {
     try validateSecurity(.{ .navigation = .{
         .allowed_origins = &.{ "zero://app", "https://example.com" },
-        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{"https://example.com/*"} },
+        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{ "https://example.com/docs", "https://example.com/*", "*" } },
     } });
 
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .allowed_origins = &.{"bad origin"} } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"ssh://example.com"} } } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://example.com*"} } } }));
+    for ([_][]const u8{ "https://*.example.com/*", "https://*/*", "https://*/", "https://example.com/*/docs" }) |pattern| {
+        try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{pattern} } } }));
+    }
 }
 
 test "package metadata validation catches empty authors and invalid keywords" {
@@ -755,4 +797,11 @@ test "package metadata validation catches empty authors and invalid keywords" {
     try std.testing.expectError(error.InvalidKeyword, validatePackageMetadata(.{ .keywords = &.{""} }));
     try std.testing.expectError(error.InvalidKeyword, validatePackageMetadata(.{ .keywords = &.{"Bad"} }));
     try std.testing.expectError(error.InvalidUrl, validatePackageMetadata(.{ .repository = "ssh://example.com/repo" }));
+}
+
+test "registered-image manifest budget accepts the documented range only" {
+    try validateImages(.{});
+    try validateImages(.{ .max_image_pixel_bytes = 8 * 1024 * 1024 });
+    try std.testing.expectError(error.InvalidDimension, validateImages(.{ .max_image_pixel_bytes = 1024 * 1024 - 1 }));
+    try std.testing.expectError(error.InvalidDimension, validateImages(.{ .max_image_pixel_bytes = 8 * 1024 * 1024 + 1 }));
 }

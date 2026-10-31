@@ -15,6 +15,7 @@ const shell_layout = @import("shell_layout.zig");
 const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
 const runtime_canvas_images = @import("canvas_images.zig");
+const runtime_media_surface = @import("media_surface.zig");
 const runtime_canvas_fonts = @import("canvas_fonts.zig");
 const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
@@ -26,6 +27,7 @@ const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
 const runtime_session_state = @import("session_state.zig");
+const session_journal = @import("session_journal.zig");
 const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
@@ -38,7 +40,10 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const window_state = @import("../window_state/root.zig");
 const runtime_effects = @import("effects.zig");
+const runtime_record_store = @import("record_store.zig");
+const runtime_relational_store = @import("relational_store.zig");
 const security = @import("../security/root.zig");
 
 const max_async_bridge_responses = runtime_async_bridge.max_async_bridge_responses;
@@ -98,6 +103,7 @@ const RuntimeMainWebViewState = runtime_state.RuntimeMainWebViewState;
 const RuntimeSourceStorage = runtime_state.RuntimeSourceStorage;
 const RuntimeWebView = runtime_state.RuntimeWebView;
 const RuntimeTrayItem = runtime_state.RuntimeTrayItem;
+const RuntimeStatusItem = runtime_state.RuntimeStatusItem;
 const ShellApplyMode = runtime_state.ShellApplyMode;
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
@@ -145,6 +151,8 @@ pub const CanvasWidgetAccessibilityAction = runtime_api.CanvasWidgetAccessibilit
 pub const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 pub const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
 pub const CanvasWidgetContextMenuEvent = runtime_api.CanvasWidgetContextMenuEvent;
+pub const CanvasWidgetContextMenuShownEvent = runtime_api.CanvasWidgetContextMenuShownEvent;
+pub const CanvasWidgetContextMenuDismissedEvent = runtime_api.CanvasWidgetContextMenuDismissedEvent;
 pub const CanvasWidgetContextMenuRequestEvent = runtime_api.CanvasWidgetContextMenuRequestEvent;
 pub const CanvasWidgetDismissEvent = runtime_api.CanvasWidgetDismissEvent;
 pub const CanvasWidgetContextPressEvent = runtime_api.CanvasWidgetContextPressEvent;
@@ -178,19 +186,42 @@ pub const DispatchErrorPolicy = enum { degrade, propagate };
 
 pub const Runtime = struct {
     options: Options,
+    /// The allocator that owns every runtime-lifetime heap allocation
+    /// (registered canvas font bytes, registered canvas image slot
+    /// buffers, adopted media-surface texture buffers, and expanded live-view
+    /// text/history pools). Captured from
+    /// `Options.allocator` at init precisely
+    /// because `options` is public and mutable: allocation and free of
+    /// owned storage can be a whole runtime lifetime apart, and they
+    /// must resolve through ONE allocator identity. Mutating
+    /// `options.allocator` on a live runtime does not retarget this —
+    /// bytes are always returned to the allocator that made them. Every
+    /// on-demand owner (registration and adoption allocs, refusal-path
+    /// frees, the `deinit` frees) goes through this field, never
+    /// through `options.allocator`.
+    owned_allocator: std.mem.Allocator,
+    /// Registered-image budget captured at init. Decode, registration,
+    /// replay validation, slot reuse, and deinit all observe this one
+    /// app-fixed limit even if public `options` is later mutated.
+    max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
+    /// Synchronous OS facts queued only while replaying. One event must
+    /// consume the complete sequence before the next event can begin.
+    replay_window_chrome_active: bool = false,
+    replay_window_chrome_source: session_journal.WindowChromeSource = .native_queries,
+    replay_window_chrome_failed: bool = false,
+    replay_window_chrome: [session_journal.max_session_window_chrome_queries]session_journal.WindowChromeRecord = undefined,
+    replay_window_chrome_count: usize = 0,
+    replay_window_chrome_index: usize = 0,
     windows: [platform.max_windows]RuntimeWindow = undefined,
     window_count: usize = 0,
     views: [platform.max_views]RuntimeView = undefined,
     view_count: usize = 0,
     webviews: [platform.max_webviews]RuntimeWebView = undefined,
     webview_count: usize = 0,
-    tray_items: [platform.max_tray_items]RuntimeTrayItem = undefined,
-    tray_item_count: usize = 0,
-    tray_created: bool = false,
-    tray_title: []const u8 = "",
-    tray_title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    status_items: [platform.max_status_items]RuntimeStatusItem = [_]RuntimeStatusItem{.{}} ** platform.max_status_items,
+    status_item_count: usize = 0,
     /// Audio playback mirror for the automation snapshot, stamped by
     /// the ui-app layer whenever a dispatch or effect drain may have
     /// moved the effects channel's playback state. Like the tray, the
@@ -217,11 +248,67 @@ pub const Runtime = struct {
     /// cannot analyze: honest absence, visible as such.
     audio_spectrum_bands: [platform.audio_spectrum_band_count]u8 = @splat(0),
     audio_spectrum_events: u64 = 0,
+    /// Video playback mirrors (`UiApp.publishVideoState`) — the audio
+    /// mirrors' twin, so the automation snapshot reports the single
+    /// video channel honestly. Dimensions are the stream's decoded
+    /// pixels from the `.loaded` acknowledgment; the surface id names
+    /// which media-surface texture channel the frames feed.
+    video_active: bool = false,
+    video_key: u64 = 0,
+    video_surface_id: u64 = 0,
+    video_playing: bool = false,
+    video_buffering: bool = false,
+    video_looping: bool = false,
+    video_muted: bool = false,
+    video_source: runtime_effects.EffectVideoSource = .local,
+    video_position_ms: u64 = 0,
+    video_duration_ms: u64 = 0,
+    video_width: u64 = 0,
+    video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
+    shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+    view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    window_lifecycle_policy: ?*const fn ([]const u8, []u8) usize = null,
+    image_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+    font_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+    shell_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    shell_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+    system_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+    bridge_descriptor_policy: ?*const fn ([]const u8, []u8) usize = null,
+    authorization_policy: ?*const fn ([]const u8, []u8) usize = null,
+    builtin_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    automation_command_policy: ?*const fn ([]const u8, []u8) usize = null,
+    automation_interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
+    snapshot_policy: ?*const fn ([]const u8, []u8) usize = null,
+    host_flow_policy: ?*const fn ([]const u8, []u8) usize = null,
+    command_policy: ?*const fn ([]const u8, []u8) usize = null,
+    context_menu_policy: ?*const fn ([]const u8, []u8) usize = null,
+    text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Reused by runtime-created window restoration. `Store.loadWindow`
+    /// needs the whole bounded state file plus decoded-string scratch; keep
+    /// that 64-KiB workspace on the already heap-owned Runtime instead of
+    /// placing it on the event-loop stack for every secondary-window create.
+    window_state_read_scratch: [window_state.max_serialized_bytes]u8 = undefined,
     next_window_id: platform.WindowId = 2,
     next_view_id: platform.ViewId = 1,
     invalidated: bool = true,
+    /// Whether the platform currently reports the app ACTIVE (frontmost
+    /// on macOS — the state the `.app_activated`/`.app_deactivated`
+    /// lifecycle events flip). Stamped in the dispatch loop from those
+    /// journaled events, so replay reproduces it deterministically.
+    /// Defaults true: a launching app is treated as active until the
+    /// platform says otherwise, because some hosts deliver input before
+    /// the first activation event and suppressing intent until one
+    /// arrived would deaden hover on hosts that never send it. The
+    /// tooltip intent machine consults this: an INACTIVE app reveals
+    /// and arms nothing — including a rebuild the app performs from its
+    /// own deactivation callback.
+    app_active: bool = true,
     /// Whether the app's stop hook (`App.stop`) has been delivered.
     /// Normally the platform's `.app_shutdown` event delivers it; the
     /// run loop's exit path checks this flag and delivers a missed stop
@@ -277,17 +364,63 @@ pub const Runtime = struct {
     /// list its full per-view item budget — the snapshot never truncates
     /// menus the runtime accepted.
     automation_widget_menu_items: [canvas_limits.max_canvas_widget_context_menu_items_per_view * platform.max_views]automation.snapshot.WidgetContextMenuItem = undefined,
-    automation_tray_items: [platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    automation_tray_items: [platform.max_status_items * platform.max_tray_items]automation.snapshot.TrayItem = undefined,
+    automation_trays: [platform.max_status_items]automation.snapshot.Tray = undefined,
     /// Handshake for the `provenance` verb: cleared before the query is
     /// evented to the app, set by the app's response publish — so the
     /// dispatcher can answer with a teaching error when no app-side
     /// provenance table exists (builder-only apps, release engines).
     automation_provenance_published: bool = false,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    /// Pointer and drag events from one physical input are dispatched
+    /// separately, so both routed paths must stay live until their dispatch.
+    /// In particular, the drag source can be an ancestor of the raw pointer
+    /// target and therefore has a different capture/target/bubble route.
+    widget_drag_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    /// The in-flight IME preedit for the TARGETLESS text path (an app
+    /// consuming committed text with no focused text widget — a terminal
+    /// grid): updated by `ime_set_composition`, delivered as committed
+    /// text on `ime_commit_composition` (the host emits an EMPTY commit
+    /// when the marked text is committed unchanged, so the composed
+    /// bytes live only here), cleared on cancel or a direct text_input.
+    /// Grows to fit the current composition (never truncated): each
+    /// `ime_set_composition` REPLACES the preedit with the host's full
+    /// composition string, so this holds at most one composition's
+    /// bytes, reallocated up through `owned_allocator` only when a
+    /// larger one arrives and freed at `deinit`. `.len` is the allocated
+    /// capacity; `targetless_ime_preedit_len` is the bytes in use.
+    /// Focused text widgets never use this — their editor applies the
+    /// composition directly.
+    targetless_ime_preedit: []u8 = &.{},
+    targetless_ime_preedit_len: usize = 0,
+    /// The surface that buffered the preedit (window + view label) —
+    /// target-less composition state is PER SURFACE, the way a focused
+    /// widget's editor scopes its own composition to the widget. Only
+    /// events from the owning surface consume or clear the buffer: a
+    /// second surface's empty commit must never insert a composition the
+    /// user typed into the first (its own cancel/commit, delivered on its
+    /// own label, clears it). A new `ime_set_composition` from any
+    /// surface takes ownership — at most one system composition exists.
+    targetless_ime_preedit_window: platform.WindowId = 0,
+    targetless_ime_preedit_label: [platform.max_view_label_bytes]u8 = undefined,
+    targetless_ime_preedit_label_len: usize = 0,
+    /// The target-less twin of `RuntimeView.canvas_widget_ime_commit_grace`:
+    /// armed when the owning surface's composition CANCELS, because the
+    /// hosts encode a converted commit as cancel-then-text_input — the
+    /// trailing text_input still belongs to the target-less composition
+    /// and must deliver target-less (to the same surface, matched via
+    /// the preedit owner fields above) rather than into whichever text
+    /// widget holds focus by then. One-shot: any other event disarms it.
+    targetless_ime_commit_grace: bool = false,
     /// The in-flight native context-menu request: set when the
     /// platform is asked to present, resolved by the matching
     /// `context_menu_action` event. At most one menu tracks at a time.
     canvas_widget_context_menu_pending: ?runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = null,
+    /// Monotonic per-request context-menu token source: each presented
+    /// (or automation-armed) request gets a fresh token, so a superseded
+    /// request's late dismissal can never resolve its successor — even
+    /// when both target the same widget.
+    canvas_widget_context_menu_token: u64 = 0,
     canvas_widget_display_list_refresh_batch_depth: usize = 0,
     /// Nonzero while a gpu-surface input dispatch is live: accessibility
     /// publishes requested inside it defer to after the responding
@@ -336,20 +469,51 @@ pub const Runtime = struct {
     canvas_frame_render_override_samples: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     canvas_frame_render_override_combined: [max_canvas_render_overrides_per_view]canvas.CanvasRenderOverride = undefined,
     /// Runtime-registered canvas images (see canvas_images.zig): entry
-    /// metadata, the per-slot pixel pool, and the `ReferenceImage` scratch
-    /// the frame planner hands to renderers each plan.
+    /// metadata, the per-slot pixel buffers, and the `ReferenceImage`
+    /// scratch the frame planner hands to renderers each plan. Each
+    /// slot's buffer is ONE lazy slot-budget allocation from the frozen
+    /// `owned_allocator` at the slot's first registration (freed only by
+    /// `deinit`; unregister compaction swaps pointers and keeps vacated
+    /// buffers for reuse) — zero registered images cost zero bytes,
+    /// where an embedded pool at the budget would put 16 x 1 MiB =
+    /// 16 MiB in EVERY Runtime, the media-texture-pool regression's
+    /// twin.
     canvas_image_entries: [canvas_limits.max_registered_canvas_images]runtime_canvas_images.CanvasImageEntry = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images,
     canvas_image_count: usize = 0,
-    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][canvas_limits.max_registered_canvas_image_pixel_bytes]u8 = undefined,
-    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images]canvas.ReferenceImage = undefined,
+    canvas_image_pixels: [canvas_limits.max_registered_canvas_images][]u8 = [_][]u8{&.{}} ** canvas_limits.max_registered_canvas_images,
+    /// `ReferenceImage` scratch the frame planner hands to renderers
+    /// each plan: the registered images plus the adopted media-surface
+    /// textures (appended as `presentation_only` entries).
+    canvas_image_resources_scratch: [canvas_limits.max_registered_canvas_images + canvas_limits.max_media_surface_channels]canvas.ReferenceImage = undefined,
+    /// Adopted media-surface textures (see media_surface.zig): entry
+    /// metadata and the per-channel pixel buffers the loop thread owns.
+    /// Each buffer is ONE lazy frame-budget allocation from the frozen
+    /// `owned_allocator` at the entry's first adoption (freed only by
+    /// `deinit`) — zero media use costs zero bytes, where an embedded
+    /// pool at the budget would put 4 x 8 MiB = 32 MiB in EVERY Runtime
+    /// (the registered-font-pool regression's twin, measured on the
+    /// docs wasm preview host as +32 MB per component tile before any
+    /// producer existed). The cross-thread mailbox producers push into
+    /// is process-lived module state, deliberately NOT here — a
+    /// producer outliving this runtime must never reach runtime memory.
+    media_surface_entries: [canvas_limits.max_media_surface_channels]runtime_media_surface.MediaSurfaceTextureEntry = [_]runtime_media_surface.MediaSurfaceTextureEntry{.{}} ** canvas_limits.max_media_surface_channels,
+    media_surface_count: usize = 0,
+    media_surface_pixels: [canvas_limits.max_media_surface_channels][]u8 = [_][]u8{&.{}} ** canvas_limits.max_media_surface_channels,
+    /// Process-unique tag stamped on mailbox slots this runtime claims
+    /// (0 until the first acquire): slot ownership survives allocator
+    /// address reuse across runtimes in one process.
+    media_surface_runtime_tag: u64 = 0,
     /// Runtime-registered canvas fonts (see canvas_fonts.zig): entry
-    /// metadata, the per-slot TrueType byte pool with parsed face views
-    /// over it, the `ReferenceFont` scratch the frame planner hands to
-    /// renderers, and the font-aware measure provider installed on first
-    /// registration for platforms without host-side text measurement.
+    /// metadata carrying each face's heap-owned TrueType bytes (exact
+    /// file size, allocated from the init-frozen `owned_allocator` at
+    /// registration —
+    /// zero fonts cost zero bytes; freed only by `deinit`, registration
+    /// being permanent), parsed face views over those bytes, the
+    /// `ReferenceFont` scratch the frame planner hands to renderers, and
+    /// the font-aware measure provider installed on first registration
+    /// for platforms without host-side text measurement.
     canvas_font_entries: [canvas_limits.max_registered_canvas_fonts]runtime_canvas_fonts.CanvasFontEntry = [_]runtime_canvas_fonts.CanvasFontEntry{.{}} ** canvas_limits.max_registered_canvas_fonts,
     canvas_font_count: usize = 0,
-    canvas_font_bytes: [canvas_limits.max_registered_canvas_fonts][canvas_limits.max_registered_canvas_font_bytes]u8 = undefined,
     canvas_font_faces: [canvas_limits.max_registered_canvas_fonts]canvas.font_ttf.Face = undefined,
     canvas_font_resources_scratch: [canvas_limits.max_registered_canvas_fonts]canvas.ReferenceFont = undefined,
     canvas_font_measure_provider: canvas.TextMeasureProvider = .{ .measure_fn = runtime_canvas_fonts.unboundCanvasFontMeasure },
@@ -376,16 +540,36 @@ pub const Runtime = struct {
             }
         }
         self.options = options;
+        if (options.max_image_pixel_bytes < canvas_limits.max_registered_canvas_image_pixel_bytes or
+            options.max_image_pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling)
+        {
+            @panic("max_image_pixel_bytes must be between 1 MiB and 8 MiB; declare app.zon .images.max_image_pixel_bytes within that range");
+        }
+        // Freeze the ownership allocator now (see the field doc):
+        // `options` stays publicly mutable, but the identity that owns
+        // on-demand storage must not move under live allocations.
+        self.owned_allocator = options.allocator;
+        self.max_image_pixel_bytes = options.max_image_pixel_bytes;
         self.surface = options.platform.surface();
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
         self.frame_profile = .{};
+        // Status rows exceed the small-default copy bound. Initialize their
+        // ownership metadata without touching unused menu payload buffers.
+        for (&self.status_items) |*item| {
+            item.id = 0;
+            item.active = false;
+            item.visible = true;
+            item.title = "";
+            item.item_count = 0;
+        }
         self.started_timestamp_ns = timestampToU64(nowNanoseconds());
         self.text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
             .{
                 .context = options.platform.services.context,
                 .measure_fn = measure_fn,
                 .measure_advances_fn = options.platform.services.measure_text_advances_fn,
+                .measure_ink_fn = options.platform.services.measure_text_ink_fn,
             }
         else
             null;
@@ -395,6 +579,86 @@ pub const Runtime = struct {
         // (tests do constantly): bump the generation so nothing measured
         // against a previous runtime's provider can be served to this one.
         canvas.bumpTextMeasureGeneration();
+    }
+
+    /// Release the runtime's heap-owned on-demand storage (expanded live-view
+    /// text/history pools, registered canvas font bytes, registered canvas
+    /// image slot buffers, and adopted media-surface texture buffers,
+    /// allocated from the init-frozen `owned_allocator`), return each registered font's
+    /// host-side registration (through the unregister owner captured
+    /// into the entry at registration time — host font state is
+    /// per-process, this runtime's ids are not, and live `options` may
+    /// no longer name the host that received the registration), and
+    /// disarm the media-surface wake bindings (a producer
+    /// thread must never wake a dead host). Ends the runtime's life:
+    /// parsed faces, atlas keys,
+    /// measure providers, adopted textures, and the resource slices
+    /// built over them are invalid past this point. Process-lifetime
+    /// embeddings (the app runner) may skip it — the default
+    /// allocator's pages die with the process, and the run loop's exit
+    /// defer already disarms the wakes — but embedders that create and
+    /// destroy runtimes in one process (tests, the docs wasm preview
+    /// host) call it to return the storage.
+    pub fn deinit(self: *Runtime) void {
+        self.disarmMediaSurfaceWakes();
+        for (self.views[0..self.view_count]) |*view| {
+            if (view.widget_text_bytes_heap_owned) self.owned_allocator.free(view.widget_text_bytes);
+            if (view.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(view.canvas_widget_text_history_bytes);
+            view.widget_text_bytes = &.{};
+            view.widget_text_bytes_heap_owned = false;
+            view.canvas_widget_text_history_bytes = &.{};
+            view.canvas_widget_text_history_bytes_heap_owned = false;
+        }
+        self.view_count = 0;
+        if (self.targetless_ime_preedit.len > 0) {
+            self.owned_allocator.free(self.targetless_ime_preedit);
+            self.targetless_ime_preedit = &.{};
+            self.targetless_ime_preedit_len = 0;
+        }
+        for (self.canvas_font_entries[0..self.canvas_font_count]) |entry| {
+            // Return the HOST side of the registration before the bytes:
+            // registration pushed the face to platforms with host-side
+            // text (macOS installs a CoreText descriptor plus caches,
+            // keyed by an id that is only permanent per-RUNTIME while
+            // that host state is per-process), so a deinit that freed
+            // only the Zig-side bytes would leave an embedder cycling
+            // runtimes growing host font state for the process lifetime.
+            // Through the entry's owner captured at registration time,
+            // never live `options`: the option is publicly mutable, and
+            // an embedder that swapped the platform after registering
+            // must see this land on the host that holds the
+            // registration, not on the current platform or a null seam
+            // (the `owned_allocator` identity discipline two lines
+            // down, applied to the host). Best-effort by design —
+            // deinit cannot fail, and a null owner means the platform
+            // at registration time retained nothing to return. The
+            // entry's ownership token rides along so the host removes
+            // ONLY this runtime's registration: a later runtime may
+            // have re-registered the id (last wins), and presenting a
+            // stale token is a no-op accept — the newer runtime's live
+            // face survives this deinit.
+            if (entry.host_unregister_fn) |host_unregister_fn| {
+                host_unregister_fn(entry.host_unregister_context, entry.id, entry.host_registration_token) catch {};
+            }
+            // Through the frozen identity, never `options.allocator`:
+            // an embedder may have swapped the public option since these
+            // bytes were made, and a free must hit the allocator that
+            // allocated.
+            self.owned_allocator.free(entry.bytes);
+        }
+        self.canvas_font_count = 0;
+        for (&self.canvas_image_pixels) |*buffer| {
+            if (buffer.len != 0) self.owned_allocator.free(buffer.*);
+            buffer.* = &.{};
+        }
+        self.canvas_image_entries = [_]runtime_canvas_images.CanvasImageEntry{.{}} ** canvas_limits.max_registered_canvas_images;
+        self.canvas_image_count = 0;
+        for (&self.media_surface_pixels) |*buffer| {
+            if (buffer.len != 0) self.owned_allocator.free(buffer.*);
+            buffer.* = &.{};
+        }
+        self.media_surface_entries = [_]runtime_media_surface.MediaSurfaceTextureEntry{.{}} ** canvas_limits.max_media_surface_channels;
+        self.media_surface_count = 0;
     }
 
     fn fieldHasSmallDefault(comptime field: std.builtin.Type.StructField) bool {
@@ -450,6 +714,7 @@ pub const Runtime = struct {
     pub const respondToBridge = FlowMethods.respondToBridge;
     pub const dispatchPlatformEvent = FlowMethods.dispatchPlatformEvent;
     pub const dispatchEvent = FlowMethods.dispatchEvent;
+    pub const recordDispatchError = FlowMethods.recordDispatchError;
     pub const dispatchCommand = FlowMethods.dispatchCommand;
     pub const frame = FlowMethods.frame;
     pub const automationSnapshot = FlowMethods.automationSnapshot;
@@ -466,7 +731,12 @@ pub const Runtime = struct {
     pub const listWindows = WindowViewMethods.listWindows;
     pub const focusWindow = WindowViewMethods.focusWindow;
     pub const closeWindow = WindowViewMethods.closeWindow;
+    pub const restoreWindowCapabilityResult = WindowViewMethods.restoreWindowCapabilityResult;
+    pub const restoreWindowShow = WindowViewMethods.restoreWindowShow;
     pub const minimizeWindow = WindowViewMethods.minimizeWindow;
+    pub const hideWindow = WindowViewMethods.hideWindow;
+    pub const showWindow = WindowViewMethods.showWindow;
+    pub const quitApp = WindowViewMethods.quitApp;
     pub const createShellWindow = WindowViewMethods.createShellWindow;
     pub const createSourcelessShellWindow = WindowViewMethods.createSourcelessShellWindow;
     pub const createShellViews = WindowViewMethods.createShellViews;
@@ -529,7 +799,9 @@ pub const Runtime = struct {
     const relayoutDescendantWebViewBackends = WindowViewMethods.relayoutDescendantWebViewBackends;
     const relayoutDescendantWebViewBackendsDepth = WindowViewMethods.relayoutDescendantWebViewBackendsDepth;
     const reserveView = WindowViewMethods.reserveView;
-    const findViewIndex = WindowViewMethods.findViewIndex;
+    // Public: the ui-app layer resolves view indices for targeted
+    // display-list refreshes (the terminal repaint path).
+    pub const findViewIndex = WindowViewMethods.findViewIndex;
     const commandSourceForNativeView = WindowViewMethods.commandSourceForNativeView;
     const setFocusedView = WindowViewMethods.setFocusedView;
     const clearFocusedView = WindowViewMethods.clearFocusedView;
@@ -561,11 +833,20 @@ pub const Runtime = struct {
     pub const setCredential = SystemServiceMethods.setCredential;
     pub const getCredential = SystemServiceMethods.getCredential;
     pub const deleteCredential = SystemServiceMethods.deleteCredential;
+    pub const formatLocalTime = SystemServiceMethods.formatLocalTime;
     pub const createTray = SystemServiceMethods.createTray;
+    pub const createStatusItem = SystemServiceMethods.createStatusItem;
+    pub const updateStatusItemShell = SystemServiceMethods.updateStatusItemShell;
+    pub const updateStatusItemMenu = SystemServiceMethods.updateStatusItemMenu;
+    pub const updateStatusItemTitle = SystemServiceMethods.updateStatusItemTitle;
+    pub const updateStatusItemPresentation = SystemServiceMethods.updateStatusItemPresentation;
+    pub const removeStatusItem = SystemServiceMethods.removeStatusItem;
     pub const updateTrayMenu = SystemServiceMethods.updateTrayMenu;
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
+    pub const updateTrayPresentation = SystemServiceMethods.updateTrayPresentation;
     pub const removeTray = SystemServiceMethods.removeTray;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
+    const statusItemCommandNameForItem = SystemServiceMethods.statusItemCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;
     const readClipboardTextFromJson = SystemServiceMethods.readClipboardTextFromJson;
     const writeClipboardTextFromJson = SystemServiceMethods.writeClipboardTextFromJson;
@@ -607,6 +888,14 @@ pub const Runtime = struct {
     /// pointers are stable for the runtime's lifetime and tokens stamped
     /// with them compare equal frame to frame.
     pub fn textMeasureProvider(self: *const Runtime) ?*const canvas.TextMeasureProvider {
+        if (self.font_registry_policy) |policy| {
+            const choice = @import("font_registry_policy.zig").plan(policy, .provider, &.{}, self.canvas_font_count, .{ .facts = @intFromBool(self.text_measure_provider != null) }).action;
+            return switch (choice) {
+                1 => if (self.text_measure_provider) |*provider| provider else unreachable,
+                2 => &self.canvas_font_measure_provider,
+                else => null,
+            };
+        }
         if (self.text_measure_provider) |*provider| return provider;
         if (self.canvas_font_count > 0) return &self.canvas_font_measure_provider;
         return null;
@@ -643,6 +932,45 @@ pub const Runtime = struct {
     pub fn safeAreaInsetsForWindow(self: *const Runtime, window_id: platform.WindowId) geometry.InsetsF {
         if (self.surface.id != window_id) return .{};
         return self.surface.safe_area_insets;
+    }
+
+    /// Query native chrome live, or consume the recorded OS result on
+    /// replay. Missing, extra and differently targeted queries diverge
+    /// loudly; replay never consults the current host for this fact.
+    pub fn windowChrome(self: *Runtime, window_id: platform.WindowId) !platform.WindowChrome {
+        if (self.replay_window_chrome_active) {
+            if (self.replay_window_chrome_source == .unavailable) return .{};
+            if (self.replay_window_chrome_index == self.replay_window_chrome_count) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            const record = self.replay_window_chrome[self.replay_window_chrome_index];
+            if (record.window_id != window_id) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            self.replay_window_chrome_index += 1;
+            return record.chrome;
+        }
+        const chrome = self.options.platform.services.windowChrome(window_id);
+        if (self.options.session_recorder) |recorder| recorder.recordWindowChrome(.{ .window_id = window_id, .chrome = chrome });
+        return chrome;
+    }
+
+    /// The OS window-control cluster's frame in a canvas view's LOCAL
+    /// coordinates (Windows: the DWM min/max/close buttons; macOS: the
+    /// traffic lights), from the platform's live chrome report. Zero-sized
+    /// when no controls overlay the content — standard-chrome windows,
+    /// fullscreen, platforms without the concept — and translated by the
+    /// view's window-content frame so a docked canvas judges the overlap
+    /// in its own space. This is the geometry `UiApp` consults to keep a
+    /// drag header's content out from under the cluster.
+    pub fn windowControlsForView(self: *Runtime, window_id: platform.WindowId, label: []const u8) !geometry.RectF {
+        const zero = geometry.RectF.init(0, 0, 0, 0);
+        const buttons = (try self.windowChrome(window_id)).buttons.normalized();
+        if (buttons.width <= 0 or buttons.height <= 0) return zero;
+        const view_frame = (self.absoluteViewFrame(window_id, label, 0) catch return buttons).normalized();
+        return geometry.RectF.init(buttons.x - view_frame.x, buttons.y - view_frame.y, buttons.width, buttons.height);
     }
 
     pub fn listCommands(self: *const Runtime, output: []Command) []const Command {
@@ -688,6 +1016,14 @@ pub const Runtime = struct {
     pub const registeredCanvasImageCount = CanvasImageMethods.registeredCanvasImageCount;
     pub const canvasImageRegistryBinding = CanvasImageMethods.canvasImageRegistryBinding;
 
+    const MediaSurfaceMethods = runtime_media_surface.RuntimeMediaSurfaces(Runtime);
+    pub const acquireMediaSurfaceProducer = MediaSurfaceMethods.acquireMediaSurfaceProducer;
+    pub const adoptMediaSurfaceFrames = MediaSurfaceMethods.adoptMediaSurfaceFrames;
+    pub const disarmMediaSurfaceWakes = MediaSurfaceMethods.disarmMediaSurfaceWakes;
+    pub const adoptedMediaSurfaceTexture = MediaSurfaceMethods.adoptedMediaSurfaceTexture;
+    pub const mediaSurfaceBinding = MediaSurfaceMethods.mediaSurfaceBinding;
+    const adoptedMediaSurfaceTextures = MediaSurfaceMethods.adoptedMediaSurfaceTextures;
+
     const CanvasFontMethods = runtime_canvas_fonts.RuntimeCanvasFonts(Runtime);
     pub const registerCanvasFont = CanvasFontMethods.registerCanvasFont;
     pub const registeredCanvasFonts = CanvasFontMethods.registeredCanvasFonts;
@@ -703,6 +1039,7 @@ pub const Runtime = struct {
     pub const startCanvasWidgetLayoutTween = CanvasWidgetStateMethods.startCanvasWidgetLayoutTween;
     pub const advanceCanvasWidgetLayoutTweensForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetLayoutTweensForFrame;
     pub const advanceCanvasWidgetDisclosureTweenForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetDisclosureTweenForFrame;
+    pub const advanceCanvasWidgetDragLayoutMotionForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetDragLayoutMotionForFrame;
     pub const setCanvasWidgetDesignTokens = CanvasWidgetStateMethods.setCanvasWidgetDesignTokens;
     pub const canvasWidgetDesignTokens = CanvasWidgetStateMethods.canvasWidgetDesignTokens;
     pub const canvasWidgetTextGeometry = CanvasWidgetStateMethods.canvasWidgetTextGeometry;
@@ -714,7 +1051,10 @@ pub const Runtime = struct {
     pub const emitCanvasWidgetDisplayListWithChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListWithChrome;
     pub const emitCanvasWidgetDisplayListWithStoredTokensAndChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListWithStoredTokensAndChrome;
     const emitCanvasWidgetDisplayListForViewWithChrome = CanvasWidgetDisplayMethods.emitCanvasWidgetDisplayListForViewWithChrome;
-    const refreshCanvasWidgetDisplayListIfOwned = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwned;
+    // Public: the ui-app layer repaints after a terminal session's
+    // published snapshot moved under the retained tree (batch-aware,
+    // a no-op for chrome-owned display lists).
+    pub const refreshCanvasWidgetDisplayListIfOwned = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwned;
     const refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate;
@@ -727,7 +1067,12 @@ pub const Runtime = struct {
     const refreshCanvasWidgetDisplayList = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayList;
 
     const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+    pub const advanceCanvasTooltipIntentForFrame = CanvasWidgetEventMethods.advanceCanvasTooltipIntentForFrame;
+    pub const reconcileCanvasTooltipIntent = CanvasWidgetEventMethods.reconcileCanvasTooltipIntent;
+    pub const captureCanvasTooltipAdoptionBindings = CanvasWidgetEventMethods.captureCanvasTooltipAdoptionBindings;
+    pub const canvasWidgetPressTargetForRoute = CanvasWidgetEventMethods.canvasWidgetPressTargetForRoute;
     pub const routeCanvasWidgetPointerInput = CanvasWidgetEventMethods.routeCanvasWidgetPointerInput;
+    pub const canvasWidgetKeyboardFocusParticipation = CanvasWidgetEventMethods.canvasWidgetKeyboardFocusParticipation;
     pub const routeCanvasWidgetKeyboardInput = CanvasWidgetEventMethods.routeCanvasWidgetKeyboardInput;
     pub const routeCanvasWidgetTextInput = CanvasWidgetEventMethods.routeCanvasWidgetTextInput;
     pub const routeCanvasWidgetFileDrop = CanvasWidgetEventMethods.routeCanvasWidgetFileDrop;
@@ -747,9 +1092,10 @@ pub const Runtime = struct {
     const updateCanvasWidgetControlFromKeyboard = CanvasWidgetEventMethods.updateCanvasWidgetControlFromKeyboard;
     const dismissCanvasWidgetSurfaceFromPointerInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromPointerInput;
     const dismissCanvasWidgetSurfaceFromKeyboardInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromKeyboardInput;
-    const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
-    const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
-    const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;
+    pub const updateCanvasWidgetClickCountFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetClickCountFromPointer;
+    pub const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
+    pub const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
+    pub const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;
     const updateCanvasWidgetFocusFromKeyboardInput = CanvasWidgetEventMethods.updateCanvasWidgetFocusFromKeyboardInput;
     const setCanvasWidgetFocusFromKeyboard = CanvasWidgetEventMethods.setCanvasWidgetFocusFromKeyboard;
     const invalidateForWidgetInvalidations = CanvasWidgetEventMethods.invalidateForWidgetInvalidations;
@@ -761,7 +1107,7 @@ pub const Runtime = struct {
     const dispatchGpuSurfaceInput = GpuSurfaceEventMethods.dispatchGpuSurfaceInput;
 
     const AutomationWidgetMethods = runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
-    const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
+    pub const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
     const dispatchAutomationWidgetClick = AutomationWidgetMethods.dispatchAutomationWidgetClick;
     const dispatchAutomationWidgetHold = AutomationWidgetMethods.dispatchAutomationWidgetHold;
     const dispatchAutomationWidgetContextPress = AutomationWidgetMethods.dispatchAutomationWidgetContextPress;
@@ -775,6 +1121,7 @@ pub const Runtime = struct {
     const selectAutomationCanvasWidget = AutomationWidgetMethods.selectAutomationCanvasWidget;
     const setAutomationCanvasWidgetText = AutomationWidgetMethods.setAutomationCanvasWidgetText;
     const editAutomationCanvasWidgetText = AutomationWidgetMethods.editAutomationCanvasWidgetText;
+    const composeAutomationCanvasWidgetText = AutomationWidgetMethods.composeAutomationCanvasWidgetText;
     const dispatchAutomationCanvasWidgetDrag = AutomationWidgetMethods.dispatchAutomationCanvasWidgetDrag;
     const dispatchAutomationCanvasWidgetFileDrop = AutomationWidgetMethods.dispatchAutomationCanvasWidgetFileDrop;
 };
@@ -797,7 +1144,6 @@ pub fn TestHarness() type {
         trace_records: [64]trace.Record = undefined,
         trace_sink: trace.BufferSink = undefined,
         runtime: Runtime = undefined,
-
         /// The harness embeds the multi-megabyte Runtime, so stack
         /// instances overflow test threads; create on the heap.
         pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
@@ -806,16 +1152,61 @@ pub fn TestHarness() type {
             return self;
         }
 
+        /// Store-capability counterpart of `create`. The SQLite database is
+        /// private to this harness and is automatically bound to every UiApp
+        /// effect channel installed into its runtime.
+        pub fn createWithRecordStore(gpa: std.mem.Allocator, surface: platform.Surface) !*RecordStoreTestHarness() {
+            return RecordStoreTestHarness().create(gpa, surface);
+        }
+
+        /// Relational-capability counterpart of `create`. `native test`
+        /// receives a private in-memory SQLite database and never touches an
+        /// app-data path.
+        pub fn createWithRelationalStore(gpa: std.mem.Allocator, surface: platform.Surface) !*RelationalStoreTestHarness() {
+            return RelationalStoreTestHarness().create(gpa, surface);
+        }
+
+        /// Credential-capability counterpart of `create`. It enables both
+        /// gates against the NullPlatform's process-local byte store, so
+        /// `native test` never opens a real desktop keychain/keyring.
+        pub fn createWithCredentials(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
+            const self = try create(gpa, surface);
+            self.runtime.options.credentials_enabled = true;
+            self.runtime.options.security.permissions = &.{security.permission_credentials};
+            return self;
+        }
+
         pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            // The harness embeds the runtime's platform: deinit both
+            // returns the runtime's heap-owned storage (registered font
+            // bytes, lazily allocated image and media buffers) to the leak-checked
+            // test allocator AND disarms the wake bindings, so a
+            // producer handle a test keeps past destroy (the orphan
+            // tests) can never wake the freed host — the run loop's exit
+            // defer for real apps, this line for harness-driven ones.
+            self.runtime.deinit();
+            self.null_platform.deinit();
             gpa.destroy(self);
         }
 
         pub fn init(self: *Self, surface: platform.Surface) void {
+            self.initRuntime(surface, null);
+        }
+
+        fn initRuntime(self: *Self, surface: platform.Surface, record_store_binding: ?runtime_effects.RecordStoreBinding) void {
             self.null_platform = platform.NullPlatform.init(surface);
             self.trace_sink = trace.BufferSink.init(&self.trace_records);
             Runtime.initAt(&self.runtime, .{
                 .platform = self.null_platform.platform(),
                 .trace_sink = self.trace_sink.sink(),
+                .record_store = record_store_binding,
+                // On-demand runtime storage (registered font bytes,
+                // registered image slot buffers, adopted media-surface
+                // texture buffers) routes through
+                // the leak-checked test allocator (freed by `destroy`
+                // via Runtime.deinit), so a registration or adoption
+                // that leaks fails the test that made it.
+                .allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator,
                 // Real-executor effect tests spawn processes that must
                 // see the parent environment (HOME, PATH), exactly as
                 // the app runner threads it from `std.process.Init`.
@@ -839,6 +1230,104 @@ pub fn TestHarness() type {
     };
 }
 
+/// Capability-opted harness returned by `TestHarness().createWithRecordStore`.
+/// It is a separate concrete type so ordinary app tests that use
+/// `TestHarness().create` never analyze or link SQLite merely because Zig's
+/// test reflection visits the public SDK surface.
+pub fn RecordStoreTestHarness() type {
+    return struct {
+        const Self = @This();
+
+        null_platform: platform.NullPlatform = platform.NullPlatform.init(.{}),
+        trace_records: [64]trace.Record = undefined,
+        trace_sink: trace.BufferSink = undefined,
+        runtime: Runtime = undefined,
+        record_store: ?runtime_record_store.Store = null,
+
+        pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
+            const self = try gpa.create(Self);
+            errdefer gpa.destroy(self);
+            self.record_store = try runtime_record_store.Store.openMemory(gpa);
+            errdefer if (self.record_store) |*store| store.deinit();
+            self.null_platform = platform.NullPlatform.init(surface);
+            self.trace_sink = trace.BufferSink.init(&self.trace_records);
+            Runtime.initAt(&self.runtime, .{
+                .platform = self.null_platform.platform(),
+                .trace_sink = self.trace_sink.sink(),
+                .record_store = self.record_store.?.binding(),
+                .allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator,
+                .environ = if (builtin.is_test) std.testing.environ else null,
+            });
+            self.runtime.dispatch_error_policy = .propagate;
+            return self;
+        }
+
+        pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
+            if (self.record_store) |*store| store.deinit();
+            gpa.destroy(self);
+        }
+
+        pub fn start(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_start);
+            try self.runtime.dispatchPlatformEvent(app, .{ .surface_resized = self.null_platform.surface_value });
+            try self.runtime.dispatchPlatformEvent(app, .frame_requested);
+        }
+
+        pub fn stop(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_shutdown);
+        }
+    };
+}
+
+/// Capability-opted harness returned by
+/// `TestHarness().createWithRelationalStore`.
+pub fn RelationalStoreTestHarness() type {
+    return struct {
+        const Self = @This();
+
+        null_platform: platform.NullPlatform = platform.NullPlatform.init(.{}),
+        trace_records: [64]trace.Record = undefined,
+        trace_sink: trace.BufferSink = undefined,
+        runtime: Runtime = undefined,
+        relational_store: ?runtime_relational_store.Database = null,
+
+        pub fn create(gpa: std.mem.Allocator, surface: platform.Surface) !*Self {
+            const self = try gpa.create(Self);
+            errdefer gpa.destroy(self);
+            self.relational_store = try runtime_relational_store.Database.openMemory(gpa);
+            errdefer if (self.relational_store) |*database| database.deinit();
+            self.null_platform = platform.NullPlatform.init(surface);
+            self.trace_sink = trace.BufferSink.init(&self.trace_records);
+            Runtime.initAt(&self.runtime, .{
+                .platform = self.null_platform.platform(),
+                .trace_sink = self.trace_sink.sink(),
+                .relational_store = self.relational_store.?.binding(),
+                .allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator,
+                .environ = if (builtin.is_test) std.testing.environ else null,
+            });
+            self.runtime.dispatch_error_policy = .propagate;
+            return self;
+        }
+
+        pub fn destroy(self: *Self, gpa: std.mem.Allocator) void {
+            self.runtime.deinit();
+            if (self.relational_store) |*database| database.deinit();
+            gpa.destroy(self);
+        }
+
+        pub fn start(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_start);
+            try self.runtime.dispatchPlatformEvent(app, .{ .surface_resized = self.null_platform.surface_value });
+            try self.runtime.dispatchPlatformEvent(app, .frame_requested);
+        }
+
+        pub fn stop(self: *Self, app: App) anyerror!void {
+            try self.runtime.dispatchPlatformEvent(app, .app_shutdown);
+        }
+    };
+}
+
 const testingWriteViewJson = writeViewJson;
 const testingCopyInto = copyInto;
 const testingCanvasWidgetSemanticsById = canvasWidgetSemanticsById;
@@ -847,6 +1336,90 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub const scroll_mutation_methods = @import("view_widget_scroll.zig");
+    pub const scroll_mutation_policy = @import("scroll_mutation_policy.zig");
+    pub const virtual_window_policy = @import("virtual_window_policy.zig");
+    pub const context_menu_policy = @import("context_menu_policy.zig");
+    pub const web_pane_test_cases = @import("web_pane_test_cases.zig");
+    pub const web_pane_policy = @import("web_pane_policy.zig");
+    pub const context_menu_test_cases = @import("canvas_widget_context_menu_test_cases.zig");
+    pub const widget_retention_policy = @import("widget_retention_policy.zig");
+    pub const widget_retention_runtime = runtime_canvas_widget_runtime;
+    pub const widget_retention_view = runtime_view.RuntimeView;
+    pub const markup_development_policy = @import("markup_development_policy.zig");
+    pub const markup_provenance = @import("ui_app_provenance.zig");
+    pub const markup_provenance_reference = @import("ui_app_provenance_reference.zig");
+    pub const host_flow_reference = @import("flow_reference.zig");
+    pub const host_event_pump = @import("host_event_pump.zig");
+    pub const host_event_pump_reference = @import("host_event_pump_reference.zig");
+    pub const journal_policy = @import("journal_policy.zig");
+    pub const blob_policy = @import("blob_policy.zig");
+    pub const blob_reference_store = @import("session_blobs_reference.zig");
+    pub const snapshot_policy = @import("snapshot_policy.zig");
+    pub const frame_profile = runtime_frame_profile;
+    pub const replay_progress_policy = @import("replay_progress_policy.zig");
+    pub const recording_policy = @import("recording_policy.zig");
+    pub const syncHostInputDrivers = runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime).syncCanvasWidgetScrollDriversForView;
+    pub const stampHostInputRegions = runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime).stampCanvasWidgetNativeScroll;
+    pub const syncHostInputDragRegions = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime).syncCanvasWidgetWindowDragRegionsForView;
+    pub const host_input_regions_policy = @import("host_input_regions_policy.zig");
+    pub const view_coordination_policy = @import("view_coordination_policy.zig");
+    pub const view_coordination_methods = @import("window_view_runtime.zig").RuntimeWindowViewRuntime(Runtime);
+    pub const window_lifecycle_policy = @import("window_lifecycle_policy.zig");
+    pub const image_registry_policy = @import("image_registry_policy.zig");
+    pub const font_registry_policy = @import("font_registry_policy.zig");
+    pub const shell_coordination_policy = @import("shell_coordination_policy.zig");
+    pub const shell_admission_policy = @import("shell_admission_policy.zig");
+    pub const system_admission_policy = @import("system_admission_policy.zig");
+    pub const bridge_descriptor_policy = @import("bridge_descriptor_policy.zig");
+    pub const authorization_policy = @import("authorization_policy.zig");
+    pub const automation_commands = @import("automation_commands.zig");
+    pub const automation_command_policy = @import("automation_command_policy.zig");
+    pub const automation_interaction_policy = @import("automation_interaction_policy.zig");
+    pub const builtin_coordination_policy = @import("builtin_coordination_policy.zig");
+    pub const reference_bridge_payload = @import("bridge_payload.zig");
+    pub const reference_descriptor_validation = @import("validation.zig");
+    pub const shell_view_methods = @import("window_views.zig").RuntimeWindowViews(Runtime);
+    pub const window_storage_methods = @import("window_storage.zig").RuntimeWindowStorage(Runtime);
+    pub const referenceWindowDragRegions = @import("canvas_widget_events.zig").collectCanvasWidgetWindowDragRegions;
+    pub const input_composition_policy = @import("input_composition_policy.zig");
+    pub const clearInputCompositionOnBlur = runtime_view.clearImeGraceOnViewBlur;
+    pub const referenceInputPointer = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
+    pub const referenceInputKeyboard = canvas_frame_helpers.canvasWidgetKeyboardEventFromGpuInput;
+    pub const referenceInputText = canvas_frame_helpers.canvasWidgetTextInputEventFromGpuInput;
+    pub const referenceInputEscape = canvas_frame_helpers.canvasWidgetEscapeKey;
+    pub const referenceInputCommandModifier = canvas_frame_helpers.gpuInputHasTextCommandModifier;
+    pub const scene_observation_policy = @import("canvas_scene_observation_policy.zig");
+    pub const presentation_lifecycle_policy = @import("canvas_presentation_lifecycle_policy.zig");
+    pub const referencePresentationFallback = @import("canvas_frame.zig").referencePresentationFallback;
+    pub const compiledPresentationFallback = @import("canvas_frame.zig").compiledPresentationFallback;
+    pub const referenceSceneDirtyProjection = @import("canvas_frame.zig").canvasDirtyRegionForView;
+    pub const referenceSceneBlurExtent = @import("canvas_frame.zig").backdropBlurSampleExtentMultiplier;
+    pub const referenceSceneColor = canvas_frame_helpers.canvasColorToRgba8;
+    pub const referenceFrameBounds = canvas_frame_helpers.canvasFullRepaintBounds;
+    pub const referenceFrameScale = canvas_frame_helpers.normalizedCanvasPresentationScale;
+    pub const referenceFrameBudgetUnset = canvas_frame_helpers.canvasFrameBudgetIsUnset;
+    pub const render_animation_policy = @import("render_animation_policy.zig");
+    pub const motion_sampling_policy = @import("motion_sampling_policy.zig");
+    pub const referenceAnimationScheduleDirtyBounds = @import("canvas_frame.zig").referenceAnimationScheduleDirtyBounds;
+    pub const command_policy = @import("command_policy.zig");
+    pub const status_validation = @import("status_validation.zig");
+    pub const native_validation = @import("validation.zig");
+    pub const command_services = runtime_system_services.RuntimeSystemServices(Runtime);
+    pub const builtin_bridge_methods = @import("builtin_bridge.zig").RuntimeBuiltinBridge(Runtime);
+    pub const accessibility_policy = @import("accessibility_policy.zig");
+    pub const accessibility_publication = runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
+    pub const DamageCurrentCommand = @import("canvas_frame.zig").DamageCurrentCommand;
+    pub const referenceDamageSnap = @import("canvas_frame.zig").referenceDamageSnap;
+    pub const referenceDamageWiden = @import("canvas_frame.zig").referenceDamageWiden;
+    pub const referenceDamagePatch = @import("canvas_frame.zig").referenceDamagePatch;
+    pub fn mergeCanvasRenderOverrides(scheduled: []const canvas.CanvasRenderOverride, explicit: []const canvas.CanvasRenderOverride, output: []canvas.CanvasRenderOverride) ![]const canvas.CanvasRenderOverride {
+        return canvas_frame_helpers.mergeCanvasRenderOverrides(scheduled, explicit, output);
+    }
+
+    pub const nativeShellPlan = shell_layout.referenceShellPlan;
+    pub const compiledShellPlan = shell_layout.compiledShellPlan;
+    pub const encodeShellPlanRequest = shell_layout.encodeShellPlanRequest;
     pub fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
         return testingCopyInto(buffer, value);
     }

@@ -26,11 +26,16 @@ pub const ValidationError = error{
     InvalidTimeout,
     InvalidKeyword,
     MissingRequiredField,
+    MissingTrayCapability,
+    WebViewLayerConflict,
     NoSpaceLeft,
 };
 
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
+/// App identities double as the credential-manager service namespace, whose
+/// cross-platform ABI is bounded to this size.
+pub const max_app_id_bytes: usize = 128;
 pub const max_shortcut_key_bytes: usize = 32;
 pub const max_shell_windows: usize = 16;
 pub const max_shell_views_per_window: usize = 128;
@@ -84,6 +89,18 @@ pub const WebEngine = enum {
     chromium,
 };
 
+/// Whether the app ships the embedded web layer. `auto` (the default)
+/// infers it from the manifest's declarations — a `.frontend` block, the
+/// `webview` capability, a `.shell` webview view, or the Chromium engine
+/// all mean web; none of them means native-only. `include`/`exclude`
+/// override the inference, and an `exclude` that contradicts a web
+/// declaration is a validation error, never a silently broken build.
+pub const WebViewLayer = enum {
+    auto,
+    include,
+    exclude,
+};
+
 pub const CefConfig = struct {
     dir: []const u8 = "third_party/cef/macos",
     auto_install: bool = false,
@@ -100,6 +117,7 @@ pub const PermissionKind = enum {
     filesystem,
     camera,
     microphone,
+    system_audio,
     location,
     notifications,
     clipboard,
@@ -116,6 +134,7 @@ pub const Permission = union(PermissionKind) {
     filesystem: void,
     camera: void,
     microphone: void,
+    system_audio: void,
     location: void,
     notifications: void,
     clipboard: void,
@@ -146,6 +165,9 @@ pub const CapabilityKind = enum {
     dialog,
     clipboard,
     credentials,
+    persist,
+    store,
+    sqlite,
     open_url,
     reveal_path,
     recent_documents,
@@ -171,6 +193,9 @@ pub const Capability = union(CapabilityKind) {
     dialog: void,
     clipboard: void,
     credentials: void,
+    persist: void,
+    store: void,
+    sqlite: void,
     open_url: void,
     reveal_path: void,
     recent_documents: void,
@@ -297,6 +322,31 @@ pub const WindowTitlebarStyle = enum {
     chromeless,
 };
 
+/// What the window's CLOSE affordance (the red traffic light, cmd+W,
+/// the caption X) does. `.quit` is the classic document-app default:
+/// the window really closes, and closing the last one follows the
+/// host's exit semantics — behavior unchanged for every app that never
+/// declares the field.
+///
+/// `.hide` is the menu-bar/tray-app shape: the close affordance hides
+/// the window (it stays alive with its views, `WindowState.hidden`
+/// flips true) and the app keeps running behind its status item — a
+/// tray action's `Effects.showWindow`, or the macOS Dock reopen,
+/// brings it back. Supported where the host can re-show a hidden
+/// window (macOS, Windows); platforms without that affordance refuse
+/// the declaration loudly at create time rather than stranding a
+/// hidden window.
+///
+/// Room is deliberately left for a future `.event` tier — the model
+/// receives the close request as a Msg and owns the consequence
+/// (unsaved-changes prompts) — which is NOT implemented yet;
+/// model-declared secondary windows already have that shape today via
+/// `WindowDescriptor.on_close`.
+pub const WindowClosePolicy = enum {
+    quit,
+    hide,
+};
+
 pub const Window = struct {
     label: []const u8 = "main",
     title: ?[]const u8 = null,
@@ -311,11 +361,27 @@ pub const Window = struct {
     /// threaded through the platform create call, so the main window
     /// can hide its titlebar before the scene loads.
     titlebar: WindowTitlebarStyle = .standard,
+    /// Alpha-capable top-level window. Pair canvas windows with a
+    /// non-opaque `gpu_alpha_mode` so transparent pixels reach through
+    /// to the desktop.
+    transparent: bool = false,
+    /// Keep this window above ordinary application windows.
+    always_on_top: bool = false,
+    /// Let all pointer input pass through the window to whatever is
+    /// underneath it.
+    click_through: bool = false,
+    /// Show without activating the app or taking keyboard focus when
+    /// false. An explicit focus action can still activate the window.
+    activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// What the user's close affordance does — see `WindowClosePolicy`.
+    close_policy: WindowClosePolicy = .quit,
 };
 
 pub const ViewKind = enum {
@@ -438,6 +504,18 @@ pub const ShellWindow = struct {
     /// create, and the scene's first window here should declare the
     /// SAME style so the two never disagree.
     titlebar: WindowTitlebarStyle = .standard,
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
+    /// Create the native window ordered out and keep it hidden until an
+    /// explicit show/focus request. Intended for retained menu-bar app
+    /// host windows that must never flash during launch.
+    initially_hidden: bool = false,
+    /// Whether macOS exposes native fullscreen for this window. False
+    /// keeps ordinary resizing but disables the green fullscreen button
+    /// and the fullscreen command.
+    allows_fullscreen: bool = true,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor. Like
@@ -446,6 +524,11 @@ pub const ShellWindow = struct {
     /// runtime-created windows apply their own declaration at create.
     min_width: f32 = 0,
     min_height: f32 = 0,
+    /// What the user's close affordance does — see `WindowClosePolicy`.
+    /// Like `titlebar`, close handling is host window state: the
+    /// STARTUP window threads it through the host create, and
+    /// runtime-created windows apply their own declaration at create.
+    close_policy: WindowClosePolicy = .quit,
     views: []const ShellView = &.{},
 };
 
@@ -564,12 +647,37 @@ pub const UpdateConfig = struct {
     check_on_start: bool = false,
 };
 
+pub const PersistRestore = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
+};
+
+pub const PersistConfig = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: PersistRestore,
+};
+
+pub const ImagesConfig = struct {
+    /// Per-used-slot decoded RGBA8 budget. The default is 1 MiB; apps may
+    /// deliberately raise it through 8 MiB. Sixteen fully used slots at
+    /// the ceiling are a declared 128 MiB high-water mark.
+    max_image_pixel_bytes: usize = 1024 * 1024,
+};
+
 pub const Manifest = struct {
     identity: AppIdentity,
     version: Version,
     icons: []const Icon = &.{},
     permissions: []const Permission = &.{},
     capabilities: []const Capability = &.{},
+    /// Whether the app starts with its ordinary desktop presence. On
+    /// macOS false selects Accessory before startup windows exist, so no
+    /// Dock tile flashes; other hosts currently ignore the field.
+    dock_visible: bool = true,
+    persist: ?PersistConfig = null,
+    images: ImagesConfig = .{},
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,
     security: SecurityConfig = .{},
@@ -582,6 +690,7 @@ pub const Manifest = struct {
     file_associations: []const FileAssociation = &.{},
     url_schemes: []const UrlScheme = &.{},
     cef: CefConfig = .{},
+    webview_layer: WebViewLayer = .auto,
     package: PackageMetadata = .{},
     updates: UpdateConfig = .{},
 };

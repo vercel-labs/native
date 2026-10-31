@@ -27,6 +27,12 @@ pub const RuntimeWindow = struct {
     main_view_id: platform.ViewId = 0,
     source: ?platform.WebViewSource = null,
     source_reloads_from_app: bool = false,
+    /// Retained so hot reload never materializes an app WebView in a
+    /// deliberately sourceless canvas window.
+    source_policy: WindowSourcePolicy = .allow_source_less,
+    /// Creation-time show policy retained so Runtime.showWindow mirrors
+    /// whether the native host passively orders front or activates.
+    activate_on_show: bool = true,
     main_frame: geometry.RectF = geometry.RectF.init(0, 0, 0, 0),
     main_frame_set: bool = false,
     main_layer: i32 = 0,
@@ -37,6 +43,22 @@ pub const RuntimeWindow = struct {
     title_storage: [platform.max_window_title_bytes]u8 = undefined,
     main_parent_storage: [platform.max_view_label_bytes]u8 = undefined,
     source_storage: RuntimeSourceStorage = .{},
+
+    /// A table move copies inline storage but its slices still address the
+    /// old slot. Rebind every owned field before that slot can be reused.
+    pub fn rebindStorage(self: *RuntimeWindow) void {
+        self.info.label = self.label_storage[0..self.info.label.len];
+        self.info.title = self.title_storage[0..self.info.title.len];
+        if (self.main_parent) |parent| self.main_parent = self.main_parent_storage[0..parent.len];
+        if (self.source) |*source| {
+            source.bytes = self.source_storage.bytes[0..source.bytes.len];
+            if (source.asset_options) |*assets| {
+                assets.root_path = self.source_storage.asset_root_path[0..assets.root_path.len];
+                assets.entry = self.source_storage.asset_entry[0..assets.entry.len];
+                assets.origin = self.source_storage.asset_origin[0..assets.origin.len];
+            }
+        }
+    }
 };
 
 pub const RuntimeMainWebViewState = struct {
@@ -72,8 +94,38 @@ pub const RuntimeTrayItem = struct {
     label: []const u8 = "",
     separator: bool = false,
     enabled: bool = true,
+    detail: []const u8 = "",
+    role: platform.TrayItemRole = .command,
+    key: []const u8 = "",
+    modifiers: platform.ShortcutModifiers = .{},
     command_storage: [platform.max_tray_item_command_bytes]u8 = undefined,
     label_storage: [platform.max_tray_item_label_bytes]u8 = undefined,
+    detail_storage: [platform.max_tray_item_detail_bytes]u8 = undefined,
+    key_storage: [platform.max_menu_key_bytes]u8 = undefined,
+    segment_options: [platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+    segment_option_label_storage: [platform.max_tray_segment_options][platform.max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [platform.max_tray_segment_options][platform.max_tray_item_command_bytes]u8 = undefined,
+    segment_option_count: usize = 0,
+    segmented: ?platform.TraySegmentedRow = null,
+    metric_primary_storage: [platform.max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [platform.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    metric: ?platform.TrayMetricRow = null,
+    chart_values: [platform.max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_label_storage: [platform.max_tray_chart_text_bytes]u8 = undefined,
+    chart: ?platform.TrayChartRow = null,
+};
+
+pub const RuntimeStatusItem = struct {
+    id: platform.StatusItemId = 0,
+    active: bool = false,
+    visible: bool = true,
+    title: []const u8 = "",
+    title_storage: [platform.max_tray_title_bytes]u8 = undefined,
+    items: [platform.max_tray_items]RuntimeTrayItem = undefined,
+    item_count: usize = 0,
 };
 
 pub const ShellApplyMode = enum {

@@ -2,6 +2,7 @@ const std = @import("std");
 const app_icon_tool = @import("app_icon");
 const app_manifest = @import("app_manifest");
 const diagnostics = @import("diagnostics");
+const json_to_zon = @import("json_to_zon.zig");
 const raw_manifest = @import("raw_manifest.zig");
 const web_engine_tool = @import("web_engine.zig");
 
@@ -22,13 +23,36 @@ pub const Metadata = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    dock_visible: bool = true,
+    persist: ?PersistMetadata = null,
+    images: ImagesMetadata = .{},
+    service_packages: []const ServicePackageMetadata = &.{},
+    /// Which carrier runs src/services operations: "auto", "in_process",
+    /// or "child". Validated so a typo teaches at check time.
+    service_carrier: []const u8 = "auto",
+    /// In-process service pool width; null keeps the runtime default.
+    service_pool_size: ?u8 = null,
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
+    /// Whether the app ships the embedded web layer: "auto" (default,
+    /// inferred from the manifest's web declarations), "include", or
+    /// "exclude". See `webLayer` for the inference.
+    webview_layer: []const u8 = "auto",
+    /// How a TypeScript core compiles: "external" (the default and only
+    /// lane — the external core compiler). The removed transpiled
+    /// lane's spelling is refused with a teaching at validation.
+    core_compiler: []const u8 = "external",
     /// The built-in theme pack the app selects (`theme = "geist"`).
     /// Optional — absent keeps the house register. Validated against
     /// the known pack names so a typo is a check error, never a silent
     /// default-theme fallback.
     theme: ?[]const u8 = null,
+    /// The manifest's one-accent brand override (`theme_accent =
+    /// "#df2670"`), layered over the resolved pack by the runtime
+    /// (`canvas.accentOverrides`; high contrast skips it). Optional —
+    /// absent keeps the pack's own accent. Validated as a #rrggbb hex
+    /// color so a typo is a check error, never a silent stock accent.
+    theme_accent: ?[]const u8 = null,
     cef: web_engine_tool.CefConfig = .{},
     frontend: ?FrontendMetadata = null,
     security: SecurityMetadata = .{},
@@ -39,6 +63,8 @@ pub const Metadata = struct {
     shortcuts: []const ShortcutMetadata = &.{},
     file_associations: []const FileAssociationMetadata = &.{},
     url_schemes: []const UrlSchemeMetadata = &.{},
+    updates: UpdateMetadata = .{},
+    dmg: DmgMetadata = .{},
 
     pub fn displayName(self: Metadata) []const u8 {
         return self.display_name orelse self.name;
@@ -50,8 +76,12 @@ pub const Metadata = struct {
         if (self.display_name) |value| allocator.free(value);
         if (self.description) |value| allocator.free(value);
         if (self.theme) |value| allocator.free(value);
+        if (self.theme_accent) |value| allocator.free(value);
         allocator.free(self.version);
         allocator.free(self.web_engine);
+        allocator.free(self.webview_layer);
+        allocator.free(self.core_compiler);
+        allocator.free(self.service_carrier);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
         if (self.icons.len > 0) allocator.free(self.icons);
@@ -61,6 +91,17 @@ pub const Metadata = struct {
         if (self.permissions.len > 0) allocator.free(self.permissions);
         for (self.capabilities) |value| allocator.free(value);
         if (self.capabilities.len > 0) allocator.free(self.capabilities);
+        if (self.persist) |persist| {
+            allocator.free(persist.restore.ok);
+            allocator.free(persist.restore.none);
+            allocator.free(persist.restore.err);
+        }
+        for (self.service_packages) |package_entry| {
+            allocator.free(package_entry.name);
+            allocator.free(package_entry.version);
+            allocator.free(package_entry.content_hash);
+        }
+        if (self.service_packages.len > 0) allocator.free(self.service_packages);
         for (self.bridge_commands) |command| {
             allocator.free(command.name);
             for (command.permissions) |value| allocator.free(value);
@@ -90,6 +131,7 @@ pub const Metadata = struct {
             allocator.free(window.label);
             if (window.title) |title| allocator.free(title);
             allocator.free(window.titlebar);
+            allocator.free(window.close_policy);
         }
         if (self.windows.len > 0) allocator.free(self.windows);
         for (self.shell.windows) |window| {
@@ -97,6 +139,7 @@ pub const Metadata = struct {
             if (window.title) |title| allocator.free(title);
             allocator.free(window.restore_policy);
             allocator.free(window.titlebar);
+            allocator.free(window.close_policy);
             for (window.views) |view| {
                 allocator.free(view.label);
                 allocator.free(view.kind);
@@ -167,7 +210,38 @@ pub const Metadata = struct {
             allocator.free(scheme.role);
         }
         if (self.url_schemes.len > 0) allocator.free(self.url_schemes);
+        if (self.updates.feed_url) |value| allocator.free(value);
+        if (self.updates.public_key) |value| allocator.free(value);
+        if (self.dmg.volume_name) |value| allocator.free(value);
+        if (self.dmg.background) |value| allocator.free(value);
+        for (self.dmg.items) |item| {
+            if (item.path) |value| allocator.free(value);
+            if (item.name) |value| allocator.free(value);
+        }
+        if (self.dmg.items.len > 0) allocator.free(self.dmg.items);
     }
+};
+
+pub const ServicePackageMetadata = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
+};
+
+pub const PersistMetadata = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: PersistRestoreMetadata,
+};
+
+pub const ImagesMetadata = struct {
+    max_image_pixel_bytes: usize = 1024 * 1024,
+};
+
+pub const PersistRestoreMetadata = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
 };
 
 pub const BridgeCommandMetadata = struct {
@@ -186,8 +260,15 @@ pub const WindowMetadata = struct {
     resizable: bool = true,
     restore_state: bool = true,
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
 };
 
 pub const ShellMetadata = struct {
@@ -223,8 +304,15 @@ pub const ShellWindowMetadata = struct {
     restore_state: bool = true,
     restore_policy: []const u8 = "clamp_to_visible_screen",
     titlebar: []const u8 = "standard",
+    transparent: bool = false,
+    always_on_top: bool = false,
+    click_through: bool = false,
+    activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
+    close_policy: []const u8 = "quit",
     views: []const ShellViewMetadata = &.{},
 };
 
@@ -300,6 +388,47 @@ pub const UrlSchemeMetadata = struct {
     role: []const u8 = "viewer",
 };
 
+pub const DmgPosition = struct {
+    x: u16,
+    y: u16,
+};
+
+pub const DmgItemKind = enum {
+    app,
+    applications,
+    file,
+    link,
+};
+
+pub const DmgItemMetadata = struct {
+    kind: DmgItemKind,
+    path: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    position: DmgPosition,
+};
+
+pub const DmgMetadata = struct {
+    volume_name: ?[]const u8 = null,
+    background: ?[]const u8 = null,
+    window_width: u16 = 660,
+    window_height: u16 = 400,
+    icon_size: u16 = 128,
+    app_position: DmgPosition = .{ .x = 166, .y = 182 },
+    applications_position: DmgPosition = .{ .x = 486, .y = 182 },
+    applications_link: bool = true,
+    items: []const DmgItemMetadata = &.{},
+};
+
+pub const UpdateMetadata = struct {
+    feed_url: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    check_on_start: bool = false,
+
+    pub fn enabled(self: UpdateMetadata) bool {
+        return self.feed_url != null;
+    }
+};
+
 pub const FrontendDevMetadata = struct {
     url: []const u8,
     command: []const []const u8 = &.{},
@@ -346,67 +475,140 @@ const RawMenuItem = raw_manifest.RawMenuItem;
 const RawShortcut = raw_manifest.RawShortcut;
 const RawFileAssociation = raw_manifest.RawFileAssociation;
 const RawUrlScheme = raw_manifest.RawUrlScheme;
+const RawUpdates = raw_manifest.RawUpdates;
+const RawDmg = raw_manifest.RawDmg;
+const RawDmgItem = raw_manifest.RawDmgItem;
+
+pub const json_name = "app.json";
+pub const zon_name = "app.zon";
+
+/// Resolve the conventional manifest in the current app directory. JSON is
+/// the authoring default; app.zon remains a fully supported fallback. When a
+/// project temporarily contains both (for example while migrating), app.json
+/// is authoritative so every CLI boundary makes the same choice.
+pub fn defaultPath(io: std.Io) ?[]const u8 {
+    if (pathExists(io, json_name)) return json_name;
+    if (pathExists(io, zon_name)) return zon_name;
+    return null;
+}
+
+fn pathExists(io: std.Io, path: []const u8) bool {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return stat.kind == .file;
+}
+
+pub fn isJsonPath(path: []const u8) bool {
+    return json_to_zon.isJsonPath(path);
+}
 
 pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ValidationResult {
     const source = try readFile(allocator, io, path);
     defer allocator.free(source);
 
-    const metadata = parseText(allocator, source) catch return .{
+    const metadata = parseTextForPath(allocator, path, source) catch |err| return .{
         .ok = false,
-        .message = zonParseFailureMessage(allocator, source) orelse "app.zon metadata could not be parsed",
+        .message = parseFailureMessage(allocator, path, source, err),
     };
     defer metadata.deinit(allocator);
 
     if (metadata.description) |description| {
         app_manifest.validateDescription(description) catch return .{
             .ok = false,
-            .message = "app.zon description is invalid - it must be one non-empty line of at most 256 bytes with no control characters (it becomes the About panel credits line)",
+            .message = "app manifest description is invalid - it must be one non-empty line of at most 256 bytes with no control characters (it becomes the About panel credits line)",
         };
     }
     if (metadata.theme) |theme_name| {
         if (!isKnownThemePack(theme_name)) return .{
             .ok = false,
-            .message = "app.zon theme is invalid - expected one of: house, geist",
+            .message = "app manifest theme is invalid - expected one of: house, geist",
         };
     }
-    validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app.zon icons are invalid" };
+    if (metadata.theme_accent) |accent| {
+        if (!isHexColor(accent)) return .{
+            .ok = false,
+            .message = "app manifest theme_accent is invalid - expected a #rrggbb hex color (e.g. \"#df2670\")",
+        };
+    }
+    validateIconPaths(metadata.icons) catch return .{ .ok = false, .message = "app manifest icons are invalid" };
     if (try checkIconSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.icons)) |icon_message| {
         return .{ .ok = false, .message = icon_message };
     }
-    const permissions = parsePermissions(allocator, metadata.permissions) catch return .{ .ok = false, .message = "app.zon permissions are invalid" };
+    const permissions = parsePermissions(allocator, metadata.permissions) catch return .{ .ok = false, .message = "app manifest permissions are invalid" };
     defer allocator.free(permissions);
-    const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
+    const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app manifest capabilities are invalid" };
     defer allocator.free(capabilities);
-    const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app.zon bridge commands are invalid" };
+    const persist = convertPersist(metadata.persist);
+    app_manifest.validateImages(.{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes }) catch return .{
+        .ok = false,
+        .message = "app manifest images.max_image_pixel_bytes must be between 1048576 (the default) and 8388608 bytes; allocation is lazy once per used slot, up to 16 slots",
+    };
+    if (!validServicePackages(metadata.service_packages)) return .{
+        .ok = false,
+        .message = "app manifest service_packages must use safe npm names, exact X.Y.Z versions, unique names, and lowercase SHA-256 content hashes",
+    };
+    if (!validServiceCarrier(metadata.service_carrier)) return .{
+        .ok = false,
+        .message = "app manifest service_carrier must be \"auto\", \"in_process\", or \"child\"",
+    };
+    if (metadata.service_pool_size) |pool_size| {
+        if (pool_size < 1 or pool_size > 16) return .{
+            .ok = false,
+            .message = "app manifest service_pool_size must be between 1 and 16",
+        };
+    }
+    const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app manifest bridge commands are invalid" };
     defer {
         for (bridge_commands) |command| allocator.free(command.permissions);
         allocator.free(bridge_commands);
     }
     const frontend = if (metadata.frontend) |frontend_value| convertFrontend(frontend_value) else null;
-    const security = convertSecurity(metadata.security) catch return .{ .ok = false, .message = "app.zon security policy is invalid" };
-    const windows = convertWindows(allocator, metadata.windows) catch return .{ .ok = false, .message = "app.zon windows are invalid" };
+    const security = convertSecurity(metadata.security) catch return .{ .ok = false, .message = "app manifest security policy is invalid" };
+    const windows = convertWindows(allocator, metadata.windows) catch return .{ .ok = false, .message = "app manifest windows are invalid" };
     defer allocator.free(windows);
-    const shell = parseShell(allocator, metadata.shell) catch return .{ .ok = false, .message = "app.zon shell is invalid" };
+    const shell = parseShell(allocator, metadata.shell) catch return .{ .ok = false, .message = "app manifest shell is invalid" };
     defer deinitParsedShell(allocator, shell);
-    const commands = parseCommands(allocator, metadata.commands) catch return .{ .ok = false, .message = "app.zon commands are invalid" };
+    const commands = parseCommands(allocator, metadata.commands) catch return .{ .ok = false, .message = "app manifest commands are invalid" };
     defer allocator.free(commands);
-    const menus = parseMenus(allocator, metadata.menus) catch return .{ .ok = false, .message = "app.zon menus are invalid" };
+    const menus = parseMenus(allocator, metadata.menus) catch return .{ .ok = false, .message = "app manifest menus are invalid" };
     defer deinitParsedMenus(allocator, menus);
-    const shortcuts = parseShortcuts(allocator, metadata.shortcuts) catch return .{ .ok = false, .message = "app.zon shortcuts are invalid" };
+    const shortcuts = parseShortcuts(allocator, metadata.shortcuts) catch return .{ .ok = false, .message = "app manifest shortcuts are invalid" };
     defer allocator.free(shortcuts);
-    const file_associations = parseFileAssociations(allocator, metadata.file_associations) catch return .{ .ok = false, .message = "app.zon file associations are invalid" };
+    const file_associations = parseFileAssociations(allocator, metadata.file_associations) catch return .{ .ok = false, .message = "app manifest file associations are invalid" };
     defer allocator.free(file_associations);
-    const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
+    const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app manifest URL schemes are invalid" };
     defer allocator.free(url_schemes);
-    const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
-    const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app.zon platforms are invalid" };
+    const updates = convertUpdates(metadata.updates) catch return .{ .ok = false, .message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; check_on_start requires both" };
+    // General manifest validation owns only values the app explicitly
+    // declared. Archive-time fallbacks (notably display_name as the volume
+    // name) are validated when a macOS archive is actually requested, so an
+    // otherwise valid display name does not make every `native check` fail.
+    validateDmgSettings(metadata.dmg) catch return .{ .ok = false, .message = "app manifest dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
+    if (try checkDmgSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.dmg)) |dmg_message| {
+        return .{ .ok = false, .message = dmg_message };
+    }
+    const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app manifest web engine is invalid" };
+    if (metadata.updates.enabled() and manifest_web_engine == .chromium) return .{
+        .ok = false,
+        .message = "native updates currently require web_engine = \"system\" on macOS; the Chromium host does not yet provide the updater UI/install lifecycle",
+    };
+    const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app manifest webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
+    if (!std.mem.eql(u8, metadata.core_compiler, "external")) {
+        if (std.mem.eql(u8, metadata.core_compiler, "transpiler")) {
+            return .{ .ok = false, .message = "app manifest core_compiler = \"transpiler\" names the removed TS-to-Zig transpiled lane (v0.7.0 removed it) - TypeScript cores compile through the external core compiler now; delete the setting (or spell it \"external\")" };
+        }
+        return .{ .ok = false, .message = "app manifest core_compiler is invalid - expected \"external\" (the default and only lane)" };
+    }
+    const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app manifest platforms are invalid" };
     defer allocator.free(platform_settings);
 
     const manifest: app_manifest.Manifest = .{
         .identity = .{ .id = metadata.id, .name = metadata.name, .display_name = metadata.display_name, .description = metadata.description },
-        .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app.zon version is invalid" },
+        .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app manifest version is invalid" },
         .permissions = permissions,
         .capabilities = capabilities,
+        .dock_visible = metadata.dock_visible,
+        .persist = persist,
+        .images = .{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes },
         .bridge = .{ .commands = bridge_commands },
         .frontend = frontend,
         .security = security,
@@ -418,11 +620,20 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .shortcuts = shortcuts,
         .file_associations = file_associations,
         .url_schemes = url_schemes,
+        .updates = updates,
         .cef = .{ .dir = metadata.cef.dir, .auto_install = metadata.cef.auto_install },
+        .webview_layer = manifest_webview_layer,
         .package = .{ .web_engine = manifest_web_engine },
     };
-    app_manifest.validateManifest(manifest) catch return .{ .ok = false, .message = "manifest fields failed semantic validation" };
-    return .{ .ok = true, .message = "app.zon is valid" };
+    app_manifest.validateManifest(manifest) catch |err| return .{
+        .ok = false,
+        .message = switch (err) {
+            error.MissingTrayCapability => "app manifest dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to capabilities and install a status item, or keep dock_visible = true (the default)",
+            error.WebViewLayerConflict => web_layer_conflict_message,
+            else => "manifest fields failed semantic validation",
+        },
+    };
+    return .{ .ok = true, .message = if (isJsonPath(path)) "app.json is valid" else "app.zon is valid" };
 }
 
 /// Re-parse a failed manifest with std.zon diagnostics enabled so the
@@ -436,7 +647,7 @@ fn zonParseFailureMessage(allocator: std.mem.Allocator, source: []const u8) ?[]c
     const source_z = scratch.dupeZ(u8, source) catch return null;
     var diag: std.zon.parse.Diagnostics = .{};
     defer diag.deinit(scratch);
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(4000);
     if (std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, &diag, .{})) |_| {
         return null;
     } else |_| {
@@ -448,32 +659,73 @@ fn zonParseFailureMessage(allocator: std.mem.Allocator, source: []const u8) ?[]c
     }
 }
 
+fn parseFailureMessage(allocator: std.mem.Allocator, path: []const u8, source: []const u8, err: anyerror) []const u8 {
+    if (!isJsonPath(path)) return zonParseFailureMessage(allocator, source) orelse "app.zon metadata could not be parsed";
+    if (err == error.NullNotAllowed) return "app.json cannot contain null values - omit optional fields instead";
+    return std.fmt.allocPrint(allocator, "{s} could not be parsed as a Native SDK manifest ({s})", .{ std.fs.path.basename(path), @errorName(err) }) catch "app.json metadata could not be parsed";
+}
+
 pub fn readMetadata(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Metadata {
     const source = try readFile(allocator, io, path);
     defer allocator.free(source);
-    return parseText(allocator, source);
+    return parseTextForPath(allocator, path, source);
 }
 
+/// Parse legacy ZON text. Kept as the focused test/helper API; file-backed
+/// callers use parseTextForPath so app.json and app.zon share one conversion
+/// and semantic-validation pipeline.
 pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
     const source_z = try scratch.dupeZ(u8, source);
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(4000);
     const raw = try std.zon.parse.fromSliceAlloc(RawManifest, scratch, source_z, null, .{});
+    return metadataFromRaw(allocator, raw);
+}
+
+pub fn parseJsonText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
+    try json_to_zon.validateSource(allocator, source);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const raw = try std.json.parseFromSliceLeaky(RawManifest, arena.allocator(), source, .{ .ignore_unknown_fields = false });
+    return metadataFromRaw(allocator, raw);
+}
+
+pub fn parseTextForPath(allocator: std.mem.Allocator, path: []const u8, source: []const u8) !Metadata {
+    return if (isJsonPath(path)) parseJsonText(allocator, source) else parseText(allocator, source);
+}
+
+fn metadataFromRaw(allocator: std.mem.Allocator, raw: RawManifest) !Metadata {
+    if (raw.assets.fonts.len > 8) return error.TooManyFontAssets;
+    for (raw.assets.fonts, 0..) |font, index| {
+        if (font.id < 64 or font.id > 9_007_199_254_740_991) return error.InvalidFontAssetId;
+        try validateRelativePath(font.path);
+        if (!std.mem.startsWith(u8, font.path, "assets/")) return error.InvalidFontAssetPath;
+        for (raw.assets.fonts[0..index]) |previous| if (previous.id == font.id) return error.DuplicateFontAssetId;
+    }
     return .{
         .id = try allocator.dupe(u8, raw.id),
         .name = try allocator.dupe(u8, raw.name),
         .display_name = if (raw.display_name) |value| try allocator.dupe(u8, value) else null,
         .description = if (raw.description) |value| try allocator.dupe(u8, value) else null,
         .theme = if (raw.theme) |value| try allocator.dupe(u8, value) else null,
+        .theme_accent = if (raw.theme_accent) |value| try allocator.dupe(u8, value) else null,
         .version = try allocator.dupe(u8, raw.version),
         .icons = try duplicateStringList(allocator, raw.icons),
         .platforms = try duplicateStringList(allocator, raw.platforms),
         .permissions = try duplicateStringList(allocator, raw.permissions),
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
+        .dock_visible = raw.dock_visible,
+        .persist = try duplicateRawPersist(allocator, raw.persist),
+        .images = .{ .max_image_pixel_bytes = raw.images.max_image_pixel_bytes },
+        .service_packages = try duplicateRawServicePackages(allocator, raw.service_packages),
+        .service_carrier = try allocator.dupe(u8, raw.service_carrier),
+        .service_pool_size = if (raw.service_pool_size == 0) null else raw.service_pool_size,
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
+        .webview_layer = try allocator.dupe(u8, raw.webview_layer),
+        .core_compiler = try allocator.dupe(u8, raw.core_compiler),
         .cef = .{
             .dir = try allocator.dupe(u8, raw.cef.dir),
             .auto_install = raw.cef.auto_install,
@@ -487,7 +739,128 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .shortcuts = try convertRawShortcuts(allocator, raw.shortcuts),
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
+        .updates = try duplicateRawUpdates(allocator, raw.updates),
+        .dmg = try convertRawDmg(allocator, raw.dmg),
     };
+}
+
+fn duplicateRawUpdates(allocator: std.mem.Allocator, raw: RawUpdates) !UpdateMetadata {
+    return .{
+        .feed_url = try duplicateOptionalString(allocator, raw.feed_url),
+        .public_key = try duplicateOptionalString(allocator, raw.public_key),
+        .check_on_start = raw.check_on_start,
+    };
+}
+
+fn convertUpdates(updates: UpdateMetadata) !app_manifest.UpdateConfig {
+    if (updates.feed_url == null and updates.public_key == null and !updates.check_on_start) return .{};
+    const feed_url = updates.feed_url orelse return error.InvalidUpdates;
+    const public_key = updates.public_key orelse return error.InvalidUpdates;
+    if (!std.mem.startsWith(u8, feed_url, "https://")) return error.InvalidUpdates;
+    if (public_key.len == 0) return error.InvalidUpdates;
+    return .{ .feed_url = feed_url, .public_key = public_key, .check_on_start = updates.check_on_start };
+}
+
+fn duplicateRawServicePackages(allocator: std.mem.Allocator, packages: []const raw_manifest.RawServicePackage) ![]const ServicePackageMetadata {
+    if (packages.len == 0) return &.{};
+    const out = try allocator.alloc(ServicePackageMetadata, packages.len);
+    for (packages, 0..) |package_entry, index| out[index] = .{
+        .name = try allocator.dupe(u8, package_entry.name),
+        .version = try allocator.dupe(u8, package_entry.version),
+        .content_hash = try allocator.dupe(u8, package_entry.content_hash),
+    };
+    return out;
+}
+
+fn validServicePackages(packages: []const ServicePackageMetadata) bool {
+    for (packages, 0..) |package_entry, index| {
+        if (!validNpmPackageName(package_entry.name) or !exactPackageVersion(package_entry.version) or package_entry.content_hash.len != 64) return false;
+        for (package_entry.content_hash) |byte| if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) return false;
+        for (packages[0..index]) |earlier| if (std.mem.eql(u8, earlier.name, package_entry.name)) return false;
+    }
+    return true;
+}
+
+fn validServiceCarrier(value: []const u8) bool {
+    return std.mem.eql(u8, value, "auto") or std.mem.eql(u8, value, "in_process") or std.mem.eql(u8, value, "child");
+}
+
+fn validNpmPackageName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    const plain = struct {
+        fn valid(value: []const u8) bool {
+            if (value.len == 0) return false;
+            for (value) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '_' or byte == '-')) return false;
+            return true;
+        }
+    }.valid;
+    if (name[0] != '@') return plain(name);
+    const slash = std.mem.indexOfScalar(u8, name, '/') orelse return false;
+    return slash > 1 and slash + 1 < name.len and
+        std.mem.indexOfScalar(u8, name[slash + 1 ..], '/') == null and
+        plain(name[1..slash]) and plain(name[slash + 1 ..]);
+}
+
+fn exactPackageVersion(version: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, version, '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |byte| if (!std.ascii.isDigit(byte)) return false;
+        count += 1;
+    }
+    return count == 3;
+}
+
+fn convertRawDmg(allocator: std.mem.Allocator, dmg: RawDmg) !DmgMetadata {
+    return .{
+        .volume_name = try duplicateOptionalString(allocator, dmg.volume_name),
+        .background = try duplicateOptionalString(allocator, dmg.background),
+        .window_width = dmg.window_width,
+        .window_height = dmg.window_height,
+        .icon_size = dmg.icon_size,
+        .app_position = .{ .x = dmg.app_position.x, .y = dmg.app_position.y },
+        .applications_position = .{ .x = dmg.applications_position.x, .y = dmg.applications_position.y },
+        .applications_link = dmg.applications_link,
+        .items = try convertRawDmgItems(allocator, dmg.items),
+    };
+}
+
+fn convertRawDmgItems(allocator: std.mem.Allocator, items: []const RawDmgItem) ![]const DmgItemMetadata {
+    if (items.len == 0) return &.{};
+    const converted = try allocator.alloc(DmgItemMetadata, items.len);
+    errdefer allocator.free(converted);
+    var initialized: usize = 0;
+    errdefer for (converted[0..initialized]) |item| {
+        if (item.path) |value| allocator.free(value);
+        if (item.name) |value| allocator.free(value);
+    };
+    for (items, 0..) |item, index| {
+        converted[index] = try convertRawDmgItem(allocator, item);
+        initialized += 1;
+    }
+    return converted;
+}
+
+fn convertRawDmgItem(allocator: std.mem.Allocator, item: RawDmgItem) !DmgItemMetadata {
+    const path = try duplicateOptionalString(allocator, item.path);
+    errdefer if (path) |value| allocator.free(value);
+    const name = try duplicateOptionalString(allocator, item.name);
+    errdefer if (name) |value| allocator.free(value);
+    return .{
+        .kind = try parseDmgItemKind(item.kind),
+        .path = path,
+        .name = name,
+        .position = .{ .x = item.position.x, .y = item.position.y },
+    };
+}
+
+fn parseDmgItemKind(value: []const u8) !DmgItemKind {
+    if (std.mem.eql(u8, value, "app")) return .app;
+    if (std.mem.eql(u8, value, "applications")) return .applications;
+    if (std.mem.eql(u8, value, "file")) return .file;
+    if (std.mem.eql(u8, value, "link")) return .link;
+    return error.InvalidDmgItemKind;
 }
 
 fn duplicateOptionalString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
@@ -531,6 +904,33 @@ fn convertRawFrontend(allocator: std.mem.Allocator, frontend: ?RawFrontend) !?Fr
     };
 }
 
+fn duplicateRawPersist(allocator: std.mem.Allocator, raw: ?raw_manifest.RawPersist) !?PersistMetadata {
+    const persist = raw orelse return null;
+    const ok = try allocator.dupe(u8, persist.restore.ok);
+    errdefer allocator.free(ok);
+    const none = try allocator.dupe(u8, persist.restore.none);
+    errdefer allocator.free(none);
+    const err = try allocator.dupe(u8, persist.restore.err);
+    return .{
+        .version = persist.version,
+        .debounce_ms = persist.debounce_ms,
+        .restore = .{ .ok = ok, .none = none, .err = err },
+    };
+}
+
+fn convertPersist(persist: ?PersistMetadata) ?app_manifest.PersistConfig {
+    const value = persist orelse return null;
+    return .{
+        .version = value.version,
+        .debounce_ms = value.debounce_ms,
+        .restore = .{
+            .ok = value.restore.ok,
+            .none = value.restore.none,
+            .err = value.restore.err,
+        },
+    };
+}
+
 fn convertRawSecurity(allocator: std.mem.Allocator, security: RawSecurity) !SecurityMetadata {
     const external_action = if (security.navigation.external_links.allowed_urls.len == 0 and
         std.mem.eql(u8, security.navigation.external_links.action, "deny"))
@@ -562,8 +962,15 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
+            .close_policy = try allocator.dupe(u8, window.close_policy),
         };
     }
     return converted;
@@ -614,8 +1021,15 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .restore_state = window.restore_state,
             .restore_policy = try allocator.dupe(u8, window.restore_policy),
             .titlebar = try allocator.dupe(u8, window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
+            .close_policy = try allocator.dupe(u8, window.close_policy),
             .views = try convertRawShellViews(allocator, window.views),
         };
     }
@@ -813,8 +1227,15 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .resizable = window.resizable,
             .restore_state = window.restore_state,
             .titlebar = try parseTitlebarStyle(window.titlebar),
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = try parseWindowMinSize(window.min_width),
             .min_height = try parseWindowMinSize(window.min_height),
+            .close_policy = try parseClosePolicy(window.close_policy),
         };
     }
     return converted;
@@ -839,6 +1260,7 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
         const titlebar = try parseTitlebarStyle(window.titlebar);
         const min_width = try parseWindowMinSize(window.min_width);
         const min_height = try parseWindowMinSize(window.min_height);
+        const close_policy = try parseClosePolicy(window.close_policy);
         const views = try parseShellViews(allocator, window.views);
         windows[index] = .{
             .label = window.label,
@@ -851,8 +1273,15 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .restore_state = window.restore_state,
             .restore_policy = restore_policy,
             .titlebar = titlebar,
+            .transparent = window.transparent,
+            .always_on_top = window.always_on_top,
+            .click_through = window.click_through,
+            .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = min_width,
             .min_height = min_height,
+            .close_policy = close_policy,
             .views = views,
         };
         initialized += 1;
@@ -946,6 +1375,17 @@ fn isKnownThemePack(name: []const u8) bool {
     return false;
 }
 
+/// One #rrggbb hex color — the `theme_accent` shape the runner's
+/// comptime parse accepts (kept in step the same way as the pack names:
+/// a drift is a build error in the app, never a shipped typo).
+fn isHexColor(value: []const u8) bool {
+    if (value.len != 7 or value[0] != '#') return false;
+    for (value[1..]) |byte| {
+        _ = std.fmt.charToDigit(byte, 16) catch return false;
+    }
+    return true;
+}
+
 fn validateIconPaths(icons: []const []const u8) !void {
     for (icons, 0..) |icon, index| {
         try validateRelativePath(icon);
@@ -1023,6 +1463,7 @@ fn parsePermission(value: []const u8) app_manifest.Permission {
     if (std.mem.eql(u8, value, "filesystem")) return .filesystem;
     if (std.mem.eql(u8, value, "camera")) return .camera;
     if (std.mem.eql(u8, value, "microphone")) return .microphone;
+    if (std.mem.eql(u8, value, "system_audio")) return .system_audio;
     if (std.mem.eql(u8, value, "location")) return .location;
     if (std.mem.eql(u8, value, "notifications")) return .notifications;
     if (std.mem.eql(u8, value, "clipboard")) return .clipboard;
@@ -1049,6 +1490,9 @@ fn parseCapability(value: []const u8) !app_manifest.Capability {
     if (std.mem.eql(u8, value, "dialog")) return .dialog;
     if (std.mem.eql(u8, value, "clipboard")) return .clipboard;
     if (std.mem.eql(u8, value, "credentials")) return .credentials;
+    if (std.mem.eql(u8, value, "persist")) return .persist;
+    if (std.mem.eql(u8, value, "store")) return .store;
+    if (std.mem.eql(u8, value, "sqlite")) return .sqlite;
     if (std.mem.eql(u8, value, "open_url")) return .open_url;
     if (std.mem.eql(u8, value, "reveal_path")) return .reveal_path;
     if (std.mem.eql(u8, value, "recent_documents")) return .recent_documents;
@@ -1234,6 +1678,12 @@ fn parseTitlebarStyle(value: []const u8) !app_manifest.WindowTitlebarStyle {
     return error.InvalidWindowTitlebarStyle;
 }
 
+fn parseClosePolicy(value: []const u8) !app_manifest.WindowClosePolicy {
+    if (std.mem.eql(u8, value, "quit")) return .quit;
+    if (std.mem.eql(u8, value, "hide")) return .hide;
+    return error.InvalidWindowClosePolicy;
+}
+
 /// Same validation posture as the titlebar style: a min-size floor the
 /// host cannot honor (negative or non-finite) is a manifest error, not
 /// a silent clamp. 0 is the "no floor" sentinel.
@@ -1318,6 +1768,113 @@ fn parseWebEngine(value: []const u8) !app_manifest.WebEngine {
     return error.InvalidWebEngine;
 }
 
+fn parseWebViewLayer(value: []const u8) !app_manifest.WebViewLayer {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "include")) return .include;
+    if (std.mem.eql(u8, value, "exclude")) return .exclude;
+    return error.InvalidWebViewLayer;
+}
+
+/// The teaching message every boundary prints for the same
+/// contradiction: a manifest that excludes the web layer while declaring
+/// web content.
+pub const web_layer_conflict_message = "the app manifest sets webview_layer = \"exclude\" but the app declares web content (a frontend block, the \"webview\" capability, a shell webview view, or the Chromium web engine - from web_engine or --web-engine) - remove the web declarations or drop the exclude";
+
+/// The same contradiction arriving through the CLI flag instead of the
+/// manifest field: `--web-layer exclude` against an app that declares
+/// web content.
+pub const web_layer_flag_conflict_message = "--web-layer exclude contradicts the app's web declarations (a .frontend block, the \"webview\" capability, a .shell webview view, or the Chromium web engine - from .web_engine or --web-engine) - remove the web declarations or drop the flag";
+
+/// Why the web layer is (or is not) in the build, for verdict lines —
+/// the shared contract's reason set.
+pub const WebLayerReason = app_manifest.web_layer.Reason;
+
+/// The layer setting a boundary resolves before deciding: "auto",
+/// "include", or "exclude" — the shared contract's input enum, exported
+/// for the CLI's `--web-layer` flag.
+pub const WebViewLayerSetting = app_manifest.WebViewLayer;
+
+/// Parse a `--web-layer` flag value (auto|include|exclude), via the
+/// shared contract so the flag and the app.zon field accept exactly the
+/// same vocabulary.
+pub const parseWebViewLayerSetting = app_manifest.web_layer.parseWebViewLayer;
+
+pub const WebLayer = struct {
+    enabled: bool,
+    reason: WebLayerReason,
+    /// Whether the deciding include/exclude came from the CLI's
+    /// `--web-layer` flag rather than app.zon's `.webview_layer`; only
+    /// meaningful for the declared_include/declared_exclude reasons.
+    from_flag: bool = false,
+
+    /// The parenthesized half of a verdict line: `web layer: none
+    /// (inferred)` / `web layer: webview2 (declared: capabilities)`.
+    pub fn sourceText(self: WebLayer) []const u8 {
+        return switch (self.reason) {
+            .inferred_native_only => "inferred: nothing in app.zon declares web use",
+            .declared_exclude => if (self.from_flag) "declared: --web-layer exclude" else "declared: .webview_layer = \"exclude\"",
+            .capability => "declared: capabilities",
+            .frontend => "declared: .frontend",
+            .shell_webview => "declared: .shell webview view",
+            .chromium_engine => "declared: the Chromium web engine (.web_engine or --web-engine)",
+            .declared_include => if (self.from_flag) "declared: --web-layer include" else "declared: .webview_layer = \"include\"",
+            // Only the build graph's lenient parse can produce this
+            // reason; parsed metadata always reaches this fn readable.
+            .unreadable_manifest => "kept: app.zon could not be parsed",
+        };
+    }
+};
+
+pub const WebLayerError = error{ InvalidWebViewLayer, WebViewLayerConflict };
+
+/// The CLI-side adapter over the shared web-layer contract
+/// (app_manifest.web_layer): the same declare-to-use rule the build
+/// graph and the runner apply, fed the engine this boundary RESOLVED —
+/// `--web-engine` orelse app.zon, already resolved by the CLI's verb
+/// handlers. `.webview_layer = "include"|"exclude"` overrides, and an
+/// exclude that contradicts a web declaration (including a resolved
+/// Chromium engine) is refused.
+pub fn webLayer(metadata: Metadata, resolved_engine: web_engine_tool.Engine) WebLayerError!WebLayer {
+    return webLayerResolved(metadata, resolved_engine, null);
+}
+
+/// `webLayer` with the CLI's `--web-layer` flag in play: the flag beats
+/// app.zon's `.webview_layer` exactly as `-Dweb-layer` beats it in the
+/// build graph (effective setting = flag orelse manifest), so the build
+/// graphs can forward their resolved decision and hand-run packages can
+/// override the field without editing app.zon. An exclude flag against
+/// a web declaration is the same refused conflict as a manifest exclude.
+pub fn webLayerResolved(metadata: Metadata, resolved_engine: web_engine_tool.Engine, layer_flag: ?WebViewLayerSetting) WebLayerError!WebLayer {
+    const manifest_setting = parseWebViewLayer(metadata.webview_layer) catch return error.InvalidWebViewLayer;
+    const engine: app_manifest.WebEngine = switch (resolved_engine) {
+        .system => .system,
+        .chromium => .chromium,
+    };
+    const decision = app_manifest.web_layer.infer(metadata, engine, layer_flag orelse manifest_setting) catch return error.WebViewLayerConflict;
+    if (layer_flag != null) {
+        // The flag decides, but the verdict line keeps app.zon's own
+        // richer reason whenever the flag merely confirms what the
+        // manifest already decides: the build graphs forward their
+        // resolved decision on every `zig build package`, and the common
+        // case must keep reporting "declared: capabilities", not the
+        // forwarded flag. Only a flag that CHANGES the outcome names
+        // itself as the cause.
+        if (app_manifest.web_layer.infer(metadata, engine, manifest_setting)) |manifest_decision| {
+            if (manifest_decision.enabled == decision.enabled) {
+                return .{ .enabled = manifest_decision.enabled, .reason = manifest_decision.reason };
+            }
+        } else |_| {}
+        return .{ .enabled = decision.enabled, .reason = decision.reason, .from_flag = true };
+    }
+    return .{ .enabled = decision.enabled, .reason = decision.reason };
+}
+
+/// The web-layer verdict for callers with no engine flag in play
+/// (`native check`): the manifest's own engine is the resolved engine.
+pub fn webLayerFromManifest(metadata: Metadata) WebLayerError!WebLayer {
+    return webLayer(metadata, web_engine_tool.Engine.parse(metadata.web_engine) orelse .system);
+}
+
 fn validateRelativePath(path: []const u8) !void {
     if (path.len == 0) return error.InvalidPath;
     if (path[0] == '/' or path[0] == '\\') return error.InvalidPath;
@@ -1333,14 +1890,675 @@ fn validateRelativePath(path: []const u8) !void {
     try validatePathSegment(path[segment_start..]);
 }
 
+pub fn validateDmgSettings(dmg: DmgMetadata) !void {
+    if (dmg.window_width < 320 or dmg.window_width > 2000) return error.InvalidDmgWindow;
+    if (dmg.window_height < 240 or dmg.window_height > 1400) return error.InvalidDmgWindow;
+    if (dmg.icon_size < 32 or dmg.icon_size > 256) return error.InvalidDmgIconSize;
+    if (dmg.items.len == 0) {
+        if (!dmgPositionInsideWindow(dmg, dmg.app_position)) return error.InvalidDmgPosition;
+        if (dmg.applications_link and !dmgPositionInsideWindow(dmg, dmg.applications_position)) return error.InvalidDmgPosition;
+    } else {
+        if (dmg.items.len > 64) return error.TooManyDmgItems;
+        var app_count: usize = 0;
+        var applications_count: usize = 0;
+        for (dmg.items, 0..) |item, index| {
+            if (!dmgPositionInsideWindow(dmg, item.position)) return error.InvalidDmgPosition;
+            switch (item.kind) {
+                .app => {
+                    app_count += 1;
+                    if (item.path != null) return error.InvalidDmgItem;
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+                .applications => {
+                    applications_count += 1;
+                    if (item.path != null or item.name != null) return error.InvalidDmgItem;
+                },
+                .file => {
+                    const path = item.path orelse return error.InvalidDmgItem;
+                    try validateRelativePath(path);
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+                .link => {
+                    const target = item.path orelse return error.InvalidDmgItem;
+                    if (!std.fs.path.isAbsolute(target)) return error.InvalidDmgItem;
+                    for (target) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidDmgItem;
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+            }
+            const name = dmgItemDestinationName(item) orelse continue;
+            try validateDmgItemName(name);
+            for (dmg.items[0..index]) |previous| {
+                const previous_name = dmgItemDestinationName(previous) orelse continue;
+                if (std.ascii.eqlIgnoreCase(previous_name, name)) return error.DuplicateDmgItem;
+            }
+        }
+        if (app_count != 1 or applications_count > 1) return error.InvalidDmgItem;
+    }
+    if (dmg.volume_name) |name| try validateDmgVolumeName(name);
+    if (dmg.background) |background| {
+        try validateRelativePath(background);
+        if (!dmgBackgroundExtensionSupported(background)) return error.InvalidDmgBackground;
+    }
+}
+
+/// Validate the derived values packaging actually passes to `hdiutil` and
+/// `ditto`, not only the optional raw overrides. In particular, an absent
+/// volume name falls back to the app display name, and an app item without an
+/// `.app` suffix gains one before it becomes a filesystem component.
+pub fn validateDmgPackageSettings(metadata: Metadata) !void {
+    try validateDmgSettings(metadata.dmg);
+    try validateDmgVolumeName(metadata.dmg.volume_name orelse metadata.displayName());
+
+    var app_name_buffer: [255]u8 = undefined;
+    const app_name = try dmgAppBundleName(&app_name_buffer, metadata);
+    for (metadata.dmg.items) |item| {
+        const destination_name = dmgItemDestinationName(item) orelse continue;
+        if (std.ascii.eqlIgnoreCase(destination_name, app_name)) return error.DuplicateDmgItem;
+    }
+}
+
+fn dmgConfiguredAppName(metadata: Metadata) []const u8 {
+    if (metadata.dmg.items.len > 0) {
+        for (metadata.dmg.items) |item| {
+            if (item.kind == .app) return item.name orelse metadata.displayName();
+        }
+    }
+    return metadata.displayName();
+}
+
+/// Resolve the exact app-bundle filesystem name used inside the DMG. Keeping
+/// this beside validation ensures collision checks and staging cannot drift.
+pub fn dmgAppBundleName(buffer: []u8, metadata: Metadata) ![]const u8 {
+    const configured_name = dmgConfiguredAppName(metadata);
+    const has_app_suffix = configured_name.len >= 4 and std.ascii.eqlIgnoreCase(configured_name[configured_name.len - 4 ..], ".app");
+    const configured_stem = if (has_app_suffix) configured_name[0 .. configured_name.len - 4] else configured_name;
+    const stem = if (configured_stem.len == 0) metadata.name else configured_stem;
+    if (stem.len > 255 - ".app".len or buffer.len < stem.len + ".app".len) return error.InvalidDmgItem;
+
+    for (stem, 0..) |byte, index| {
+        buffer[index] = switch (byte) {
+            '/', ':', '\\', 0...0x1f, 0x7f => '-',
+            else => byte,
+        };
+    }
+    @memcpy(buffer[stem.len..][0..".app".len], ".app");
+    return buffer[0 .. stem.len + ".app".len];
+}
+
+fn validateDmgVolumeName(name: []const u8) !void {
+    if (name.len == 0 or name.len > 127) return error.InvalidDmgVolumeName;
+    for (name) |byte| {
+        if (byte < 0x20 or byte == 0x7f or byte == '/' or byte == ':') return error.InvalidDmgVolumeName;
+    }
+}
+
+fn dmgPositionInsideWindow(dmg: DmgMetadata, position: DmgPosition) bool {
+    return position.x < dmg.window_width and position.y < dmg.window_height;
+}
+
+pub fn dmgItemDestinationName(item: DmgItemMetadata) ?[]const u8 {
+    return switch (item.kind) {
+        .app => null,
+        .applications => "Applications",
+        .file, .link => item.name orelse if (item.path) |path| std.fs.path.basename(path) else null,
+    };
+}
+
+fn validateDmgItemName(name: []const u8) !void {
+    if (name.len == 0 or name.len > 255) return error.InvalidDmgItem;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidDmgItem;
+    if (std.ascii.eqlIgnoreCase(name, ".background") or std.ascii.eqlIgnoreCase(name, ".DS_Store")) return error.InvalidDmgItem;
+    for (name) |byte| {
+        if (byte < 0x20 or byte == 0x7f or byte == '/' or byte == ':' or byte == '\\') return error.InvalidDmgItem;
+    }
+}
+
+fn dmgBackgroundExtensionSupported(path: []const u8) bool {
+    return app_icon_tool.pathHasExtension(path, ".png") or
+        app_icon_tool.pathHasExtension(path, ".jpg") or
+        app_icon_tool.pathHasExtension(path, ".jpeg") or
+        app_icon_tool.pathHasExtension(path, ".tif") or
+        app_icon_tool.pathHasExtension(path, ".tiff");
+}
+
+const max_dmg_background_bytes = 64 * 1024 * 1024;
+
+const DmgImageDimensions = struct {
+    width: usize,
+    height: usize,
+};
+
+pub fn dmgRetinaRelativePathAlloc(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
+    if (app_icon_tool.pathHasExtension(path, ".tif") or app_icon_tool.pathHasExtension(path, ".tiff")) return null;
+    const extension = std.fs.path.extension(path);
+    const retina_path = try std.fmt.allocPrint(allocator, "{s}@2x{s}", .{ path[0 .. path.len - extension.len], extension });
+    return retina_path;
+}
+
+fn dmgImageDimensions(path: []const u8, bytes: []const u8) ?DmgImageDimensions {
+    if (app_icon_tool.pathHasExtension(path, ".png")) return pngDimensions(bytes);
+    if (app_icon_tool.pathHasExtension(path, ".jpg") or app_icon_tool.pathHasExtension(path, ".jpeg")) return jpegDimensions(bytes);
+    if (app_icon_tool.pathHasExtension(path, ".tif") or app_icon_tool.pathHasExtension(path, ".tiff")) return tiffDimensions(bytes);
+    return null;
+}
+
+/// Validate the complete PNG chunk envelope (including CRCs and IEND), while
+/// leaving pixel decoding to Finder. This accepts interlaced/background PNGs
+/// beyond the deliberately narrower app-icon rasterizer dialect.
+fn pngDimensions(bytes: []const u8) ?DmgImageDimensions {
+    const signature = "\x89PNG\r\n\x1a\n";
+    if (bytes.len < signature.len or !std.mem.eql(u8, bytes[0..signature.len], signature)) return null;
+    var offset: usize = signature.len;
+    var dimensions: ?DmgImageDimensions = null;
+    var saw_idat = false;
+    while (offset < bytes.len) {
+        if (bytes.len - offset < 12) return null;
+        const data_len: usize = std.mem.readInt(u32, bytes[offset..][0..4], .big);
+        if (data_len > bytes.len - offset - 12) return null;
+        const chunk_type = bytes[offset + 4 .. offset + 8];
+        const data = bytes[offset + 8 .. offset + 8 + data_len];
+        const expected_crc = std.mem.readInt(u32, bytes[offset + 8 + data_len ..][0..4], .big);
+        var crc = std.hash.Crc32.init();
+        crc.update(chunk_type);
+        crc.update(data);
+        if (crc.final() != expected_crc) return null;
+        offset += 12 + data_len;
+
+        if (std.mem.eql(u8, chunk_type, "IHDR")) {
+            if (dimensions != null or data.len != 13 or saw_idat) return null;
+            const width = std.mem.readInt(u32, data[0..4], .big);
+            const height = std.mem.readInt(u32, data[4..8], .big);
+            if (width == 0 or height == 0 or data[10] != 0 or data[11] != 0 or data[12] > 1) return null;
+            const valid_depth = switch (data[9]) {
+                0 => data[8] == 1 or data[8] == 2 or data[8] == 4 or data[8] == 8 or data[8] == 16,
+                2, 4, 6 => data[8] == 8 or data[8] == 16,
+                3 => data[8] == 1 or data[8] == 2 or data[8] == 4 or data[8] == 8,
+                else => false,
+            };
+            if (!valid_depth) return null;
+            dimensions = .{ .width = width, .height = height };
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            if (dimensions == null) return null;
+            saw_idat = true;
+        } else if (std.mem.eql(u8, chunk_type, "IEND")) {
+            if (data.len != 0 or !saw_idat or offset != bytes.len) return null;
+            return dimensions;
+        }
+    }
+    return null;
+}
+
+fn jpegDimensions(bytes: []const u8) ?DmgImageDimensions {
+    if (bytes.len < 4 or bytes[0] != 0xff or bytes[1] != 0xd8) return null;
+    var offset: usize = 2;
+    var dimensions: ?DmgImageDimensions = null;
+    var in_scan = false;
+    var saw_scan = false;
+    while (offset < bytes.len) {
+        if (in_scan) {
+            while (offset < bytes.len and bytes[offset] != 0xff) : (offset += 1) {}
+            if (offset == bytes.len) return null;
+        } else if (bytes[offset] != 0xff) {
+            return null;
+        }
+        while (offset < bytes.len and bytes[offset] == 0xff) : (offset += 1) {}
+        if (offset == bytes.len) return null;
+        const marker = bytes[offset];
+        offset += 1;
+        if (marker == 0x00) {
+            if (!in_scan) return null;
+            continue;
+        }
+        if (marker == 0xd9) return if (saw_scan) dimensions else null;
+        if (marker >= 0xd0 and marker <= 0xd7) {
+            if (!in_scan) return null;
+            continue;
+        }
+        if (marker == 0x01) continue;
+        if (marker == 0xd8) return null;
+        if (bytes.len - offset < 2) return null;
+        const segment_len: usize = std.mem.readInt(u16, bytes[offset..][0..2], .big);
+        if (segment_len < 2 or segment_len > bytes.len - offset) return null;
+        const segment = bytes[offset + 2 .. offset + segment_len];
+        if (jpegMarkerCarriesDimensions(marker)) {
+            if (segment.len < 6) return null;
+            const height = std.mem.readInt(u16, segment[1..3], .big);
+            const width = std.mem.readInt(u16, segment[3..5], .big);
+            if (width == 0 or height == 0) return null;
+            dimensions = .{ .width = width, .height = height };
+        }
+        in_scan = marker == 0xda;
+        saw_scan = saw_scan or in_scan;
+        offset += segment_len;
+    }
+    return null;
+}
+
+fn jpegMarkerCarriesDimensions(marker: u8) bool {
+    return switch (marker) {
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf => true,
+        else => false,
+    };
+}
+
+fn tiffDimensions(bytes: []const u8) ?DmgImageDimensions {
+    if (bytes.len < 8) return null;
+    const endian: std.builtin.Endian = if (std.mem.eql(u8, bytes[0..2], "II"))
+        .little
+    else if (std.mem.eql(u8, bytes[0..2], "MM"))
+        .big
+    else
+        return null;
+    return switch (readEndianU16(bytes, 2, endian) orelse return null) {
+        42 => classicTiffDimensions(bytes, endian),
+        43 => bigTiffDimensions(bytes, endian),
+        else => null,
+    };
+}
+
+const max_tiff_directories = 64;
+
+const TiffIntegerKind = enum {
+    short,
+    long,
+    long8,
+};
+
+const TiffIntegerField = struct {
+    kind: TiffIntegerKind,
+    count: usize,
+    data_offset: usize,
+};
+
+const TiffDirectory = struct {
+    dimensions: DmgImageDimensions,
+    next_offset: usize,
+};
+
+fn classicTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
+    var ifd_offset = std.math.cast(usize, readEndianU32(bytes, 4, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = classicTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn classicTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
+    const entry_count = readEndianU16(bytes, ifd_offset, endian) orelse return null;
+    const entries_start = std.math.add(usize, ifd_offset, 2) catch return null;
+    const entries_bytes = std.math.mul(usize, entry_count, 12) catch return null;
+    const entries_end = std.math.add(usize, entries_start, entries_bytes) catch return null;
+    if (entries_end > bytes.len or bytes.len - entries_end < 4) return null;
+    var width: ?usize = null;
+    var height: ?usize = null;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
+    for (0..entry_count) |index| {
+        const entry_offset = entries_start + index * 12;
+        const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
+        switch (tag) {
+            256, 257 => {
+                const field = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
+    }
+    if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU32(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn classicTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU32(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 4)
+        entry_offset + 8
+    else
+        std.math.cast(usize, readEndianU32(bytes, entry_offset + 8, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
+}
+
+fn bigTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
+    if (bytes.len < 16 or (readEndianU16(bytes, 4, endian) orelse return null) != 8 or (readEndianU16(bytes, 6, endian) orelse return null) != 0) return null;
+    var ifd_offset = std.math.cast(usize, readEndianU64(bytes, 8, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = bigTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn bigTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
+    const entry_count = std.math.cast(usize, readEndianU64(bytes, ifd_offset, endian) orelse return null) orelse return null;
+    const entries_start = std.math.add(usize, ifd_offset, 8) catch return null;
+    const entries_bytes = std.math.mul(usize, entry_count, 20) catch return null;
+    const entries_end = std.math.add(usize, entries_start, entries_bytes) catch return null;
+    if (entries_end > bytes.len or bytes.len - entries_end < 8) return null;
+    var width: ?usize = null;
+    var height: ?usize = null;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
+    for (0..entry_count) |index| {
+        const entry_offset = entries_start + index * 20;
+        const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
+        switch (tag) {
+            256, 257 => {
+                const field = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
+    }
+    if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU64(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn bigTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        16 => .long8,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU64(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 8)
+        entry_offset + 12
+    else
+        std.math.cast(usize, readEndianU64(bytes, entry_offset + 12, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
+}
+
+fn tiffIntegerSize(kind: TiffIntegerKind) usize {
+    return switch (kind) {
+        .short => 2,
+        .long => 4,
+        .long8 => 8,
+    };
+}
+
+fn tiffIntegerValue(bytes: []const u8, field: TiffIntegerField, index: usize, endian: std.builtin.Endian) ?usize {
+    if (index >= field.count) return null;
+    const value_offset = std.math.add(usize, field.data_offset, std.math.mul(usize, index, tiffIntegerSize(field.kind)) catch return null) catch return null;
+    return switch (field.kind) {
+        .short => readEndianU16(bytes, value_offset, endian) orelse return null,
+        .long => std.math.cast(usize, readEndianU32(bytes, value_offset, endian) orelse return null) orelse return null,
+        .long8 => std.math.cast(usize, readEndianU64(bytes, value_offset, endian) orelse return null) orelse return null,
+    };
+}
+
+fn tiffImagePayloadsValid(
+    bytes: []const u8,
+    endian: std.builtin.Endian,
+    strip_offsets: ?TiffIntegerField,
+    strip_byte_counts: ?TiffIntegerField,
+    tile_offsets: ?TiffIntegerField,
+    tile_byte_counts: ?TiffIntegerField,
+) bool {
+    const has_strips = strip_offsets != null or strip_byte_counts != null;
+    const has_tiles = tile_offsets != null or tile_byte_counts != null;
+    if (!has_strips and !has_tiles) return false;
+    if (has_strips) {
+        if (strip_offsets == null or strip_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, strip_offsets.?, strip_byte_counts.?)) return false;
+    }
+    if (has_tiles) {
+        if (tile_offsets == null or tile_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, tile_offsets.?, tile_byte_counts.?)) return false;
+    }
+    return true;
+}
+
+fn tiffPayloadRangesValid(bytes: []const u8, endian: std.builtin.Endian, offsets: TiffIntegerField, byte_counts: TiffIntegerField) bool {
+    if (offsets.count == 0 or offsets.count != byte_counts.count) return false;
+    for (0..offsets.count) |index| {
+        const payload_offset = tiffIntegerValue(bytes, offsets, index, endian) orelse return false;
+        const payload_bytes = tiffIntegerValue(bytes, byte_counts, index, endian) orelse return false;
+        if (payload_bytes == 0 or payload_offset > bytes.len or payload_bytes > bytes.len - payload_offset) return false;
+    }
+    return true;
+}
+
+fn readEndianU16(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u16 {
+    if (offset > bytes.len or bytes.len - offset < 2) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u16, bytes[offset..][0..2], .little),
+        .big => std.mem.readInt(u16, bytes[offset..][0..2], .big),
+    };
+}
+
+fn readEndianU32(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u32 {
+    if (offset > bytes.len or bytes.len - offset < 4) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u32, bytes[offset..][0..4], .little),
+        .big => std.mem.readInt(u32, bytes[offset..][0..4], .big),
+    };
+}
+
+fn readEndianU64(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u64 {
+    if (offset > bytes.len or bytes.len - offset < 8) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u64, bytes[offset..][0..8], .little),
+        .big => std.mem.readInt(u64, bytes[offset..][0..8], .big),
+    };
+}
+
+pub fn checkDmgSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, dmg: DmgMetadata) !?[]const u8 {
+    if (try checkDmgBackground(allocator, io, manifest_dir, dmg)) |message| return message;
+    return checkDmgItemSources(allocator, io, manifest_dir, dmg.items);
+}
+
+fn checkDmgBackground(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, dmg: DmgMetadata) !?[]const u8 {
+    const path = dmg.background orelse return null;
+    validateRelativePath(path) catch return "app.zon dmg background is invalid - use a project-relative PNG, JPEG, or TIFF path";
+    if (!dmgBackgroundExtensionSupported(path)) return "app.zon dmg background is invalid - Finder backgrounds must be PNG, JPEG, or TIFF";
+    const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, path });
+    defer allocator.free(resolved);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, resolved, allocator, .limited(max_dmg_background_bytes)) catch return "app.zon dmg background could not be read";
+    defer allocator.free(bytes);
+    const dimensions = dmgImageDimensions(path, bytes) orelse return "app.zon dmg background is not a structurally valid PNG, JPEG, or TIFF image";
+    if (dimensions.width != dmg.window_width or dimensions.height != dmg.window_height) {
+        const message = try std.fmt.allocPrint(allocator, "app.zon dmg background is {d}x{d} - expected {d}x{d} to match window_width/window_height", .{ dimensions.width, dimensions.height, dmg.window_width, dmg.window_height });
+        return message;
+    }
+
+    const retina_relative = (try dmgRetinaRelativePathAlloc(allocator, path)) orelse return null;
+    defer allocator.free(retina_relative);
+    const retina_resolved = try std.fs.path.join(allocator, &.{ manifest_dir, retina_relative });
+    defer allocator.free(retina_resolved);
+    _ = std.Io.Dir.cwd().statFile(io, retina_resolved, .{}) catch return null;
+    const retina_bytes = std.Io.Dir.cwd().readFileAlloc(io, retina_resolved, allocator, .limited(max_dmg_background_bytes)) catch return "app.zon dmg @2x background could not be read";
+    defer allocator.free(retina_bytes);
+    const retina_dimensions = dmgImageDimensions(retina_relative, retina_bytes) orelse return "app.zon dmg @2x background is not a structurally valid PNG or JPEG image";
+    const expected_width: usize = @as(usize, dmg.window_width) * 2;
+    const expected_height: usize = @as(usize, dmg.window_height) * 2;
+    if (retina_dimensions.width != expected_width or retina_dimensions.height != expected_height) {
+        const message = try std.fmt.allocPrint(allocator, "app.zon dmg @2x background is {d}x{d} - expected {d}x{d}", .{ retina_dimensions.width, retina_dimensions.height, expected_width, expected_height });
+        return message;
+    }
+    return null;
+}
+
+fn checkDmgItemSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, items: []const DmgItemMetadata) !?[]const u8 {
+    for (items) |item| {
+        if (item.kind != .file) continue;
+        const path = item.path orelse continue;
+        const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, path });
+        defer allocator.free(resolved);
+        var file = std.Io.Dir.cwd().openFile(io, resolved, .{}) catch {
+            var dir = std.Io.Dir.cwd().openDir(io, resolved, .{}) catch return "app.zon dmg item source could not be read";
+            dir.close(io);
+            continue;
+        };
+        file.close(io);
+    }
+    return null;
+}
+
 fn validatePathSegment(segment: []const u8) !void {
     if (segment.len == 0) return error.InvalidPath;
     if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidPath;
 }
 
 fn parseVersionNumber(value: []const u8) !u32 {
-    if (value.len == 0) return error.InvalidVersion;
-    return std.fmt.parseUnsigned(u32, value, 10);
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.InvalidVersion;
+    return std.fmt.parseUnsigned(u32, value, 10) catch error.InvalidVersion;
+}
+
+test "manifest versions use canonical numeric components" {
+    try std.testing.expectEqual(@as(u32, 10), (try parseVersion("1.10.0")).minor);
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.010.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("01.0.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.0.00"));
+}
+
+test "manifest validation rejects leading-zero versions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.json", .data =
+        \\{ "id": "com.example.version", "name": "version", "version": "1.010.0" }
+    });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/app.json", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    const result = try validateFile(std.testing.allocator, std.testing.io, path);
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("app manifest version is invalid", result.message);
+}
+
+test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
+    const metadata = try parseJsonText(std.testing.allocator,
+        \\{
+        \\  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+        \\  "id": "com.example.json",
+        \\  "name": "json-app",
+        \\  "version": "1.2.3",
+        \\  "capabilities": ["native_views"],
+        \\  "windows": [{ "label": "main", "width": 640, "height": 480 }]
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("com.example.json", metadata.id);
+    try std.testing.expectEqualStrings("native_views", metadata.capabilities[0]);
+    try std.testing.expectEqual(@as(f32, 640), metadata.windows[0].width);
+
+    try std.testing.expectError(error.UnknownField, parseJsonText(std.testing.allocator,
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "typo": true }
+    ));
+    try std.testing.expectError(error.NullNotAllowed, parseJsonText(std.testing.allocator,
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "theme": null }
+    ));
+}
+
+test "JSON manifest parser carries native update configuration" {
+    const metadata = try parseJsonText(std.testing.allocator,
+        \\{
+        \\  "id": "com.example.updates",
+        \\  "name": "updates",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/native-update.json",
+        \\    "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        \\    "check_on_start": true
+        \\  }
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expect(metadata.updates.enabled());
+    try std.testing.expect(metadata.updates.check_on_start);
+    try std.testing.expectEqualStrings("https://example.com/native-update.json", metadata.updates.feed_url.?);
+}
+
+test "JSON file validation rejects null with a teaching diagnostic regardless of extension case" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-json-null";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/APP.JSON", .data =
+        \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "theme": null }
+    });
+
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/APP.JSON");
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("app.json cannot contain null values - omit optional fields instead", result.message);
 }
 
 test "manifest metadata parser reads identity version and lists" {
@@ -1383,6 +2601,16 @@ test "manifest metadata parser reads identity version and lists" {
         \\  },
         \\  .url_schemes = .{
         \\    .{ .scheme = "example-app" },
+        \\  },
+        \\  .dmg = .{
+        \\    .volume_name = "Example Installer",
+        \\    .background = "assets/dmg-background.png",
+        \\    .window_width = 720,
+        \\    .window_height = 440,
+        \\    .icon_size = 144,
+        \\    .app_position = .{ .x = 180, .y = 210 },
+        \\    .applications_position = .{ .x = 540, .y = 210 },
+        \\    .applications_link = false,
         \\  },
         \\}
     );
@@ -1433,6 +2661,15 @@ test "manifest metadata parser reads identity version and lists" {
     try std.testing.expectEqualStrings("text/markdown", metadata.file_associations[0].mime_types[0]);
     try std.testing.expectEqualStrings("assets/markdown.icns", metadata.file_associations[0].icon.?);
     try std.testing.expectEqualStrings("example-app", metadata.url_schemes[0].scheme);
+    try std.testing.expectEqualStrings("Example Installer", metadata.dmg.volume_name.?);
+    try std.testing.expectEqualStrings("assets/dmg-background.png", metadata.dmg.background.?);
+    try std.testing.expectEqual(@as(u16, 720), metadata.dmg.window_width);
+    try std.testing.expectEqual(@as(u16, 440), metadata.dmg.window_height);
+    try std.testing.expectEqual(@as(u16, 144), metadata.dmg.icon_size);
+    try std.testing.expectEqual(@as(u16, 180), metadata.dmg.app_position.x);
+    try std.testing.expectEqual(@as(u16, 210), metadata.dmg.app_position.y);
+    try std.testing.expectEqual(@as(u16, 540), metadata.dmg.applications_position.x);
+    try std.testing.expect(!metadata.dmg.applications_link);
     try std.testing.expectEqualStrings("chromium", metadata.web_engine);
     try std.testing.expectEqualStrings("third_party/cef/macos", metadata.cef.dir);
     try std.testing.expect(metadata.cef.auto_install);
@@ -1454,6 +2691,103 @@ test "manifest metadata parser reads identity version and lists" {
         .file_associations = associations,
         .url_schemes = schemes,
     });
+}
+
+test "manifest parser reads dock visibility and defaults it to visible" {
+    const accessory = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.menu",
+        \\  .name = "menu",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"tray"},
+        \\  .dock_visible = false,
+        \\}
+    );
+    defer accessory.deinit(std.testing.allocator);
+    try std.testing.expect(!accessory.dock_visible);
+
+    const regular = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.regular",
+        \\  .name = "regular",
+        \\  .version = "1.0.0",
+        \\}
+    );
+    defer regular.deinit(std.testing.allocator);
+    try std.testing.expect(regular.dock_visible);
+}
+
+test "manifest parser carries and validates registered-image budgets" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.photos",
+        \\  .name = "photos",
+        \\  .version = "1.0.0",
+        \\  .images = .{ .max_image_pixel_bytes = 8388608 },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), metadata.images.max_image_pixel_bytes);
+    try app_manifest.validateImages(.{ .max_image_pixel_bytes = metadata.images.max_image_pixel_bytes });
+
+    try std.testing.expectError(error.InvalidDimension, app_manifest.validateImages(.{ .max_image_pixel_bytes = 1048575 }));
+    try std.testing.expectError(error.InvalidDimension, app_manifest.validateImages(.{ .max_image_pixel_bytes = 8388609 }));
+}
+
+test "manifest metadata parser carries model persistence configuration" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.persisted",
+        \\  .name = "persisted",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{ "persist" },
+        \\  .persist = .{
+        \\    .version = 3,
+        \\    .debounce_ms = 250,
+        \\    .restore = .{ .ok = "restored", .none = "fresh_boot", .err = "restore_failed" },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    const persist = metadata.persist.?;
+    try std.testing.expectEqual(@as(u64, 3), persist.version);
+    try std.testing.expectEqual(@as(u32, 250), persist.debounce_ms);
+    try std.testing.expectEqualStrings("restored", persist.restore.ok);
+    try std.testing.expectEqualStrings("fresh_boot", persist.restore.none);
+    try std.testing.expectEqualStrings("restore_failed", persist.restore.err);
+
+    const capabilities = try parseCapabilities(std.testing.allocator, metadata.capabilities);
+    defer std.testing.allocator.free(capabilities);
+    try app_manifest.validatePersist(convertPersist(metadata.persist), capabilities);
+    try std.testing.expectError(error.MissingRequiredField, app_manifest.validatePersist(convertPersist(metadata.persist), &.{}));
+}
+
+test "manifest metadata carries exact hash-pinned service packages" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.services",
+        \\  .name = "services",
+        \\  .version = "1.0.0",
+        \\  .service_packages = .{
+        \\    .{ .name = "escape-string-regexp", .version = "5.0.0", .content_hash = "705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d" },
+        \\    .{ .name = "@scope/parser", .version = "1.2.3", .content_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expect(validServicePackages(metadata.service_packages));
+    try std.testing.expectEqual(@as(usize, 2), metadata.service_packages.len);
+    try std.testing.expectEqualStrings("@scope/parser", metadata.service_packages[1].name);
+    try std.testing.expect(!exactPackageVersion("1..2"));
+    try std.testing.expect(!validNpmPackageName("package@range"));
+}
+
+test "manifest capability parser recognizes both shared SQLite tiers" {
+    const values = [_][]const u8{ "store", "sqlite" };
+    const capabilities = try parseCapabilities(std.testing.allocator, &values);
+    defer std.testing.allocator.free(capabilities);
+    try std.testing.expectEqual(app_manifest.CapabilityKind.store, capabilities[0].kind());
+    try std.testing.expectEqual(app_manifest.CapabilityKind.sqlite, capabilities[1].kind());
 }
 
 test "manifest metadata parser reads structured security policy" {
@@ -1628,13 +2962,13 @@ test "manifest parser reads window titlebar styles" {
         \\  .name = "example",
         \\  .version = "1.2.3",
         \\  .windows = .{
-        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset" },
+        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false },
         \\    .{ .label = "tall", .titlebar = "hidden_inset_tall" },
         \\    .{ .label = "skinned", .titlebar = "chromeless" },
         \\  },
         \\  .shell = .{
         \\    .windows = .{
-        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
         \\    },
         \\  },
         \\}
@@ -1643,6 +2977,12 @@ test "manifest parser reads window titlebar styles" {
 
     try std.testing.expectEqualStrings("hidden_inset", metadata.windows[0].titlebar);
     try std.testing.expect(!metadata.windows[0].resizable);
+    try std.testing.expect(metadata.windows[0].transparent);
+    try std.testing.expect(metadata.windows[0].always_on_top);
+    try std.testing.expect(metadata.windows[0].click_through);
+    try std.testing.expect(!metadata.windows[0].activate_on_show);
+    try std.testing.expect(metadata.windows[0].initially_hidden);
+    try std.testing.expect(!metadata.windows[0].allows_fullscreen);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
@@ -1651,12 +2991,24 @@ test "manifest parser reads window titlebar styles" {
     defer std.testing.allocator.free(windows);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset, windows[0].titlebar);
     try std.testing.expect(!windows[0].resizable);
+    try std.testing.expect(windows[0].transparent);
+    try std.testing.expect(windows[0].always_on_top);
+    try std.testing.expect(windows[0].click_through);
+    try std.testing.expect(!windows[0].activate_on_show);
+    try std.testing.expect(windows[0].initially_hidden);
+    try std.testing.expect(!windows[0].allows_fullscreen);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, windows[1].titlebar);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, windows[2].titlebar);
 
     const shell = try parseShell(std.testing.allocator, metadata.shell);
     defer deinitParsedShell(std.testing.allocator, shell);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, shell.windows[0].titlebar);
+    try std.testing.expect(shell.windows[0].transparent);
+    try std.testing.expect(shell.windows[0].always_on_top);
+    try std.testing.expect(shell.windows[0].click_through);
+    try std.testing.expect(!shell.windows[0].activate_on_show);
+    try std.testing.expect(shell.windows[0].initially_hidden);
+    try std.testing.expect(!shell.windows[0].allows_fullscreen);
 }
 
 test "manifest parser reads window min sizes" {
@@ -1712,6 +3064,86 @@ test "manifest parser rejects negative window min sizes" {
 
     try std.testing.expectError(error.InvalidWindowMinSize, convertWindows(std.testing.allocator, metadata.windows));
     try std.testing.expectError(error.InvalidWindowMinSize, parseShell(std.testing.allocator, metadata.shell));
+}
+
+test "manifest parser reads window close policies" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .close_policy = "hide" },
+        \\    .{ .label = "doc" },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .close_policy = "hide", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("hide", metadata.windows[0].close_policy);
+    try std.testing.expectEqualStrings("quit", metadata.windows[1].close_policy);
+    try std.testing.expectEqualStrings("hide", metadata.shell.windows[0].close_policy);
+
+    const windows = try convertWindows(std.testing.allocator, metadata.windows);
+    defer std.testing.allocator.free(windows);
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.hide, windows[0].close_policy);
+    // Undeclared stays the .quit default — behavior unchanged for
+    // every existing app.
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.quit, windows[1].close_policy);
+
+    const shell = try parseShell(std.testing.allocator, metadata.shell);
+    defer deinitParsedShell(std.testing.allocator, shell);
+    try std.testing.expectEqual(app_manifest.WindowClosePolicy.hide, shell.windows[0].close_policy);
+}
+
+test "manifest parser reads the core-compiler setting and defaults it to external" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .core_compiler = "external",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("external", metadata.core_compiler);
+
+    // Undeclared is the external lane — the one lane there is.
+    const defaulted = try parseText(std.testing.allocator,
+        \\.{ .id = "com.example.app", .name = "example", .version = "1.2.3" }
+    );
+    defer defaulted.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("external", defaulted.core_compiler);
+}
+
+test "manifest parser rejects unknown window close policy" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .windows = .{
+        \\    .{ .label = "main", .close_policy = "minimize" },
+        \\  },
+        \\  .shell = .{
+        \\    .windows = .{
+        \\      .{ .label = "scene", .close_policy = "event", .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+
+    // "event" is the deliberately reserved future tier (model-decides
+    // close); it parses as unknown until it ships — staged honestly,
+    // never accepted early.
+    try std.testing.expectError(error.InvalidWindowClosePolicy, convertWindows(std.testing.allocator, metadata.windows));
+    try std.testing.expectError(error.InvalidWindowClosePolicy, parseShell(std.testing.allocator, metadata.shell));
 }
 
 test "manifest parser rejects unknown window titlebar style" {
@@ -1920,6 +3352,183 @@ test "validate accepts a square icon source and prebuilt containers" {
     try std.testing.expect(result.ok);
 }
 
+test "web layer inference is declare-to-use over parsed metadata" {
+    // Nothing declared: native-only.
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const canvas_layer = try webLayerFromManifest(canvas);
+    try std.testing.expect(!canvas_layer.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, canvas_layer.reason);
+
+    // Each web declaration flips the inference.
+    const webview_capabilities = [_][]const u8{"webview"};
+    const by_capability = try webLayerFromManifest(.{ .id = "dev.example.a", .name = "a", .version = "1.0.0", .capabilities = &webview_capabilities });
+    try std.testing.expect(by_capability.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, by_capability.reason);
+
+    const by_frontend = try webLayerFromManifest(.{ .id = "dev.example.b", .name = "b", .version = "1.0.0", .frontend = .{} });
+    try std.testing.expect(by_frontend.enabled);
+    try std.testing.expectEqual(WebLayerReason.frontend, by_frontend.reason);
+
+    const shell_views = [_]ShellViewMetadata{.{ .label = "content", .kind = "webview", .url = "zero://app/index.html" }};
+    const shell_windows = [_]ShellWindowMetadata{.{ .label = "main", .views = &shell_views }};
+    const by_shell = try webLayerFromManifest(.{ .id = "dev.example.c", .name = "c", .version = "1.0.0", .shell = .{ .windows = &shell_windows } });
+    try std.testing.expect(by_shell.enabled);
+    try std.testing.expectEqual(WebLayerReason.shell_webview, by_shell.reason);
+
+    // The Chromium engine is web intent; the system default alone is not.
+    const by_chromium = try webLayerFromManifest(.{ .id = "dev.example.d", .name = "d", .version = "1.0.0", .web_engine = "chromium" });
+    try std.testing.expect(by_chromium.enabled);
+    try std.testing.expectEqual(WebLayerReason.chromium_engine, by_chromium.reason);
+
+    // The RESOLVED engine decides, not the raw manifest value: a system
+    // manifest packaged with `--web-engine chromium` ships the layer.
+    const by_resolved_chromium = try webLayer(.{ .id = "dev.example.i", .name = "i", .version = "1.0.0" }, .chromium);
+    try std.testing.expect(by_resolved_chromium.enabled);
+    try std.testing.expectEqual(WebLayerReason.chromium_engine, by_resolved_chromium.reason);
+
+    // Explicit overrides.
+    const included = try webLayerFromManifest(.{ .id = "dev.example.e", .name = "e", .version = "1.0.0", .webview_layer = "include" });
+    try std.testing.expect(included.enabled);
+    const excluded = try webLayerFromManifest(.{ .id = "dev.example.f", .name = "f", .version = "1.0.0", .webview_layer = "exclude" });
+    try std.testing.expect(!excluded.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_exclude, excluded.reason);
+
+    // Contradictions and typos are refused, never resolved silently —
+    // including an exclude against a flag-resolved Chromium engine.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerFromManifest(.{ .id = "dev.example.g", .name = "g", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }));
+    try std.testing.expectError(error.WebViewLayerConflict, webLayer(.{ .id = "dev.example.j", .name = "j", .version = "1.0.0", .webview_layer = "exclude" }, .chromium));
+    try std.testing.expectError(error.InvalidWebViewLayer, webLayerFromManifest(.{ .id = "dev.example.h", .name = "h", .version = "1.0.0", .webview_layer = "never" }));
+}
+
+test "web layer --web-layer flag beats the manifest field like -Dweb-layer does" {
+    const canvas_capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const canvas: Metadata = .{ .id = "dev.example.canvas", .name = "canvas", .version = "1.0.0", .capabilities = &canvas_capabilities };
+    const webview_capabilities = [_][]const u8{"webview"};
+    const web: Metadata = .{ .id = "dev.example.web", .name = "web", .version = "1.0.0", .capabilities = &webview_capabilities };
+
+    // An include flag that changes the outcome names itself as the cause.
+    const forced_in = try webLayerResolved(canvas, .system, .include);
+    try std.testing.expect(forced_in.enabled);
+    try std.testing.expectEqual(WebLayerReason.declared_include, forced_in.reason);
+    try std.testing.expectEqualStrings("declared: --web-layer include", forced_in.sourceText());
+
+    // A flag that merely confirms the inference keeps the manifest's own
+    // richer reason, so graph-forwarded packages report like hand-run ones.
+    const confirmed = try webLayerResolved(web, .system, .include);
+    try std.testing.expect(confirmed.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, confirmed.reason);
+    try std.testing.expectEqualStrings("declared: capabilities", confirmed.sourceText());
+    const confirmed_off = try webLayerResolved(canvas, .system, .exclude);
+    try std.testing.expect(!confirmed_off.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, confirmed_off.reason);
+
+    // An exclude flag against a web declaration is the same refused
+    // conflict as a manifest exclude — including a resolved Chromium engine.
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(web, .system, .exclude));
+    try std.testing.expectError(error.WebViewLayerConflict, webLayerResolved(canvas, .chromium, .exclude));
+
+    // `--web-layer auto` overrides a manifest exclude back to inference,
+    // exactly as `-Dweb-layer=auto` does in the build graph.
+    const reopened = try webLayerResolved(.{ .id = "dev.example.k", .name = "k", .version = "1.0.0", .capabilities = &webview_capabilities, .webview_layer = "exclude" }, .system, .auto);
+    try std.testing.expect(reopened.enabled);
+    try std.testing.expectEqual(WebLayerReason.capability, reopened.reason);
+
+    // No flag: identical to `webLayer` (the manifest field decides).
+    const plain = try webLayerResolved(canvas, .system, null);
+    try std.testing.expect(!plain.enabled);
+    try std.testing.expectEqual(WebLayerReason.inferred_native_only, plain.reason);
+
+    // The flag parser shares the contract's vocabulary.
+    try std.testing.expectEqual(WebViewLayerSetting.include, parseWebViewLayerSetting("include").?);
+    try std.testing.expectEqual(WebViewLayerSetting.exclude, parseWebViewLayerSetting("exclude").?);
+    try std.testing.expectEqual(WebViewLayerSetting.auto, parseWebViewLayerSetting("auto").?);
+    try std.testing.expectEqual(null, parseWebViewLayerSetting("never"));
+}
+
+test "validate rejects a web-declaring manifest that excludes the web layer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-web-layer-conflict";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"webview"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+
+    const result = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "webview_layer = \"exclude\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.message, "declares web content") != null);
+
+    // A native-only manifest with the same exclude is valid.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"gpu_surfaces"},
+        \\  .webview_layer = "exclude",
+        \\}
+    });
+    const native_only = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(native_only.ok);
+
+    // A typo in the setting is its own teaching error.
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.app",
+        \\  .name = "demo",
+        \\  .version = "1.0.0",
+        \\  .webview_layer = "never",
+        \\}
+    });
+    const invalid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!invalid.ok);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.message, "webview_layer is invalid") != null);
+}
+
+test "validate rejects accessory startup without a tray capability" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-validate-accessory-tray";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.accessory",
+        \\  .name = "accessory",
+        \\  .version = "1.0.0",
+        \\  .dock_visible = false,
+        \\}
+    });
+
+    const invalid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!invalid.ok);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.message, "dock_visible = false requires the \"tray\" capability") != null);
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "dev.example.accessory",
+        \\  .name = "accessory",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{"tray"},
+        \\  .dock_visible = false,
+        \\}
+    });
+    const valid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
+}
+
 test "manifest validates the theme pack name" {
     const metadata = try parseText(std.testing.allocator,
         \\.{
@@ -1936,4 +3545,384 @@ test "manifest validates the theme pack name" {
     try std.testing.expect(isKnownThemePack("house"));
     try std.testing.expect(isKnownThemePack("geist"));
     try std.testing.expect(!isKnownThemePack("neon"));
+}
+
+test "manifest validates the theme accent hex color" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .theme = "geist",
+        \\  .theme_accent = "#df2670",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("#df2670", metadata.theme_accent.?);
+    // The hex-shape check is the tooling half of the contract; the
+    // runner re-parses the same shape at comptime in the app build.
+    try std.testing.expect(isHexColor("#df2670"));
+    try std.testing.expect(isHexColor("#000000"));
+    try std.testing.expect(!isHexColor("df2670"));
+    try std.testing.expect(!isHexColor("#df267"));
+    try std.testing.expect(!isHexColor("#df26700"));
+    try std.testing.expect(!isHexColor("#df267g"));
+}
+
+test "DMG settings default to a complete drag-to-Applications layout" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try validateDmgSettings(metadata.dmg);
+    try std.testing.expectEqual(@as(u16, 660), metadata.dmg.window_width);
+    try std.testing.expectEqual(@as(u16, 400), metadata.dmg.window_height);
+    try std.testing.expectEqual(@as(u16, 128), metadata.dmg.icon_size);
+    try std.testing.expectEqual(@as(u16, 166), metadata.dmg.app_position.x);
+    try std.testing.expectEqual(@as(u16, 182), metadata.dmg.app_position.y);
+    try std.testing.expectEqual(@as(u16, 486), metadata.dmg.applications_position.x);
+    try std.testing.expectEqual(@as(u16, 182), metadata.dmg.applications_position.y);
+    try std.testing.expect(metadata.dmg.applications_link);
+    try std.testing.expect(metadata.dmg.background == null);
+    try std.testing.expectEqual(@as(usize, 0), metadata.dmg.items.len);
+}
+
+test "manifest validation does not apply an implicit DMG volume name" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-implicit-volume";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .display_name = "Example: Studio",
+        \\  .version = "1.0.0",
+        \\}
+    });
+
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(result.ok);
+}
+
+test "DMG settings reject unsafe paths and out-of-window positions" {
+    try std.testing.expectError(error.InvalidPath, validateDmgSettings(.{ .background = "../outside.png" }));
+    try std.testing.expectError(error.InvalidDmgBackground, validateDmgSettings(.{ .background = "assets/background.svg" }));
+    try std.testing.expectError(error.InvalidDmgPosition, validateDmgSettings(.{ .app_position = .{ .x = 660, .y = 190 } }));
+    try std.testing.expectError(error.InvalidDmgVolumeName, validateDmgSettings(.{ .volume_name = "Bad/Name" }));
+    try validateDmgSettings(.{ .window_width = 400, .applications_link = false });
+    try validateDmgSettings(.{ .background = "assets/background.tiff" });
+}
+
+test "DMG package settings validate effective volume and app bundle names" {
+    var maximum_volume: [127]u8 = @splat('v');
+    try validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = &maximum_volume,
+        .version = "1.0.0",
+    });
+
+    var oversized_volume: [128]u8 = @splat('v');
+    try std.testing.expectError(error.InvalidDmgVolumeName, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = &oversized_volume,
+        .version = "1.0.0",
+    }));
+
+    var maximum_stem: [251]u8 = @splat('a');
+    const maximum_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .name = &maximum_stem, .position = .{ .x = 170, .y = 182 } },
+    };
+    try validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &maximum_items },
+    });
+
+    var oversized_stem: [252]u8 = @splat('a');
+    const oversized_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .name = &oversized_stem, .position = .{ .x = 170, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &oversized_items },
+    }));
+
+    const conflicting_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .file, .path = "docs/demo.app", .name = "Demo.app", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &conflicting_items },
+    }));
+}
+
+test "DMG background readers validate JPEG and TIFF envelopes" {
+    const jpeg =
+        "\xff\xd8" ++
+        "\xff\xc0\x00\x11\x08\x01\x90\x02\x94\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00" ++
+        "\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00" ++
+        "\x00\xff\xd9";
+    const jpeg_dimensions = jpegDimensions(jpeg) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 660), jpeg_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 400), jpeg_dimensions.height);
+    try std.testing.expect(jpegDimensions(jpeg[0 .. jpeg.len - 2]) == null);
+
+    // A complete 1x1 baseline TIFF: nine IFD entries followed by one strip
+    // byte. This makes the positive fixture a usable image, not merely a
+    // header carrying width and height tags.
+    var tiff: [123]u8 = @splat(0);
+    tiff[0] = 'I';
+    tiff[1] = 'I';
+    std.mem.writeInt(u16, tiff[2..4], 42, .little);
+    std.mem.writeInt(u32, tiff[4..8], 8, .little);
+    std.mem.writeInt(u16, tiff[8..10], 9, .little);
+    const entries = [_][4]u32{
+        .{ 256, 4, 1, 1 }, // ImageWidth
+        .{ 257, 4, 1, 1 }, // ImageLength
+        .{ 258, 3, 1, 8 }, // BitsPerSample
+        .{ 259, 3, 1, 1 }, // Compression: none
+        .{ 262, 3, 1, 1 }, // PhotometricInterpretation: black is zero
+        .{ 273, 4, 1, 122 }, // StripOffsets
+        .{ 277, 3, 1, 1 }, // SamplesPerPixel
+        .{ 278, 4, 1, 1 }, // RowsPerStrip
+        .{ 279, 4, 1, 1 }, // StripByteCounts
+    };
+    for (entries, 0..) |entry, index| {
+        const offset = 10 + index * 12;
+        std.mem.writeInt(u16, tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u32, tiff[offset + 4 ..][0..4], entry[2], .little);
+        std.mem.writeInt(u32, tiff[offset + 8 ..][0..4], entry[3], .little);
+    }
+    tiff[122] = 0;
+    const tiff_dimensions = tiffDimensions(&tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.height);
+    try std.testing.expect(tiffDimensions(tiff[0..122]) == null);
+}
+
+test "TIFF background reader validates indirect strips and BigTIFF payloads" {
+    var multi_strip_tiff: [80]u8 = @splat(0);
+    multi_strip_tiff[0] = 'I';
+    multi_strip_tiff[1] = 'I';
+    std.mem.writeInt(u16, multi_strip_tiff[2..4], 42, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[4..8], 8, .little);
+    std.mem.writeInt(u16, multi_strip_tiff[8..10], 4, .little);
+    const classic_entries = [_][4]u32{
+        .{ 256, 4, 1, 1 }, // ImageWidth
+        .{ 257, 4, 1, 2 }, // ImageLength
+        .{ 273, 4, 2, 62 }, // StripOffsets array
+        .{ 279, 4, 2, 70 }, // StripByteCounts array
+    };
+    for (classic_entries, 0..) |entry, index| {
+        const offset = 10 + index * 12;
+        std.mem.writeInt(u16, multi_strip_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, multi_strip_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 4 ..][0..4], entry[2], .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 8 ..][0..4], entry[3], .little);
+    }
+    std.mem.writeInt(u32, multi_strip_tiff[62..66], 78, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[66..70], 79, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[70..74], 1, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[74..78], 1, .little);
+    const multi_strip_dimensions = tiffDimensions(&multi_strip_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), multi_strip_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 2), multi_strip_dimensions.height);
+    try std.testing.expect(tiffDimensions(multi_strip_tiff[0..79]) == null);
+
+    var big_tiff: [113]u8 = @splat(0);
+    big_tiff[0] = 'I';
+    big_tiff[1] = 'I';
+    std.mem.writeInt(u16, big_tiff[2..4], 43, .little);
+    std.mem.writeInt(u16, big_tiff[4..6], 8, .little);
+    std.mem.writeInt(u64, big_tiff[8..16], 16, .little);
+    std.mem.writeInt(u64, big_tiff[16..24], 4, .little);
+    const big_entries = [_][4]u64{
+        .{ 256, 16, 1, 1 }, // ImageWidth
+        .{ 257, 16, 1, 1 }, // ImageLength
+        .{ 273, 16, 1, 112 }, // StripOffsets
+        .{ 279, 16, 1, 1 }, // StripByteCounts
+    };
+    for (big_entries, 0..) |entry, index| {
+        const offset = 24 + index * 20;
+        std.mem.writeInt(u16, big_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, big_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u64, big_tiff[offset + 4 ..][0..8], entry[2], .little);
+        std.mem.writeInt(u64, big_tiff[offset + 12 ..][0..8], entry[3], .little);
+    }
+    const big_dimensions = tiffDimensions(&big_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.height);
+    try std.testing.expect(tiffDimensions(big_tiff[0..112]) == null);
+}
+
+test "DMG explicit items select and position Finder contents" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{
+        \\    .items = .{
+        \\      .{ .kind = "app", .position = .{ .x = 150, .y = 170 } },
+        \\      .{ .kind = "applications", .position = .{ .x = 510, .y = 170 } },
+        \\      .{ .kind = "file", .path = "docs/README.pdf", .name = "Read Me.pdf", .position = .{ .x = 260, .y = 330 } },
+        \\      .{ .kind = "link", .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 400, .y = 330 } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try validateDmgSettings(metadata.dmg);
+    try std.testing.expectEqual(@as(usize, 4), metadata.dmg.items.len);
+    try std.testing.expectEqual(DmgItemKind.app, metadata.dmg.items[0].kind);
+    try std.testing.expectEqual(DmgItemKind.file, metadata.dmg.items[2].kind);
+    try std.testing.expectEqualStrings("Read Me.pdf", dmgItemDestinationName(metadata.dmg.items[2]).?);
+    try std.testing.expectEqualStrings("QuickLook", dmgItemDestinationName(metadata.dmg.items[3]).?);
+}
+
+test "DMG explicit items require one app and reject unsafe or duplicate destinations" {
+    const applications_only = [_]DmgItemMetadata{
+        .{ .kind = .applications, .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgSettings(.{ .items = &applications_only }));
+
+    const duplicate_applications = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .applications, .position = .{ .x = 490, .y = 182 } },
+        .{ .kind = .link, .path = "/Applications", .name = "applications", .position = .{ .x = 330, .y = 320 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, validateDmgSettings(.{ .items = &duplicate_applications }));
+
+    const unsafe_file = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .file, .path = "../README.pdf", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidPath, validateDmgSettings(.{ .items = &unsafe_file }));
+
+    const relative_link = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .link, .path = "Library/QuickLook", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgSettings(.{ .items = &relative_link }));
+}
+
+test "manifest validation resolves a custom DMG background beside app.zon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-background";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    const pixels = try gpa.alloc(u8, 320 * 240 * 4);
+    @memset(pixels, 255);
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, 320, 240);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = encoded });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{ .background = "art/installer.png", .window_width = 320, .window_height = 240, .applications_link = false },
+        \\}
+    });
+
+    const valid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
+
+    const retina_pixels = try gpa.alloc(u8, 640 * 480 * 4);
+    @memset(retina_pixels, 255);
+    const retina_encoded = try app_icon_tool.encodePng(gpa, retina_pixels, 640, 480);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = retina_encoded });
+    const retina_valid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(retina_valid.ok);
+
+    const wrong_retina = try app_icon_tool.encodePng(gpa, retina_pixels[0 .. 640 * 479 * 4], 640, 479);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = wrong_retina });
+    const retina_mismatch = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!retina_mismatch.ok);
+    try std.testing.expect(std.mem.indexOf(u8, retina_mismatch.message, "@2x background is 640x479") != null);
+    try cwd.deleteFile(std.testing.io, root ++ "/art/installer@2x.png");
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = "not a png" });
+    const malformed = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!malformed.ok);
+    try std.testing.expect(std.mem.indexOf(u8, malformed.message, "not a structurally valid") != null);
+
+    try cwd.deleteFile(std.testing.io, root ++ "/art/installer.png");
+    const missing = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!missing.ok);
+    try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg background could not be read") != null);
+}
+
+test "manifest validation resolves explicit DMG file items beside app.zon" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-items";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/docs");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/docs/README.pdf", .data = "fixture" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{ .items = .{
+        \\    .{ .kind = "app", .position = .{ .x = 170, .y = 182 } },
+        \\    .{ .kind = "file", .path = "docs/README.pdf", .position = .{ .x = 490, .y = 182 } },
+        \\  } },
+        \\}
+    });
+
+    const valid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
+    try cwd.deleteFile(std.testing.io, root ++ "/docs/README.pdf");
+    const missing = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!missing.ok);
+    try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg item source could not be read") != null);
+}
+
+test "font manifests enforce permanent ids, bundled paths and the native slot bound" {
+    const allocator = std.testing.allocator;
+    const good = try parseJsonText(allocator,
+        \\{"id":"dev.test.fonts","name":"fonts","version":"0.1.0","assets":{"fonts":[{"id":64,"path":"assets/mono.ttf"}]}}
+    );
+    good.deinit(allocator);
+    const zon = try parseText(allocator, ".{ .id = \"dev.test.fonts\", .name = \"fonts\", .version = \"0.1.0\", .assets = .{ .fonts = .{ .{ .id = 64, .path = \"assets/mono.ttf\" } } } }");
+    zon.deinit(allocator);
+    const nine = try std.fmt.allocPrint(
+        allocator,
+        "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":[{s}]}}}}",
+        .{"{\"id\":64,\"path\":\"assets/a.ttf\"}," ** 8 ++ "{\"id\":65,\"path\":\"assets/b.ttf\"}"},
+    );
+    defer allocator.free(nine);
+    try std.testing.expectError(error.TooManyFontAssets, parseJsonText(allocator, nine));
+    for ([_]struct { fonts: []const u8, err: anyerror }{
+        .{ .fonts = "[{\"id\":9007199254740992,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":63,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":64,\"path\":\"a.ttf\"}]", .err = error.InvalidFontAssetPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/../a.ttf\"}]", .err = error.InvalidPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/a.ttf\"},{\"id\":64,\"path\":\"assets/b.ttf\"}]", .err = error.DuplicateFontAssetId },
+    }) |case| {
+        const source = try std.fmt.allocPrint(allocator, "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":{s}}}}}", .{case.fonts});
+        defer allocator.free(source);
+        try std.testing.expectError(case.err, parseJsonText(allocator, source));
+    }
 }

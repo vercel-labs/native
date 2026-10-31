@@ -8,6 +8,7 @@ const event_model = @import("events.zig");
 const equality_model = @import("equality.zig");
 const widget_tree = @import("widget_tree.zig");
 const widget_access = @import("widget_access.zig");
+const portable = @import("widget_routing_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -33,38 +34,64 @@ const isWidgetHiddenInAncestors = widget_tree.isWidgetHiddenInAncestors;
 
 const max_widget_depth: usize = 32;
 
-pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
-    // Anchored floating surfaces paint in the late z-pass — topmost — so
-    // they hit-test FIRST, in reverse tree order (a nested anchored
-    // submenu has a higher node index than the surface it hangs from).
-    var index = layout.nodes.len;
-    while (index > 0) {
-        index -= 1;
-        if (!widget_tree.widgetIsAnchored(layout.nodes[index].widget)) continue;
-        if (isWidgetHiddenInAncestors(layout, index)) continue;
-        if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
-        if (hitTestWidgetLayoutNode(layout, index, point, tokens)) |hit| return hit;
+/// Which widgets a hit test may land on: the interactive policy is the
+/// engine's classic one (presses, washes, cursor, text selection); the
+/// hover policy additionally sees hover-Msg listeners, and ONLY the
+/// hover-containment resolution uses it — so binding hover never moves
+/// a wash or steals a click, even from an overlapping sibling.
+pub const HitTestPolicy = enum {
+    interactive,
+    hover_msgs,
+
+    fn admits(comptime self: HitTestPolicy, widget: Widget) bool {
+        return switch (self) {
+            .interactive => widget_access.isHitTarget(widget),
+            .hover_msgs => widget_access.isHoverMsgHitTarget(widget),
+        };
     }
-    return hitTestWidgetLayoutChildren(layout, null, point, tokens);
+};
+
+pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+    return hitTestWidgetLayoutWithPolicy(layout, point, tokens, .interactive);
 }
 
-fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+pub fn hitTestWidgetLayoutWithPolicy(layout: anytype, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
+    if (tokens.widget_routing_policy orelse portable.owner(layout)) |owner| {
+        const result = portable.query(layout, owner, if (policy == .interactive) 0 else 1, 0, null, null, point, tokens, 0, {});
+        return hitFromPortableResult(layout, result.target);
+    }
+    // Window-level surfaces paint in the late z-pass — topmost — so they
+    // hit-test FIRST, in reverse window-surface paint order.
+    const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
+    var tested: usize = 0;
+    var previous: ?widget_tree.WidgetPaintOrder = null;
+    while (tested < surface_count) : (tested += 1) {
+        const index = widget_tree.previousWidgetLayoutWindowSurface(layout, tokens, previous) orelse break;
+        previous = widget_tree.widgetLayoutWindowSurfaceOrder(layout, index, tokens);
+        if (isWidgetHiddenInAncestors(layout, index)) continue;
+        if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
+        if (hitTestWidgetLayoutNode(layout, index, point, tokens, policy)) |hit| return hit;
+    }
+    return hitTestWidgetLayoutChildren(layout, null, point, tokens, policy);
+}
+
+fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     const child_count = widget_tree.widgetLayoutDirectChildCount(layout, parent_index);
     var tested: usize = 0;
     var previous: ?widget_tree.WidgetPaintOrder = null;
     while (tested < child_count) : (tested += 1) {
         const child_index = widget_tree.previousWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return null;
-        // Anchored floating children live in the hoisted pre-pass above,
-        // never at their tree position.
-        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
-            if (hitTestWidgetLayoutNode(layout, child_index, point, tokens)) |hit| return hit;
+        // Window-level surfaces live in the hoisted pre-pass above, never
+        // at their tree position.
+        if (!widget_tree.widgetEscapesAncestorClips(layout.nodes[child_index].widget)) {
+            if (hitTestWidgetLayoutNode(layout, child_index, point, tokens, policy)) |hit| return hit;
         }
         previous = .{ .layer = widget_tree.widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
     }
     return null;
 }
 
-fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
     if (node_index >= layout.nodes.len) return null;
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return null;
@@ -79,10 +106,10 @@ fn hitTestWidgetLayoutNode(layout: anytype, node_index: usize, point: geometry.P
     // shadows the widgets that actually occupy that space.
     const content_interactive = !widget_tree.widgetKindDisclosureAnimated(node.widget.kind) or widget_tree.disclosureSettledOpen(layout, node_index);
     if (content_interactive) {
-        if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens)) |hit| return hit;
+        if (hitTestWidgetLayoutChildren(layout, node_index, local_point, tokens, policy)) |hit| return hit;
     }
 
-    if (!widget_access.isHitTarget(node.widget)) return null;
+    if (!policy.admits(node.widget)) return null;
     if (!node.frame.normalized().containsPoint(local_point)) return null;
     return widgetHitFromNode(node, node_index);
 }
@@ -110,10 +137,11 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
 /// claims presses (`widgetClaimsPress`). Plain text, icons, decorations,
 /// and layout containers let the press fall through; interactive kinds,
 /// editable text, scroll containers, overlay surfaces, and any widget
-/// with a bound press/toggle handler stop the walk. Returns null when
+/// with a bound press/toggle/drag handler stop the walk. Returns null when
 /// nothing on the path claims — the press dispatches to no one, exactly
 /// like a click on dead space.
 pub fn widgetPressTargetIndexFromNode(layout: anytype, node_index: usize) ?usize {
+    if (portable.owner(layout)) |owner| return portable.query(layout, owner, 2, 0, node_index, null, .{}, .{}, 0, {}).target;
     var current: ?usize = node_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
@@ -138,6 +166,11 @@ pub fn widgetPressTargetForHit(layout: anytype, hit: WidgetHit) ?WidgetHit {
 /// pressable ancestor), and a hit with no claiming ancestor keeps itself
 /// (static text keeps its selection affordance).
 pub fn widgetHoverTargetForHit(layout: anytype, hit: WidgetHit) WidgetHit {
+    if (portable.owner(layout)) |owner| {
+        const facts: u8 = @as(u8, @intFromBool(hit.role == .link)) | (@as(u8, @intFromBool(hit.state.disabled)) << 1) | (@as(u8, @intFromBool(hit.kind == .data_cell)) << 2);
+        const result = portable.query(layout, owner, 3, facts, hit.index, null, .{}, .{}, 0, {});
+        return if (result.keep_hit) hit else hitFromPortableResult(layout, result.target) orelse hit;
+    }
     if (hit.role == .link and !hit.state.disabled) return hit;
     const target = widgetPressTargetForHit(layout, hit) orelse hit;
     // A table row hovers as ONE unit: a hit that resolves to a cell (a
@@ -149,6 +182,42 @@ pub fn widgetHoverTargetForHit(layout: anytype, hit: WidgetHit) WidgetHit {
         if (widgetAncestorHitOfKind(layout, target.index, .data_row)) |row_hit| return row_hit;
     }
     return target;
+}
+
+/// The hover-Msg containment chain for a raw hit: every widget on the
+/// hit path (the target itself, then its ancestors) whose bound
+/// hover-enter/hover-leave handlers are live
+/// (`widget_access.widgetListensForHoverMsgs`), written into `output`
+/// OUTERMOST FIRST — the DOM's mouseenter order, so a diff against the
+/// previously delivered chain fires enters outermost-first and leaves
+/// innermost-first by construction. Nested listeners each track their
+/// own containment: moving from a listening card onto a listening row
+/// inside it keeps the card's entry (the pointer never left the card),
+/// exactly like the browser pair this models. The chain is empty for
+/// apps that bind no hover handlers, so unbound trees pay nothing.
+pub fn widgetHoverMsgChainFromNode(layout: anytype, node_index: usize, output: []ObjectId) []const ObjectId {
+    if (portable.owner(layout)) |owner| {
+        const result = portable.query(layout, owner, 4, 0, node_index, null, .{}, .{}, output.len, {});
+        for (0..result.len) |i| output[i] = layout.nodes[result.indices[i]].widget.id;
+        return output[0..result.len];
+    }
+    var chain: [max_widget_depth]ObjectId = undefined;
+    var chain_len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) break;
+        if (widget_access.widgetListensForHoverMsgs(layout.nodes[index].widget) and chain_len < chain.len) {
+            chain[chain_len] = layout.nodes[index].widget.id;
+            chain_len += 1;
+        }
+        current = layout.nodes[index].parent_index;
+    }
+    const len = @min(chain_len, output.len);
+    // The walk collected innermost-first; deliver outermost-first.
+    for (0..len) |index| {
+        output[index] = chain[chain_len - 1 - index];
+    }
+    return output[0..len];
 }
 
 /// The nearest ancestor of `node_index` with the given kind, as a hit.
@@ -169,6 +238,7 @@ fn widgetAncestorHitOfKind(layout: anytype, node_index: usize, kind: WidgetKind)
 /// walk. A widget that both claims presses and marks `window_drag`
 /// keeps its press — authored handlers outrank the drag surface.
 pub fn widgetWindowDragTargetIndexFromNode(layout: anytype, node_index: usize) ?usize {
+    if (portable.owner(layout)) |owner| return portable.query(layout, owner, 5, 0, node_index, null, .{}, .{}, 0, {}).target;
     var current: ?usize = node_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
@@ -182,9 +252,9 @@ pub fn widgetWindowDragTargetIndexFromNode(layout: anytype, node_index: usize) ?
 fn isPointVisibleInWidgetAncestors(layout: anytype, node_index: usize, point: geometry.PointF) bool {
     var current: usize = node_index;
     while (true) {
-        // An anchored floating widget escapes its ancestors' clip regions
-        // (window-clipped, not parent-clipped), so the walk stops here.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // A window-level surface escapes its ancestors' clip regions, so
+        // the walk stops here.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const parent_index = layout.nodes[current].parent_index orelse return true;
         if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
@@ -199,10 +269,9 @@ fn isWidgetFrameVisibleInWidgetAncestors(layout: anytype, node_index: usize) boo
     if (frame.isEmpty()) return false;
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clips — focus targets
-        // inside an open overlay stay live outside the scroll ancestor's
-        // bounds.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // Window-level surfaces escape ancestor clips, keeping their focus
+        // targets live outside the authored container's bounds.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const parent_index = layout.nodes[current].parent_index orelse return true;
         if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
@@ -212,6 +281,19 @@ fn isWidgetFrameVisibleInWidgetAncestors(layout: anytype, node_index: usize) boo
 }
 
 pub fn routeWidgetPointerEvent(layout: anytype, event: WidgetPointerEvent, tokens: DesignTokens, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
+    if (tokens.widget_routing_policy orelse portable.owner(layout)) |owner| {
+        const phase: u8 = switch (event.phase) {
+            .hover => 0,
+            .down => 1,
+            .move => 2,
+            .up => 3,
+            .cancel => 4,
+            .wheel => 5,
+        };
+        const result = portable.query(layout, owner, 6, phase, null, event.captured_id, event.point, tokens, output.len, {});
+        const entries = try result.copy(layout, output);
+        return .{ .target = hitFromPortableResult(layout, result.target), .press_target = hitFromPortableResult(layout, result.press), .entries = entries };
+    }
     const target = if (eventUsesPointerCapture(event)) blk: {
         break :blk capturedWidgetPointerTarget(layout, event) orelse return .{ .entries = output[0..0] };
     } else hitTestWidgetLayout(layout, event.point, tokens) orelse return .{ .entries = output[0..0] };
@@ -250,6 +332,11 @@ fn widgetPointerTargetById(layout: anytype, id: ObjectId) ?WidgetHit {
 }
 
 pub fn routeWidgetKeyboardEvent(layout: anytype, event: WidgetKeyboardEvent, output: []WidgetEventRouteEntry, scroll_semantics_fn: anytype) Error!WidgetKeyboardRoute {
+    if (portable.owner(layout)) |owner| {
+        const result = portable.query(layout, owner, 7, 0, null, event.focused_id, .{}, .{}, output.len, scroll_semantics_fn);
+        const entries = try result.copy(layout, output);
+        return .{ .target = focusFromPortableResult(layout, result.target), .entries = entries };
+    }
     const focused_id = event.focused_id orelse return .{ .entries = output[0..0] };
     const target_index = widgetIndexById(layout, focused_id) orelse return .{ .entries = output[0..0] };
     const target = focusTargetFromLayoutNode(layout, target_index, scroll_semantics_fn) orelse return .{ .entries = output[0..0] };
@@ -258,6 +345,11 @@ pub fn routeWidgetKeyboardEvent(layout: anytype, event: WidgetKeyboardEvent, out
 }
 
 pub fn routeWidgetFileDropEvent(layout: anytype, event: WidgetFileDropEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
+    if (portable.owner(layout)) |owner| {
+        const result = portable.query(layout, owner, 8, @intFromBool(event.paths.len != 0), null, null, event.point, .{}, output.len, {});
+        const entries = try result.copy(layout, output);
+        return .{ .target = hitFromPortableResult(layout, result.target), .entries = entries };
+    }
     if (event.paths.len == 0) return .{ .entries = output[0..0] };
     const target_index = widgetDropTargetIndexAtPoint(layout, event.point) orelse return .{ .entries = output[0..0] };
     const entries = try routeWidgetEventPath(layout, target_index, output);
@@ -265,6 +357,11 @@ pub fn routeWidgetFileDropEvent(layout: anytype, event: WidgetFileDropEvent, out
 }
 
 pub fn routeWidgetDragEvent(layout: anytype, event: WidgetDragEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
+    if (portable.owner(layout)) |owner| {
+        const result = portable.query(layout, owner, 9, 0, null, event.source_id, .{}, .{}, output.len, {});
+        const entries = try result.copy(layout, output);
+        return .{ .target = hitFromPortableResult(layout, result.target), .entries = entries };
+    }
     const target_index = widgetDragSourceIndex(layout, event.source_id) orelse return .{ .entries = output[0..0] };
     const entries = try routeWidgetEventPath(layout, target_index, output);
     return .{ .target = widgetHitFromNode(layout.nodes[target_index], target_index), .entries = entries };
@@ -287,13 +384,18 @@ fn widgetDropTargetIndexAtPoint(layout: anytype, point: geometry.PointF) ?usize 
 
 fn widgetDragSourceIndex(layout: anytype, id: ObjectId) ?usize {
     if (id == 0) return null;
-    const index = widgetIndexById(layout, id) orelse return null;
-    const node = layout.nodes[index];
-    if (!widget_access.isDragSource(node.widget)) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
-    if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    return index;
+    var current = widgetIndexById(layout, id);
+    while (current) |index| {
+        const node = layout.nodes[index];
+        if (widget_access.isDragSource(node.widget)) {
+            if (isWidgetHiddenInAncestors(layout, index)) return null;
+            if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+            if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
+            return index;
+        }
+        current = node.parent_index;
+    }
+    return null;
 }
 
 fn routeWidgetEventPath(layout: anytype, target_index: usize, output: []WidgetEventRouteEntry) Error![]const WidgetEventRouteEntry {
@@ -342,6 +444,17 @@ fn appendWidgetEventRouteEntry(
 }
 
 pub fn focusWidgetTarget(layout: anytype, current_id: ?ObjectId, direction: WidgetFocusDirection, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (portable.owner(layout)) |owner| {
+        const param: u8 = switch (direction) {
+            .forward => 0,
+            .backward => 1,
+            .left => 2,
+            .right => 3,
+            .up => 4,
+            .down => 5,
+        };
+        return focusFromPortableResult(layout, portable.query(layout, owner, 10, param, null, current_id, .{}, .{}, 0, scroll_semantics_fn).target);
+    }
     if (layout.nodes.len == 0) return null;
     const current_index = if (current_id) |id| widgetIndexById(layout, id) else null;
     return switch (direction) {
@@ -352,8 +465,37 @@ pub fn focusWidgetTarget(layout: anytype, current_id: ?ObjectId, direction: Widg
 }
 
 pub fn focusWidgetTargetById(layout: anytype, id: ObjectId, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (portable.owner(layout)) |owner| return focusFromPortableResult(layout, portable.query(layout, owner, 11, 0, null, id, .{}, .{}, 0, scroll_semantics_fn).target);
     const index = widgetIndexById(layout, id) orelse return null;
+    return focusWidgetTargetAtIndex(layout, index, scroll_semantics_fn);
+}
+
+/// Exact visible-focus capability for a retained index, without an ID scan.
+pub fn focusWidgetTargetAtIndex(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (portable.owner(layout)) |owner| return focusFromPortableResult(layout, portable.query(layout, owner, 12, 0, index, null, .{}, .{}, 0, scroll_semantics_fn).target);
+    if (index >= layout.nodes.len) return null;
     return focusTargetFromLayoutNode(layout, index, scroll_semantics_fn);
+}
+
+/// Resolve every ordinary focus gate except ancestor geometry. Runtime
+/// reveal paths use this to name a clipped target before scrolling it, while
+/// keeping the exact same hidden, disclosure, disabled, and scroll-semantic
+/// eligibility as `focusWidgetTargetById`.
+pub fn logicalFocusWidgetTargetAtIndex(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (portable.owner(layout)) |owner| return focusFromPortableResult(layout, portable.query(layout, owner, 13, 0, index, null, .{}, .{}, 0, scroll_semantics_fn).target);
+    if (index >= layout.nodes.len) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
+    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const node = layout.nodes[index];
+    if (node.widget.id == 0) return null;
+    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = index,
+        .state = node.widget.state,
+    };
 }
 
 fn focusForward(layout: anytype, current_index: ?usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
@@ -409,23 +551,9 @@ fn focusSpatial(layout: anytype, current_index: usize, direction: WidgetFocusDir
 }
 
 fn focusTargetFromLayoutNode(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
-    if (index >= layout.nodes.len) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    // Concealed disclosure content never joins the focus order: a
-    // closed section's controls are unreachable by tab or arrows, and
-    // mid-reveal content stays unreachable until the reveal settles.
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const target = logicalFocusWidgetTargetAtIndex(layout, index, scroll_semantics_fn) orelse return null;
     if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    const node = layout.nodes[index];
-    if (node.widget.id == 0) return null;
-    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .index = index,
-        .state = node.widget.state,
-    };
+    return target;
 }
 
 fn spatialFocusCandidate(
@@ -472,4 +600,14 @@ fn rectsOverlapX(a: geometry.RectF, b: geometry.RectF) bool {
 
 fn rectsOverlapY(a: geometry.RectF, b: geometry.RectF) bool {
     return @min(a.maxY(), b.maxY()) > @max(a.y, b.y);
+}
+
+fn hitFromPortableResult(layout: anytype, result: ?usize) ?WidgetHit {
+    const index = result orelse return null;
+    return widgetHitFromNode(layout.nodes[index], index);
+}
+fn focusFromPortableResult(layout: anytype, result: ?usize) ?WidgetFocusTarget {
+    const index = result orelse return null;
+    const node = layout.nodes[index];
+    return .{ .id = node.widget.id, .kind = node.widget.kind, .bounds = node.frame, .index = index, .state = node.widget.state };
 }

@@ -436,6 +436,72 @@ test "axis labels draw muted in reserved gutters and thin to fit" {
     try testing.expect(narrow_plot.maxY() < widget.frame.maxY());
 }
 
+test "emitted tick labels survive a later emit into another builder" {
+    // The builder contract (the `allocPathElements` rule): a display
+    // list may be HELD while another builder emits, and it may
+    // accumulate several emit calls — either way every emitted command
+    // stays intact. Label bytes live in the BUILDER's own store, so a
+    // second chart's labels can never overwrite a held list's text the
+    // way a per-emit-reset scratch pool would.
+    var widget = Widget{
+        .id = 93,
+        .kind = WidgetKind.chart,
+        .frame = geometry.RectF.init(0, 0, 240, 120),
+        .chart = .{
+            .series = &.{.{ .kind = .line, .values = &[_]f32{ 0.2, 0.8 } }},
+            .y_min = 0,
+            .y_max = 1,
+            .grid_lines = 1,
+            .y_labels = true,
+        },
+    };
+    const tokens = DesignTokens{};
+    var commands: [32]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, widget, tokens);
+
+    // A second chart over a DIFFERENT domain emits different label
+    // bytes into another builder while the first list is held.
+    widget.chart.y_min = 0;
+    widget.chart.y_max = 4;
+    var other_commands: [32]CanvasCommand = undefined;
+    var other_builder = Builder.init(&other_commands);
+    try emitWidgetTree(&other_builder, widget, tokens);
+
+    // The held list still reads the FIRST chart's lattice ("0", "0.5",
+    // "1"), not the second's ("0", "2", "4") or a byte mix.
+    try expectChartTickLabels(builder.displayList(), &.{ "0", "0.5", "1" });
+    try expectChartTickLabels(other_builder.displayList(), &.{ "0", "2", "4" });
+
+    // Accumulating both charts into ONE builder keeps both intact too.
+    var accumulated_commands: [64]CanvasCommand = undefined;
+    var accumulated = Builder.init(&accumulated_commands);
+    widget.chart.y_min = 0;
+    widget.chart.y_max = 1;
+    try emitWidgetTree(&accumulated, widget, tokens);
+    var second = widget;
+    second.id = 94;
+    second.chart.y_min = 0;
+    second.chart.y_max = 4;
+    try emitWidgetTree(&accumulated, second, tokens);
+    try expectChartTickLabels(accumulated.displayList(), &.{ "0", "0.5", "1", "0", "2", "4" });
+}
+
+fn expectChartTickLabels(display_list: DisplayList, expected: []const []const u8) !void {
+    var index: usize = 0;
+    for (display_list.commands) |command| {
+        switch (command) {
+            .draw_text => |text| {
+                try testing.expect(index < expected.len);
+                try testing.expectEqualStrings(expected[index], text.text);
+                index += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(expected.len, index);
+}
+
 test "hover-detail chrome renders only under interaction and is deterministic" {
     const values = [_]f32{ 0.2, 0.8, 0.4, 0.6 };
     const labels = [_][]const u8{ "q1", "q2", "q3", "q4" };

@@ -56,7 +56,6 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     // the in-canvas drag band carries the window (see view.zig), and
     // app.zon's startup window declares the same style.
     .resizable = false,
-    .restore_state = false,
     .titlebar = .hidden_inset,
     .views = &shell_views,
 }};
@@ -152,7 +151,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "Calculator",
         .bundle_id = "dev.native_sdk.calculator",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .shortcuts = &app_shortcuts,
         .security = .{

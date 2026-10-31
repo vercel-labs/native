@@ -1,25 +1,26 @@
-<!-- One kanban column, shared through <import> by the board view. Bindings
-     stay zero-argument, so each <use> passes its own model query as the
-     cards arg. Cards carry a global-key so their ids survive moving between
-     columns, and the move button is an <if> over card.movable. -->
-<template name="board-column" args="title cards">
+<template name="board-card-list" args="cards">
+  <column gap="8">
+    <for each="cards" key="id" as="c">
+      <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
+        <column grow="1" gap="8">
+          <text>{c.title}</text>
+          <row height="24" gap="6" cross="center">
+            <text size="sm" foreground="text_muted">NAT-{c.ticketNumber}</text>
+            <spacer grow="1" />
+            <if test="{c.assignee == 'openai'}">
+              <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
+            </if>
+            <else>
+              <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
+            </else>
+          </row>
+        </column>
+      </row>
+    </for>
+  </column>
+</template>
+<template name="board-column" args="title">
   <column grow="1" gap="8" padding="10" label="{title}">
-    <text foreground="text_muted">{title}</text>
-    <column gap="8">
-      <for each="cards" key="id" as="c">
-        <!-- Board cards are the deliberate CARD treatment: draggable
-             spatial objects, not list rows, so each opts into the
-             surface fill + radius explicitly (background/radius here;
-             style_tokens or control-token overrides in Zig views). List
-             rows never carry this — flat list-item washes are the
-             default register. -->
-        <row global-key="{c.id}" background="surface" radius="md" gap="8" padding="8" cross="center" role="listitem" label="{c.title}">
-          <text grow="1">{c.title}</text>
-          <if test="{c.movable}">
-            <button size="sm" on-press="move_right:{c.id}">></button>
-          </if>
-        </row>
-      </for>
-    </column>
+    <slot/>
   </column>
 </template>

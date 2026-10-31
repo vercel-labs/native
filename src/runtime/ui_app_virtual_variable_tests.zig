@@ -181,8 +181,10 @@ const Harness = struct {
         return layout.findById(transcript_id).?;
     }
 
-    fn scrollState(self: *Harness) canvas.ScrollState {
-        return self.harness.runtime.views[0].canvasWidgetScrollStateById(transcript_id).?;
+    /// The transcript's VERTICAL axis state — virtual lists are
+    /// vertical machinery, so every assertion here reads that axis.
+    fn scrollState(self: *Harness) canvas.ScrollAxisState {
+        return self.harness.runtime.views[0].canvasWidgetScrollStateById(transcript_id).?.axis(.vertical);
     }
 
     /// Screen-space frame of a row by logical index, from the RETAINED

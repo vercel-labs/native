@@ -1,0 +1,10 @@
+<template name="board-actions">
+  <row gap="4">
+    <stack>
+      <button on-press="add">Add</button>
+      <tooltip anchor="above" tooltip-delay="200">Add a task</tooltip>
+    </stack>
+    <button on-press="cycle">Cycle</button>
+    <button on-press="clear">Clear</button>
+  </row>
+</template>

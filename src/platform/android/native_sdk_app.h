@@ -156,6 +156,10 @@ typedef struct native_sdk_gpu_frame_state {
 
 void *native_sdk_app_create(void);
 void native_sdk_app_destroy(void *app);
+// Returns 1 when teardown preserved the app because a detached platform
+// callback may still be executing; the shim must preserve that callback's
+// context too. Returns 0 after ordinary complete destruction.
+int native_sdk_app_destroy_with_status(void *app);
 void native_sdk_app_start(void *app);
 void native_sdk_app_activate(void *app);
 void native_sdk_app_deactivate(void *app);
@@ -208,6 +212,18 @@ typedef struct native_sdk_audio_service {
   int (*set_volume)(void *context, double volume);
 } native_sdk_audio_service_t;
 int native_sdk_app_set_audio_service(void *app, const native_sdk_audio_service_t *service, void *context);
+// Secure credential service. Result codes preserve the core effect's closed
+// outcomes: set returns 1 success, -2 locked, -3 denied, 0 I/O failure;
+// get returns a non-negative byte length, -1 miss, -2 locked, -3 denied,
+// -4 output too small, -5 I/O failure; delete returns 1 deleted, 0 miss,
+// -2 locked, -3 denied, -5 I/O failure.
+typedef struct native_sdk_credential_service {
+  int (*set)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len, const uint8_t *secret, uintptr_t secret_len);
+  int64_t (*get)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len, uint8_t *output, uintptr_t output_len);
+  int (*delete)(void *context, const char *service, uintptr_t service_len, const char *account, uintptr_t account_len);
+} native_sdk_credential_service_t;
+int native_sdk_app_set_credential_service(void *app, const native_sdk_credential_service_t *service, void *context);
+
 // One audio player report (kind ordinals above; position/duration in ms).
 // Call between runtime entry points on the loop thread, never from inside
 // an audio service callback.
@@ -223,10 +239,11 @@ void native_sdk_app_audio_event(void *app, int kind, uint64_t position_ms, uint6
 // declines image decoding honestly and image/avatar widgets keep their
 // fallback.
 typedef struct native_sdk_image_service {
-  int (*decode)(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t *out_width, uintptr_t *out_height);
+  int (*decode)(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t max_pixels, uintptr_t *out_width, uintptr_t *out_height);
 } native_sdk_image_service_t;
 int native_sdk_app_set_image_service(void *app, const native_sdk_image_service_t *service, void *context);
 int native_sdk_app_set_automation_dir(void *app, const char *path, uintptr_t len);
+int native_sdk_app_set_data_root(void *app, const char *path, uintptr_t len);
 void native_sdk_app_set_asset_root(void *app, const char *path, uintptr_t len);
 uintptr_t native_sdk_app_widget_semantics_count(void *app);
 int native_sdk_app_widget_semantics_at(void *app, uintptr_t index, native_sdk_widget_semantics_t *out);

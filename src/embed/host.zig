@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const app_manifest = @import("app_manifest");
 const runtime = @import("../runtime/root.zig");
+const canvas_limits = @import("../runtime/canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const automation = @import("../automation/root.zig");
 const types = @import("types.zig");
@@ -163,6 +164,102 @@ pub fn setAudioService(self: anytype, service: types.MobileAudioService, context
     services.audio_set_volume_fn = if (playback) Bridge.audioSetVolume else null;
     self.null_platform.audio_playback = playback;
     self.null_platform.audio_streaming = streaming;
+    // The embed ABI has no capture producer callbacks yet; never inherit
+    // the null platform's deterministic capture fake as host capability.
+    self.null_platform.microphone_capture = false;
+    self.null_platform.system_audio_capture = false;
+}
+
+/// Host-owned callback table for the mobile OS credential store.
+pub const MobileCredentials = struct {
+    service: types.MobileCredentialService = .{},
+    context: ?*anyopaque = null,
+};
+
+fn MobileCredentialBridge(comptime Host: type) type {
+    return struct {
+        fn hostFromContext(context: ?*anyopaque) *Host {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            return @alignCast(@fieldParentPtr("null_platform", null_platform));
+        }
+
+        fn setCredential(context: ?*anyopaque, credential: platform.Credential) anyerror!void {
+            const store = &hostFromContext(context).credentials;
+            const set_fn = store.service.set orelse return error.UnsupportedService;
+            return switch (set_fn(
+                store.context,
+                credential.service.ptr,
+                credential.service.len,
+                credential.account.ptr,
+                credential.account.len,
+                credential.secret.ptr,
+                credential.secret.len,
+            )) {
+                1 => {},
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                else => error.CredentialStoreFailed,
+            };
+        }
+
+        fn getCredential(context: ?*anyopaque, key: platform.CredentialKey, output: []u8) anyerror![]const u8 {
+            const store = &hostFromContext(context).credentials;
+            const get_fn = store.service.get orelse return error.UnsupportedService;
+            const result = get_fn(
+                store.context,
+                key.service.ptr,
+                key.service.len,
+                key.account.ptr,
+                key.account.len,
+                output.ptr,
+                output.len,
+            );
+            return switch (result) {
+                -1 => error.CredentialNotFound,
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                -4 => error.NoSpaceLeft,
+                else => if (result < 0 or result > output.len)
+                    error.CredentialStoreFailed
+                else
+                    output[0..@intCast(result)],
+            };
+        }
+
+        fn deleteCredential(context: ?*anyopaque, key: platform.CredentialKey) anyerror!void {
+            const store = &hostFromContext(context).credentials;
+            const delete_fn = store.service.delete orelse return error.UnsupportedService;
+            return switch (delete_fn(
+                store.context,
+                key.service.ptr,
+                key.service.len,
+                key.account.ptr,
+                key.account.len,
+            )) {
+                1 => {},
+                0 => error.CredentialNotFound,
+                -2 => error.CredentialStoreLocked,
+                -3 => error.AccessDenied,
+                else => error.CredentialStoreFailed,
+            };
+        }
+    };
+}
+
+/// Install or clear the mobile OS credential service. Partial tables are
+/// refused so a successful set can never be paired with an unavailable get
+/// or delete. Registration only supplies the backing; the manifest
+/// capability and permission remain independent runtime gates.
+pub fn setCredentialService(self: anytype, service: types.MobileCredentialService, context: ?*anyopaque) anyerror!void {
+    const Host = std.meta.Child(@TypeOf(self));
+    const Bridge = MobileCredentialBridge(Host);
+    const complete = service.complete();
+    if (!complete and !service.empty()) return error.InvalidCommand;
+    self.credentials = .{ .service = service, .context = if (complete) context else null };
+    const services = &self.embedded.runtime.options.platform.services;
+    services.set_credential_fn = if (complete) Bridge.setCredential else null;
+    services.get_credential_fn = if (complete) Bridge.getCredential else null;
+    services.delete_credential_fn = if (complete) Bridge.deleteCredential else null;
 }
 
 /// Host-owned storage for the shim's registered image-decode service
@@ -192,17 +289,19 @@ fn MobileImageBridge(comptime Host: type) type {
             return @alignCast(@fieldParentPtr("null_platform", null_platform));
         }
 
-        fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform.DecodedImage {
+        fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform.DecodedImage {
             const image = &hostFromContext(context).image;
             const decode_fn = image.service.decode orelse return error.UnsupportedService;
             var width: usize = 0;
             var height: usize = 0;
-            return switch (decode_fn(image.context, bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+            return switch (decode_fn(image.context, bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
                 1 => {
                     if (width == 0 or height == 0) return error.ImageDecodeFailed;
                     const row_len = std.math.mul(usize, width, 4) catch return error.ImageDecodeFailed;
                     const byte_len = std.math.mul(usize, row_len, height) catch return error.ImageDecodeFailed;
                     if (byte_len > buffer.len) return error.ImageDecodeFailed;
+                    const pixel_count = std.math.mul(usize, width, height) catch return error.ImageDecodeFailed;
+                    if (pixel_count > max_pixels) return error.ImageTooLarge;
                     return .{ .width = width, .height = height, .rgba8 = buffer[0..byte_len] };
                 },
                 -1 => error.ImageTooLarge,
@@ -436,6 +535,15 @@ pub fn deliverPresentedPixels(self: anytype, scale: f32, buffer: []u8, out: *typ
     return true;
 }
 
+/// A runtime embedded in a host that owns the main loop (the mobile
+/// shims, game engines, custom render loops, headless tests). Lifecycle:
+/// `init`/`initInPlace`, `defer embedded.deinit()`, `start`, host-pumped
+/// events and `frame`s, `stop` (dispatches app_shutdown), and finally
+/// that deferred `deinit` — `stop` only tells the app it is shutting
+/// down; `deinit` is what returns the embedded runtime's heap-owned
+/// registrations (registered canvas font bytes), so a direct embedder
+/// that creates and destroys apps in one process leaks a full font
+/// registry per cycle without it.
 pub const EmbeddedApp = struct {
     app: runtime.App,
     runtime: runtime.Runtime,
@@ -447,8 +555,23 @@ pub const EmbeddedApp = struct {
     }
 
     pub fn initInPlace(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform) void {
+        self.initInPlaceWithImageBudget(app, platform_value, canvas_limits.max_registered_canvas_image_pixel_bytes);
+    }
+
+    pub fn initInPlaceWithImageBudget(self: *EmbeddedApp, app: runtime.App, platform_value: platform.Platform, max_image_pixel_bytes: usize) void {
         self.app = app;
-        runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value });
+        runtime.Runtime.initAt(&self.runtime, .{ .platform = platform_value, .max_image_pixel_bytes = max_image_pixel_bytes });
+    }
+
+    /// End of the embedded lifecycle, symmetric with `init`/`initInPlace`:
+    /// releases everything the embedded app owns on the heap — the
+    /// runtime's registered canvas font bytes (`Runtime.deinit`); `init`
+    /// itself allocates nothing else. Idempotent: a second call is a
+    /// no-op, so `defer embedded.deinit()` composes with early exits.
+    /// Everything borrowing the runtime (parsed faces, measure
+    /// providers, views) is invalid past this point.
+    pub fn deinit(self: *EmbeddedApp) void {
+        self.runtime.deinit();
     }
 
     pub fn start(self: *EmbeddedApp) anyerror!void {
@@ -672,6 +795,7 @@ pub const MobileHostApp = struct {
     automation_io: ?*std.Io.Threaded = null,
     text_measure: MobileTextMeasure = .{},
     audio: MobileAudio = .{},
+    credentials: MobileCredentials = .{},
     // Image decode stays declined until the shim registers a real codec
     // (`native_sdk_app_set_image_service`): the null platform's strict
     // test decoder is opt-in (`image_decode`, default off), so with no
@@ -705,6 +829,13 @@ pub const MobileHostApp = struct {
         // below so the runtime's service table starts without audio.
         self.null_platform.audio_playback = false;
         self.null_platform.audio_streaming = false;
+        self.null_platform.microphone_capture = false;
+        self.null_platform.system_audio_capture = false;
+        // Video is declined the same way: no mobile shim registers a
+        // decoder yet, and the null platform's fake player belongs to
+        // hermetic tests — a load that "succeeds" but never decodes
+        // would be a lie. Apps hear one honest failed event instead.
+        self.null_platform.video_playback = false;
         self.last_error = null;
         self.activation_count = 0;
         self.deactivation_count = 0;
@@ -740,6 +871,7 @@ pub const MobileHostApp = struct {
         self.automation_io = null;
         self.text_measure = .{};
         self.audio = .{};
+        self.credentials = .{};
         self.image = .{};
         self.form_factor = .unknown;
         self.chrome_tabs_projected = false;
@@ -752,12 +884,33 @@ pub const MobileHostApp = struct {
             .source_fn = mobileSource,
             .event_fn = handleEvent,
         }, self.null_platform.platform());
+        // A real mobile host must register Keychain/Keystore backing before
+        // start. Do not expose the NullPlatform's hermetic test map to an
+        // installed app while that registration is absent.
+        try setCredentialService(self, .{}, null);
         return self;
     }
 
-    pub fn destroy(self: *MobileHostApp) void {
+    /// Returns true when teardown deliberately preserves the host because an
+    /// abandoned platform callback may still enter it. Mobile shims that own
+    /// callback context use the companion C ABI result to preserve that
+    /// context under the same condition.
+    pub fn destroy(self: *MobileHostApp) bool {
         disableAutomation(self);
+        // One lifecycle owner: the embedded app's own deinit returns
+        // the runtime's heap-owned storage (registered canvas font
+        // bytes, lazily allocated media-surface texture buffers) AND
+        // disarms the producer wake bindings, so a media producer the
+        // embedding app keeps past destroy can never wake the freed
+        // host storage (the embedded null platform included).
+        self.embedded.deinit();
+        // Effects reports any detached platform call through the null
+        // platform's abandon latch. Such a call still resolves this wrapper
+        // from the services context, so preserve the complete host block just
+        // as desktop platform destroy paths preserve theirs.
+        if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) return true;
         std.heap.page_allocator.destroy(self);
+        return false;
     }
 
     pub fn start(self: *MobileHostApp) anyerror!void {

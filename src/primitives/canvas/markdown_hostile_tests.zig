@@ -41,11 +41,15 @@ const Ui = Md.Ui;
 /// node buffer (64 nodes x a multi-KiB `Ui.Node`), and one table costs a
 /// 64-row buffer (~315 KiB measured), so container-dense documents run
 /// ~180x their source bytes (measured: 100-deep nesting 15 KiB -> 2.7 MiB).
-/// 256x + a one-table floor keeps the assert green for every legitimate
-/// shape while a quadratic join (megabytes-per-source-KiB) still blows
-/// through it by orders of magnitude.
+/// The factor scales with `Ui.Node` itself — every handler field added to
+/// `ElementOptions` (the hover pair moved the densest corpus doc from
+/// ~1.45 MiB to ~1.54 MiB at 3.9 KiB source) grows those eager buffers
+/// linearly, so the factor carries headroom over the measured densest
+/// shape. 320x + a one-table floor keeps the assert green for every
+/// legitimate shape while a quadratic join (megabytes-per-source-KiB)
+/// still blows through it by orders of magnitude.
 fn arenaBound(source_len: usize) usize {
-    return source_len * 256 + 512 * 1024;
+    return source_len * 320 + 512 * 1024;
 }
 
 const BuildResult = struct {
@@ -165,6 +169,16 @@ test "hostile: 100-deep quotes, lists, and details nesting stay bounded" {
     // Details nested past max_markdown_details_per_document, all expanded.
     for (0..40) |_| try stream.writeAll("<details>\n<summary>s</summary>\n\nbody\n\n");
     for (0..40) |_| try stream.writeAll("</details>\n");
+    // Safe HTML blockquotes recurse only to the mapper's bounded block
+    // depth, then consume the overflowing subtree without growing the tree.
+    for (0..100) |_| try stream.writeAll("<blockquote>\n");
+    try stream.writeAll("html quote body\n");
+    for (0..100) |_| try stream.writeAll("</blockquote>\n");
+    // Persistent block presentation has a bounded scope stack too; excess
+    // wrappers are ignored until their matching close drains the overflow.
+    for (0..100) |_| try stream.writeAll("<div align=\"center\">\n");
+    try stream.writeAll("centered body\n");
+    for (0..100) |_| try stream.writeAll("</div>\n");
 
     const result = try buildHostile(stream.buffered());
     try testing.expect(result.widgets > 0);
@@ -209,6 +223,18 @@ test "hostile: kilochar single words and megabyte paragraphs join in linear memo
         var index: usize = 40;
         while (index < source.len) : (index += 41) source[index] = '\n';
         _ = try buildHostile(source);
+    }
+
+    // Safe HTML block collection must consume the full element without
+    // retaining a source-sized copy in the view tree.
+    {
+        const source = try allocator.alloc(u8, 1024 * 1024);
+        defer allocator.free(source);
+        @memset(source, 'h');
+        @memcpy(source[0..3], "<p>");
+        @memcpy(source[source.len - 4 ..], "</p>");
+        const result = try buildHostile(source);
+        try testing.expect(result.text_bytes <= markdown.max_markdown_paragraph_bytes * 2);
     }
 }
 
@@ -282,6 +308,24 @@ test "hostile: bare-url paren tails trim in linear time" {
     @memset(source[12..], '(');
     @memset(source[12 + (source.len - 12) / 2 ..], ')');
     _ = try buildHostile(source);
+}
+
+test "hostile: unterminated HTML comment-prefix walls parse in linear time" {
+    const allocator = testing.allocator;
+    const bomb_len = 256 * 1024;
+    const source = try allocator.alloc(u8, bomb_len);
+    defer allocator.free(source);
+
+    // Every four-byte prefix looks like a comment opener, but none has a
+    // closer. A fresh suffix scan at every '<' is quadratic; the HTML scan
+    // must remember the first unterminated comment through the remaining
+    // source and through the paragraph's measuring/copy passes.
+    var index: usize = 0;
+    while (index + 4 <= source.len) : (index += 4) @memcpy(source[index..][0..4], "<!--");
+    if (index < source.len) @memset(source[index..], '<');
+
+    const result = try buildHostile(source);
+    try testing.expect(result.text_bytes <= markdown.max_markdown_paragraph_bytes * 2);
 }
 
 test "hostile: unterminated fences, HTML soup, and stray closers stay valid" {

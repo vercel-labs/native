@@ -152,6 +152,31 @@ test "NSUI round-trips the input-group vocabulary under its fresh codes" {
     try testing.expectEqual(@as(u16, 63), schema.elementByName("input-group-actions").?.code);
 }
 
+test "NSUI round-trips the media surface under its fresh codes" {
+    // media-surface and its surface binding serialize like any element —
+    // fresh registry codes ride the wire automatically, no schema bump —
+    // so a media document survives encode/decode node-for-node.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\<column gap="8">
+        \\  <media-surface surface="{preview}" width="320" height="180" label="Camera preview" />
+        \\</column>
+    ;
+    const document = try parseSource(arena, source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(document));
+
+    var diagnostic = nsui.CodecDiagnostic{};
+    const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
+    const decoded = try nsui.decode(arena, bytes, &diagnostic);
+    try expectNodesEqual(document.root.?, decoded.root.?);
+
+    // The wire carries the registry codes, never the names.
+    try testing.expectEqual(@as(u16, 66), schema.elementByName("media-surface").?.code);
+    try testing.expectEqual(@as(u16, 81), schema.attrByName("surface").?.code);
+}
+
 test "NSUI round-trips the split layout-tween pair under its fresh codes" {
     // resize-duration/resize-easing serialize like any attribute — fresh
     // registry codes ride the wire automatically, no schema bump — so a
@@ -200,7 +225,7 @@ test "NSUI golden bytes for a minimal document" {
     const bytes = try nsui.encode(arena, document, .{ .spans = false, .provenance = false }, &diagnostic);
     const expected = [_]u8{
         'N', 'S', 'U', 'I', // magic
-        1, 0, // schema_version = 1
+        2, 0, // schema_version = 2
         0, 0, // flags: no spans, no provenance
         0, 0, // template count = 0
         1, // root present
@@ -294,6 +319,16 @@ test "NSUI refuses what it does not know, loudly" {
     var diagnostic = nsui.CodecDiagnostic{};
     const bytes = try nsui.encode(arena, document, .{}, &diagnostic);
 
+    // V1 migrates structurally to v2. Its wire layout is unchanged, and
+    // every document valid under the old checkbox/radio content rules is
+    // also valid under the new optional-text rules.
+    {
+        const migrated = try arena.dupe(u8, bytes);
+        std.mem.writeInt(u16, migrated[4..6], 1, .little);
+        const decoded = try nsui.decode(arena, migrated, &diagnostic);
+        try testing.expectEqualStrings("row", decoded.root.?.name);
+    }
+
     // Unknown schema version.
     {
         const mutated = try arena.dupe(u8, bytes);
@@ -350,7 +385,7 @@ test "NSUI JSON dump derives from the decoded document" {
     defer out.deinit();
     try nsui.writeJson(decoded, hash, &out.writer);
     const json = out.written();
-    try testing.expect(std.mem.indexOf(u8, json, "\"schemaVersion\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"schemaVersion\":2") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"node\":\"row\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"code\":1") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"name\":\"gap\"") != null);
@@ -377,8 +412,8 @@ test "NSUI refuses hostile nesting depth" {
     try testing.expectEqualStrings(nsui.depth_message, diagnostic.message);
 }
 
-test "the schema version constant is 1 and the registry backs the wire" {
-    try testing.expectEqual(@as(u16, 1), schema.schema_version);
+test "the schema version constant is 2 and the registry backs the wire" {
+    try testing.expectEqual(@as(u16, 2), schema.schema_version);
     // Every registry element/attr the encoder can meet has a nonzero code
     // (0 is the wire's "no entry" marker).
     for (schema.elements) |entry| try testing.expect(entry.code != 0);

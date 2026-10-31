@@ -34,7 +34,8 @@
 //! The audit is geometry-only and deterministic: it re-uses the exact
 //! measurement seam layout and paint use (`tokens.text_measure`, falling
 //! back to the deterministic estimator), so what it predicts is what the
-//! reference renderer inks. It allocates nothing and reads no globals —
+//! reference renderer inks. The native reference is allocation-free; a
+//! selected compiled owner uses copied native-owned request/result buffers —
 //! fast enough to run inside every example test suite across a sweep
 //! matrix of window sizes, densities, and text expansions.
 
@@ -69,11 +70,11 @@ pub const layout_audit_epsilon: f32 = 0.5;
 /// call while the line breakers accumulate per-word measures, so an
 /// exact-fit line can land one f32 ulp past its own frame (~1e-3 px) —
 /// runtimes hide that under the pixel-snap wrap budget (`textWrapMaxWidth`
-/// hands back up to 0.5/scale). The audit widens its simulated wrap by an
-/// eighth of a point: far above accumulated float noise, below the
-/// smallest real overflow (a glyph) and below the smallest runtime snap
-/// budget (0.5/scale at any real scale factor), so exact-fit text stays
-/// clean and genuine wraps still report.
+/// hands back the full snap quantum, 1/scale). The audit widens its
+/// simulated wrap by an eighth of a point: far above accumulated float
+/// noise, below the smallest real overflow (a glyph) and below the
+/// smallest runtime snap budget (1/scale at any real scale factor), so
+/// exact-fit text stays clean and genuine wraps still report.
 pub const layout_audit_wrap_slack: f32 = 0.125;
 
 /// Findings reported per audit pass. A view with more than this many
@@ -136,6 +137,7 @@ pub fn auditWidgetLayout(
     tokens: DesignTokens,
     storage: []LayoutAuditFinding,
 ) LayoutAuditIssues {
+    if (layout.audit_policy orelse tokens.widget_audit_policy) |policy| return @import("widget_audit_policy.zig").auditLayout(std.heap.page_allocator, policy, layout, window, tokens, storage) catch @panic("compiled layout audit failed");
     var sink = FindingSink{ .storage = storage };
     const node_count = @min(layout.nodes.len, max_layout_audit_nodes);
 
@@ -244,7 +246,9 @@ fn auditNodeTextOverflow(layout: WidgetLayoutTree, node_index: usize, tokens: De
 }
 
 fn auditSpanParagraphOverflow(widget: Widget, frame: geometry.RectF, node_index: usize, tokens: DesignTokens, sink: *FindingSink) void {
-    const content = frame.inset(widget.layout.padding).normalized();
+    var framed_widget = widget;
+    framed_widget.frame = frame;
+    const content = widget_metrics.widgetTextSpanContentFrame(framed_widget, tokens).normalized();
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const span_layout = text_spans_model.layoutTextSpans(
         widget.spans,
@@ -270,7 +274,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
     // there is nothing to report on the horizontal axis. Only explicit
     // newlines can still overrun (vertically), checked below.
     const text_size = widget_metrics.widgetBodyTextSize(widget, tokens);
-    const line_height = widget_metrics.widgetLineHeight(text_size);
+    const line_height = widget_metrics.widgetLineHeightWithTokens(text_size, tokens);
 
     // Replay the paint-time single-line breaker (`wrap = .none`: lines
     // split only at explicit newlines) without a line buffer: the audit
@@ -284,6 +288,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
             .line_height = line_height,
             .wrap = .none,
             .alignment = widget.text_alignment,
+            .text_run_policy = tokens.text_run_policy,
             .measure = tokens.text_measure,
         });
         line_count += 1;
@@ -378,7 +383,7 @@ fn nodeIsOverlapCandidate(layout: WidgetLayoutTree, node_index: usize, parent_in
     const node = layout.nodes[node_index];
     if (node.parent_index != parent_index) return false;
     const widget = node.widget;
-    if (widget.layout.anchor != null) return false;
+    if (widget_tree.widgetEscapesAncestorClips(widget)) return false;
     if (widget.semantics.hidden) return false;
     if (widget.opacity <= 0) return false;
     if (!equality_model.affinesEqual(widget.transform, canvas.Affine.identity())) return false;
@@ -395,21 +400,29 @@ fn widgetClipsForAudit(widget: Widget) bool {
 }
 
 /// Whether the clip scope scrolls vertically by design, making vertical
-/// overhang the normal operating mode rather than damage.
+/// overhang the normal operating mode rather than damage. A
+/// horizontal-only scroll view does NOT scroll vertically: content
+/// escaping it downward is damage nothing can reveal.
 fn scopeScrollsVertically(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.virtualized;
+    return (widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized;
+}
+
+/// The horizontal twin: a scroll viewport granting the horizontal axis
+/// makes horizontal overhang the operating mode, not damage.
+fn scopeScrollsHorizontally(widget: Widget) bool {
+    return widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized;
 }
 
 /// Nearest ancestor whose clip bounds this node: the first clipping
-/// ancestor, or the window (node 0's scope) when none clips. Anchored
-/// floating widgets hoist out of every ancestor clip and are clipped by
-/// the window alone, so the walk stops at an anchor boundary.
+/// ancestor, or the window (node 0's scope) when none clips. Window-level
+/// surfaces hoist out of every ancestor clip and are clipped by the window
+/// alone, so the walk stops at that boundary.
 fn clipScopeIndex(layout: WidgetLayoutTree, node_index: usize) ?usize {
-    if (layout.nodes[node_index].widget.layout.anchor != null) return null;
+    if (widget_tree.widgetEscapesAncestorClips(layout.nodes[node_index].widget)) return null;
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (widgetClipsForAudit(layout.nodes[index].widget)) return index;
-        if (layout.nodes[index].widget.layout.anchor != null) return null;
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[index].widget)) return null;
         current = layout.nodes[index].parent_index;
     }
     return null;
@@ -428,6 +441,7 @@ fn auditNodeContainerEscape(
     const scope_index = clipScopeIndex(layout, node_index);
     const scope = if (scope_index) |index| layout.nodes[index].frame.normalized() else window.normalized();
     const vertical_checked = if (scope_index) |index| !scopeScrollsVertically(layout.nodes[index].widget) else true;
+    const horizontal_checked = if (scope_index) |index| !scopeScrollsHorizontally(layout.nodes[index].widget) else true;
 
     // Attribute the escape to the outermost offender: if any ancestor
     // inside the same scope is already reported, this node's overhang is
@@ -441,8 +455,16 @@ fn auditNodeContainerEscape(
 
     const frame = node.frame.normalized();
     var overrun_x: f32 = 0;
-    overrun_x = @max(overrun_x, overrunPast(frame.maxX(), scope.maxX()));
-    overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x));
+    if (horizontal_checked) {
+        overrun_x = @max(overrun_x, overrunPast(frame.maxX(), scope.maxX()));
+        overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x));
+    } else if (scope_index) |index| {
+        // A horizontal scroll scope forgives trailing overhang (the
+        // scroll reveals it) but not content stranded BEFORE the
+        // origin: offsets clamp at zero, so anything the region's own
+        // offset cannot explain on the leading side is damage.
+        overrun_x = @max(overrun_x, overrunPast(scope.x, frame.x + layout.nodes[index].widget.value_x));
+    }
     var overrun_y: f32 = 0;
     if (vertical_checked) {
         overrun_y = @max(overrun_y, overrunPast(frame.maxY(), scope.maxY()));
@@ -469,7 +491,7 @@ fn auditNodeContainerEscape(
 /// inline link hotspots follow text metrics by convention; both exempt.
 fn widgetKindIsPointerTarget(kind: WidgetKind) bool {
     return switch (kind) {
-        .button, .toggle_button, .icon_button, .select, .combobox, .input, .text_field, .search_field, .textarea, .checkbox, .radio, .switch_control, .toggle, .slider, .menu_item, .segmented_control, .list_item => true,
+        .button, .toggle_button, .icon_button, .select, .combobox, .input, .text_field, .search_field, .textarea, .checkbox, .radio, .switch_control, .toggle, .slider, .menu_item, .segmented_control, .list_item, .terminal => true,
         else => false,
     };
 }

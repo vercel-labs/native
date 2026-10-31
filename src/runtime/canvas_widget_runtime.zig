@@ -1,3 +1,8 @@
+pub const staged_rebuild_policy = @import("staged_rebuild_policy.zig");
+pub const continuity_policy = @import("widget_continuity_policy.zig");
+pub const scroll_tree_policy = @import("scroll_tree_policy.zig");
+const retention = @import("widget_retention_policy.zig");
+const keyboard_focus = @import("canvas_keyboard_focus_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
@@ -114,9 +119,12 @@ pub const CanvasWidgetSemanticsIndex = CanvasWidgetIdIndex(canvas.WidgetSemantic
 /// Shared per-pass index scratch (~8 KiB of slots per table). The two
 /// reconcile passes per rebuild (the staged reconcile, then the retained
 /// copy) run back-to-back on the single-threaded event loop and each
-/// rebuilds every table it uses, so one threadlocal set serves both —
-/// the same pattern as the planners' probe-table scratch.
-pub threadlocal var canvas_widget_reconcile_index_scratch: CanvasWidgetReconcileIndexScratch = .{};
+/// rebuilds every table it uses, so one per-thread set serves both —
+/// the same pattern as the planners' probe-table scratch. Lazily
+/// heap-allocated (~32 KiB) on a thread's first reconcile, so threads
+/// that never reconcile widgets never carry it in their static TLS
+/// block.
+pub const canvas_widget_reconcile_index_scratch = canvas.lazy_tls.LazyTls(CanvasWidgetReconcileIndexScratch);
 
 pub const CanvasWidgetReconcileIndexScratch = struct {
     controls: CanvasWidgetControlEntryIndex = .{},
@@ -146,21 +154,43 @@ pub const CanvasWidgetTextReconcileEntry = struct {
     id: canvas.ObjectId = 0,
     kind: canvas.WidgetKind = .text_field,
     text: []const u8 = &.{},
+    static_text_group_id: canvas.ObjectId = 0,
     source_text_len: usize = 0,
     source_text_hash: u64 = 0,
+    /// The selection declared by the previous SOURCE tree, distinct from
+    /// the runtime-owned selection in `text_selection`. Legacy controlled
+    /// models always materialize the default `.upstream` affinity, so an
+    /// unchanged source affinity is an echo; a changed affinity is an
+    /// explicit source-side visual-caret move.
+    source_text_selection: ?canvas.TextSelection = null,
     text_selection: ?canvas.TextSelection = null,
     text_composition: ?canvas.TextRange = null,
     value: f32 = 0,
+    value_x: f32 = 0,
+    code_content_width: f32 = 0,
+    code_content_width_generation: u64 = 0,
+    code_content_width_font_id: u64 = 0,
+    code_content_width_size_bits: u32 = 0,
 };
 
 pub const CanvasWidgetSourceScrollEntry = struct {
     id: canvas.ObjectId = 0,
     value: f32 = 0,
+    /// The horizontal scroll offset channel (`Widget.value_x`) — 0 for
+    /// splits, which share this entry shape but carry one fraction.
+    value_x: f32 = 0,
 };
 
 pub fn canvasWidgetSourceScrollById(entries: []const CanvasWidgetSourceScrollEntry, id: canvas.ObjectId) ?f32 {
     for (entries) |entry| {
         if (entry.id == id) return entry.value;
+    }
+    return null;
+}
+
+pub fn canvasWidgetSourceScrollEntryById(entries: []const CanvasWidgetSourceScrollEntry, id: canvas.ObjectId) ?CanvasWidgetSourceScrollEntry {
+    for (entries) |entry| {
+        if (entry.id == id) return entry;
     }
     return null;
 }
@@ -180,7 +210,7 @@ pub fn collectCanvasWidgetScrollOffsetEntries(
     for (nodes) |node| {
         if (!canvasWidgetSourceValueKind(node.widget.kind) or node.widget.id == 0) continue;
         if (len >= output.len) break;
-        output[len] = .{ .id = node.widget.id, .value = node.widget.value };
+        output[len] = .{ .id = node.widget.id, .value = node.widget.value, .value_x = node.widget.value_x };
         len += 1;
     }
     return output[0..len];
@@ -199,15 +229,164 @@ pub fn restoreCanvasWidgetLayoutScrollOffsets(
     previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
     previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
 ) void {
+    restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(nodes, previous_runtime_offsets, previous_source_offsets, null, null, null);
+}
+
+fn restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
+    nodes: []canvas.WidgetLayoutNode,
+    previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
+    previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+    anchored_depth: ?usize,
+    strata: ?canvas.layout_coordination_policy.RetainedPlan,
+    policy: scroll_tree_policy.Policy,
+) void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
-        const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse continue;
-        const previous_source = canvasWidgetSourceScrollById(previous_source_offsets, node.widget.id) orelse continue;
-        if (node.widget.value != previous_source) continue;
-        if (node.widget.value == previous_runtime) continue;
-        const laid_out = node.widget.value;
-        nodes[index].widget.value = previous_runtime;
-        translateCanvasWidgetLayoutScrollDescendants(nodes, index, -(previous_runtime - laid_out));
+        if (anchored_depth) |depth| {
+            if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(nodes, index)) != depth) continue;
+        }
+        const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id) orelse continue;
+        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id);
+        // Each axis reconciles on its own: a programmatic vertical
+        // scroll (source-side `value` change) must not snap a
+        // user-scrolled horizontal offset back, and vice versa. Only
+        // granted axes restore — the layout pass never displaced
+        // children along an ungranted axis, so restoring its offset
+        // would translate content that never moved (the clamp pass
+        // pins the stale value home instead).
+        var restore = geometry.OffsetF{};
+        const next_y = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 2, .current = node.widget.value, .previous_source = if (previous_source) |entry| entry.value else null, .retained = previous_runtime.value, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (previous_source != null and canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value == previous_source.?.value) previous_runtime.value else node.widget.value;
+        const next_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 2, .current = node.widget.value_x, .previous_source = if (previous_source) |entry| entry.value_x else null, .retained = previous_runtime.value_x, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (previous_source != null and canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x == previous_source.?.value_x) previous_runtime.value_x else node.widget.value_x;
+        if (next_y != node.widget.value) {
+            restore.dy = next_y - node.widget.value;
+            nodes[index].widget.value = next_y;
+        }
+        if (next_x != node.widget.value_x) {
+            restore.dx = next_x - node.widget.value_x;
+            nodes[index].widget.value_x = next_x;
+        }
+        if (restore.dx == 0 and restore.dy == 0) continue;
+        translateCanvasWidgetLayoutScrollDescendantsWithPolicy(policy, nodes, index, .{ .dx = -restore.dx, .dy = -restore.dy });
+    }
+}
+
+/// Clamp a fresh or genuinely PROGRAMMATIC source offset before a native
+/// scroll driver adopts the layout. Native drivers otherwise keep their raw
+/// runtime offset so an Elm-style rebuild cannot interrupt rubber-band
+/// overscroll. A source value that exactly echoes the retained runtime value
+/// is the same user-driven state, not a programmatic move, and stays exempt.
+///
+/// This pass is what makes an intentionally out-of-range source value useful
+/// as "scroll to the end": descendants are first laid out at that source
+/// value, then translated back to the content-range clamp before either the
+/// retained tree or the native driver sees them.
+fn clampCanvasWidgetLayoutProgrammaticScrollOffsets(
+    nodes: []canvas.WidgetLayoutNode,
+    source: canvas.WidgetLayoutTree,
+    previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
+    previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+    anchored_depth: ?usize,
+    strata: ?canvas.layout_coordination_policy.RetainedPlan,
+    policy: scroll_tree_policy.Policy,
+) void {
+    for (nodes, 0..) |node, index| {
+        if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
+        if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
+        if (anchored_depth) |depth| {
+            if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(nodes, index)) != depth) continue;
+        }
+
+        const source_node = source.findById(node.widget.id) orelse continue;
+        const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id);
+        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id);
+        const fresh = previous_source == null;
+        const source_moved_y = fresh or source_node.widget.value != previous_source.?.value;
+        const source_moved_x = fresh or source_node.widget.value_x != previous_source.?.value_x;
+        const runtime_echo_y = previous_runtime != null and source_node.widget.value == previous_runtime.?.value;
+        const runtime_echo_x = previous_runtime != null and source_node.widget.value_x == previous_runtime.?.value_x;
+        const clamp_y = source_moved_y and !runtime_echo_y;
+        const clamp_x = source_moved_x and !runtime_echo_x;
+        if (!node.widget.runtime_flags.compiled_scroll_policy and !clamp_y and !clamp_x) continue;
+
+        const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+        if (viewport.isEmpty()) continue;
+
+        const extents = canvasWidgetLayoutScrollExtentsWithPolicy(policy, nodes, index, viewport);
+        const current_y = node.widget.value;
+        const current_x = node.widget.value_x;
+        const next_y = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 3, .current = current_y, .viewport = viewport.height, .content = extents.dy, .delta = source_node.widget.value, .previous_source = if (previous_source) |entry| entry.value else null, .retained = if (previous_runtime) |entry| entry.value else null, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (clamp_y)
+            if (canvas.widgetScrollsAxis(node.widget, .vertical))
+                std.math.clamp(@max(0, current_y), 0, @max(0, extents.dy - viewport.height))
+            else
+                0
+        else
+            current_y;
+        const next_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 3, .current = current_x, .viewport = viewport.width, .content = extents.dx, .delta = source_node.widget.value_x, .previous_source = if (previous_source) |entry| entry.value_x else null, .retained = if (previous_runtime) |entry| entry.value_x else null, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (clamp_x)
+            if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+                std.math.clamp(@max(0, current_x), 0, @max(0, extents.dx - viewport.width))
+            else
+                0
+        else
+            current_x;
+        if (next_y == current_y and next_x == current_x) continue;
+
+        nodes[index].widget.value = next_y;
+        nodes[index].widget.value_x = next_x;
+        translateCanvasWidgetLayoutScrollDescendantsWithPolicy(policy, nodes, index, .{
+            .dx = if (canvas.widgetScrollsAxis(node.widget, .horizontal)) -(next_x - current_x) else 0,
+            .dy = if (canvas.widgetScrollsAxis(node.widget, .vertical)) -(next_y - current_y) else 0,
+        });
+    }
+}
+
+fn previousLayoutHasSelectedTab(previous: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
+    for (previous.nodes) |node| {
+        if (node.widget.id == id) return node.widget.semantics.role == .tab and node.widget.state.selected;
+    }
+    return false;
+}
+
+/// A tab activation reveals only the pixels outside its standing horizontal
+/// viewport. This runs after retained scroll restoration, against final layout
+/// frames, so an already-visible tab preserves the exact offset and a newly
+/// mounted native scroll driver never paints a speculative leading-edge jump.
+pub fn revealNewlySelectedTabs(previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode, anchored_depth: ?usize, strata: ?canvas.layout_coordination_policy.RetainedPlan) void {
+    for (nodes, 0..) |tab_node, tab_index| {
+        const tab = tab_node.widget;
+        if (tab.semantics.role != .tab or !tab.state.selected) continue;
+        if (tab.id != 0 and previousLayoutHasSelectedTab(previous, tab.id)) continue;
+        if (anchored_depth) |depth| {
+            if ((if (strata) |plan| plan.nesting(tab_index) else canvas.anchoredNestingDepth(nodes, tab_index)) != depth) continue;
+        }
+
+        var ancestor = tab_node.parent_index;
+        while (ancestor) |index| {
+            if (index >= nodes.len) break;
+            const scroll_node = nodes[index];
+            if (scroll_node.widget.kind == .scroll_view and
+                canvas.widgetScrollsAxis(scroll_node.widget, .horizontal) and
+                !scroll_node.widget.layout.virtualized)
+            {
+                const viewport = scroll_node.frame.inset(scroll_node.widget.layout.padding).normalized();
+                const tab_frame = nodes[tab_index].frame.normalized();
+                if (viewport.isEmpty() or tab_frame.isEmpty()) break;
+
+                const delta = if (tab_frame.x < viewport.x)
+                    tab_frame.x - viewport.x
+                else if (tab_frame.maxX() > viewport.maxX())
+                    tab_frame.maxX() - viewport.maxX()
+                else
+                    0;
+                if (delta == 0) break;
+                const current = scroll_node.widget.value_x;
+                const next = @max(0, current + delta);
+                if (next == current) break;
+                nodes[index].widget.value_x = next;
+                translateCanvasWidgetLayoutScrollDescendants(nodes, index, .{ .dx = -(next - current) });
+                break;
+            }
+            ancestor = scroll_node.parent_index;
+        }
     }
 }
 
@@ -216,6 +395,7 @@ pub const CanvasWidgetSourceTextEntry = struct {
     kind: canvas.WidgetKind = .text_field,
     text_len: usize = 0,
     text_hash: u64 = 0,
+    text_selection: ?canvas.TextSelection = null,
 };
 
 /// The SOURCE-side selected state (and value, for sliders) of one
@@ -275,6 +455,20 @@ pub fn canvasWidgetInteractionTargetExists(layout: canvas.WidgetLayoutTree, id: 
     return canvasWidgetRuntimeHitTarget(layout.nodes[index].widget);
 }
 
+/// The hover-containment survival predicate: the widget still exists,
+/// is still visible, and still LISTENS for hover Msgs. Its own
+/// predicate rather than the interactive one above, because a chain
+/// entry can be a hover-only listener the interactive test would
+/// wrongly evict (a false leave), and an interactive widget whose
+/// hover bindings a rebuild removed must stop standing (its leave is
+/// owed) even though it still exists interactively.
+pub fn canvasWidgetHoverMsgTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
+    const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
+    if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
+    if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
+    return canvas.widgetListensForHoverMsgs(layout.nodes[index].widget);
+}
+
 pub fn canvasWidgetSelectableTargetExists(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     const index = canvasWidgetLayoutNodeIndexById(layout, id) orelse return false;
     if (canvasWidgetLayoutNodeHidden(layout, index)) return false;
@@ -323,9 +517,9 @@ pub fn canvasWidgetLayoutNodeFrameVisible(layout: canvas.WidgetLayoutTree, node_
     if (frame.isEmpty()) return false;
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clip regions (they
-        // render in the hoisted window-level pass).
-        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // Window-level surfaces render in the hoisted pass and escape
+        // ancestor clip regions.
+        if (canvas.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const index = layout.nodes[current].parent_index orelse return true;
         if (index >= layout.nodes.len) return true;
         const ancestor = layout.nodes[index];
@@ -343,9 +537,9 @@ pub fn canvasWidgetLayoutNodeClippedBounds(layout: canvas.WidgetLayoutTree, node
 
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clip regions, so
-        // dirty bounds under them clip to the window only.
-        if (canvas.widgetIsAnchored(layout.nodes[current].widget)) break;
+        // Window-level surfaces escape ancestor clip regions, so dirty
+        // bounds under them clip to the window only.
+        if (canvas.widgetEscapesAncestorClips(layout.nodes[current].widget)) break;
         const index = layout.nodes[current].parent_index orelse break;
         if (index >= layout.nodes.len) return null;
         const ancestor = layout.nodes[index];
@@ -364,7 +558,7 @@ pub fn canvasWidgetClipsContent(widget: canvas.Widget) bool {
 
 pub fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
     // Widget-level hit-target-ness lives in one place (canvas
-    // widget_access.zig: kind predicate plus bound press/toggle handlers)
+    // widget_access.zig: kind predicate plus bound press/toggle/drag handlers)
     // so the runtime, the engines' hit test, and the markup validation of
     // pointer handlers can never drift.
     return canvas.widgetIsHitTarget(widget);
@@ -390,10 +584,21 @@ pub fn canvasWidgetEditableTextKind(kind: canvas.WidgetKind) bool {
     return kind == .input or kind == .text_field or kind == .search_field or kind == .combobox or kind == .textarea;
 }
 
-/// Clipboard paste text clamped to what the view's shared widget text
-/// storage can absorb (the bytes the edit replaces are freed first).
-/// Clamping lands on a UTF-8 boundary; `truncated` is the loud flag the
-/// runtime forwards to apps on the keyboard event.
+/// Kinds that show their focus affordance HOWEVER focus arrived (pointer,
+/// autofocus, automation) — the :focus-visible contract of a control the
+/// user operates by typing into it. Editable text kinds plus the
+/// terminal: a click that focuses a terminal must reveal its ring the way
+/// clicking a text field reveals its ring and caret, or the ring the
+/// renderer paints on `state.focused` is unreachable except by Tab.
+pub fn canvasWidgetShowsPointerFocusRing(kind: canvas.WidgetKind) bool {
+    return canvasWidgetEditableTextKind(kind) or kind == .terminal;
+}
+
+/// Clipboard paste text sanitized for the target kind and then clamped
+/// to what the view's shared widget text storage can absorb (the bytes
+/// the edit replaces are freed first). Clamping lands on a UTF-8
+/// boundary; `truncated` is the loud flag the runtime forwards to apps
+/// on the keyboard event.
 pub const CanvasWidgetPasteClamp = struct {
     text: []const u8 = "",
     truncated: bool = false,
@@ -406,11 +611,30 @@ pub fn clampCanvasWidgetPasteText(widget: canvas.Widget, view_text_len: usize, t
         if (canvas.widgetTextSelectionRange(widget)) |range| break :blk range.byteLen(widget.text.len);
         break :blk 0;
     };
-    const used = view_text_len -| replaced_len;
-    const available = capacity -| used;
-    if (text.len <= available) return .{ .text = text };
-    const clamped = canvas.snapTextOffset(text, available);
-    return .{ .text = text[0..clamped], .truncated = true };
+    const available = capacity -| (view_text_len -| replaced_len);
+    if (widget.interaction_policy != null and (widget.kind == .textarea or canvas.widgetKindSingleLineTextEntry(widget.kind)) and text.len <= capacity) {
+        const prepared = canvas.widgetCompiledTextInput(widget, text, 2, null, available) orelse return .{};
+        return .{ .text = prepared.text, .truncated = prepared.truncated };
+    }
+    // Sanitize BEFORE clamping — the shared step for BOTH paste entry
+    // points (the cmd+V shortcut and the context-menu Paste). A
+    // single-line target strips \r/\n at the edit-derivation seam
+    // anyway, so capacity must be measured against the bytes that
+    // actually land: clamping the raw clipboard first discarded valid
+    // suffix text near the limit ("a\nbc" into 3 free bytes clamped to
+    // "a\nb" and then sanitized to "ab", when the sanitized "abc" fits
+    // whole). The stamped edit is the post-clamp bytes, so the retained
+    // editor and the app's `on_input` mirror still hear identically —
+    // the seam's re-sanitize is a no-op on already-stripped text. A
+    // paste that sanitizes to nothing clamps to nothing; that is the
+    // sanitize rule speaking, NOT capacity, so `truncated` stays false.
+    const sanitized = if (canvas.sanitizedSingleLineTextInputEvent(widget.kind, .{ .insert_text = text })) |event|
+        event.insert_text
+    else
+        return .{};
+    if (sanitized.len <= available) return .{ .text = sanitized };
+    const clamped = canvas.snapTextOffset(sanitized, available);
+    return .{ .text = sanitized[0..clamped], .truncated = true };
 }
 
 pub fn canvasWidgetSingleLineTextKind(kind: canvas.WidgetKind) bool {
@@ -483,13 +707,24 @@ pub fn canvasWidgetScrollStateForLayoutNode(
     node: canvas.WidgetLayoutNode,
     previous: []const CanvasWidgetScrollReconcileEntry,
 ) canvas.ScrollState {
-    var state = canvas.ScrollState{ .offset = node.widget.value };
+    var state = canvas.ScrollState{ .offset_y = node.widget.value, .offset_x = node.widget.value_x };
     if (node.widget.kind != .scroll_view or node.widget.id == 0) return state;
     for (previous) |entry| {
-        if (entry.id == node.widget.id) {
-            state.velocity = entry.state.velocity;
-            return state;
+        if (entry.id != node.widget.id) continue;
+        // In-flight fling velocity survives a rebuild PER AXIS, and only
+        // while that axis's offset of record survived too: a
+        // source-side (programmatic) jump means the model took the
+        // wheel — resuming the old fling would immediately drag the
+        // region away from where it was just placed. An axis the region
+        // no longer grants carries no velocity either, so a revoked and
+        // later restored grant can never resume an obsolete fling.
+        if (canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value == entry.state.offset_y) {
+            state.velocity_y = entry.state.velocity_y;
         }
+        if (canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x == entry.state.offset_x) {
+            state.velocity_x = entry.state.velocity_x;
+        }
+        return state;
     }
     return state;
 }
@@ -506,16 +741,28 @@ pub fn collectCanvasWidgetTextReconcileEntries(
         if (node.widget.id == 0 or !canvasWidgetTextReconcileKind(node.widget)) continue;
         if (len >= output.len) break;
         const text_range = try appendWidgetTextStorageRange(text_storage, text_len, node.widget.text);
-        const source_text = canvasWidgetSourceTextByIdKind(source_entries, node.widget.id, node.widget.kind) orelse canvasWidgetSourceTextFingerprint(node.widget.text);
+        const source_entry = canvasWidgetSourceTextEntryByIdKind(source_entries, node.widget.id, node.widget.kind);
+        const source_text = if (source_entry) |entry|
+            CanvasWidgetSourceTextFingerprint{ .len = entry.text_len, .hash = entry.text_hash }
+        else
+            canvasWidgetSourceTextFingerprint(node.widget.text);
+        const has_code_diff = node.widget.hasCodeDiff();
         output[len] = .{
             .id = node.widget.id,
             .kind = node.widget.kind,
             .text = text_storage[text_range.start..text_range.end],
+            .static_text_group_id = node.widget.static_text_group_id,
             .source_text_len = source_text.len,
             .source_text_hash = source_text.hash,
+            .source_text_selection = if (source_entry) |entry| entry.text_selection else null,
             .text_selection = node.widget.text_selection,
             .text_composition = node.widget.text_composition,
             .value = node.widget.value,
+            .value_x = node.widget.value_x,
+            .code_content_width = if (!has_code_diff) node.widget.code_content_width else 0,
+            .code_content_width_generation = if (!has_code_diff) node.widget.code_content_width_generation else 0,
+            .code_content_width_font_id = if (!has_code_diff) node.widget.code_content_width_font_id else 0,
+            .code_content_width_size_bits = if (!has_code_diff) node.widget.code_content_width_size_bits else 0,
         };
         len += 1;
     }
@@ -550,14 +797,62 @@ pub fn canvasWidgetSourceTextByIdKind(
     id: canvas.ObjectId,
     kind: canvas.WidgetKind,
 ) ?CanvasWidgetSourceTextFingerprint {
+    const entry = canvasWidgetSourceTextEntryByIdKind(entries, id, kind) orelse return null;
+    return .{
+        .len = entry.text_len,
+        .hash = entry.text_hash,
+    };
+}
+
+fn canvasWidgetSourceTextEntryByIdKind(
+    entries: []const CanvasWidgetSourceTextEntry,
+    id: canvas.ObjectId,
+    kind: canvas.WidgetKind,
+) ?CanvasWidgetSourceTextEntry {
     for (entries) |entry| {
         if (entry.id != id or entry.kind != kind) continue;
-        return .{
-            .len = entry.text_len,
-            .hash = entry.text_hash,
-        };
+        return entry;
     }
     return null;
+}
+
+pub const reconcile_policy = @import("widget_reconcile_policy.zig");
+pub fn canvasWidgetReconcilePlan(policy: reconcile_policy.Policy, layout: canvas.WidgetLayoutTree, controls: *const CanvasWidgetControlEntryIndex, sources: *const CanvasWidgetSourceControlEntryIndex, texts: *const CanvasWidgetTextEntryIndex) ?reconcile_policy.Plan {
+    return reconcile_policy.build(policy, layout, controls, sources, texts, canvasWidgetLayoutNodeHidden, canvasWidgetSourceTextFingerprint, canvasWidgetResizableMinWidth);
+}
+pub fn canvasWidgetLayoutNodeWithPlannedText(node: canvas.WidgetLayoutNode, action: reconcile_policy.Action, previous: *const CanvasWidgetTextEntryIndex) canvas.WidgetLayoutNode {
+    var copy = node;
+    if (action.flags & (16 | 32 | 64 | 128 | 256 | 512) != 0) {
+        const entry = previous.firstWithKind(node.widget.id, node.widget.kind) orelse @panic("missing planned text record");
+        if (action.flags & 16 != 0) copy.widget.text = entry.text;
+        if (action.flags & 32 != 0) copy.widget.value = entry.value;
+        if (action.flags & 64 != 0) {
+            copy.widget.text_selection = entry.text_selection;
+            // Static text restores only selection, never composition.
+            if (copy.widget.kind != .text) copy.widget.text_composition = entry.text_composition;
+        } else if (action.flags & 128 != 0) copy.widget.text_selection.?.affinity = entry.text_selection.?.affinity;
+        if (action.flags & 256 != 0) copy.widget.value_x = entry.value_x;
+        if (action.flags & 512 != 0) {
+            copy.widget.code_content_width = entry.code_content_width;
+            copy.widget.code_content_width_generation = entry.code_content_width_generation;
+            copy.widget.code_content_width_font_id = entry.code_content_width_font_id;
+            copy.widget.code_content_width_size_bits = entry.code_content_width_size_bits;
+        }
+    }
+    return if (action.flags & 1024 != 0) canvasWidgetLayoutNodeWithCaretSafeSelection(copy) else copy;
+}
+pub fn canvasWidgetLayoutNodeWithPlannedControl(node: canvas.WidgetLayoutNode, action: reconcile_policy.Action) canvas.WidgetLayoutNode {
+    var copy = node;
+    if (action.flags & 1 != 0) {
+        copy.widget.state.selected = action.flags & 2 != 0;
+        copy.widget.value = if (copy.widget.state.selected) 1 else 0;
+    }
+    if (action.flags & 4 != 0) copy.widget.value = action.value;
+    if (action.flags & 8 != 0) {
+        copy.frame.width = action.value;
+        copy.widget.frame.width = action.value;
+    }
+    return copy;
 }
 
 pub fn canvasWidgetLayoutNodeWithControlReconcileState(
@@ -587,15 +882,14 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                     source_entry.selected
                 else
                     false;
-                const selected = if (source_selected or previously_selected)
-                    source_selected
-                else
-                    entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledToggleSelected(copy.widget, 9, previously_selected, entry.state.selected or entry.value >= 0.5) orelse
+                    if (source_selected or previously_selected) source_selected else entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
             .checkbox, .switch_control, .toggle => {
-                const selected = entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledToggleSelected(copy.widget, 10, false, entry.state.selected or entry.value >= 0.5) orelse
+                    entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
@@ -612,10 +906,8 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 const source_selected = canvasWidgetBooleanSelected(copy.widget);
                 const previous_source = previous_source_controls.firstWithKind(copy.widget.id, copy.widget.kind);
                 const source_moved = if (previous_source) |source_entry| source_selected != source_entry.selected else false;
-                const selected = if (source_moved)
-                    source_selected
-                else
-                    entry.state.selected or entry.value >= 0.5;
+                const selected = canvasWidgetCompiledAccordionSelected(copy.widget, 9, if (previous_source) |source_entry| source_entry.selected else null, entry.state.selected or entry.value >= 0.5) orelse
+                    if (source_moved) source_selected else entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
@@ -633,11 +925,12 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                     copy.widget.value != source_entry.value
                 else
                     false;
-                if (!source_moved or entry.state.pressed) copy.widget.value = entry.value;
-                copy.widget.value = std.math.clamp(copy.widget.value, 0, 1);
+                copy.widget.value = canvas.widgetCompiledSliderValue(copy.widget, 1, if (previous_source) |source_entry| source_entry.value else null, entry.value, entry.state.pressed) orelse
+                    std.math.clamp(if (!source_moved or entry.state.pressed) entry.value else copy.widget.value, 0, 1);
             },
             .resizable => {
-                const width = @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);
+                const width = canvas.widgetCompiledResizableWidth(copy.widget, 1, entry.value, 0) orelse
+                    @max(canvasWidgetResizableMinWidth(copy.widget), entry.value);
                 copy.frame.width = width;
                 copy.widget.frame.width = width;
             },
@@ -673,18 +966,23 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
     previous: *const CanvasWidgetTextEntryIndex,
 ) canvas.WidgetLayoutNode {
     var copy = node;
-    if (copy.widget.id == 0) return copy;
-    if (copy.widget.state.disabled or canvasWidgetLayoutNodeHidden(layout, node_index)) return copy;
+    if (copy.widget.id == 0) return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
+    if (copy.widget.state.disabled or canvasWidgetLayoutNodeHidden(layout, node_index)) {
+        return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
+    }
 
     if (copy.widget.kind == .text) {
         // Static text selections survive rebuilds only while the source
-        // text is byte-identical; changed text drops the selection.
+        // text and its optional grouped document are byte-identical.
         if (previous.firstWithKind(copy.widget.id, copy.widget.kind)) |entry| {
-            if (copy.widget.text_selection == null and std.mem.eql(u8, entry.text, copy.widget.text)) {
+            if (copy.widget.text_selection == null and
+                std.mem.eql(u8, entry.text, copy.widget.text) and
+                entry.static_text_group_id == copy.widget.static_text_group_id)
+            {
                 copy.widget.text_selection = entry.text_selection;
             }
         }
-        return copy;
+        return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
     }
     if (!canvasWidgetEditableTextKind(copy.widget.kind)) return copy;
 
@@ -698,13 +996,65 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
         const next_source_text = canvasWidgetSourceTextFingerprint(copy.widget.text);
         const source_unchanged = entry.source_text_len == next_source_text.len and entry.source_text_hash == next_source_text.hash;
         const source_matches_runtime_text = std.mem.eql(u8, entry.text, copy.widget.text);
-        if (!source_unchanged and !source_matches_runtime_text) return copy;
-        if (source_unchanged) copy.widget.text = entry.text;
-        if (copy.widget.kind == .textarea) copy.widget.value = entry.value;
-        if (copy.widget.text_selection == null and copy.widget.text_composition == null) {
+        const reconcile = canvas.widgetCompiledTextReconcile(copy.widget, .{
+            .source_unchanged = source_unchanged,
+            .source_matches_runtime = source_matches_runtime_text,
+            .previous_source_selection = entry.source_text_selection,
+            .retained_selection = entry.text_selection,
+        }) orelse referenceTextReconcilePolicy(copy.widget, entry, source_unchanged, source_matches_runtime_text);
+        if (!reconcile.retain_state) {
+            return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
+        }
+        if (reconcile.retain_text) copy.widget.text = entry.text;
+        // The retained scroll offset rides `value` for every editable
+        // text kind: the textarea's vertical offset and the single-line
+        // field's horizontal one both survive rebuilds through this
+        // restore (and re-clamp in `clampCanvasWidgetLayoutTextOffsets`
+        // right after, so a resized or re-texted field never keeps a
+        // stale offset).
+        if (canvasWidgetEditableTextKind(copy.widget.kind)) copy.widget.value = entry.value;
+        if (copy.widget.runtime_flags.code_editor) {
+            copy.widget.value_x = entry.value_x;
+            if (!copy.widget.hasCodeDiff()) {
+                copy.widget.code_content_width = entry.code_content_width;
+                copy.widget.code_content_width_generation = entry.code_content_width_generation;
+                copy.widget.code_content_width_font_id = entry.code_content_width_font_id;
+                copy.widget.code_content_width_size_bits = entry.code_content_width_size_bits;
+            }
+        }
+        if (reconcile.retain_selection_composition) {
             copy.widget.text_selection = entry.text_selection;
             copy.widget.text_composition = entry.text_composition;
+        } else if (reconcile.retain_affinity) {
+            copy.widget.text_selection.?.affinity = entry.text_selection.?.affinity;
         }
+    }
+    return canvasWidgetLayoutNodeWithCaretSafeSelection(copy);
+}
+
+fn referenceTextReconcilePolicy(widget: canvas.Widget, entry: *const CanvasWidgetTextReconcileEntry, source_unchanged: bool, source_matches_runtime: bool) canvas.TextReconcilePolicyResult {
+    var retain_affinity = false;
+    if (widget.text_selection) |source| {
+        if (entry.text_selection) |retained| {
+            // Byte-identical legacy source echoes carry upstream affinity;
+            // preserve the runtime's painted stop unless the source changed it.
+            const affinity_changed = if (entry.source_text_selection) |previous| source.affinity != previous.affinity else source.affinity != .upstream;
+            retain_affinity = source.anchor == retained.anchor and source.focus == retained.focus and !affinity_changed;
+        }
+    }
+    return .{
+        .retain_text = source_unchanged,
+        .retain_state = source_unchanged or source_matches_runtime,
+        .retain_selection_composition = widget.text_selection == null and widget.text_composition == null,
+        .retain_affinity = retain_affinity,
+    };
+}
+
+fn canvasWidgetLayoutNodeWithCaretSafeSelection(node: canvas.WidgetLayoutNode) canvas.WidgetLayoutNode {
+    var copy = node;
+    if (!canvasWidgetEditableTextKind(copy.widget.kind)) return copy;
+    if (copy.widget.text_selection) |selection| {
+        copy.widget.text_selection = canvas.snapTextCaretSelection(copy.widget.text, selection);
     }
     return copy;
 }
@@ -734,16 +1084,19 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
 ) anyerror!canvas.WidgetLayoutTree {
     if (next.nodes.len > node_buffer.len) return error.WidgetNodeLimitReached;
 
-    const previous_control_states = collectCanvasWidgetControlReconcileEntries(
+    const previous_control_states = collectCanvasWidgetControlReconcileEntriesWithPolicy(
+        tokens.widget_retention_policy,
         previous.nodes,
         control_entries,
     );
-    const previous_runtime_offsets = collectCanvasWidgetScrollOffsetEntries(
+    const previous_runtime_offsets = collectCanvasWidgetScrollOffsetEntriesWithPolicy(
+        tokens.widget_retention_policy,
         previous.nodes,
         scroll_offset_entries,
     );
     var text_len: usize = 0;
-    const previous_text_states = try collectCanvasWidgetTextReconcileEntries(
+    const previous_text_states = try collectCanvasWidgetTextReconcileEntriesWithPolicy(
+        tokens.widget_retention_policy,
         previous.nodes,
         previous_source_text_entries,
         text_entries,
@@ -751,11 +1104,19 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
         &text_len,
     );
 
-    // Split fractions reconcile FIRST, as a staged copy of the laid-out
-    // tree, so the per-node passes below see final geometry. Outer
-    // splits restore before nested ones (ascending node order), so a
-    // nested split re-laid (or slid) by its ancestor still restores its
-    // own fraction afterwards. Two restore shapes:
+    // Geometry reconciles in anchored-surface strata. The authored source
+    // layout is first finalized outside every surface, then direct anchored
+    // children are replayed against that final geometry. Runtime-owned
+    // scroll/split/tab state inside those surfaces is restored before their
+    // own nested surfaces replay, and so on. A surface replay can therefore
+    // recover authored intrinsic sizing without erasing already-finalized
+    // descendant state.
+    //
+    // Within each stratum split fractions reconcile FIRST, as a staged copy
+    // of the laid-out tree, so the per-node passes below see final geometry.
+    // Outer splits restore before nested ones (ascending node order), so a
+    // nested split re-laid (or slid) by its ancestor still restores its own
+    // fraction afterwards. Two restore shapes:
     //   - SETTLED runtime-owned fraction (a past drag, no tween in
     //     flight): re-run the split's child layout in place — content
     //     honestly wraps at the restored width;
@@ -768,72 +1129,187 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     //     frame at a time (the disclosure doctrine, horizontal).
     const staged_nodes = node_buffer[0..next.nodes.len];
     @memcpy(staged_nodes, next.nodes);
-    for (staged_nodes, 0..) |node, index| {
-        if (node.widget.kind != .split or node.widget.id == 0) continue;
-        const tween_armed = objectIdInList(armed_split_tween_ids, node.widget.id);
-        const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse {
-            // A FRESH split (no retained fraction): a declared enter
-            // origin slides the first layout's boundary to the origin
-            // pose — children keep the declared value's (target) wrap —
-            // so the tween armed right after this reconcile eases it in
-            // instead of the mount popping to its value.
-            if (node.widget.resize_duration_ms != 0 and node.widget.resize_origin >= 0 and node.widget.children.len != 0) {
-                canvas.slideSplitChildren(node.frame, node.widget.resize_origin, index, staged_nodes);
+    const staged_root_bounds = next.root_bounds orelse if (staged_nodes.len > 0) staged_nodes[0].frame else geometry.RectF.init(0, 0, 0, 0);
+    var strata_scratch = std.heap.stackFallback(2048, std.heap.page_allocator);
+    const strata = if (tokens.layout_coordination_policy) |policy|
+        canvas.layout_coordination_policy.RetainedPlan.init(strata_scratch.get(), policy, staged_nodes) catch @panic("reconcile strata allocation failed")
+    else
+        null;
+    defer if (strata) |plan| plan.deinit();
+    const max_anchored_depth = if (strata) |plan| plan.maximum() else canvas.maxAnchoredNestingDepth(staged_nodes);
+    if (tokens.staged_rebuild_policy) |policy| {
+        var program = staged_rebuild_policy.Program.init(policy, staged_nodes.len, max_anchored_depth);
+        for (staged_nodes, 0..) |node, i| program.setNode(i, node, if (strata) |plan| plan.nesting(i) else canvas.anchoredNestingDepth(staged_nodes, i));
+        while (true) {
+            const step = program.next();
+            switch (step.kind) {
+                .done => break,
+                .split => {
+                    // Read the node AFTER prior mutations: an outer split
+                    // or anchored replay may have rebuilt this source value.
+                    const node = staged_nodes[step.index];
+                    const result = staged_rebuild_policy.split(policy, node, canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id), canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id), objectIdInList(armed_split_tween_ids, node.widget.id), pressed_split_id != 0 and node.widget.id == pressed_split_id);
+                    switch (result.kind) {
+                        .keep => {},
+                        .enter_slide => canvas.slideSplitChildrenWithTokens(node.frame, result.value, step.index, staged_nodes, tokens),
+                        .value_only => staged_nodes[step.index].widget.value = result.value,
+                        .slide => {
+                            staged_nodes[step.index].widget.value = result.value;
+                            canvas.slideSplitChildrenWithTokens(node.frame, result.value, step.index, staged_nodes, tokens);
+                        },
+                        .relayout => {
+                            staged_nodes[step.index].widget.value = result.value;
+                            try canvas.relayoutSplitChildren(staged_nodes[step.index].widget, node.frame, step.index, node.depth, node_buffer, staged_root_bounds, tokens);
+                        },
+                    }
+                    program.refreshAdmission(staged_nodes);
+                },
+                .restore_scroll => restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(staged_nodes, previous_runtime_offsets, previous_source_scroll_entries, step.depth, strata, tokens.scroll_tree_policy),
+                .clamp_scroll => clampCanvasWidgetLayoutProgrammaticScrollOffsets(staged_nodes, next, previous_runtime_offsets, previous_source_scroll_entries, step.depth, strata, tokens.scroll_tree_policy),
+                .reveal_tabs => revealNewlySelectedTabsWithPolicy(tokens.scroll_tree_policy, previous, staged_nodes, step.depth, strata),
+                .anchors => {
+                    try canvas.relayoutAnchoredChildrenAtDepth(staged_nodes, staged_root_bounds, tokens, step.depth);
+                    if (strata) |plan| for (staged_nodes, 0..) |node, i| plan.setNode(i, node);
+                    for (staged_nodes, 0..) |node, i| program.setNode(i, node, if (strata) |plan| plan.nesting(i) else canvas.anchoredNestingDepth(staged_nodes, i));
+                },
             }
-            continue;
-        };
-        const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id) orelse continue;
-        // Source-wins: the runtime-owned fraction survives rebuilds only
-        // while the SOURCE fraction is unchanged; a source-side change
-        // (the model echoing or driving the fraction) wins — UNLESS the
-        // split declares a layout tween (`resize_duration_ms` nonzero)
-        // or one is already in flight: then the moved source value is a
-        // TARGET, the rendered fraction stays where it is, and the
-        // runtime's tween lowering (armed right after this reconcile
-        // lands, in setCanvasWidgetLayout) eases it there one presented
-        // frame at a time. Reduced motion still snaps: the tween
-        // lowering's snap path applies the target through this same
-        // mutation family in the same rebuild.
-        const source_moved = node.widget.value != previous_source;
-        if (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed) continue;
-        if (node.widget.value == previous_runtime) continue;
-        staged_nodes[index].widget.value = previous_runtime;
-        // Retained trees clear children; a split without them keeps the
-        // value restore only (frames follow on the next full layout).
-        if (node.widget.children.len == 0) continue;
-        // A pressed divider is a live drag: its echo rebuilds must keep
-        // re-wrapping at the dragged width (the pinned drag behavior),
-        // so the slide shape only applies to tween-owned motion.
-        const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
-        if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
-            canvas.slideSplitChildren(node.frame, previous_runtime, index, staged_nodes);
-        } else {
-            try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, tokens);
+        }
+    } else {
+        var anchored_depth: usize = 0;
+        while (anchored_depth <= max_anchored_depth) : (anchored_depth += 1) {
+            for (staged_nodes, 0..) |node, index| {
+                if (node.widget.kind != .split or node.widget.id == 0) continue;
+                if ((if (strata) |plan| plan.nesting(index) else canvas.anchoredNestingDepth(staged_nodes, index)) != anchored_depth) continue;
+                const tween_armed = objectIdInList(armed_split_tween_ids, node.widget.id);
+                const previous_runtime = canvasWidgetSourceScrollById(previous_runtime_offsets, node.widget.id) orelse {
+                    // A FRESH split (no retained fraction): a declared enter
+                    // origin slides the first layout's boundary to the origin
+                    // pose — children keep the declared value's (target) wrap —
+                    // so the tween armed right after this reconcile eases it in
+                    // instead of the mount popping to its value.
+                    if (node.widget.resize_duration_ms != 0 and node.widget.resize_origin >= 0 and node.widget.children.len != 0) {
+                        canvas.slideSplitChildrenWithTokens(node.frame, node.widget.resize_origin, index, staged_nodes, tokens);
+                    }
+                    continue;
+                };
+                const previous_source = canvasWidgetSourceScrollById(previous_source_scroll_entries, node.widget.id);
+                // Source-wins: the runtime-owned fraction survives rebuilds only
+                // while the SOURCE fraction is unchanged; a source-side change
+                // (the model echoing or driving the fraction) wins — UNLESS the
+                // split declares a layout tween (`resize_duration_ms` nonzero)
+                // or one is already in flight: then the moved source value is a
+                // TARGET, the rendered fraction stays where it is, and the
+                // runtime's tween lowering (armed right after this reconcile
+                // lands, in setCanvasWidgetLayout) eases it there one presented
+                // frame at a time. Reduced motion still snaps: the tween
+                // lowering's snap path applies the target through this same
+                // mutation family in the same rebuild.
+                const source_moved = if (previous_source) |source| node.widget.value != source else false;
+                const retained_fraction = canvas.widgetCompiledSplitValue(node.widget, .{
+                    .operation = 2,
+                    .value = node.widget.value,
+                    .previous_source = previous_source,
+                    .retained = previous_runtime,
+                    .declared_tween = node.widget.resize_duration_ms != 0,
+                    .armed_tween = tween_armed,
+                }) orelse if (previous_source == null or (source_moved and node.widget.resize_duration_ms == 0 and !tween_armed)) node.widget.value else previous_runtime;
+                if (node.widget.value == retained_fraction) continue;
+                staged_nodes[index].widget.value = retained_fraction;
+                // Retained trees clear children; a split without them keeps the
+                // value restore only (frames follow on the next full layout).
+                if (node.widget.children.len == 0) continue;
+                // A pressed divider is a live drag: its echo rebuilds must keep
+                // re-wrapping at the dragged width (the pinned drag behavior),
+                // so the slide shape only applies to tween-owned motion.
+                const dragging = pressed_split_id != 0 and node.widget.id == pressed_split_id;
+                if (!dragging and (tween_armed or (source_moved and node.widget.resize_duration_ms != 0))) {
+                    canvas.slideSplitChildrenWithTokens(node.frame, retained_fraction, index, staged_nodes, tokens);
+                } else {
+                    try canvas.relayoutSplitChildren(staged_nodes[index].widget, node.frame, index, node.depth, node_buffer, staged_root_bounds, tokens);
+                }
+            }
+
+            // Scroll restore is staged too (after splits, so translated frames
+            // are final geometry): the retained offset comes back WITH its
+            // descendants translated to match. Engine-side clamping happens at
+            // the caller AFTER native scroll drivers are stamped — a rebuild
+            // mid-rubber-band must not clamp an offset the OS scroller owns.
+            restoreCanvasWidgetLayoutScrollOffsetsAtAnchoredDepth(
+                staged_nodes,
+                previous_runtime_offsets,
+                previous_source_scroll_entries,
+                anchored_depth,
+                strata,
+                tokens.scroll_tree_policy,
+            );
+            clampCanvasWidgetLayoutProgrammaticScrollOffsets(
+                staged_nodes,
+                next,
+                previous_runtime_offsets,
+                previous_source_scroll_entries,
+                anchored_depth,
+                strata,
+                tokens.scroll_tree_policy,
+            );
+            revealNewlySelectedTabsWithPolicy(tokens.scroll_tree_policy, previous, staged_nodes, anchored_depth, strata);
+            if (anchored_depth < max_anchored_depth) {
+                try canvas.relayoutAnchoredChildrenAtDepth(staged_nodes, staged_root_bounds, tokens, anchored_depth);
+                if (strata) |plan| for (staged_nodes, 0..) |node, i| plan.setNode(i, node);
+            }
         }
     }
 
-    // Scroll restore is staged too (after splits, so translated frames
-    // are final geometry): the retained offset comes back WITH its
-    // descendants translated to match. Engine-side clamping happens at
-    // the caller AFTER native scroll drivers are stamped — a rebuild
-    // mid-rubber-band must not clamp an offset the OS scroller owns.
-    restoreCanvasWidgetLayoutScrollOffsets(staged_nodes, previous_runtime_offsets, previous_source_scroll_entries);
-
-    const index_scratch = &canvas_widget_reconcile_index_scratch;
+    const index_scratch = canvas_widget_reconcile_index_scratch.get();
     index_scratch.controls.build(previous_control_states);
     index_scratch.source_controls.build(previous_source_control_entries);
     index_scratch.texts.build(previous_text_states);
     index_scratch.semantics.build(source_semantics);
 
-    const staged = canvas.WidgetLayoutTree{ .nodes = staged_nodes };
+    const staged = canvas.WidgetLayoutTree{ .nodes = staged_nodes, .root_bounds = next.root_bounds };
+    const reconcile_plan = canvasWidgetReconcilePlan(tokens.widget_reconcile_policy, staged, &index_scratch.controls, &index_scratch.source_controls, &index_scratch.texts);
+    const continuity_plan = continuity_policy.layout(tokens.widget_continuity_policy, staged_nodes, @as([]const CanvasWidgetScrollReconcileEntry, &.{}), &index_scratch.semantics);
     for (staged_nodes, 0..) |node, index| {
-        const text_copy = canvasWidgetLayoutNodeWithTextReconcileState(node, staged, index, &index_scratch.texts);
-        const control_copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, staged, index, &index_scratch.controls, &index_scratch.source_controls);
-        node_buffer[index] = canvasWidgetLayoutNodeWithSourceSemantics(control_copy, &index_scratch.semantics);
+        const text_copy = if (reconcile_plan) |*plan| canvasWidgetLayoutNodeWithPlannedText(node, plan.entries[index], &index_scratch.texts) else canvasWidgetLayoutNodeWithTextReconcileState(node, staged, index, &index_scratch.texts);
+        const control_copy = if (reconcile_plan) |*plan| canvasWidgetLayoutNodeWithPlannedControl(text_copy, plan.entries[index]) else canvasWidgetLayoutNodeWithControlReconcileState(text_copy, staged, index, &index_scratch.controls, &index_scratch.source_controls);
+        node_buffer[index] = canvasWidgetLayoutNodeWithPlannedSourceSemantics(control_copy, &index_scratch.semantics, if (continuity_plan) |plan| plan.actions[index] else null);
     }
     const reconciled = node_buffer[0..next.nodes.len];
     clampCanvasWidgetLayoutTextOffsets(reconciled, tokens);
-    return .{ .nodes = reconciled };
+    return .{ .nodes = reconciled, .root_bounds = next.root_bounds, .change_policy = next.change_policy, .text_run_policy = next.text_run_policy };
+}
+
+/// Apply only the compiled selection; complete records and physics remain in
+/// native-owned storage. Null plans preserve the independent native reference.
+pub fn canvasWidgetLayoutNodeWithPlannedSourceSemantics(node: canvas.WidgetLayoutNode, sources: *const CanvasWidgetSemanticsIndex, action: ?u8) canvas.WidgetLayoutNode {
+    const flags = action orelse return canvasWidgetLayoutNodeWithSourceSemantics(node, sources);
+    var copy = node;
+    if (flags & 1 != 0) {
+        const source = sources.first(node.widget.id) orelse @panic("missing planned source semantics");
+        copy.widget.semantics.list_item_index = source.list.item_index;
+        copy.widget.semantics.list_item_count = source.list.item_count;
+    }
+    return copy;
+}
+pub fn canvasWidgetScrollStateWithPlan(node: canvas.WidgetLayoutNode, previous: []const CanvasWidgetScrollReconcileEntry, action: ?u8) canvas.ScrollState {
+    const flags = action orelse return canvasWidgetScrollStateForLayoutNode(node, previous);
+    var state = canvas.ScrollState{ .offset_y = node.widget.value, .offset_x = node.widget.value_x };
+    if (flags & 12 != 0) for (previous) |entry| {
+        if (entry.id != node.widget.id) continue;
+        if (flags & 4 != 0) state.velocity_y = entry.state.velocity_y;
+        if (flags & 8 != 0) state.velocity_x = entry.state.velocity_x;
+        break;
+    };
+    return state;
+}
+pub fn applyCanvasWidgetSourceScrollSemanticsWithPolicy(policy: continuity_policy.Policy, nodes: []canvas.WidgetSemanticsNode, sources: *const CanvasWidgetSemanticsIndex) void {
+    const plan = continuity_policy.semanticsPlan(policy, nodes, sources) orelse return applyCanvasWidgetSourceScrollSemantics(nodes, sources);
+    for (nodes, 0..) |*node, i| if (plan.actions[i] & 2 != 0) {
+        const source = sources.first(node.id) orelse @panic("missing planned scroll semantics");
+        node.value = source.value;
+        node.scroll = source.scroll;
+        node.actions = source.actions;
+        node.focusable = source.focusable;
+    };
 }
 
 pub fn canvasWidgetLayoutNodeWithSourceSemantics(
@@ -864,7 +1340,24 @@ pub fn applyCanvasWidgetSourceScrollSemantics(
     }
 }
 
-pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState) void {
+pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, root_bounds: ?geometry.RectF, tokens: canvas.DesignTokens) anyerror!void {
+    try clampCanvasWidgetLayoutScrollOffsetsImpl(nodes, states, root_bounds, tokens, true);
+}
+
+/// The staged rebuild reconcile already replayed anchored surfaces in
+/// top-down strata. Its final engine clamp must not replay them a second
+/// time: at this point their descendants carry restored runtime state.
+pub fn clampCanvasWidgetLayoutScrollOffsetsAfterReconcile(nodes: []canvas.WidgetLayoutNode, states: ?[]canvas.ScrollState, root_bounds: ?geometry.RectF, tokens: canvas.DesignTokens) anyerror!void {
+    try clampCanvasWidgetLayoutScrollOffsetsImpl(nodes, states, root_bounds, tokens, false);
+}
+
+fn clampCanvasWidgetLayoutScrollOffsetsImpl(
+    nodes: []canvas.WidgetLayoutNode,
+    states: ?[]canvas.ScrollState,
+    root_bounds: ?geometry.RectF,
+    tokens: canvas.DesignTokens,
+    relayout_anchored: bool,
+) anyerror!void {
     for (nodes, 0..) |node, index| {
         if (node.widget.kind != .scroll_view) continue;
         // Legacy virtualized containers are model-driven: the source
@@ -872,39 +1365,138 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
         // Runtime-scrolled virtual lists (declared item count) clamp
         // like plain scroll views, against the VIRTUAL content extent.
         if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
-        // Native scroll drivers own clamping: the OS scroller constrains
-        // its own contentOffset (including mid-rubber-band rebuilds, which
-        // an engine clamp here would fight) and reports the settled offset
-        // back through the driver event.
-        if (node.widget.native_scroll) continue;
+        // Native scroll drivers own RANGE clamping: the OS scroller
+        // constrains its own contentOffset (including mid-rubber-band
+        // rebuilds, which an engine clamp here would fight) and reports
+        // the settled offset back through the driver event. A REVOKED
+        // axis is different — it has no scroller range at all (content
+        // pins to the frame), so its stale offset pins home here
+        // exactly like the engine-scrolled path below: an axis flip
+        // must behave the same on every host, or a source still
+        // echoing the old offset would resurrect it on re-grant only
+        // where drivers run.
+        if (node.widget.runtime_flags.native_scroll) {
+            const pin_y = !canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value != 0;
+            const pin_x = !canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x != 0;
+            if (pin_y) nodes[index].widget.value = 0;
+            if (pin_x) nodes[index].widget.value_x = 0;
+            if ((pin_y or pin_x) and states != null) {
+                if (index < states.?.len) {
+                    if (pin_y) {
+                        states.?[index].offset_y = 0;
+                        states.?[index].velocity_y = 0;
+                    }
+                    if (pin_x) {
+                        states.?[index].offset_x = 0;
+                        states.?[index].velocity_x = 0;
+                    }
+                }
+            }
+            continue;
+        }
 
         const viewport = node.frame.inset(node.widget.layout.padding).normalized();
         if (viewport.isEmpty()) continue;
 
-        const content_extent = canvasWidgetLayoutScrollContentExtent(nodes, index, viewport);
+        const extents = canvasWidgetLayoutScrollExtentsWithPolicy(tokens.scroll_tree_policy, nodes, index, viewport);
+        const content_extent = extents.dy;
         const max_offset = @max(0, content_extent - viewport.height);
         const current_offset = node.widget.value;
-        const next_offset = std.math.clamp(@max(0, current_offset), 0, max_offset);
-        if (next_offset == current_offset) continue;
+        // An offset on an axis the region does not grant pins home: a
+        // rebuild that flips the axis (or virtualizes the region) must
+        // not leave content displaced along the revoked axis.
+        const next_offset = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 0, .current = current_offset, .viewport = viewport.height, .content = content_extent, .granted = canvas.widgetScrollsAxis(node.widget, .vertical) })) |result| result.dx else if (canvas.widgetScrollsAxis(node.widget, .vertical))
+            std.math.clamp(@max(0, current_offset), 0, max_offset)
+        else
+            0;
 
-        const offset_delta = next_offset - current_offset;
+        const content_extent_x = extents.dx;
+        const max_offset_x = @max(0, content_extent_x - viewport.width);
+        const current_offset_x = node.widget.value_x;
+        const next_offset_x = if (canvas.widgetCompiledScrollResult(node.widget, .{ .operation = 0, .current = current_offset_x, .viewport = viewport.width, .content = content_extent_x, .granted = canvas.widgetScrollsAxis(node.widget, .horizontal) })) |result| result.dx else if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+            std.math.clamp(@max(0, current_offset_x), 0, max_offset_x)
+        else
+            0;
+        if (next_offset == current_offset and next_offset_x == current_offset_x) continue;
+
         nodes[index].widget.value = next_offset;
-        translateCanvasWidgetLayoutScrollDescendants(nodes, index, -offset_delta);
+        nodes[index].widget.value_x = next_offset_x;
+        // Only granted axes translate: the layout pass never displaced
+        // children along an ungranted axis (`scrollLayoutOffset` gates
+        // it), so pinning that value home is bookkeeping, not motion.
+        translateCanvasWidgetLayoutScrollDescendantsWithPolicy(tokens.scroll_tree_policy, nodes, index, .{
+            .dx = if (canvas.widgetScrollsAxis(node.widget, .horizontal)) -(next_offset_x - current_offset_x) else 0,
+            .dy = if (canvas.widgetScrollsAxis(node.widget, .vertical)) -(next_offset - current_offset) else 0,
+        });
         if (states) |scroll_states| {
             if (index < scroll_states.len) {
-                scroll_states[index].offset = next_offset;
-                scroll_states[index].velocity = 0;
-                scroll_states[index].viewport_extent = viewport.height;
-                scroll_states[index].content_extent = content_extent;
+                scroll_states[index].offset_y = next_offset;
+                scroll_states[index].velocity_y = 0;
+                scroll_states[index].viewport_extent_y = viewport.height;
+                scroll_states[index].content_extent_y = content_extent;
+                scroll_states[index].offset_x = next_offset_x;
+                scroll_states[index].velocity_x = 0;
+                scroll_states[index].viewport_extent_x = viewport.width;
+                scroll_states[index].content_extent_x = content_extent_x;
             }
         }
+    }
+    if (relayout_anchored and nodes.len > 0) {
+        try canvas.relayoutAnchoredChildrenWithRootBounds(nodes, root_bounds orelse nodes[0].frame, tokens);
     }
 }
 
 pub fn clampCanvasWidgetLayoutTextOffsets(nodes: []canvas.WidgetLayoutNode, tokens: canvas.DesignTokens) void {
     for (nodes) |*node| {
-        if (node.widget.kind != .textarea) continue;
-        node.widget.value = canvas.clampedTextInputScrollOffsetForWidget(node.widget, tokens, node.widget.value);
+        if (node.widget.kind == .textarea) {
+            canvas.cacheTextInputContentWidthForWidget(&node.widget, tokens);
+            node.widget.value = canvas.clampedTextInputScrollOffsetForWidget(node.widget, tokens, node.widget.value);
+            node.widget.value_x = if (node.widget.runtime_flags.code_editor)
+                canvas.clampedTextInputHorizontalScrollOffsetForWidget(node.widget, tokens, node.widget.value_x)
+            else
+                0;
+            continue;
+        }
+        if (!canvasWidgetSingleLineTextKind(node.widget.kind)) continue;
+        // Single-line fields clamp their horizontal offset against the
+        // just-reconciled text and frame, and a field holding a caret
+        // also keeps it inside the visible span — this is where a layout
+        // width change (a resized window narrowing the field) is first
+        // known, so the caret never strands outside the clip after a
+        // resize. Deterministic in retained state: the offset only moves
+        // when the clamp or the caret demands it.
+        node.widget.value = if (node.widget.text_selection != null)
+            canvas.textInputCaretVisibleScrollOffsetForWidget(node.widget, tokens, node.widget.value)
+        else
+            canvas.clampedTextInputHorizontalScrollOffsetForWidget(node.widget, tokens, node.widget.value);
+    }
+}
+
+/// A fresh copied plan observes every earlier split/scroll mutation. Never
+/// cache geometry plans across relayout or across two selected-tab reveals.
+pub fn canvasWidgetLayoutScrollExtentsWithPolicy(policy: scroll_tree_policy.Policy, nodes: []const canvas.WidgetLayoutNode, index: usize, viewport: geometry.RectF) geometry.OffsetF {
+    if (index >= nodes.len) return .{};
+    if (scroll_tree_policy.build(policy, nodes, .{ .operation = 0, .target = index, .viewport = viewport })) |plan| return .{ .dx = plan.x, .dy = plan.y };
+    return .{ .dx = canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport), .dy = canvasWidgetLayoutScrollContentExtent(nodes, index, viewport) };
+}
+
+pub fn translateCanvasWidgetLayoutScrollDescendantsWithPolicy(policy: scroll_tree_policy.Policy, nodes: []canvas.WidgetLayoutNode, index: usize, offset: geometry.OffsetF) void {
+    if (index >= nodes.len) return;
+    if (scroll_tree_policy.build(policy, nodes, .{ .operation = 1, .target = index })) |plan| {
+        plan.translate(nodes, offset);
+    } else translateCanvasWidgetLayoutScrollDescendants(nodes, index, offset);
+}
+
+pub fn revealNewlySelectedTabsWithPolicy(policy: scroll_tree_policy.Policy, previous: canvas.WidgetLayoutTree, nodes: []canvas.WidgetLayoutNode, anchored_depth: ?usize, strata: ?canvas.layout_coordination_policy.RetainedPlan) void {
+    if (policy == null) return revealNewlySelectedTabs(previous, nodes, anchored_depth, strata);
+    var cursor: usize = 0;
+    while (cursor < nodes.len) {
+        const plan = scroll_tree_policy.build(policy, nodes, .{ .operation = 2, .target = cursor, .previous = previous, .anchored_depth = anchored_depth, .strata = strata }).?;
+        if (plan.target) |index| {
+            nodes[index].widget.value_x = plan.y;
+            plan.translate(nodes, .{ .dx = plan.x });
+        }
+        cursor = plan.cursor;
     }
 }
 
@@ -918,19 +1510,100 @@ pub fn canvasWidgetLayoutScrollContentExtent(nodes: []const canvas.WidgetLayoutN
     const offset = scroll_node.widget.value;
     var bottom = viewport.maxY();
     var index = scroll_index + 1;
-    while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        if (canvas.widgetIsRootRelativeModal(nodes[index].widget)) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        // A subtree anchored DIRECTLY to the scroll region stays
+        // stationary while content scrolls (its anchor base never
+        // moves), so `frame + offset` is not a content-space position
+        // for it — counting it would grow the scroll range on every
+        // scroll, an unbounded feedback loop into blank space. Deeper
+        // anchored subtrees translate with their in-content anchors and
+        // keep their historical (constant) contribution.
+        if (nodes[index].widget.layout.anchor != null and nodes[index].parent_index == scroll_index) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
         bottom = @max(bottom, nodes[index].frame.maxY() + offset);
+        index += 1;
     }
     return @max(0, bottom - viewport.y);
 }
 
-pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, dy: f32) void {
+/// The horizontal counterpart of `canvasWidgetLayoutScrollContentExtent`:
+/// how far the region's descendants reach rightward, rebased to offset 0.
+/// Virtualized regions never scroll horizontally, so their horizontal
+/// content pins to the viewport width. Three subtree exclusions keep the
+/// range honest — each names blank space the user could otherwise scroll
+/// to (or live content they otherwise could not reach):
+///   - WINDOW-LEVEL floating subtrees are out of flow and window-clipped;
+///     an open dropdown to the right of the viewport is not content;
+///   - a NESTED CLIP SCOPE (scroll view, `clip_content` surface,
+///     virtualized container) bounds its own children — its frame is
+///     how far it reaches, whatever overflows inside it;
+///   - a disclosure subtree counts only while SETTLED OPEN: concealed
+///     content lays out at full size but cannot be revealed sideways,
+///     while an open item's wide child is live and reachable.
+pub fn canvasWidgetLayoutScrollContentExtentX(nodes: []const canvas.WidgetLayoutNode, scroll_index: usize, viewport: geometry.RectF) f32 {
+    if (scroll_index >= nodes.len) return 0;
+    const scroll_node = nodes[scroll_index];
+    if (scroll_node.widget.layout.virtualized) return viewport.width;
+    const layout = canvas.WidgetLayoutTree{ .nodes = nodes };
+    const scroll_depth = scroll_node.depth;
+    const offset = scroll_node.widget.value_x;
+    var right = viewport.maxX();
+    var index = scroll_index + 1;
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        const node = nodes[index];
+        if (canvas.widgetEscapesAncestorClips(node.widget)) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        right = @max(right, node.frame.maxX() + offset);
+        if (canvasWidgetClipsContent(node.widget) or node.widget.layout.virtualized) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        if (canvas.widgetKindDisclosureAnimated(node.widget.kind) and !canvas.disclosureSettledOpen(layout, index)) {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        index += 1;
+    }
+    return @max(0, right - viewport.x);
+}
+
+/// The index just past `index`'s whole subtree.
+fn skipCanvasWidgetSubtree(nodes: []const canvas.WidgetLayoutNode, index: usize) usize {
+    const subtree_depth = nodes[index].depth;
+    var next = index + 1;
+    while (next < nodes.len and nodes[next].depth > subtree_depth) : (next += 1) {}
+    return next;
+}
+
+/// Scrolled content carries its descendants — including floating surfaces
+/// anchored to widgets INSIDE it — but root-relative modal surfaces never
+/// ride content, and a surface anchored to the SCROLL REGION ITSELF stays
+/// put: its anchor base is the region's own frame, which never moves when
+/// the content under it does (the live-scroll translate applies the same
+/// rule).
+pub fn translateCanvasWidgetLayoutScrollDescendants(nodes: []canvas.WidgetLayoutNode, scroll_index: usize, offset: geometry.OffsetF) void {
     if (scroll_index >= nodes.len) return;
     const scroll_depth = nodes[scroll_index].depth;
     var index = scroll_index + 1;
-    while (index < nodes.len and nodes[index].depth > scroll_depth) : (index += 1) {
-        nodes[index].frame = nodes[index].frame.translate(geometry.OffsetF.init(0, dy));
+    while (index < nodes.len and nodes[index].depth > scroll_depth) {
+        const node = nodes[index];
+        if (canvas.widgetIsRootRelativeModal(node.widget) or
+            node.widget.layout.anchor != null and node.parent_index == scroll_index)
+        {
+            index = skipCanvasWidgetSubtree(nodes, index);
+            continue;
+        }
+        nodes[index].frame = nodes[index].frame.translate(offset);
         nodes[index].widget.frame = nodes[index].frame;
+        index += 1;
     }
 }
 
@@ -950,7 +1623,7 @@ pub fn canvasWidgetTextEditUnchanged(previous: canvas.TextEditState, next: canva
 }
 
 pub fn canvasTextSelectionsEqual(a: canvas.TextSelection, b: canvas.TextSelection) bool {
-    return a.anchor == b.anchor and a.focus == b.focus;
+    return a.anchor == b.anchor and a.focus == b.focus and a.affinity == b.affinity;
 }
 
 pub fn textSelectionCollapsedAt(selection: ?canvas.TextSelection, offset: usize) bool {
@@ -1044,11 +1717,27 @@ pub fn canvasWidgetSpatialFocusAllowed(layout: canvas.WidgetLayoutTree, focused:
         .data_cell => true,
         .list_item, .menu_item => same_parent and (direction == .up or direction == .down),
         .segmented_control => same_parent and (direction == .left or direction == .right),
-        .radio => same_parent,
+        .radio => blk: {
+            const focused_scope = canvasWidgetRadioGroupScopeIndex(layout, focused.index);
+            const target_scope = canvasWidgetRadioGroupScopeIndex(layout, target.index);
+            if (focused_scope != null or target_scope != null) {
+                break :blk focused_scope != null and focused_scope == target_scope;
+            }
+            break :blk same_parent;
+        },
         .button, .icon_button => same_parent and canvasWidgetParentAllowsHorizontalButtonFocus(canvasWidgetFocusParentKind(layout, focused)) and (direction == .left or direction == .right),
         .toggle_button => same_parent and canvasWidgetParentAllowsHorizontalToggleFocus(canvasWidgetFocusParentKind(layout, focused)) and (direction == .left or direction == .right),
         else => false,
     };
+}
+
+pub fn canvasWidgetSpatialFocusAllowedWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, target: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection, policy: keyboard_focus.Policy) bool {
+    const focused_scope = canvasWidgetRadioGroupScopeIndex(layout, focused.index);
+    const target_scope = canvasWidgetRadioGroupScopeIndex(layout, target.index);
+    const facts: u16 = @as(u16, if (canvasWidgetFocusTargetsShareParent(layout, focused, target)) 1 else 0) |
+        @as(u16, if (focused_scope != null) 2 else 0) | @as(u16, if (target_scope != null) 4 else 0) |
+        @as(u16, if (focused_scope != null and focused_scope == target_scope) 8 else 0);
+    return keyboard_focus.decide(policy, .{ .stage = .spatial, .a = keyboard_focus.directionCode(direction), .kind = focused.kind, .target = target.kind, .parent = canvasWidgetFocusParentKind(layout, focused), .facts = facts }) != 0;
 }
 
 pub fn canvasWidgetFocusTargetsShareParent(layout: canvas.WidgetLayoutTree, a: canvas.WidgetFocusTarget, b: canvas.WidgetFocusTarget) bool {
@@ -1093,11 +1782,30 @@ pub const CanvasWidgetGroupDirection = enum {
 };
 
 pub fn canvasWidgetGroupDirectionalFocusTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
+    return canvasWidgetGroupDirectionalFocusTargetWithPolicy(layout, focused, direction, null);
+}
+
+pub fn canvasWidgetGroupDirectionalFocusTargetWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, direction: canvas.WidgetFocusDirection, policy: keyboard_focus.Policy) ?canvas.WidgetFocusTarget {
+    if (canvasWidgetRadioGroupDirectionalFocusTarget(layout, focused, direction)) |target| return target;
     if (focused.index >= layout.nodes.len) return null;
     const parent_index = layout.nodes[focused.index].parent_index orelse return null;
     if (parent_index >= layout.nodes.len) return null;
     const parent_kind = layout.nodes[parent_index].widget.kind;
-    const group_direction = canvasWidgetGroupDirectionForFocus(parent_kind, focused.kind, direction) orelse return null;
+    const decision = keyboard_focus.decide(policy, .{ .stage = .group, .a = keyboard_focus.directionCode(direction), .kind = focused.kind, .parent = parent_kind });
+    const group_direction: CanvasWidgetGroupDirection = switch (decision) {
+        1 => .previous,
+        2 => .next,
+        else => return null,
+    };
+    if (parent_kind == .tabs and focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledTabsFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (parent_kind == .list and focused.kind == .list_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledListFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if ((parent_kind == .menu_surface or parent_kind == .dropdown_menu) and focused.kind == .menu_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledMenuFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (parent_kind == .toggle_group and focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledToggleFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    if (policy != null) return canvasWidgetCompiledGroupFocus(layout, focused, if (group_direction == .previous) 0 else 1, policy.?) orelse focused;
     return canvasWidgetAdjacentGroupFocusTarget(layout, parent_index, focused, group_direction) orelse focused;
 }
 
@@ -1115,10 +1823,6 @@ pub fn canvasWidgetGroupDirectionForFocus(parent_kind: canvas.WidgetKind, child_
             canvasWidgetHorizontalGroupDirection(direction)
         else
             null,
-        .radio_group => if (child_kind == .radio)
-            canvasWidgetAnyAxisGroupDirection(direction)
-        else
-            null,
         .list => if (child_kind == .list_item)
             canvasWidgetVerticalGroupDirection(direction)
         else
@@ -1128,6 +1832,374 @@ pub fn canvasWidgetGroupDirectionForFocus(parent_kind: canvas.WidgetKind, child_
         else
             null,
         else => null,
+    };
+}
+
+// --------------------------------------------------- radio-group focus
+//
+// Radios at ANY depth under their nearest `radio_group` ancestor form
+// one logical, roving-focus set. Node order is the authored/DFS order;
+// logical targets intentionally omit only scroll clipping so keyboard
+// focus can reveal an offscreen radio before committing to it.
+
+/// Retained geometry is native; selection scope and traversal are portable.
+/// Wire v1 uses preorder indices rather than ids (ids can exceed JS integers).
+pub fn canvasWidgetRadioPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("radio policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .radio => 1,
+            .radio_group => 2,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if (operation != 0 and operation != 8 and node.widget.kind == .radio and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if ((operation == 2 or operation == 3) and node.widget.kind == .radio and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+pub fn canvasWidgetTabsPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("tabs policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .segmented_control => 1,
+            .tabs => 2,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if (operation != 0 and operation != 8 and node.widget.kind == .segmented_control and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+fn compiledTabsFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetTabsPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid tabs policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("tabs policy target outside tree");
+    return layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+/// Direct-sibling list policy receives both logical and visible eligibility:
+/// arrows admit scroll-clipped rows; Home/End preserves visible-only edges.
+pub fn canvasWidgetListPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("list policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .list_item => 1,
+            .list => 2,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if ((operation == 4 or operation == 5) and node.widget.kind == .list_item and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if ((operation == 6 or operation == 7) and node.widget.kind == .list_item and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+fn compiledListFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetListPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid list policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("list policy target outside tree");
+    return if (operation == 4 or operation == 5) layout.logicalFocusTargetAtIndex(index) else layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+/// Geometry and eligibility remain native. The compiled menu policy chooses
+/// entry, traversal and committed-choice selection from the retained tree.
+pub fn canvasWidgetMenuPolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("menu policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        const item = node.widget.kind == .menu_item or node.widget.kind == .list_item;
+        request[at + 2] = switch (node.widget.kind) {
+            .menu_item => 1,
+            .menu_surface, .dropdown_menu => 2,
+            .list_item => 3,
+            else => 0,
+        };
+        request[at + 3] = @as(u8, if (operation != 8 and item and layout.focusTargetById(node.widget.id) != null) 2 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0) |
+            @as(u8, if (node.widget.state.selected) 8 else 0);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 4], output);
+}
+
+/// Toggle transitions and source/retained reconciliation run without a tree
+/// scan. The native caller applies the returned selected state and value.
+pub fn canvasWidgetCompiledToggleSelected(widget: canvas.Widget, operation: u8, previously_selected: bool, retained_selected: bool) ?bool {
+    if (widget.kind != .toggle_button and widget.kind != .checkbox and widget.kind != .switch_control and widget.kind != .toggle) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const request = [_]u8{
+        operation,
+        @as(u8, if (canvasWidgetBooleanSelected(widget)) 1 else 0) |
+            @as(u8, if (previously_selected) 2 else 0) |
+            @as(u8, if (retained_selected) 4 else 0),
+    };
+    var output: [1]u8 = undefined;
+    const len = policy(&request, &output);
+    if (len != 1 or output[0] > 1) @panic("invalid toggle state policy result");
+    return output[0] == 1;
+}
+
+pub fn canvasWidgetCompiledAccordionSelected(widget: canvas.Widget, operation: u8, previous_source: ?bool, retained_selected: bool) ?bool {
+    if (widget.kind != .accordion) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const request = [_]u8{
+        operation,
+        @as(u8, if (canvasWidgetBooleanSelected(widget)) 1 else 0) |
+            @as(u8, if (previous_source orelse false) 2 else 0) |
+            @as(u8, if (retained_selected) 4 else 0) |
+            @as(u8, if (previous_source != null) 8 else 0),
+    };
+    var output: [1]u8 = undefined;
+    const len = policy(&request, &output);
+    if (len != 1 or output[0] > 1) @panic("invalid accordion state policy result");
+    return output[0] == 1;
+}
+
+pub fn canvasWidgetCompiledToggleFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    if (subject >= layout.nodes.len) return null;
+    const policy = layout.nodes[subject].widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("toggle policy tree exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 4;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = switch (node.widget.kind) {
+            .toggle_button => 1,
+            .toggle_group => 2,
+            .button_group => 3,
+            else => 0,
+        };
+        request[at + 3] = if (node.widget.kind == .toggle_button and layout.focusTargetById(node.widget.id) != null) 2 else 0;
+    }
+    var output: [2]u8 = undefined;
+    const len = policy(request[0 .. 5 + layout.nodes.len * 4], &output);
+    if (len != 2) @panic("invalid toggle focus policy result");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("toggle policy target outside tree");
+    return layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+pub fn canvasWidgetCompiledMenuFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetMenuPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid menu policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("menu policy target outside tree");
+    return layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+fn compiledRadioIndex(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?usize {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetRadioPolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid radio policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("radio policy target outside tree");
+    return index;
+}
+
+fn compiledRadioFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    const index = compiledRadioIndex(layout, subject, operation) orelse return null;
+    return if (operation == 2 or operation == 3) layout.focusTargetById(layout.nodes[index].widget.id) else layout.logicalFocusTargetAtIndex(index);
+}
+
+/// Index of the nearest `.radio_group` ancestor, or null for a bare
+/// radio (and for any other node outside a radio group).
+pub fn canvasWidgetRadioGroupScopeIndex(layout: canvas.WidgetLayoutTree, node_index: usize) ?usize {
+    if (node_index >= layout.nodes.len) return null;
+    if ((layout.nodes[node_index].widget.kind == .radio or layout.nodes[node_index].widget.kind == .radio_group) and layout.nodes[node_index].widget.interaction_policy != null) return compiledRadioIndex(layout, node_index, 0);
+    var current = layout.nodes[node_index].parent_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) return null;
+        if (layout.nodes[index].widget.kind == .radio_group) return index;
+        current = layout.nodes[index].parent_index;
+    }
+    return null;
+}
+
+/// The radio-scoped form of a future-general roving Tab scope. Keeping
+/// the scope identity separate from traversal lets tabs/toolbars adopt
+/// the same entry/exit contract later without changing radio behavior.
+pub const CanvasWidgetRovingTabScope = struct {
+    kind: enum { radio_group },
+    index: usize,
+};
+
+pub fn canvasWidgetRovingTabScope(layout: canvas.WidgetLayoutTree, node_index: usize) ?CanvasWidgetRovingTabScope {
+    if (node_index >= layout.nodes.len or layout.nodes[node_index].widget.kind != .radio) return null;
+    return .{ .kind = .radio_group, .index = canvasWidgetRadioGroupScopeIndex(layout, node_index) orelse return null };
+}
+
+fn canvasWidgetRadioGroupFocusTarget(
+    layout: canvas.WidgetLayoutTree,
+    radio_group_index: usize,
+    node_index: usize,
+) ?canvas.WidgetFocusTarget {
+    if (node_index >= layout.nodes.len or layout.nodes[node_index].widget.kind != .radio) return null;
+    if (canvasWidgetRadioGroupScopeIndex(layout, node_index) != radio_group_index) return null;
+    return canvasWidgetLogicalFocusTarget(layout, node_index);
+}
+
+/// The group's one Tab entry: selected focusable radio, else first
+/// focusable radio. Selection may be represented by state or value.
+pub fn canvasWidgetRovingTabEntryTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
+    if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.interaction_policy != null) return compiledRadioFocus(layout, scope.index, 1);
+    const scope_depth = layout.nodes[scope.index].depth;
+    var first: ?canvas.WidgetFocusTarget = null;
+    var index = scope.index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        const target = canvasWidgetRadioGroupFocusTarget(layout, scope.index, index) orelse continue;
+        if (first == null) first = target;
+        if (canvasWidgetSelectableSelected(layout.nodes[index].widget)) return target;
+    }
+    return first;
+}
+
+/// The flat Tab order position occupied by a radio-group scope. It is
+/// deliberately the first CURRENTLY VISIBLE radio in authored order,
+/// rather than the selected entry: selection may live after another
+/// nested radio group (or an ordinary control) and must not move this
+/// composite's position around those intervening Tab stops.
+pub fn canvasWidgetRovingTabStopTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
+    if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.interaction_policy != null) return compiledRadioFocus(layout, scope.index, 2);
+    const scope_depth = layout.nodes[scope.index].depth;
+    var index = scope.index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        if (layout.nodes[index].widget.kind != .radio) continue;
+        if (canvasWidgetRadioGroupScopeIndex(layout, index) != scope.index) continue;
+        if (layout.focusTargetById(layout.nodes[index].widget.id)) |target| return target;
+    }
+    return null;
+}
+
+/// The group's best CURRENTLY VISIBLE Tab entry. The ordinary entry
+/// resolver above intentionally admits scroll-clipped logical targets so
+/// focus can reveal them. Callers use this narrower fallback only after a
+/// logical target could not be revealed (for example under a fixed
+/// `clip_content` card), keeping the group reachable without committing
+/// an invisible focus id.
+pub fn canvasWidgetRovingTabVisibleEntryTarget(layout: canvas.WidgetLayoutTree, scope: CanvasWidgetRovingTabScope) ?canvas.WidgetFocusTarget {
+    if (scope.index >= layout.nodes.len or layout.nodes[scope.index].widget.kind != .radio_group) return null;
+    if (layout.nodes[scope.index].widget.interaction_policy != null) return compiledRadioFocus(layout, scope.index, 3);
+    const scope_depth = layout.nodes[scope.index].depth;
+    var first: ?canvas.WidgetFocusTarget = null;
+    var index = scope.index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        if (layout.nodes[index].widget.kind != .radio) continue;
+        if (canvasWidgetRadioGroupScopeIndex(layout, index) != scope.index) continue;
+        const target = layout.focusTargetById(layout.nodes[index].widget.id) orelse continue;
+        if (first == null) first = target;
+        if (canvasWidgetSelectableSelected(layout.nodes[index].widget)) return target;
+    }
+    return first;
+}
+
+pub fn canvasWidgetRadioGroupDirectionalFocusTarget(
+    layout: canvas.WidgetLayoutTree,
+    focused: canvas.WidgetFocusTarget,
+    direction: canvas.WidgetFocusDirection,
+) ?canvas.WidgetFocusTarget {
+    if (focused.kind != .radio or focused.index >= layout.nodes.len) return null;
+    const group_direction = canvasWidgetAnyAxisGroupDirection(direction) orelse return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null) return compiledRadioFocus(layout, focused.index, if (group_direction == .previous) 4 else 5);
+    const scope_index = canvasWidgetRadioGroupScopeIndex(layout, focused.index) orelse return null;
+    return canvasWidgetRadioGroupAdjacentRadio(layout, scope_index, focused.index, group_direction) orelse focused;
+}
+
+pub fn canvasWidgetRadioGroupFocusEdgeTarget(
+    layout: canvas.WidgetLayoutTree,
+    focused: canvas.WidgetFocusTarget,
+    edge: CanvasWidgetGroupFocusEdge,
+) ?canvas.WidgetFocusTarget {
+    if (focused.kind != .radio or focused.index >= layout.nodes.len) return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null) return compiledRadioFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    const scope_index = canvasWidgetRadioGroupScopeIndex(layout, focused.index) orelse return null;
+    if (scope_index >= layout.nodes.len) return null;
+    const scope_depth = layout.nodes[scope_index].depth;
+    var last: ?canvas.WidgetFocusTarget = null;
+    var index = scope_index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        const target = canvasWidgetRadioGroupFocusTarget(layout, scope_index, index) orelse continue;
+        if (edge == .first) return target;
+        last = target;
+    }
+    return last;
+}
+
+fn canvasWidgetRadioGroupAdjacentRadio(
+    layout: canvas.WidgetLayoutTree,
+    scope_index: usize,
+    focused_index: usize,
+    direction: CanvasWidgetGroupDirection,
+) ?canvas.WidgetFocusTarget {
+    if (scope_index >= layout.nodes.len) return null;
+    const scope_depth = layout.nodes[scope_index].depth;
+    var first: ?canvas.WidgetFocusTarget = null;
+    var last: ?canvas.WidgetFocusTarget = null;
+    var previous: ?canvas.WidgetFocusTarget = null;
+    var saw_focused = false;
+    var index = scope_index + 1;
+    while (index < layout.nodes.len and layout.nodes[index].depth > scope_depth) : (index += 1) {
+        if (index == focused_index) {
+            if (direction == .previous and previous != null) return previous;
+            saw_focused = true;
+            continue;
+        }
+        const target = canvasWidgetRadioGroupFocusTarget(layout, scope_index, index) orelse continue;
+        if (first == null) first = target;
+        last = target;
+        if (direction == .next and saw_focused) return target;
+        if (!saw_focused) previous = target;
+    }
+    return switch (direction) {
+        .previous => last,
+        .next => first,
     };
 }
 
@@ -1161,11 +2233,17 @@ pub fn canvasWidgetAdjacentGroupFocusTarget(
     focused: canvas.WidgetFocusTarget,
     direction: CanvasWidgetGroupDirection,
 ) ?canvas.WidgetFocusTarget {
+    const logical_scroll_list = parent_index < layout.nodes.len and
+        layout.nodes[parent_index].widget.kind == .list and
+        focused.kind == .list_item;
     var previous: ?canvas.WidgetFocusTarget = null;
     var saw_focused = false;
-    for (layout.nodes) |node| {
+    for (layout.nodes, 0..) |node, node_index| {
         if (node.parent_index != parent_index or node.widget.kind != focused.kind) continue;
-        const target = layout.focusTargetById(node.widget.id) orelse continue;
+        const target = if (logical_scroll_list)
+            canvasWidgetLogicalFocusTarget(layout, node_index) orelse continue
+        else
+            layout.focusTargetById(node.widget.id) orelse continue;
         if (saw_focused) return target;
         if (target.id == focused.id) {
             if (direction == .previous) return previous;
@@ -1189,6 +2267,9 @@ pub fn canvasWidgetAdjacentGroupFocusTarget(
 /// the node sits outside any tree.
 pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: usize) ?usize {
     if (node_index >= layout.nodes.len) return null;
+    const widget = layout.nodes[node_index].widget;
+    if ((widget.kind == .tree or widget.semantics.role == .tree or widget.semantics.role == .treeitem) and widget.interaction_policy != null)
+        return compiledTreeIndex(layout, node_index, 0);
     var current = layout.nodes[node_index].parent_index;
     while (current) |index| {
         if (index >= layout.nodes.len) return null;
@@ -1203,9 +2284,59 @@ pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: u
     return null;
 }
 
+/// Geometry stays native; the compiled policy receives retained topology,
+/// logical focus eligibility, selection, expansion, and flat row levels.
+pub fn canvasWidgetTreePolicy(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8, output: []u8) ?usize {
+    if (subject >= layout.nodes.len) return null;
+    const widget = layout.nodes[subject].widget;
+    if (widget.kind != .tree and widget.semantics.role != .tree and widget.semantics.role != .treeitem) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("tree policy exceeds native view budget");
+    var request: [5 + canvas_limits.max_canvas_widget_nodes_per_view * 6]u8 = undefined;
+    request[0] = operation;
+    std.mem.writeInt(u16, request[1..3], @intCast(subject), .little);
+    std.mem.writeInt(u16, request[3..5], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const at = 5 + index * 6;
+        std.mem.writeInt(u16, request[at..][0..2], if (node.parent_index) |parent| @intCast(parent) else 65535, .little);
+        request[at + 2] = @as(u8, if (node.widget.semantics.role == .treeitem) 1 else 0) |
+            @as(u8, if (node.widget.kind == .tree or node.widget.semantics.role == .tree) 2 else 0);
+        request[at + 3] = @as(u8, if (operation != 0 and operation != 8 and node.widget.semantics.role == .treeitem and layout.logicalFocusTargetAtIndex(index) != null) 1 else 0) |
+            @as(u8, if (canvasWidgetSelectableSelected(node.widget)) 4 else 0) |
+            @as(u8, if (node.widget.state.expanded orelse false) 8 else 0);
+        std.mem.writeInt(u16, request[at + 4 ..][0..2], node.widget.tree_level, .little);
+    }
+    return policy(request[0 .. 5 + layout.nodes.len * 6], output);
+}
+
+fn compiledTreeIndex(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?usize {
+    var output: [2]u8 = undefined;
+    const len = canvasWidgetTreePolicy(layout, subject, operation, &output) orelse return null;
+    if (len != 2) @panic("invalid tree policy target");
+    const index = std.mem.readInt(u16, &output, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("tree policy target outside tree");
+    return index;
+}
+
+fn compiledTreeFocus(layout: canvas.WidgetLayoutTree, subject: usize, operation: u8) ?canvas.WidgetFocusTarget {
+    const index = compiledTreeIndex(layout, subject, operation) orelse return null;
+    return layout.logicalFocusTargetAtIndex(index);
+}
+
 fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
     if (layout.nodes[node_index].widget.semantics.role != .treeitem) return null;
-    return layout.focusTargetById(layout.nodes[node_index].widget.id);
+    return canvasWidgetLogicalFocusTarget(layout, node_index);
+}
+
+/// Keyboard roving and programmatic focus must be able to name a LOGICAL
+/// target even when a scroll ancestor clips it out of the current viewport.
+/// Keep every other focus gate (identity, disabled/hidden state, hidden
+/// ancestors, concealed disclosure content), but deliberately omit only the
+/// geometry clip check performed by `WidgetLayoutTree.focusTargetById`. The
+/// shared reveal seam scrolls this target into view before focus commits.
+pub fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
+    return layout.logicalFocusTargetAtIndex(node_index);
 }
 
 /// The tree keymap's focus moves. Up/Down walk the scope's rows in node
@@ -1213,8 +2344,10 @@ fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: u
 /// the focused row is a leaf or collapsed (an expanded row collapses
 /// instead — no focus move, the routed toggle intent handles it); Right
 /// moves to the FIRST CHILD row when the focused row is expanded (a
-/// collapsed row expands instead). Null = no tree move (the caller
-/// falls through to group/spatial focus).
+/// collapsed row expands instead). Flat sibling rows may declare a
+/// one-based `tree_level`; otherwise parent/child relationships derive
+/// from widget nesting. Null = no tree move (the caller falls through to
+/// group/spatial focus).
 pub fn canvasWidgetTreeDirectionalFocusTarget(
     layout: canvas.WidgetLayoutTree,
     focused: canvas.WidgetFocusTarget,
@@ -1223,6 +2356,16 @@ pub fn canvasWidgetTreeDirectionalFocusTarget(
     if (focused.index >= layout.nodes.len) return null;
     if (layout.nodes[focused.index].widget.semantics.role != .treeitem) return null;
     const tree_index = canvasWidgetTreeScopeIndex(layout, focused.index) orelse return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null) {
+        const operation: u8 = switch (direction) {
+            .up => 4,
+            .down => 5,
+            .left => 9,
+            .right => 10,
+            .forward, .backward => return null,
+        };
+        return compiledTreeFocus(layout, focused.index, operation);
+    }
     return switch (direction) {
         .up => canvasWidgetTreeAdjacentRow(layout, tree_index, focused.index, .previous) orelse focused,
         .down => canvasWidgetTreeAdjacentRow(layout, tree_index, focused.index, .next) orelse focused,
@@ -1234,7 +2377,7 @@ pub fn canvasWidgetTreeDirectionalFocusTarget(
         .right => blk: {
             const expanded = layout.nodes[focused.index].widget.state.expanded orelse false;
             if (!expanded) break :blk null; // expand intent (or leaf no-op)
-            break :blk canvasWidgetTreeFirstChildRow(layout, focused.index) orelse focused;
+            break :blk canvasWidgetTreeFirstChildRow(layout, tree_index, focused.index) orelse focused;
         },
         .forward, .backward => null,
     };
@@ -1249,6 +2392,8 @@ pub fn canvasWidgetTreeFocusEdgeTarget(
     if (focused.index >= layout.nodes.len) return null;
     if (layout.nodes[focused.index].widget.semantics.role != .treeitem) return null;
     const tree_index = canvasWidgetTreeScopeIndex(layout, focused.index) orelse return null;
+    if (layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledTreeFocus(layout, focused.index, if (edge == .first) 6 else 7);
     switch (edge) {
         .first => {
             var index = tree_index + 1;
@@ -1292,6 +2437,20 @@ fn canvasWidgetTreeAdjacentRow(
 }
 
 fn canvasWidgetTreeParentRow(layout: canvas.WidgetLayoutTree, tree_index: usize, focused_index: usize) ?canvas.WidgetFocusTarget {
+    const focused_level = layout.nodes[focused_index].widget.tree_level;
+    if (focused_level > 1) {
+        var index = focused_index;
+        while (index > tree_index + 1) {
+            index -= 1;
+            const widget = layout.nodes[index].widget;
+            if (widget.semantics.role != .treeitem) continue;
+            if (widget.tree_level == focused_level - 1) {
+                return canvasWidgetTreeRowFocusTarget(layout, index);
+            }
+            if (widget.tree_level != 0 and widget.tree_level < focused_level - 1) return null;
+        }
+        return null;
+    }
     var current = layout.nodes[focused_index].parent_index;
     while (current) |index| {
         if (index >= layout.nodes.len or index == tree_index) return null;
@@ -1301,7 +2460,21 @@ fn canvasWidgetTreeParentRow(layout: canvas.WidgetLayoutTree, tree_index: usize,
     return null;
 }
 
-fn canvasWidgetTreeFirstChildRow(layout: canvas.WidgetLayoutTree, focused_index: usize) ?canvas.WidgetFocusTarget {
+fn canvasWidgetTreeFirstChildRow(layout: canvas.WidgetLayoutTree, tree_index: usize, focused_index: usize) ?canvas.WidgetFocusTarget {
+    const focused_level = layout.nodes[focused_index].widget.tree_level;
+    if (focused_level > 0) {
+        const tree_depth = layout.nodes[tree_index].depth;
+        var index = focused_index + 1;
+        while (index < layout.nodes.len and layout.nodes[index].depth > tree_depth) : (index += 1) {
+            const widget = layout.nodes[index].widget;
+            if (widget.semantics.role != .treeitem) continue;
+            if (@as(u32, widget.tree_level) == @as(u32, focused_level) + 1) {
+                return canvasWidgetTreeRowFocusTarget(layout, index);
+            }
+            return null;
+        }
+        return null;
+    }
     const row_depth = layout.nodes[focused_index].depth;
     var index = focused_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > row_depth) : (index += 1) {
@@ -1311,9 +2484,23 @@ fn canvasWidgetTreeFirstChildRow(layout: canvas.WidgetLayoutTree, focused_index:
 }
 
 pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, edge: CanvasWidgetGroupFocusEdge) ?canvas.WidgetFocusTarget {
-    if (!canvasWidgetGroupHomeEndFocusKind(layout, focused)) return null;
+    return canvasWidgetGroupFocusEdgeTargetWithPolicy(layout, focused, edge, null);
+}
+
+pub fn canvasWidgetGroupFocusEdgeTargetWithPolicy(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, edge: CanvasWidgetGroupFocusEdge, policy: keyboard_focus.Policy) ?canvas.WidgetFocusTarget {
+    if (canvasWidgetRadioGroupFocusEdgeTarget(layout, focused, edge)) |target| return target;
+    if (keyboard_focus.decide(policy, .{ .stage = .edge, .kind = focused.kind, .parent = canvasWidgetFocusParentKind(layout, focused) }) == 0) return null;
     if (focused.index >= layout.nodes.len) return null;
     const parent_index = layout.nodes[focused.index].parent_index;
+    if (focused.kind == .segmented_control and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledTabsFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (focused.kind == .list_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return compiledListFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (focused.kind == .menu_item and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledMenuFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (focused.kind == .toggle_button and layout.nodes[focused.index].widget.interaction_policy != null)
+        return canvasWidgetCompiledToggleFocus(layout, focused.index, if (edge == .first) 6 else 7);
+    if (policy != null) return canvasWidgetCompiledGroupFocus(layout, focused, if (edge == .first) 2 else 3, policy.?);
     switch (edge) {
         .first => {
             for (layout.nodes) |node| {
@@ -1332,4 +2519,92 @@ pub fn canvasWidgetGroupFocusEdgeTarget(layout: canvas.WidgetLayoutTree, focused
         },
     }
     return null;
+}
+
+/// Exact identities remain native. Only bounded indices and native focus
+/// capability outcomes cross the copied-byte group traversal boundary.
+fn canvasWidgetCompiledGroupFocus(layout: canvas.WidgetLayoutTree, focused: canvas.WidgetFocusTarget, operation: u8, policy: *const fn ([]const u8, []u8) usize) ?canvas.WidgetFocusTarget {
+    if (focused.index >= layout.nodes.len) return null;
+    if (layout.nodes.len > canvas_limits.max_canvas_widget_nodes_per_view) @panic("keyboard group exceeds native view budget");
+    const parent = layout.nodes[focused.index].parent_index;
+    const parent_kind = canvasWidgetFocusParentKind(layout, focused);
+    var request: [9 + canvas_limits.max_canvas_widget_nodes_per_view * 4]u8 = undefined;
+    request[0..5].* = .{ 34, 10, operation, @intCast(canvas.widgetKindCode(focused.kind)), if (parent_kind) |kind| @intCast(canvas.widgetKindCode(kind)) else 63 };
+    std.mem.writeInt(u16, request[5..7], if (parent) |index| @intCast(index) else 65535, .little);
+    std.mem.writeInt(u16, request[7..9], @intCast(layout.nodes.len), .little);
+    for (layout.nodes, 0..) |node, index| {
+        const record = request[9 + index * 4 ..][0..4];
+        std.mem.writeInt(u16, record[0..2], if (node.parent_index) |parent_index| @intCast(parent_index) else 65535, .little);
+        record[2] = @intCast(canvas.widgetKindCode(node.widget.kind));
+        record[3] = @as(u8, if (layout.focusTargetById(node.widget.id) != null) 1 else 0) |
+            @as(u8, if (node.widget.id == focused.id) 2 else 0) | @as(u8, if (canvasWidgetLogicalFocusTarget(layout, index) != null) 4 else 0);
+    }
+    var response: [2]u8 = undefined;
+    if (policy(request[0 .. 9 + layout.nodes.len * 4], &response) != response.len) @panic("invalid compiled keyboard group result");
+    const index = std.mem.readInt(u16, &response, .little);
+    if (index == 65535) return null;
+    if (index >= layout.nodes.len) @panic("compiled keyboard group index out of bounds");
+    return if (operation < 2 and focused.kind == .list_item and parent_kind == .list)
+        canvasWidgetLogicalFocusTarget(layout, index)
+    else
+        layout.focusTargetById(layout.nodes[index].widget.id);
+}
+
+/// Compiled plans select complete native records, without lending their storage
+/// to the policy. Absent policies use the independent reference collectors.
+pub fn collectCanvasWidgetScrollOffsetEntriesWithPolicy(policy: retention.Policy, nodes: []const canvas.WidgetLayoutNode, output: []CanvasWidgetSourceScrollEntry) []const CanvasWidgetSourceScrollEntry {
+    const plan = retention.collect(policy, .source_scroll, nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), output.len, 0) orelse return collectCanvasWidgetScrollOffsetEntries(nodes, output);
+    for (plan.entries[0..plan.count], 0..) |entry, i| {
+        const widget = nodes[entry.node].widget;
+        output[i] = .{ .id = widget.id, .value = widget.value, .value_x = widget.value_x };
+    }
+    return output[0..plan.count];
+}
+pub fn collectCanvasWidgetSourceControlEntriesWithPolicy(policy: retention.Policy, nodes: []const canvas.WidgetLayoutNode, output: []CanvasWidgetSourceControlEntry) []const CanvasWidgetSourceControlEntry {
+    const plan = retention.collect(policy, .source_control, nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), output.len, 0) orelse return collectCanvasWidgetSourceControlEntries(nodes, output);
+    for (plan.entries[0..plan.count], 0..) |entry, i| {
+        const widget = nodes[entry.node].widget;
+        output[i] = .{ .id = widget.id, .kind = widget.kind, .selected = entry.selected, .value = widget.value };
+    }
+    return output[0..plan.count];
+}
+pub fn collectCanvasWidgetControlReconcileEntriesWithPolicy(policy: retention.Policy, nodes: []const canvas.WidgetLayoutNode, output: []CanvasWidgetControlReconcileEntry) []const CanvasWidgetControlReconcileEntry {
+    const plan = retention.collect(policy, .control, nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), output.len, 0) orelse return collectCanvasWidgetControlReconcileEntries(nodes, output);
+    for (plan.entries[0..plan.count], 0..) |entry, i| {
+        const node = nodes[entry.node];
+        output[i] = .{ .id = node.widget.id, .kind = node.widget.kind, .state = node.widget.state, .value = if (entry.resizable) node.frame.width else node.widget.value };
+    }
+    return output[0..plan.count];
+}
+pub fn collectCanvasWidgetScrollReconcileEntriesWithPolicy(policy: retention.Policy, nodes: []const canvas.WidgetLayoutNode, states: []const canvas.ScrollState, output: []CanvasWidgetScrollReconcileEntry) []const CanvasWidgetScrollReconcileEntry {
+    const plan = retention.collect(policy, .scroll, nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), output.len, @min(nodes.len, states.len)) orelse return collectCanvasWidgetScrollReconcileEntries(nodes, states, output);
+    for (plan.entries[0..plan.count], 0..) |entry, i| output[i] = .{ .id = nodes[entry.node].widget.id, .state = states[entry.node] };
+    return output[0..plan.count];
+}
+pub fn collectCanvasWidgetTextReconcileEntriesWithPolicy(policy: retention.Policy, nodes: []const canvas.WidgetLayoutNode, source_entries: []const CanvasWidgetSourceTextEntry, output: []CanvasWidgetTextReconcileEntry, text_storage: []u8, text_len: *usize) anyerror![]const CanvasWidgetTextReconcileEntry {
+    const plan = retention.collect(policy, .text, nodes, source_entries, output.len, 0) orelse return collectCanvasWidgetTextReconcileEntries(nodes, source_entries, output, text_storage, text_len);
+    for (plan.entries[0..plan.count], 0..) |entry, i| {
+        const widget = nodes[entry.node].widget;
+        const text_range = try appendWidgetTextStorageRange(text_storage, text_len, widget.text);
+        const source_entry: ?CanvasWidgetSourceTextEntry = if (entry.source) |index| source_entries[index] else null;
+        const source_text = if (source_entry) |source| CanvasWidgetSourceTextFingerprint{ .len = source.text_len, .hash = source.text_hash } else canvasWidgetSourceTextFingerprint(widget.text);
+        output[i] = .{
+            .id = widget.id,
+            .kind = widget.kind,
+            .text = text_storage[text_range.start..text_range.end],
+            .static_text_group_id = widget.static_text_group_id,
+            .source_text_len = source_text.len,
+            .source_text_hash = source_text.hash,
+            .source_text_selection = if (source_entry) |source| source.text_selection else null,
+            .text_selection = widget.text_selection,
+            .text_composition = widget.text_composition,
+            .value = widget.value,
+            .value_x = widget.value_x,
+            .code_content_width = if (!entry.code_diff) widget.code_content_width else 0,
+            .code_content_width_generation = if (!entry.code_diff) widget.code_content_width_generation else 0,
+            .code_content_width_font_id = if (!entry.code_diff) widget.code_content_width_font_id else 0,
+            .code_content_width_size_bits = if (!entry.code_diff) widget.code_content_width_size_bits else 0,
+        };
+    }
+    return output[0..plan.count];
 }

@@ -1,5 +1,17 @@
 const std = @import("std");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
+const test_shards = @import("build/test_shards.zig");
+
+test "complete root test sharding" {
+    std.testing.refAllDecls(test_shards);
+}
+
+// Installing the archive extractor opts this checkout into compiler tests.
+// The build drivers then require a complete checksum-pinned release cache;
+// disabling npm install scripts must not silently skip compiler qualification.
+fn repositoryScriptcInstallMarker(b: *std.Build) []const u8 {
+    return b.pathFromRoot("packages/core/node_modules/tar/package.json");
+}
 
 const PlatformOption = enum {
     auto,
@@ -43,6 +55,122 @@ pub const MobileLibOptions = @import("build/app.zig").MobileLibOptions;
 pub const addMobileLib = @import("build/app.zig").addMobileLib;
 const mobile_export_symbol_names = @import("build/app.zig").mobile_export_symbol_names;
 
+test "service archive support matches ScriptC localized object formats" {
+    const app_build = @import("build/app.zig");
+    const host = @import("builtin").target;
+    const resolved = struct {
+        fn target(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch, abi: std.Target.Abi) std.Build.ResolvedTarget {
+            var result = host;
+            result.os.tag = os;
+            result.cpu.arch = arch;
+            result.abi = abi;
+            return .{
+                .query = .{ .os_tag = os, .cpu_arch = arch, .abi = abi },
+                .result = result,
+            };
+        }
+    }.target;
+
+    var macos_host = host;
+    macos_host.os.tag = .macos;
+    macos_host.cpu.arch = .aarch64;
+    macos_host.abi = .none;
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .gnu)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .x86_64, .msvc)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.windows, .aarch64, .gnu)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .x86_64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.linux, .aarch64, .musl)));
+    try std.testing.expect(!app_build.serviceArchiveSupported(macos_host, resolved(.linux, .riscv64, .musl)));
+    try std.testing.expect(app_build.serviceArchiveSupported(macos_host, resolved(.macos, .x86_64, .none)));
+
+    var linux_host = host;
+    linux_host.os.tag = .linux;
+    linux_host.cpu.arch = .riscv64;
+    linux_host.abi = .musl;
+    try std.testing.expect(app_build.serviceArchiveSupported(linux_host, .{ .query = .{}, .result = linux_host }));
+    try std.testing.expect(!app_build.serviceArchiveSupported(linux_host, resolved(.macos, .aarch64, .none)));
+
+    var gnu_linux_host = host;
+    gnu_linux_host.os.tag = .linux;
+    gnu_linux_host.cpu.arch = .x86_64;
+    gnu_linux_host.abi = .gnu;
+    const explicit_same_triple_gnu = resolved(.linux, .x86_64, .gnu);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(gnu_linux_host, explicit_same_triple_gnu));
+    try std.testing.expect(app_build.linuxGlibcSpellingHitsDefaultFloor(explicit_same_triple_gnu));
+    try std.testing.expect(!app_build.linuxGlibcSpellingHitsDefaultFloor(.{ .query = .{}, .result = gnu_linux_host }));
+
+    var windows_host = host;
+    windows_host.os.tag = .windows;
+    windows_host.cpu.arch = .x86_64;
+    windows_host.abi = .gnu;
+    const native_windows_msvc = resolved(.windows, .x86_64, .msvc);
+    try std.testing.expect(!app_build.scriptcTargetIsCross(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.scriptcCompileSupported(windows_host, native_windows_msvc));
+    try std.testing.expect(app_build.serviceArchiveSupported(windows_host, native_windows_msvc));
+}
+
+test "root TypeScript markup discovery classification and resolver budgets" {
+    const app_build = @import("build/app.zig");
+    try std.testing.expect(app_build.isRootMarkupSourcePath("components/card.native"));
+    try std.testing.expect(app_build.isRootMarkupSourcePath("feature/nested/panel.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("app.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("windows/settings.native"));
+    try std.testing.expect(!app_build.isRootMarkupSourcePath("components/card.ts"));
+
+    // The authored paths are relative to src/, while native check and the
+    // desktop hot-reload resolver see the leading `src/` too. Pin the exact
+    // source-relative boundaries that keep those full paths within 24
+    // segments and 200 bytes.
+    const max_segments_path = "a/" ** 22 ++ "a";
+    try std.testing.expect(app_build.markupSourcePathWithinBudget(max_segments_path));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget(max_segments_path ++ "/a"));
+    try std.testing.expect(app_build.markupSourcePathWithinBudget("a" ** 196));
+    try std.testing.expect(!app_build.markupSourcePathWithinBudget("a" ** 197));
+}
+
+test "generated TypeScript runners install the compiled root markup view" {
+    const desktop = @embedFile("src/app_runner/ts_core_main.zig");
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled, .view_reload = view_reload_enabled })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "if (dev) void else @import(\"app_markup_root\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, ".view = CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, "if (comptime ts_view.enabled) options.view = ts_view.buildRuntime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, desktop, ".markup = if (dev and !ts_view.enabled)") != null);
+
+    const mobile = @embedFile("src/app_runner/ts_core_mobile.zig");
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false, .compiled_model = ts_view.enabled }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "TsUiAppWithFeatures(core, features)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "const app_markup_root = @import(\"app_markup_root\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "CompiledMarkupImports(core.Model, core.Msg, \"app.native\", &app_markup_sources)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, ".view = if (ts_view.enabled) ts_view.buildRuntime else CompiledAppView.build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, "pub const SourceModel = core.Model") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mobile, ".markup =") == null);
+}
+
+test "Debug TypeScript root markup stays outside the staged app module" {
+    const source = @embedFile("build/app.zig");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source,
+        "_ = staged.addCopyFile(b.path(appPath(b, app_root, \"src/app.native\")), \"app.native\");",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source,
+        "_ = release_markup.addCopyFile(b.path(appPath(b, app_root, \"src/app.native\")), \"app.native\");",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "if (optimize != .Debug)") != null);
+}
+
+test "native check preserves the app markup root for component files" {
+    const source = @embedFile("tools/native-sdk/main.zig");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        source,
+        "checkFiles(allocator, io, markup_files.items, .{\n            .import_root_for_file = markup_cli.importRootForFile,\n",
+    ) != null);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const host_target = b.graph.host;
@@ -51,6 +179,7 @@ pub fn build(b: *std.Build) void {
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     _ = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     _ = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     _ = b.option(bool, "webview", "Deprecated compatibility flag; native surfaces are always enabled") orelse true;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
@@ -58,6 +187,9 @@ pub fn build(b: *std.Build) void {
     _ = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux, ios, android") orelse .macos;
     const signing_mode = b.option(SigningMode, "signing", "Signing mode: none, adhoc, identity") orelse .none;
+    const signing_identity = b.option([]const u8, "identity", "Code signing identity for distribution packages");
+    const signing_entitlements = b.option([]const u8, "entitlements", "Entitlements plist for identity signing");
+    const notary_profile = b.option([]const u8, "notary-profile", "notarytool Keychain profile for notarization");
     const package_version = packageVersion(b);
     const optimize_name = @tagName(optimize);
     // Resolve against THIS build's root: as a dependency of a user app the
@@ -102,6 +234,7 @@ pub fn build(b: *std.Build) void {
     const diagnostics_mod = module(b, target, optimize, "src/primitives/diagnostics/root.zig");
     const platform_info_mod = module(b, target, optimize, "src/primitives/platform_info/root.zig");
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
+    const app_runner_assets_mod = module(b, target, optimize, "src/app_runner/app_assets.zig");
     const canvas_mod = module(b, target, optimize, "src/primitives/canvas/root.zig");
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
@@ -126,7 +259,23 @@ pub fn build(b: *std.Build) void {
     const diagnostics_tests = testArtifact(b, diagnostics_mod);
     const platform_info_tests = testArtifact(b, platform_info_mod);
     const json_tests = testArtifact(b, json_mod);
+    const app_runner_assets_tests = testArtifact(b, app_runner_assets_mod);
     const canvas_tests = testArtifact(b, canvas_mod);
+    // Keep the GTK software-present damage math in a C-only executable: it
+    // exercises the production helper without requiring GTK headers, a
+    // display server, or the native host to be linked into unit tests.
+    const gtk_pixels_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc", "-cflags", "-std=c11", "-Wall", "-Wextra", "-Werror", "--" });
+    gtk_pixels_test_run.addFileArg(b.path("src/platform/linux/gtk_pixels_test.c"));
+    gtk_pixels_test_run.addFileInput(b.path("src/platform/linux/gtk_pixels.h"));
+    gtk_pixels_test_run.expectExitCode(0);
+    const gtk_pixels_test_step = b.step("test-gtk-pixels", "Run GTK software pixel conversion tests");
+    gtk_pixels_test_step.dependOn(&gtk_pixels_test_run.step);
+    const spectrum_bins_test_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc", "-cflags", "-std=c11", "-Wall", "-Wextra", "-Werror", "--" });
+    spectrum_bins_test_run.addFileArg(b.path("src/platform/macos/spectrum_bins_test.c"));
+    spectrum_bins_test_run.addFileInput(b.path("src/platform/macos/spectrum_bins.h"));
+    spectrum_bins_test_run.expectExitCode(0);
+    const spectrum_bins_test_step = b.step("test-spectrum-bins", "Run audio spectrum bin range tests");
+    spectrum_bins_test_step.dependOn(&spectrum_bins_test_run.step);
 
     const desktop_mod = module(b, target, optimize, "src/root.zig");
     desktop_mod.addImport("geometry", geometry_mod);
@@ -138,8 +287,95 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("platform_info", platform_info_mod);
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
+    desktop_mod.addImport("terminal_vt", terminalVtModule(b, target, optimize));
+    desktop_mod.addIncludePath(b.path("third_party/sqlite"));
+    desktop_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        // Mobile -Dtargets (the mobile e2e battery) compile the
+        // amalgamation against the platform SDK/NDK sysroot; desktop
+        // targets keep Zig's ordinary libc discovery.
+        .flags = if (target.result.os.tag == .ios or target.result.abi.isAndroid())
+            @import("build/app.zig").sqliteCFlags(b, target)
+        else
+            sqliteCompileFlags(),
+    });
+    const app_runner_window_placement_mod = module(b, target, optimize, "src/app_runner/window_placement.zig");
+    app_runner_window_placement_mod.addImport("native_sdk", desktop_mod);
+    const app_runner_window_placement_tests = testArtifact(b, app_runner_window_placement_mod);
+    const app_runner_options = b.addOptions();
+    app_runner_options.addOption([]const u8, "platform", "null");
+    app_runner_options.addOption([]const u8, "trace", "off");
+    app_runner_options.addOption([]const u8, "web_engine", "system");
+    app_runner_options.addOption(bool, "debug_overlay", false);
+    app_runner_options.addOption(bool, "automation", false);
+    app_runner_options.addOption(bool, "web_layer", false);
+    // Omit an unspecified setting to also exercise older custom build options.
+    if (webview_inspection) |enabled| {
+        app_runner_options.addOption(?bool, "webview_inspection", enabled);
+    }
+    app_runner_options.addOption(bool, "webview_inspection_expected", webview_inspection orelse (optimize == .Debug));
+    const app_runner_mod = module(b, target, optimize, "src/app_runner/root.zig");
+    app_runner_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("build_options", app_runner_options.createModule());
+    app_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("tests/app-runner/menu_commands_fixture.zon") }));
+    const app_runner_migrations_mod = module(b, target, optimize, "src/app_runner/no_migrations.zig");
+    app_runner_migrations_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("relational_migrations", app_runner_migrations_mod);
+    const app_runner_tests = testArtifact(b, app_runner_mod);
+    const app_runner_test_run = b.addRunArtifact(app_runner_tests);
+    const app_runner_test_step = b.step("test-app-runner", "Run framework app-runner manifest fallback tests");
+    app_runner_test_step.dependOn(&app_runner_test_run.step);
+    desktop_mod.link_libc = true;
+    if (target.result.os.tag == .macos) {
+        const flags: []const []const u8 = if (b.sysroot) |sysroot|
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, b.fmt("-I{s}/usr/include", .{sysroot}) }
+        else
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+        desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/image_fit_test.m"), .flags = flags });
+        desktop_mod.linkFramework("Foundation", .{});
+        desktop_mod.linkFramework("ImageIO", .{});
+        desktop_mod.linkSystemLibrary("objc", .{});
+    }
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+    // Tier-5 crash battery: a child uses the public streamed sink, signals
+    // after a chunk is durable only in the atomic temporary, then the parent
+    // kills it and verifies the destination still names the old generation.
+    const file_crash_helper_mod = module(b, target, optimize, "src/runtime/file_effect_crash_helper.zig");
+    file_crash_helper_mod.addImport("native_sdk", desktop_mod);
+    const file_crash_helper = b.addExecutable(.{ .name = "file-effect-crash-helper", .root_module = file_crash_helper_mod });
+    const file_crash_tests_mod = module(b, target, optimize, "src/runtime/file_effect_crash_tests.zig");
+    file_crash_tests_mod.addImport("native_sdk", desktop_mod);
+    const file_crash_options = b.addOptions();
+    file_crash_options.addOptionPath("helper_executable", file_crash_helper.getEmittedBin());
+    file_crash_tests_mod.addOptions("file_crash_options", file_crash_options);
+    const file_crash_tests = testArtifact(b, file_crash_tests_mod);
+    const file_crash_run = b.addRunArtifact(file_crash_tests);
+    const file_crash_step = b.step("test-file-effect-crash", "Kill a streamed writer before close and verify atomic destination visibility");
+    file_crash_step.dependOn(&file_crash_run.step);
+    const tier5_tests = filteredTestArtifact(b, desktop_mod, "storage-tier-5-tests", &.{
+        "runtime.effects_file_tests.test",
+        "runtime.file_access.test",
+        "runtime.session_record.test.recorder moves streamed file chunks",
+        "runtime.session_tests.test.a multi-megabyte file stream",
+    });
+    const tier5_run = b.addRunArtifact(tier5_tests);
+    const tier5_step = b.step("test-storage-tier-5", "Run file streaming, bounds, replay/blob, gating, and crash-atomicity batteries");
+    tier5_step.dependOn(&tier5_run.step);
+    tier5_step.dependOn(&file_crash_run.step);
+
+    // SQLite is capability-shed from ordinary app artifacts. Its focused
+    // engine/store suite gets a dedicated module that explicitly compiles the
+    // vendored amalgamation, so framework tests cover it without making every
+    // unrelated example carry the database object.
+    const record_store_mod = module(b, target, optimize, "src/runtime/record_store.zig");
+    record_store_mod.addIncludePath(b.path("third_party/sqlite"));
+    record_store_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    record_store_mod.link_libc = true;
+    const record_store_tests = testArtifact(b, record_store_mod);
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -175,6 +411,7 @@ pub fn build(b: *std.Build) void {
     const ios_host_mod = module(b, target, optimize, "src/platform/ios/files.zig");
     const android_host_mod = module(b, target, optimize, "src/platform/android/files.zig");
     const tooling_mod = module(b, target, optimize, "src/tooling/root.zig");
+    const update_feed_mod = module(b, target, optimize, "src/updater/feed.zig");
     tooling_mod.addImport("assets", assets_mod);
     tooling_mod.addImport("app_dirs", app_dirs_mod);
     tooling_mod.addImport("app_manifest", app_manifest_mod);
@@ -185,6 +422,14 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("app_icon", app_icon_mod);
     tooling_mod.addImport("ios_host", ios_host_mod);
     tooling_mod.addImport("android_host", android_host_mod);
+    tooling_mod.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
+    tooling_mod.addImport("update_feed", update_feed_mod);
+    tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    tooling_mod.link_libc = true;
     const tooling_tests = testArtifact(b, tooling_mod);
 
     // Ejected-component identity proofs: a separate test module because
@@ -195,6 +440,23 @@ pub fn build(b: *std.Build) void {
     eject_components_mod.addImport("native_sdk", desktop_mod);
     const eject_components_tests = testArtifact(b, eject_components_mod);
 
+    // The mirror's byte runtime stays a native unit root. Core admission
+    // and projection tests use the compiled host archive in the TypeScript
+    // tooling block below, alongside frontend-sidecar conformance.
+    const corewire_shim_rt_tests = testArtifact(b, module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+
+    // TypeScript-core end-to-end suite: each fixture core is compiled
+    // through the external core compiler AT BUILD TIME (never a
+    // committed archive) and its e2e battery drives the linked archive
+    // through the real runtime via `TsCoreHost` over the generated
+    // mirror. Gated on node plus the package's installed dependencies
+    // (`npm ci` in packages/core — the compiler and the frontend
+    // toolchain arrive together): absent either, the suite is skipped
+    // (the bridge itself stays covered by
+    // src/runtime/ts_core_host_tests.zig against a hand-written
+    // core-ABI module).
+    const ts_core_e2e_tests = tsCoreE2eArtifact(b, target, optimize, desktop_mod, tooling_mod);
+
     const ui_markup_mod = module(b, target, optimize, "src/primitives/canvas/ui_markup.zig");
     const markup_lsp_mod = module(b, target, optimize, "tools/native-sdk/markup_lsp.zig");
     markup_lsp_mod.addImport("ui_markup", ui_markup_mod);
@@ -204,6 +466,30 @@ pub fn build(b: *std.Build) void {
     automation_cli_mod.addImport("automation_protocol", automation_protocol_mod);
     automation_cli_mod.addImport("ui_markup", ui_markup_mod);
     const automation_cli_tests = testArtifact(b, automation_cli_mod);
+
+    const markup_cli_mod = module(b, target, optimize, "tools/native-sdk/markup.zig");
+    markup_cli_mod.addImport("ui_markup", ui_markup_mod);
+    markup_cli_mod.addImport("markup_lsp", markup_lsp_mod);
+    const markup_cli_tests = testArtifact(b, markup_cli_mod);
+
+    const skills_cli_mod = module(b, target, optimize, "tools/native-sdk/skills.zig");
+    const skills_cli_tests = testArtifact(b, skills_cli_mod);
+
+    // The evals harness's Cmd wire-format decoder (copied next to every
+    // ts-track case harness at grading time). Its own tests run here —
+    // NOT at eval time — because a decoder that lags a
+    // cmd_format_version bump panics mid-eval inside case harnesses,
+    // where the failure reads as the graded app's, not the tooling's.
+    const evals_cmdview_mod = module(b, target, optimize, "evals/harness-lib/cmdview.zig");
+    const evals_cmdview_tests = testArtifact(b, evals_cmdview_mod);
+    const build_graph_tests = testArtifact(b, module(b, host_target, optimize, "build.zig"));
+    const invalid_import_compile_mod = module(b, target, optimize, "tests/ts-core/invalid_import_compile.zig");
+    invalid_import_compile_mod.addImport("canvas", canvas_mod);
+    const invalid_import_compile = b.addObject(.{
+        .name = "ts-invalid-import-compile",
+        .root_module = invalid_import_compile_mod,
+    });
+    invalid_import_compile.expect_errors = .{ .contains = "imported files define templates only - this file has a view root element; move the view to its own file and import just the templates" };
 
     // `native version` names the commit the binary was built from, so
     // binary/framework skew ("your native binary may be stale") is a
@@ -247,6 +533,7 @@ pub fn build(b: *std.Build) void {
     const host_ios_host_mod = module(b, host_target, optimize, "src/platform/ios/files.zig");
     const host_android_host_mod = module(b, host_target, optimize, "src/platform/android/files.zig");
     const host_tooling_mod = module(b, host_target, optimize, "src/tooling/root.zig");
+    const host_update_feed_mod = module(b, host_target, optimize, "src/updater/feed.zig");
     host_tooling_mod.addImport("assets", host_assets_mod);
     host_tooling_mod.addImport("app_dirs", host_app_dirs_mod);
     host_tooling_mod.addImport("app_manifest", host_app_manifest_mod);
@@ -257,6 +544,14 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("app_icon", host_app_icon_mod);
     host_tooling_mod.addImport("ios_host", host_ios_host_mod);
     host_tooling_mod.addImport("android_host", host_android_host_mod);
+    host_tooling_mod.addImport("sqlite_engine", module(b, host_target, optimize, "src/runtime/sqlite_engine.zig"));
+    host_tooling_mod.addImport("update_feed", host_update_feed_mod);
+    host_tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    host_tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    host_tooling_mod.link_libc = true;
     const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
     const host_markup_lsp_mod = module(b, host_target, optimize, "tools/native-sdk/markup_lsp.zig");
     host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
@@ -337,6 +632,10 @@ pub fn build(b: *std.Build) void {
     wasm_native_mod.addImport("app_manifest", module(b, wasm_target, wasm_optimize, "src/primitives/app_manifest/root.zig"));
     wasm_native_mod.addImport("diagnostics", module(b, wasm_target, wasm_optimize, "src/primitives/diagnostics/root.zig"));
     wasm_native_mod.addImport("platform_info", module(b, wasm_target, wasm_optimize, "src/primitives/platform_info/root.zig"));
+    // The docs preview never runs an emulator: the stub keeps the wasm
+    // module free of the ghostty graph (and of pty transports it could
+    // not use anyway).
+    wasm_native_mod.addImport("terminal_vt", module(b, wasm_target, wasm_optimize, "src/runtime/terminal_vt_stub.zig"));
     const docs_wasm_preview_mod = module(b, wasm_target, wasm_optimize, "tools/docs_wasm_preview.zig");
     docs_wasm_preview_mod.addImport("native_sdk", wasm_native_mod);
     docs_wasm_preview_mod.strip = true;
@@ -364,9 +663,41 @@ pub fn build(b: *std.Build) void {
     // Registry pin printer: emits the ui_schema table counts and
     // fingerprints in the exact form ui_schema_tests.zig pins, plus the
     // next free code per table for reserving codes ahead of parallel
-    // work. `zig build print-pins` after registry additions.
+    // work, plus this build's layout fingerprints (session journal
+    // format, automation protocol). `zig build print-pins` after
+    // registry additions. The journal fingerprint lives in the full
+    // framework module, and the tool runs on the build HOST by
+    // construction (addRunArtifact), so it builds against a host clone
+    // of the framework module — cross-compiled `-Dtarget` builds keep a
+    // runnable print-pins, and the fingerprints are layout identities
+    // (type shapes, never target-sized values), identical either way.
+    const pins_json_mod = module(b, host_target, optimize, "src/primitives/json/root.zig");
+    const pins_canvas_mod = module(b, host_target, optimize, "src/primitives/canvas/root.zig");
+    pins_canvas_mod.addImport("geometry", host_geometry_mod);
+    pins_canvas_mod.addImport("json", pins_json_mod);
+    if (host_target.result.os.tag == .macos) {
+        // Same CoreText linkage the target canvas module carries (see
+        // canvas_mod above): the shaping path calls it on macOS hosts.
+        pins_canvas_mod.linkFramework("CoreFoundation", .{});
+        pins_canvas_mod.linkFramework("CoreGraphics", .{});
+        pins_canvas_mod.linkFramework("CoreText", .{});
+        pins_canvas_mod.linkSystemLibrary("c", .{});
+    }
+    const pins_native_mod = module(b, host_target, optimize, "src/root.zig");
+    pins_native_mod.addImport("geometry", host_geometry_mod);
+    pins_native_mod.addImport("app_dirs", host_app_dirs_mod);
+    pins_native_mod.addImport("assets", host_assets_mod);
+    pins_native_mod.addImport("trace", host_trace_mod);
+    pins_native_mod.addImport("app_manifest", host_app_manifest_mod);
+    pins_native_mod.addImport("diagnostics", host_diagnostics_mod);
+    pins_native_mod.addImport("platform_info", host_platform_info_mod);
+    pins_native_mod.addImport("json", pins_json_mod);
+    pins_native_mod.addImport("canvas", pins_canvas_mod);
+    // The pin printer reflects registry tables and layout fingerprints —
+    // type shapes, never emulator state — so the stub keeps it light.
+    pins_native_mod.addImport("terminal_vt", module(b, host_target, optimize, "src/runtime/terminal_vt_stub.zig"));
     const print_pins_mod = module(b, host_target, optimize, "tools/print_pins.zig");
-    print_pins_mod.addImport("ui_schema", module(b, host_target, optimize, "src/primitives/canvas/ui_schema.zig"));
+    print_pins_mod.addImport("native_sdk", pins_native_mod);
     const print_pins_exe = b.addExecutable(.{
         .name = "print-pins",
         .root_module = print_pins_mod,
@@ -385,6 +716,9 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run package and framework tests");
+    b.step("test-ts-canvas-hooks", "Verify canvas declaration validation, ownership, and model accessibility themes").dependOn(&b.addRunArtifact(filteredTestArtifact(b, desktop_mod, "ts-canvas-hook-tests", &.{ "TypeScript canvas", "model accessibility theme" })).step);
+    test_step.dependOn(&invalid_import_compile.step);
+    test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_dirs_tests).step);
@@ -393,15 +727,1129 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(diagnostics_tests).step);
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
+    test_step.dependOn(&app_runner_test_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
+    test_step.dependOn(&gtk_pixels_test_run.step);
+    test_step.dependOn(&spectrum_bins_test_run.step);
+    if (b.graph.host.result.os.tag == .macos) {
+        for ([_]struct { file: []const u8, step: []const u8, description: []const u8 }{
+            .{ .file = "widget_focus_test.m", .step = "test-macos-widget-focus", .description = "Verify native accessibility publication preserves keyboard focus without assistive feedback" },
+            .{ .file = "scroll_driver_test.m", .step = "test-macos-scroll-drivers", .description = "Verify native scroll resize reports settle after driver reconciliation" },
+            .{ .file = "pointer_motion_test.m", .step = "test-macos-pointer-motion", .description = "Verify coalesced native pointer drags preserve geometry deltas" },
+            .{ .file = "webview_inspection_test.m", .step = "test-macos-webview-inspection", .description = "Verify inspection capability for primary, lazy, secondary and child WebViews" },
+            .{ .file = "text_keyboard_test.m", .step = "test-macos-text-keyboard", .description = "Verify native Enter modifiers survive AppKit text interpretation" },
+        }) |probe| {
+            const probe_run = b.addSystemCommand(&.{ b.graph.zig_exe, "run", "-lc" });
+            for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "CoreMedia", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+                probe_run.addArgs(&.{ "-framework", framework });
+            }
+            probe_run.addArgs(&.{ "-cflags", "-fobjc-arc", "-fno-sanitize=builtin", "-mmacosx-version-min=11.0" });
+            if (b.sysroot) |sysroot| probe_run.addArgs(&.{ "-isysroot", sysroot });
+            probe_run.addArg("--");
+            probe_run.addFileArg(b.path(b.fmt("src/platform/macos/{s}", .{probe.file})));
+            probe_run.addFileInput(b.path("src/platform/macos/appkit_host.m"));
+            probe_run.addFileInput(b.path("src/platform/macos/appkit_host.h"));
+            probe_run.expectExitCode(0);
+            b.step(probe.step, probe.description).dependOn(&probe_run.step);
+            test_step.dependOn(&probe_run.step);
+        }
+    }
+    test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
+    test_step.dependOn(&file_crash_run.step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
     test_step.dependOn(&b.addRunArtifact(automation_protocol_tests).step);
     test_step.dependOn(&b.addRunArtifact(tooling_tests).step);
     test_step.dependOn(&b.addRunArtifact(eject_components_tests).step);
+    test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
+    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
+    if (ts_core_e2e_tests) |ts_core_artifacts| {
+        const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
+        // Keep stderr inherited for timed app reference/replay commands: Zig's
+        // I/O lock then serializes their nested builds, whose CPU pools would
+        // otherwise compete with one another. Capture stdout for quiet runs.
+        // Independent compilation and ordinary example suites remain parallel.
+        const native_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        native_driver_run.setCwd(b.path("tests/native-driver"));
+        native_driver_run.has_side_effects = true;
+        _ = native_driver_run.captureStdOut(.{});
+        native_driver_run.setName("TypeScript native test driver");
+        native_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        const legacy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        legacy_driver_run.setCwd(b.path("tests/native-driver"));
+        legacy_driver_run.has_side_effects = true;
+        legacy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        _ = legacy_driver_run.captureStdOut(.{});
+        legacy_driver_run.setName("Native test driver reference view");
+        // Both builds share the app scratch graph. Run the reference first,
+        // then exercise the compiled default in the same test battery.
+        native_driver_run.step.dependOn(&legacy_driver_run.step);
+        const native_driver_step = b.step("test-ts-native-driver", "Drive a compiled app from authored TypeScript tests");
+        native_driver_step.dependOn(&native_driver_run.step);
+        const kanban_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        kanban_driver_run.setCwd(b.path("examples/kanban"));
+        kanban_driver_run.has_side_effects = true;
+        kanban_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        kanban_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/kanban-view-reference"));
+        _ = kanban_driver_run.captureStdOut(.{});
+        kanban_driver_run.setName("TypeScript Kanban native test driver");
+        const kanban_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        kanban_reference_run.setCwd(b.path("examples/kanban"));
+        kanban_reference_run.has_side_effects = true;
+        kanban_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        kanban_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/kanban-view-reference"));
+        _ = kanban_reference_run.captureStdOut(.{});
+        kanban_reference_run.setName("Kanban native test driver reference view");
+        kanban_driver_run.step.dependOn(&kanban_reference_run.step);
+        native_driver_step.dependOn(&kanban_driver_run.step);
+        ts_core_e2e_step.dependOn(&kanban_driver_run.step);
+        test_step.dependOn(&kanban_driver_run.step);
+        const feed_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        feed_reference_run.setCwd(b.path("examples/service-feed-reader"));
+        feed_reference_run.has_side_effects = true;
+        feed_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        feed_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/feed-view-reference"));
+        _ = feed_reference_run.captureStdOut(.{});
+        const feed_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        feed_driver_run.setCwd(b.path("examples/service-feed-reader"));
+        feed_driver_run.has_side_effects = true;
+        feed_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        feed_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/feed-view-reference"));
+        _ = feed_driver_run.captureStdOut(.{});
+        feed_driver_run.step.dependOn(&feed_reference_run.step);
+        native_driver_step.dependOn(&feed_driver_run.step);
+        ts_core_e2e_step.dependOn(&feed_driver_run.step);
+        ts_services_e2e_step.dependOn(&feed_driver_run.step);
+        test_step.dependOn(&feed_driver_run.step);
+        const subscription_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        subscription_reference_run.setCwd(b.path("examples/subscription-policy"));
+        subscription_reference_run.has_side_effects = true;
+        subscription_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        subscription_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/subscription-policy-reference"));
+        _ = subscription_reference_run.captureStdOut(.{});
+        const subscription_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        subscription_driver_run.setCwd(b.path("examples/subscription-policy"));
+        subscription_driver_run.has_side_effects = true;
+        subscription_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        subscription_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/subscription-policy-reference"));
+        _ = subscription_driver_run.captureStdOut(.{});
+        subscription_driver_run.step.dependOn(&subscription_reference_run.step);
+        native_driver_step.dependOn(&subscription_driver_run.step);
+        ts_core_e2e_step.dependOn(&subscription_driver_run.step);
+        test_step.dependOn(&subscription_driver_run.step);
+        const effect_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        effect_reference_run.setCwd(b.path("examples/effect-policy"));
+        effect_reference_run.has_side_effects = true;
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        effect_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_reference_run.captureStdOut(.{});
+        const effect_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        effect_driver_run.setCwd(b.path("examples/effect-policy"));
+        effect_driver_run.has_side_effects = true;
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        effect_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/effect-policy-reference"));
+        _ = effect_driver_run.captureStdOut(.{});
+        effect_driver_run.step.dependOn(&effect_reference_run.step);
+        native_driver_step.dependOn(&effect_driver_run.step);
+        ts_core_e2e_step.dependOn(&effect_driver_run.step);
+        test_step.dependOn(&effect_driver_run.step);
+        const stream_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        stream_reference_run.setCwd(b.path("examples/stream-policy"));
+        stream_reference_run.has_side_effects = true;
+        stream_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        stream_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/stream-policy-reference"));
+        _ = stream_reference_run.captureStdOut(.{});
+        const stream_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        stream_driver_run.setCwd(b.path("examples/stream-policy"));
+        stream_driver_run.has_side_effects = true;
+        stream_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        stream_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/stream-policy-reference"));
+        _ = stream_driver_run.captureStdOut(.{});
+        stream_driver_run.step.dependOn(&stream_reference_run.step);
+        native_driver_step.dependOn(&stream_driver_run.step);
+        ts_core_e2e_step.dependOn(&stream_driver_run.step);
+        test_step.dependOn(&stream_driver_run.step);
+        const pipeline_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        pipeline_reference_run.setCwd(b.path("examples/pipeline"));
+        pipeline_reference_run.has_side_effects = true;
+        pipeline_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        pipeline_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/pipeline-view-reference"));
+        _ = pipeline_reference_run.captureStdOut(.{});
+        const pipeline_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        pipeline_driver_run.setCwd(b.path("examples/pipeline"));
+        pipeline_driver_run.has_side_effects = true;
+        pipeline_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        pipeline_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/pipeline-view-reference"));
+        _ = pipeline_driver_run.captureStdOut(.{});
+        pipeline_driver_run.step.dependOn(&pipeline_reference_run.step);
+        native_driver_step.dependOn(&pipeline_driver_run.step);
+        ts_core_e2e_step.dependOn(&pipeline_driver_run.step);
+        test_step.dependOn(&pipeline_driver_run.step);
+        const radio_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        radio_policy_reference_run.setCwd(b.path("examples/radio-policy"));
+        radio_policy_reference_run.has_side_effects = true;
+        radio_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        radio_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/radio-policy-view-reference"));
+        _ = radio_policy_reference_run.captureStdOut(.{});
+        const radio_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        radio_policy_driver_run.setCwd(b.path("examples/radio-policy"));
+        radio_policy_driver_run.has_side_effects = true;
+        radio_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        radio_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/radio-policy-view-reference"));
+        _ = radio_policy_driver_run.captureStdOut(.{});
+        radio_policy_driver_run.step.dependOn(&radio_policy_reference_run.step);
+        native_driver_step.dependOn(&radio_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&radio_policy_driver_run.step);
+        test_step.dependOn(&radio_policy_driver_run.step);
+        const tabs_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        tabs_policy_reference_run.setCwd(b.path("examples/tabs-policy"));
+        tabs_policy_reference_run.has_side_effects = true;
+        tabs_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        tabs_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tabs-policy-view-reference"));
+        _ = tabs_policy_reference_run.captureStdOut(.{});
+        const tabs_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        tabs_policy_driver_run.setCwd(b.path("examples/tabs-policy"));
+        tabs_policy_driver_run.has_side_effects = true;
+        tabs_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        tabs_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tabs-policy-view-reference"));
+        _ = tabs_policy_driver_run.captureStdOut(.{});
+        tabs_policy_driver_run.step.dependOn(&tabs_policy_reference_run.step);
+        native_driver_step.dependOn(&tabs_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&tabs_policy_driver_run.step);
+        test_step.dependOn(&tabs_policy_driver_run.step);
+        const tree_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        tree_policy_reference_run.setCwd(b.path("examples/tree-policy"));
+        tree_policy_reference_run.has_side_effects = true;
+        tree_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        tree_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tree-policy-view-reference"));
+        _ = tree_policy_reference_run.captureStdOut(.{});
+        const tree_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        tree_policy_driver_run.setCwd(b.path("examples/tree-policy"));
+        tree_policy_driver_run.has_side_effects = true;
+        tree_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        tree_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/tree-policy-view-reference"));
+        _ = tree_policy_driver_run.captureStdOut(.{});
+        tree_policy_driver_run.step.dependOn(&tree_policy_reference_run.step);
+        native_driver_step.dependOn(&tree_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&tree_policy_driver_run.step);
+        test_step.dependOn(&tree_policy_driver_run.step);
+        const list_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        list_policy_reference_run.setCwd(b.path("examples/list-policy"));
+        list_policy_reference_run.has_side_effects = true;
+        list_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        list_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/list-policy-view-reference"));
+        _ = list_policy_reference_run.captureStdOut(.{});
+        const list_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        list_policy_driver_run.setCwd(b.path("examples/list-policy"));
+        list_policy_driver_run.has_side_effects = true;
+        list_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        list_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/list-policy-view-reference"));
+        _ = list_policy_driver_run.captureStdOut(.{});
+        list_policy_driver_run.step.dependOn(&list_policy_reference_run.step);
+        native_driver_step.dependOn(&list_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&list_policy_driver_run.step);
+        test_step.dependOn(&list_policy_driver_run.step);
+        const menu_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        menu_policy_reference_run.setCwd(b.path("examples/menu-policy"));
+        menu_policy_reference_run.has_side_effects = true;
+        menu_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        menu_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/menu-policy-view-reference"));
+        _ = menu_policy_reference_run.captureStdOut(.{});
+        const menu_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        menu_policy_driver_run.setCwd(b.path("examples/menu-policy"));
+        menu_policy_driver_run.has_side_effects = true;
+        menu_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        menu_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/menu-policy-view-reference"));
+        _ = menu_policy_driver_run.captureStdOut(.{});
+        menu_policy_driver_run.step.dependOn(&menu_policy_reference_run.step);
+        native_driver_step.dependOn(&menu_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&menu_policy_driver_run.step);
+        test_step.dependOn(&menu_policy_driver_run.step);
+        const toggle_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        toggle_policy_reference_run.setCwd(b.path("examples/toggle-policy"));
+        toggle_policy_reference_run.has_side_effects = true;
+        toggle_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        toggle_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/toggle-policy-view-reference"));
+        _ = toggle_policy_reference_run.captureStdOut(.{});
+        const toggle_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        toggle_policy_driver_run.setCwd(b.path("examples/toggle-policy"));
+        toggle_policy_driver_run.has_side_effects = true;
+        toggle_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        toggle_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/toggle-policy-view-reference"));
+        _ = toggle_policy_driver_run.captureStdOut(.{});
+        toggle_policy_driver_run.step.dependOn(&toggle_policy_reference_run.step);
+        native_driver_step.dependOn(&toggle_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&toggle_policy_driver_run.step);
+        test_step.dependOn(&toggle_policy_driver_run.step);
+        const accordion_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        accordion_policy_reference_run.setCwd(b.path("examples/accordion-policy"));
+        accordion_policy_reference_run.has_side_effects = true;
+        accordion_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        accordion_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/accordion-policy-view-reference"));
+        _ = accordion_policy_reference_run.captureStdOut(.{});
+        const accordion_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        accordion_policy_driver_run.setCwd(b.path("examples/accordion-policy"));
+        accordion_policy_driver_run.has_side_effects = true;
+        accordion_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        accordion_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/accordion-policy-view-reference"));
+        _ = accordion_policy_driver_run.captureStdOut(.{});
+        accordion_policy_driver_run.step.dependOn(&accordion_policy_reference_run.step);
+        native_driver_step.dependOn(&accordion_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&accordion_policy_driver_run.step);
+        test_step.dependOn(&accordion_policy_driver_run.step);
+        const checkable_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        checkable_policy_reference_run.setCwd(b.path("examples/checkable-policy"));
+        checkable_policy_reference_run.has_side_effects = true;
+        checkable_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        checkable_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/checkable-policy-view-reference"));
+        _ = checkable_policy_reference_run.captureStdOut(.{});
+        const checkable_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        checkable_policy_driver_run.setCwd(b.path("examples/checkable-policy"));
+        checkable_policy_driver_run.has_side_effects = true;
+        checkable_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        checkable_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/checkable-policy-view-reference"));
+        _ = checkable_policy_driver_run.captureStdOut(.{});
+        checkable_policy_driver_run.step.dependOn(&checkable_policy_reference_run.step);
+        native_driver_step.dependOn(&checkable_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&checkable_policy_driver_run.step);
+        test_step.dependOn(&checkable_policy_driver_run.step);
+        const slider_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        slider_policy_reference_run.setCwd(b.path("examples/slider-policy"));
+        slider_policy_reference_run.has_side_effects = true;
+        slider_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        slider_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/slider-policy-view-reference"));
+        _ = slider_policy_reference_run.captureStdOut(.{});
+        const slider_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        slider_policy_driver_run.setCwd(b.path("examples/slider-policy"));
+        slider_policy_driver_run.has_side_effects = true;
+        slider_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        slider_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/slider-policy-view-reference"));
+        _ = slider_policy_driver_run.captureStdOut(.{});
+        slider_policy_driver_run.step.dependOn(&slider_policy_reference_run.step);
+        native_driver_step.dependOn(&slider_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&slider_policy_driver_run.step);
+        test_step.dependOn(&slider_policy_driver_run.step);
+        const split_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        split_policy_reference_run.setCwd(b.path("examples/split-policy"));
+        split_policy_reference_run.has_side_effects = true;
+        split_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        split_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/split-policy-view-reference"));
+        _ = split_policy_reference_run.captureStdOut(.{});
+        const split_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        split_policy_driver_run.setCwd(b.path("examples/split-policy"));
+        split_policy_driver_run.has_side_effects = true;
+        split_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        split_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/split-policy-view-reference"));
+        _ = split_policy_driver_run.captureStdOut(.{});
+        split_policy_driver_run.step.dependOn(&split_policy_reference_run.step);
+        native_driver_step.dependOn(&split_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&split_policy_driver_run.step);
+        test_step.dependOn(&split_policy_driver_run.step);
+        const scroll_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        scroll_policy_reference_run.setCwd(b.path("examples/scroll-policy"));
+        scroll_policy_reference_run.has_side_effects = true;
+        scroll_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        scroll_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/scroll-policy-view-reference"));
+        _ = scroll_policy_reference_run.captureStdOut(.{});
+        const scroll_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        scroll_policy_driver_run.setCwd(b.path("examples/scroll-policy"));
+        scroll_policy_driver_run.has_side_effects = true;
+        scroll_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        scroll_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/scroll-policy-view-reference"));
+        _ = scroll_policy_driver_run.captureStdOut(.{});
+        scroll_policy_driver_run.step.dependOn(&scroll_policy_reference_run.step);
+        native_driver_step.dependOn(&scroll_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&scroll_policy_driver_run.step);
+        test_step.dependOn(&scroll_policy_driver_run.step);
+        const resizable_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        resizable_policy_reference_run.setCwd(b.path("examples/resizable-policy"));
+        resizable_policy_reference_run.has_side_effects = true;
+        resizable_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        resizable_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/resizable-policy-view-reference"));
+        _ = resizable_policy_reference_run.captureStdOut(.{});
+        const resizable_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        resizable_policy_driver_run.setCwd(b.path("examples/resizable-policy"));
+        resizable_policy_driver_run.has_side_effects = true;
+        resizable_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        resizable_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/resizable-policy-view-reference"));
+        _ = resizable_policy_driver_run.captureStdOut(.{});
+        resizable_policy_driver_run.step.dependOn(&resizable_policy_reference_run.step);
+        native_driver_step.dependOn(&resizable_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&resizable_policy_driver_run.step);
+        test_step.dependOn(&resizable_policy_driver_run.step);
+
+        const window_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        window_policy_reference_run.setCwd(b.path("examples/window-policy"));
+        window_policy_reference_run.has_side_effects = true;
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        window_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_reference_run.captureStdOut(.{});
+        const window_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        window_policy_driver_run.setCwd(b.path("examples/window-policy"));
+        window_policy_driver_run.has_side_effects = true;
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        window_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/window-policy-view-reference"));
+        _ = window_policy_driver_run.captureStdOut(.{});
+        window_policy_driver_run.step.dependOn(&window_policy_reference_run.step);
+        native_driver_step.dependOn(&window_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&window_policy_driver_run.step);
+        test_step.dependOn(&window_policy_driver_run.step);
+        const status_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        status_reference_run.setCwd(b.path("examples/status-policy"));
+        status_reference_run.has_side_effects = true;
+        status_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        status_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/status-policy-view-reference"));
+        _ = status_reference_run.captureStdOut(.{});
+        const status_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        status_driver_run.setCwd(b.path("examples/status-policy"));
+        status_driver_run.has_side_effects = true;
+        status_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        status_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/status-policy-view-reference"));
+        _ = status_driver_run.captureStdOut(.{});
+        status_driver_run.step.dependOn(&status_reference_run.step);
+        native_driver_step.dependOn(&status_driver_run.step);
+        ts_core_e2e_step.dependOn(&status_driver_run.step);
+        test_step.dependOn(&status_driver_run.step);
+
+        const typography_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        typography_reference_run.setCwd(b.path("examples/typography"));
+        typography_reference_run.has_side_effects = true;
+        typography_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        typography_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/typography-view-reference"));
+        _ = typography_reference_run.captureStdOut(.{});
+        const typography_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        typography_driver_run.setCwd(b.path("examples/typography"));
+        typography_driver_run.has_side_effects = true;
+        typography_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        typography_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/typography-view-reference"));
+        _ = typography_driver_run.captureStdOut(.{});
+        typography_driver_run.step.dependOn(&typography_reference_run.step);
+        b.step("test-ts-typography-driver", "Compare complete typography snapshots and replay across view backends").dependOn(&typography_driver_run.step);
+        native_driver_step.dependOn(&typography_driver_run.step);
+        ts_core_e2e_step.dependOn(&typography_driver_run.step);
+        test_step.dependOn(&typography_driver_run.step);
+
+        const relational_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        relational_reference_run.setCwd(b.path("examples/relational-notes"));
+        relational_reference_run.has_side_effects = true;
+        relational_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        relational_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/relational-notes-view-reference"));
+        _ = relational_reference_run.captureStdOut(.{});
+        const relational_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        relational_driver_run.setCwd(b.path("examples/relational-notes"));
+        relational_driver_run.has_side_effects = true;
+        relational_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        relational_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/relational-notes-view-reference"));
+        _ = relational_driver_run.captureStdOut(.{});
+        relational_driver_run.step.dependOn(&relational_reference_run.step);
+        native_driver_step.dependOn(&relational_driver_run.step);
+        ts_core_e2e_step.dependOn(&relational_driver_run.step);
+        test_step.dependOn(&relational_driver_run.step);
+
+        const hold_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        hold_policy_reference_run.setCwd(b.path("examples/hold-policy"));
+        hold_policy_reference_run.has_side_effects = true;
+        hold_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        hold_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/hold-policy-view-reference"));
+        _ = hold_policy_reference_run.captureStdOut(.{});
+        const hold_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        hold_policy_driver_run.setCwd(b.path("examples/hold-policy"));
+        hold_policy_driver_run.has_side_effects = true;
+        hold_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        hold_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/hold-policy-view-reference"));
+        _ = hold_policy_driver_run.captureStdOut(.{});
+        hold_policy_driver_run.step.dependOn(&hold_policy_reference_run.step);
+        native_driver_step.dependOn(&hold_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&hold_policy_driver_run.step);
+        test_step.dependOn(&hold_policy_driver_run.step);
+        b.step("test-hold-policy", "Compare complete gesture lab snapshots and replay across view backends").dependOn(&hold_policy_driver_run.step);
+
+        const theme_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        theme_policy_reference_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_reference_run.has_side_effects = true;
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        theme_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_reference_run.captureStdOut(.{});
+        const theme_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        theme_policy_driver_run.setCwd(b.path("examples/theme-policy"));
+        theme_policy_driver_run.has_side_effects = true;
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        theme_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/theme-policy-view-reference"));
+        _ = theme_policy_driver_run.captureStdOut(.{});
+        theme_policy_driver_run.step.dependOn(&theme_policy_reference_run.step);
+        native_driver_step.dependOn(&theme_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&theme_policy_driver_run.step);
+        test_step.dependOn(&theme_policy_driver_run.step);
+
+        const text_policy_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        text_policy_reference_run.setCwd(b.path("examples/text-policy"));
+        text_policy_reference_run.has_side_effects = true;
+        text_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        text_policy_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/text-policy-view-reference"));
+        _ = text_policy_reference_run.captureStdOut(.{});
+        const text_policy_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        text_policy_driver_run.setCwd(b.path("examples/text-policy"));
+        text_policy_driver_run.has_side_effects = true;
+        text_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        text_policy_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/text-policy-view-reference"));
+        _ = text_policy_driver_run.captureStdOut(.{});
+        text_policy_driver_run.step.dependOn(&text_policy_reference_run.step);
+        native_driver_step.dependOn(&text_policy_driver_run.step);
+        ts_core_e2e_step.dependOn(&text_policy_driver_run.step);
+        test_step.dependOn(&text_policy_driver_run.step);
+        const inbox_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        inbox_reference_run.setCwd(b.path("examples/ui-inbox"));
+        inbox_reference_run.has_side_effects = true;
+        inbox_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        inbox_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/inbox-view-reference"));
+        _ = inbox_reference_run.captureStdOut(.{});
+        const inbox_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        inbox_driver_run.setCwd(b.path("examples/ui-inbox"));
+        inbox_driver_run.has_side_effects = true;
+        inbox_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        inbox_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/inbox-view-reference"));
+        _ = inbox_driver_run.captureStdOut(.{});
+        inbox_driver_run.step.dependOn(&inbox_reference_run.step);
+        b.step("test-ts-inbox-driver", "Compare complete ui-inbox snapshots and sealed replay across view backends").dependOn(&inbox_driver_run.step);
+        native_driver_step.dependOn(&inbox_driver_run.step);
+        ts_core_e2e_step.dependOn(&inbox_driver_run.step);
+        test_step.dependOn(&inbox_driver_run.step);
+        const canvas_preview_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        canvas_preview_reference_run.setCwd(b.path("examples/canvas-preview"));
+        canvas_preview_reference_run.has_side_effects = true;
+        canvas_preview_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        canvas_preview_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/canvas_preview-view-reference"));
+        _ = canvas_preview_reference_run.captureStdOut(.{});
+        const canvas_preview_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        canvas_preview_driver_run.setCwd(b.path("examples/canvas-preview"));
+        canvas_preview_driver_run.has_side_effects = true;
+        canvas_preview_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        canvas_preview_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/canvas_preview-view-reference"));
+        _ = canvas_preview_driver_run.captureStdOut(.{});
+        canvas_preview_driver_run.step.dependOn(&canvas_preview_reference_run.step);
+        b.step("test-ts-canvas-preview-driver", "Compare complete canvas-preview snapshots and sealed replay across view backends").dependOn(&canvas_preview_driver_run.step);
+        native_driver_step.dependOn(&canvas_preview_driver_run.step);
+        ts_core_e2e_step.dependOn(&canvas_preview_driver_run.step);
+        test_step.dependOn(&canvas_preview_driver_run.step);
+        const habits_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        habits_reference_run.setCwd(b.path("examples/habits"));
+        habits_reference_run.has_side_effects = true;
+        habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        habits_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
+        const habits_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        habits_driver_run.setCwd(b.path("examples/habits"));
+        habits_driver_run.has_side_effects = true;
+        habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        habits_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/habits-view-reference"));
+        habits_driver_run.step.dependOn(&habits_reference_run.step);
+        native_driver_step.dependOn(&habits_driver_run.step);
+        ts_core_e2e_step.dependOn(&habits_driver_run.step);
+        test_step.dependOn(&habits_driver_run.step);
+        b.step("test-habits", "Compare complete Habits snapshots and replay across view backends").dependOn(&habits_driver_run.step);
+
+        const code_workbench_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        code_workbench_reference_run.setCwd(b.path("examples/code-workbench"));
+        code_workbench_reference_run.has_side_effects = true;
+        code_workbench_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        code_workbench_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/code-workbench-view-reference"));
+        _ = code_workbench_reference_run.captureStdOut(.{});
+        const code_workbench_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        code_workbench_driver_run.setCwd(b.path("examples/code-workbench"));
+        code_workbench_driver_run.has_side_effects = true;
+        code_workbench_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        code_workbench_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/code-workbench-view-reference"));
+        _ = code_workbench_driver_run.captureStdOut(.{});
+        code_workbench_driver_run.step.dependOn(&code_workbench_reference_run.step);
+        native_driver_step.dependOn(&code_workbench_driver_run.step);
+        ts_core_e2e_step.dependOn(&code_workbench_driver_run.step);
+        test_step.dependOn(&code_workbench_driver_run.step);
+        const gallery_reference_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null", "-Dtypescript-view=false" });
+        gallery_reference_run.setCwd(b.path("examples/gpu-components"));
+        gallery_reference_run.has_side_effects = true;
+        gallery_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "zig");
+        gallery_reference_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/gallery-view-reference"));
+        _ = gallery_reference_run.captureStdOut(.{});
+        const gallery_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        gallery_driver_run.setCwd(b.path("examples/gpu-components"));
+        gallery_driver_run.has_side_effects = true;
+        gallery_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        gallery_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_REFERENCE", b.pathFromRoot(".zig-cache/gallery-view-reference"));
+        _ = gallery_driver_run.captureStdOut(.{});
+        gallery_driver_run.step.dependOn(&gallery_reference_run.step);
+        native_driver_step.dependOn(&gallery_driver_run.step);
+        ts_core_e2e_step.dependOn(&gallery_driver_run.step);
+        test_step.dependOn(&gallery_driver_run.step);
+        b.step("test-component-gallery", "Compare every component gallery specimen and replay across view backends").dependOn(&gallery_driver_run.step);
+        const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
+        for ([_][]const u8{ "scriptc_toolchain.test.ts", "compiler_command.test.ts", "external_core_compiler.test.ts", "package_manifest.test.ts" }) |file| {
+            native_api_tests.addFileArg(b.path(b.fmt("packages/core/test/{s}", .{file})));
+        }
+        native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_appearance.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/component_construction.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/command_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/status_validation.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_motion.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_audits.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_routing.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_changes.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_retention.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_reconcile.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/scroll_tree.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_continuity.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/staged_rebuild.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/virtual_windows.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/context_menus.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_paint.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_presentation.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_paint_walk.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_geometry.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_content.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/surface_recipes.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/widget_metrics.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/layout_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/render_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/canvas_hooks.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_commands.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_payloads.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/control_primitives.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/leaf_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/chart_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/indicator_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/effect_plans.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/paragraph_layout.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_run_layout.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_query_layout.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_measurement_cache.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_document_width.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/scalar_text.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/glyph_atlas.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/registered_font.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/vector_effects.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/render_resources.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/gpu_planning.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/gpu_presentation.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/canvas_frame_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/canvas_scene_observation.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/canvas_presentation_lifecycle.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/input_composition.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/host_input_regions.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_coordination.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/window_lifecycle.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/image_registry.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/vector_raster.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/text_span_queries.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/component_composition.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_frontend.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_check.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_evaluator.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_reload.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/editor_declarations.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/declarations.test.ts"));
+        native_api_tests.addFileArg(b.path("packages/core/test/view_provenance.test.ts"));
+        native_api_tests.has_side_effects = true;
+        _ = native_api_tests.captureStdOut(.{});
+        _ = native_api_tests.captureStdErr(.{});
+        native_driver_step.dependOn(&native_api_tests.step);
+        ts_core_e2e_step.dependOn(&native_api_tests.step);
+        test_step.dependOn(&native_api_tests.step);
+        ts_core_e2e_step.dependOn(&native_driver_run.step);
+        test_step.dependOn(&native_driver_run.step);
+        const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
+        const persist_e2e_run = b.addRunArtifact(ts_core_artifacts.persist);
+        const runtime_model_step = b.step("test-ts-runtime-model", "Verify compiled model projections, lazy snapshots, persistence and effects");
+        const runtime_model_host = filteredTestArtifact(b, ts_core_artifacts.host.root_module, "ts-runtime-model-host-tests", &.{"compiled host projects"});
+        const runtime_model_persist = filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-runtime-model-persist-tests", &.{ "compiled runtime model", "persist", "migration", "restore", "lifecycle" });
+        runtime_model_step.dependOn(&b.addRunArtifact(runtime_model_host).step);
+        runtime_model_step.dependOn(&b.addRunArtifact(runtime_model_persist).step);
+        b.step("test-ts-control-appearance", "Compare complete compiled control appearance with native behavior").dependOn(&persist_e2e_run.step);
+        b.step("test-ts-widget-routing", "Compare complete compiled input routing and focus with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_routing).step);
+        b.step("test-ts-widget-changes", "Compare complete compiled retained widget changes with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_changes).step);
+        b.step("test-ts-widget-paint-walk", "Compare complete compiled retained paint traversal with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_paint_walk).step);
+        b.step("test-ts-control-geometry", "Compare complete compiled control and scroll geometry with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.control_geometry).step);
+        b.step("test-ts-control-content", "Compare compiled control content and editing chrome with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.control_content).step);
+        b.step("test-ts-paragraph-layout", "Compare complete compiled paragraph layout and font measurement continuations").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-paragraph-layout-tests", &.{ "compiled widget metric paragraphs", "paragraph copied transport" })).step);
+        b.step("test-ts-text-query-layout", "Compare complete compiled text traversal, bounds, selection and neighbor queries").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-query-layout-tests", &.{ "compiled text runs", "compiled text bounds", "compiled text query", "text query copied transport", "text run copied transport", "portable text planner context" })).step);
+        b.step("test-ts-text-measurement-cache", "Compare measured advance and retained paragraph cache decisions and complete outputs").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-measurement-cache-tests", &.{ "compiled widget metric measured cache", "measured text copied transport" })).step);
+        b.step("test-ts-text-document-width", "Compare compiled document width planning, retained cache decisions and font call traces").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-document-width-tests", &.{ "compiled document width", "document width copied transport" })).step);
+        b.step("test-ts-scalar-text", "Compare compiled scalar text fallback, exact arithmetic and font capability traces").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-scalar-text-tests", &.{ "compiled scalar text", "scalar text copied transport" })).step);
+        b.step("test-ts-registered-font", "Compare compiled registered font widths, byte advances and ink bounds").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-registered-font-tests", &.{"compiled registered font"})).step);
+        b.step("test-ts-text-span-queries", "Compare rich-text clipping, point mapping and complete paged selection").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-span-query-tests", &.{ "compiled span query", "span query copied transport" })).step);
+        b.step("test-ts-text-run-layout", "Compare compiled ordinary text lines, elision and caret geometry").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.widget_metrics.root_module, "ts-text-run-layout-tests", &.{ "compiled text runs", "compiled text bounds", "text run copied transport", "portable text planner context" })).step);
+        b.step("test-ts-widget-metrics", "Compare complete compiled widget metrics and leaf dimensions with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_metrics).step);
+        b.step("test-ts-surface-recipes", "Compare compiled surface chrome recipes with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.surface_recipes).step);
+        b.step("test-ts-widget-presentation", "Compare complete compiled retained presentation with the native reference").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_presentation).step);
+        b.step("test-ts-widget-audits", "Compare compiled accessibility and layout audits with native rules").dependOn(&b.addRunArtifact(ts_core_artifacts.widget_audits).step);
+        b.step("test-ts-markdown-content", "Compare complete compiled Markdown with native behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.markdown_content).step);
+        b.step("test-ts-component-construction", "Compare complete compiled construction with native behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.construction).step);
+        const composition_view_run = b.addRunArtifact(ts_core_artifacts.composition_view);
+        const composition_step = b.step("test-ts-component-composition", "Compare complete compiled composition recipes with native behavior");
+        composition_step.dependOn(&b.addRunArtifact(ts_core_artifacts.composition).step);
+        composition_step.dependOn(&composition_view_run.step);
+        const composition_app_run = b.addRunArtifact(ts_core_artifacts.composition_app);
+        composition_step.dependOn(&composition_app_run.step);
+        ts_core_e2e_step.dependOn(&composition_app_run.step);
+        test_step.dependOn(&composition_app_run.step);
+        const view_reload_run = b.addRunArtifact(ts_core_artifacts.view_reload);
+        b.step("test-ts-view-reload", "Reload compiled TypeScript views from markup edits while the model and widget state persist").dependOn(&view_reload_run.step);
+        const view_provenance_run = b.addRunArtifact(ts_core_artifacts.view_provenance);
+        b.step("test-ts-view-provenance", "Compare compiled view provenance and write-back spans with the native markup interpreter").dependOn(&view_provenance_run.step);
+        ts_core_e2e_step.dependOn(&view_provenance_run.step);
+        test_step.dependOn(&view_provenance_run.step);
+        ts_core_e2e_step.dependOn(&view_reload_run.step);
+        test_step.dependOn(&view_reload_run.step);
+        ts_core_e2e_step.dependOn(&composition_view_run.step);
+        test_step.dependOn(&composition_view_run.step);
+        b.step("test-ts-widget-motion", "Compare compiled widget motion with native runtime behavior").dependOn(&b.addRunArtifact(ts_core_artifacts.motion).step);
+        b.step("test-ts-component-policy", "Compare compiled component coordination with native behavior").dependOn(&persist_e2e_run.step);
+        b.step("test-ts-replay-policy", "Compare compiled replay admission with native behavior").dependOn(&persist_e2e_run.step);
+        b.step("test-ts-dispatch-policy", "Compare compiled app dispatch coordination with native behavior").dependOn(&persist_e2e_run.step);
+        b.step("test-ts-lifecycle-policy", "Compare compiled app lifecycle coordination and persistence with native behavior").dependOn(&persist_e2e_run.step);
+        const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
+        const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
+        const workbench_run = b.addRunArtifact(ts_core_artifacts.workbench);
+        b.step("test-ts-workbench-e2e", "Compare compiled Workbench with complete native behavior").dependOn(&workbench_run.step);
+        ts_core_e2e_step.dependOn(&workbench_run.step);
+        test_step.dependOn(&workbench_run.step);
+        const feed_run = b.addRunArtifact(ts_core_artifacts.feed);
+        b.step("test-ts-feed-e2e", "Compare compiled Feed with complete native model, viewport, and replay behavior").dependOn(&feed_run.step);
+        ts_core_e2e_step.dependOn(&feed_run.step);
+        test_step.dependOn(&feed_run.step);
+        const split_collapse_run = b.addRunArtifact(ts_core_artifacts.split_collapse);
+        b.step("test-ts-split-collapse-e2e", "Compare compiled Split Collapse with complete native timing and view behavior").dependOn(&split_collapse_run.step);
+        ts_core_e2e_step.dependOn(&split_collapse_run.step);
+        test_step.dependOn(&split_collapse_run.step);
+        const canvas_layers_run = b.addRunArtifact(ts_core_artifacts.canvas_layers);
+        b.step("test-ts-canvas-layers", "Compare complete compiled chrome layers, ownership and retained replay").dependOn(&canvas_layers_run.step);
+        ts_core_e2e_step.dependOn(&canvas_layers_run.step);
+        test_step.dependOn(&canvas_layers_run.step);
+        const audio_exact_run = b.addRunArtifact(ts_core_artifacts.audio_exact);
+        b.step("test-ts-audio-exact", "Compare exact compiled audio capabilities, ownership and effect replay").dependOn(&audio_exact_run.step);
+        ts_core_e2e_step.dependOn(&audio_exact_run.step);
+        test_step.dependOn(&audio_exact_run.step);
+        const spawn_exact_run = b.addRunArtifact(ts_core_artifacts.spawn_exact);
+        b.step("test-ts-spawn-exact", "Compare exact compiled subprocess routing, ownership and effect replay").dependOn(&spawn_exact_run.step);
+        ts_core_e2e_step.dependOn(&spawn_exact_run.step);
+        test_step.dependOn(&spawn_exact_run.step);
+        const boot_images_run = b.addRunArtifact(ts_core_artifacts.boot_images);
+        b.step("test-ts-boot-images", "Compare synchronous compiled image startup, complete results and native pixel ownership").dependOn(&boot_images_run.step);
+        ts_core_e2e_step.dependOn(&boot_images_run.step);
+        test_step.dependOn(&boot_images_run.step);
+        const deck_driver_run = managedExampleRun(b, host_cli_exe, &.{ "test", "-Dplatform=null" });
+        deck_driver_run.setCwd(b.path("examples/deck"));
+        deck_driver_run.has_side_effects = true;
+        deck_driver_run.setEnvironmentVariable("NATIVE_SDK_TEST_VIEW_BACKEND", "typescript");
+        _ = deck_driver_run.captureStdOut(.{});
+        b.step("test-ts-deck-app-driver", "Run the compiled Deck player and playlist through complete snapshots and replay").dependOn(&deck_driver_run.step);
+        ts_core_e2e_step.dependOn(&deck_driver_run.step);
+        test_step.dependOn(&deck_driver_run.step);
+        const deck_run = b.addRunArtifact(ts_core_artifacts.deck);
+        b.step("test-ts-deck-e2e", "Compare complete Deck state, views, capabilities and replay with the native reference").dependOn(&deck_run.step);
+        b.step("test-ts-deck-integration", "Run Deck whole-app snapshots, theme, chrome and sealed replay").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.deck.root_module, "ts-deck-integration-tests", &.{ "Deck whole", "Deck complete theme" })).step);
+        ts_core_e2e_step.dependOn(&deck_run.step);
+        test_step.dependOn(&deck_run.step);
+        const gpu_dashboard_run = b.addRunArtifact(ts_core_artifacts.gpu_dashboard);
+        b.step("test-ts-gpu-dashboard-e2e", "Compare complete GPU Dashboard models, views, chrome, animations and replay").dependOn(&gpu_dashboard_run.step);
+        ts_core_e2e_step.dependOn(&gpu_dashboard_run.step);
+        test_step.dependOn(&gpu_dashboard_run.step);
+        const channel_monitor_run = b.addRunArtifact(ts_core_artifacts.channel_monitor);
+        b.step("test-ts-channel-monitor-e2e", "Compare compiled Channel Monitor with complete native channel and replay behavior").dependOn(&channel_monitor_run.step);
+        ts_core_e2e_step.dependOn(&channel_monitor_run.step);
+        test_step.dependOn(&channel_monitor_run.step);
+        const code_editor_run = b.addRunArtifact(ts_core_artifacts.code_editor);
+        b.step("test-ts-code-editor-e2e", "Compare compiled Code Editor with complete native behavior").dependOn(&code_editor_run.step);
+        ts_core_e2e_step.dependOn(&code_editor_run.step);
+        test_step.dependOn(&code_editor_run.step);
+        const markdown_viewer_run = b.addRunArtifact(ts_core_artifacts.markdown_viewer);
+        b.step("test-ts-markdown-viewer-e2e", "Compare compiled Markdown Viewer with complete native behavior").dependOn(&markdown_viewer_run.step);
+        ts_core_e2e_step.dependOn(&markdown_viewer_run.step);
+        test_step.dependOn(&markdown_viewer_run.step);
+        const notes_run = b.addRunArtifact(ts_core_artifacts.notes);
+        b.step("test-ts-notes-e2e", "Compare compiled Notes with the complete native reference").dependOn(&notes_run.step);
+        ts_core_e2e_step.dependOn(&notes_run.step);
+        test_step.dependOn(&notes_run.step);
+        const effects_probe_run = b.addRunArtifact(ts_core_artifacts.effects_probe);
+        b.step("test-ts-effects-probe-e2e", "Compare compiled effects-probe with complete native behavior").dependOn(&effects_probe_run.step);
+        ts_core_e2e_step.dependOn(&effects_probe_run.step);
+        test_step.dependOn(&effects_probe_run.step);
+        const video_player_run = b.addRunArtifact(ts_core_artifacts.video_player);
+        b.step("test-ts-video-player-e2e", "Compare compiled video-player with complete native behavior").dependOn(&video_player_run.step);
+        ts_core_e2e_step.dependOn(&video_player_run.step);
+        test_step.dependOn(&video_player_run.step);
+        const inbox_run = b.addRunArtifact(ts_core_artifacts.inbox);
+        b.step("test-ts-inbox-e2e", "Compare compiled Inbox with the native behavior reference").dependOn(&inbox_run.step);
+        ts_core_e2e_step.dependOn(&inbox_run.step);
+        test_step.dependOn(&inbox_run.step);
+        const canvas_preview_run = b.addRunArtifact(ts_core_artifacts.canvas_preview);
+        b.step("test-ts-canvas-preview-e2e", "Compare compiled Canvas Preview with the native behavior reference").dependOn(&canvas_preview_run.step);
+        ts_core_e2e_step.dependOn(&canvas_preview_run.step);
+        test_step.dependOn(&canvas_preview_run.step);
+        const habits_e2e_run = b.addRunArtifact(ts_core_artifacts.habits);
+        addTestStep(b, "test-ts-habits-e2e", "Compare compiled Habits with the native behavior reference", ts_core_artifacts.habits);
+        ts_core_e2e_step.dependOn(&habits_e2e_run.step);
+        test_step.dependOn(&habits_e2e_run.step);
+        const soundboard_e2e_run = b.addRunArtifact(ts_core_artifacts.soundboard);
+        const monitor_e2e_run = b.addRunArtifact(ts_core_artifacts.system_monitor);
+        addTestStep(b, "test-ts-soundboard-e2e", "Run the compiled Soundboard application battery", ts_core_artifacts.soundboard);
+        addTestStep(b, "test-ts-system-monitor-e2e", "Run the compiled System Monitor application battery", ts_core_artifacts.system_monitor);
+        const scaffold_ide_e2e_run = b.addRunArtifact(ts_core_artifacts.scaffold_ide);
+        // The suite scaffolds and typechecks real trees under .zig-cache;
+        // no build inputs/outputs to hash, so always run it.
+        scaffold_ide_e2e_run.has_side_effects = true;
+        const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
+        b.step("test-ts-chart-content", "Compare complete compiled chart preparation with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-chart-content-tests", &.{"compiled chart content"})).step);
+        b.step("test-ts-code-content", "Compare complete compiled code spans and carried state with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.persist.root_module, "ts-code-content-tests", &.{"compiled code content"})).step);
+        const chart_app_run = b.addRunArtifact(ts_core_artifacts.chart_app);
+        const chart_view_run = b.addRunArtifact(ts_core_artifacts.chart_view);
+        const chart_step = b.step("test-ts-chart-app", "Verify generated chart views and copied data ownership");
+        chart_step.dependOn(&chart_app_run.step);
+        chart_step.dependOn(&chart_view_run.step);
+        ts_core_e2e_step.dependOn(&chart_app_run.step);
+        test_step.dependOn(&chart_app_run.step);
+        ts_core_e2e_step.dependOn(&chart_view_run.step);
+        test_step.dependOn(&chart_view_run.step);
+        const code_app_run = b.addRunArtifact(ts_core_artifacts.code_app);
+        const code_view_run = b.addRunArtifact(ts_core_artifacts.code_view);
+        const code_app_step = b.step("test-ts-code-app", "Verify complete generated code views and owned typed input");
+        code_app_step.dependOn(&code_app_run.step);
+        code_app_step.dependOn(&code_view_run.step);
+        ts_core_e2e_step.dependOn(&code_app_run.step);
+        test_step.dependOn(&code_app_run.step);
+        ts_core_e2e_step.dependOn(&code_view_run.step);
+        test_step.dependOn(&code_view_run.step);
+        const markdown_app_run = b.addRunArtifact(ts_core_artifacts.markdown_app);
+        const markdown_view_run = b.addRunArtifact(ts_core_artifacts.markdown_view);
+        const markdown_app_step = b.step("test-ts-markdown-app", "Verify generated Markdown views, typed routes and owned recipes");
+        markdown_app_step.dependOn(&markdown_app_run.step);
+        markdown_app_step.dependOn(&markdown_view_run.step);
+        ts_core_e2e_step.dependOn(&markdown_app_run.step);
+        test_step.dependOn(&markdown_app_run.step);
+        ts_core_e2e_step.dependOn(&markdown_view_run.step);
+        test_step.dependOn(&markdown_view_run.step);
+        const feed_reader_e2e_run = b.addRunArtifact(ts_core_artifacts.feed_reader);
+        const journal_codecs_run = b.addRunArtifact(ts_core_artifacts.journal_codecs);
+        const journal_codecs_step = b.step("test-ts-journal-codecs", "Compare complete compiled journal codecs with the independent native reference");
+        journal_codecs_step.dependOn(&journal_codecs_run.step);
+        const file_reference_files = b.addWriteFiles();
+        const callback_reference_files = b.addWriteFiles();
+        ts_core_artifacts.feed_reader.root_module.addImport("callback_policy_reference", b.createModule(.{ .root_source_file = callback_reference_files.addCopyFile(b.path("src/runtime/callback_policy_test_reference.zig"), "callback_policy_reference.zig"), .target = target, .optimize = optimize }));
+        b.step("test-ts-callback-policy", "Compare compiled buffered and timer completion policy with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-callback-policy-tests", &.{"compiled callback coordination"})).step);
+        ts_core_artifacts.feed_reader.root_module.addImport("file_policy_reference", b.createModule(.{ .root_source_file = file_reference_files.addCopyFile(b.path("src/runtime/file_policy_test_reference.zig"), "file_policy_reference.zig"), .target = target, .optimize = optimize }));
+        b.step("test-ts-file-policy", "Compare compiled file stream and clipboard coordination with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-file-policy-tests", &.{"compiled file coordination"})).step);
+        const request_reference_files = b.addWriteFiles();
+        ts_core_artifacts.feed_reader.root_module.addImport("request_policy_reference", b.createModule(.{ .root_source_file = request_reference_files.addCopyFile(b.path("src/runtime/request_policy_test_reference.zig"), "request_policy_reference.zig"), .target = target, .optimize = optimize }));
+        b.step("test-ts-request-policy", "Compare compiled request routing cancellation and credential plans with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-request-policy-tests", &.{"compiled request"})).step);
+        const media_policy_step = b.step("test-ts-media-policy", "Verify compiled media lifecycle and transport decisions against the native reference");
+        media_policy_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-media-policy-tests", &.{"compiled media"})).step);
+        const shell_layout_e2e_run = b.addRunArtifact(ts_core_artifacts.shell_layout);
+        addTestStep(b, "test-ts-shell-layout-e2e", "Run compiled shell planning, ownership, and OS application parity", ts_core_artifacts.shell_layout);
+        ts_core_e2e_step.dependOn(&shell_layout_e2e_run.step);
+        test_step.dependOn(&shell_layout_e2e_run.step);
+        const typography_run = b.addRunArtifact(ts_core_artifacts.typography);
+        b.step("test-ts-typography-e2e", "Verify compiled token overrides and registered rich paragraphs").dependOn(&typography_run.step);
+        ts_core_e2e_step.dependOn(&typography_run.step);
+        test_step.dependOn(&typography_run.step);
+        const surface_layout_run = b.addRunArtifact(ts_core_artifacts.surface_layout);
+        const surface_layout_step = b.step("test-ts-surface-layout-e2e", "Compare compiled floating-surface placement with native layout and ABI ownership");
+        surface_layout_step.dependOn(&surface_layout_run.step);
+        const virtual_fixed_run = b.addRunArtifact(ts_core_artifacts.virtual_fixed);
+        surface_layout_step.dependOn(&virtual_fixed_run.step);
+        b.step("test-ts-virtual-fixed", "Build and exercise fixed-only virtual view mirror capabilities").dependOn(&virtual_fixed_run.step);
+        b.step("test-ts-accessibility-publication", "Compare complete compiled accessibility projection and runtime publication").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-accessibility-publication-tests", &.{"compiled accessibility"})).step);
+        b.step("test-ts-command-coordination", "Compare complete compiled command routing and native registry ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-command-coordination-tests", &.{"compiled command"})).step);
+        b.step("test-ts-vector-derivation", "Compare compiled vector and effect derivation without runtime frame setup").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-derivation-tests", &.{ "compiled vector resources preserve", "vector resource copied transport" })).step);
+        b.step("test-ts-render-resources", "Compare complete compiled image layer and resource derivation").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-render-resource-tests", &.{ "compiled render resources", "render resource copied transport" })).step);
+        b.step("test-ts-gpu-packet-preparation", "Compare complete compiled retained packet identities and edits").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-gpu-packet-preparation-tests", &.{ "compiled GPU packet preparation", "packet preparation copied transport" })).step);
+        b.step("test-ts-render-animation", "Compare complete compiled animation lifecycle and replacement damage").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-render-animation-tests", &.{ "compiled render animation", "compiled motion sampling" })).step);
+        b.step("test-ts-canvas-scene-observation", "Compare complete compiled scene summaries and presentation preparation").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-canvas-scene-observation-tests", &.{ "compiled scene observation", "compiled GPU presentation runtime" })).step);
+        const input_composition_step = b.step("test-ts-input-composition", "Compare compiled input normalization and complete composition ownership");
+        input_composition_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-input-composition-tests", &.{ "compiled input composition", "input composition transport" })).step);
+        input_composition_step.dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.feed_reader.root_module, "ts-input-selection-ownership-tests", &.{"compiled selection press decisions own"})).step);
+        b.step("test-ts-host-input-regions", "Compare complete compiled host scroll and window-drag region ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-host-input-regions-tests", &.{"compiled host input regions"})).step);
+        b.step("test-ts-window-lifecycle", "Compare complete compiled window capability and activation coordination").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-window-lifecycle-tests", &.{"compiled window lifecycle"})).step);
+        b.step("test-ts-image-registry", "Compare compiled image registration and media texture ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-image-registry-tests", &.{"compiled image registry"})).step);
+        b.step("test-ts-shell-coordination", "Compare compiled shell installation and rollback ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-shell-coordination-tests", &.{"compiled shell coordination"})).step);
+        b.step("test-ts-shell-admission", "Compare complete compiled scene hierarchy and runtime descriptor admission").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-shell-admission-tests", &.{"compiled shell admission"})).step);
+        b.step("test-ts-authorization", "Compare compiled authorization and complete bridge responses against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-authorization-tests", &.{"compiled authorization"})).step);
+        b.step("test-ts-builtin-coordination", "Compare complete builtin bridge coordination against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-builtin-coordination-tests", &.{"compiled builtin coordination"})).step);
+        b.step("test-ts-widget-retention", "Compare complete retained widget collections and autofocus with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-retention-tests", &.{"compiled widget retention"})).step);
+        b.step("test-ts-context-menus", "Compare compiled context menus with complete native request and action races").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-context-menu-tests", &.{ "compiled context menus", "compiled automation interactions preserve context-menu" })).step);
+        b.step("test-ts-web-panes", "Compare complete compiled embedded WebView pane coordination with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-web-pane-tests", &.{"compiled web panes"})).step);
+        b.step("test-ts-extent-program", "Compare compiled retained-table programs with complete native state and callback order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-extent-program-tests", &.{ "compiled extent", "compiled estimate", "compiled variable" })).step);
+        b.step("test-ts-markup-expressions", "Compare complete compiled markup expression programs with native values and failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-expression-tests", &.{ "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-text", "Compare compiled markup text/calendar bytes, ownership and allocation failures with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-text-tests", &.{ "compiled markup text", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-display", "Compare compiled interpolation and numeric display assembly with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-display-tests", &.{ "compiled markup display", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-scalars", "Compare compiled exact scalar expression semantics with native behavior").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-scalar-tests", &.{ "compiled markup scalars", "compiled markup expressions", "compiled markup display", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-parser", "Compare compiled runtime expression trees, diagnostics and borrowed ownership with native parsing").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-parser-tests", &.{ "compiled markup parser", "compiled markup expressions", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-document", "Compare compiled runtime markup documents, failure order and borrowed source ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-document-tests", &.{ "compiled markup document", "compiled markup parser", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-imports", "Compare compiled import closures, exact loader order and arena failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-import-tests", &.{ "compiled markup imports", "compiled markup document", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-canonical", "Compare complete compiled typed documents, borrowed aliases and allocation failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-canonical-tests", &.{ "compiled markup canonicalization", "compiled markup imports", "compiled markup document", "compiled markup parser", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-construction", "Compare complete runtime construction, lexical scope, callback order and arena failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-construction-tests", &.{ "compiled markup construction", "compiled markup canonicalization", "compiled markup development", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-elements", "Compare complete runtime elements, attributes, handlers and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-element-tests", &.{ "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-specialized", "Compare complete runtime elements, attributes, handlers and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-specialized-tests", &.{ "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-shapes", "Compare compiled shared shape and text diagnostics with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-shapes-tests", &.{ "compiled markup shapes", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-options", "Compare compiled option admission, exact scale conversion and complete builder failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-option-tests", &.{ "compiled markup options", "compiled markup metadata", "compiled markup values", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-numeric", "Compare exact numeric options and virtual-window defaults, ranges and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-numeric-tests", &.{ "compiled markup numeric", "compiled markup specialized", "compiled markup options" })).step);
+        b.step("test-ts-static-markup-values", "Compare static markup dynamic values, exact payloads, keys and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-value-tests", &.{ "static markup values", "compiled markup values" })).step);
+        b.step("test-ts-static-markup-collections", "Compare static virtual windows, row consumption, exact keys, stepper indices and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-collection-tests", &.{ "static markup collections", "compiled markup numeric", "compiled markup specialized" })).step);
+        b.step("test-ts-static-markup-expansion", "Compare static branches, item sequencing, lexical captures, exact inherited keys and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-expansion-tests", &.{ "static markup expansion", "static markup collections" })).step);
+        b.step("test-ts-static-markup-specialized", "Compare static specialized metadata, forwarded handlers, tab triggers and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-specialized-tests", &.{ "static markup", "compiled markup values", "compiled markup metadata", "compiled markup options", "compiled markup postprocessing", "compiled markup numeric", "compiled markup admission", "compiled markup literals" })).step);
+        b.step("test-ts-static-markup-typography", "Compare static spans, interpolation, callback order and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-typography-tests", &.{ "static markup", "compiled markup specialized", "compiled markup runtime" })).step);
+        b.step("test-ts-static-markup-builders", "Compare static forms, timelines, charts, video and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-builder-tests", &.{ "static markup builders", "compiled markup specialized" })).step);
+        b.step("test-ts-static-markup-content", "Compare static markdown, code and stepper construction and complete failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-static-markup-content-tests", &.{ "static markup content builders", "compiled markup specialized" })).step);
+        b.step("test-ts-markup-postprocessing", "Compare forwarded handlers, provenance, tabs and borrowed binding paths").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-postprocessing-tests", &.{ "compiled markup postprocessing", "compiled markup literals", "compiled markup admission", "compiled markup construction" })).step);
+        b.step("test-ts-markup-literals", "Compare exact literal inference, template defaults and lexical capture ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-literal-tests", &.{ "compiled markup literals", "compiled markup admission", "compiled markup construction" })).step);
+        b.step("test-ts-markup-admission", "Compare specialized attribute forms, raw flags and complete eager failure effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-admission-tests", &.{ "compiled markup admission", "compiled markup specialized", "compiled markup options", "compiled markup metadata" })).step);
+        b.step("test-ts-markup-metadata", "Compare compiled icon and code metadata with native grammar, storage and builder effects").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-metadata-tests", &.{ "compiled markup metadata", "compiled markup values", "compiled markup specialized", "compiled markup elements" })).step);
+        b.step("test-ts-markup-classification", "Compare runtime classification, cached ownership and complete builder parity").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-classification-tests", &.{ "compiled markup classification", "compiled markup canonicalization", "compiled markup runtime", "compiled markup specialized", "compiled markup elements", "compiled markup values" })).step);
+        b.step("test-ts-markup-runtime", "Compare runtime interpolation, collections, exact keys and callback ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-runtime-tests", &.{ "compiled markup runtime", "compiled markup values", "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-markup-values", "Compare exact runtime values, typed callbacks, lexical bindings and native failure order").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-values-tests", &.{ "compiled markup values", "compiled markup specialized", "compiled markup elements", "compiled markup construction", "compiled markup canonicalization", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-scroll-mutation", "Compare complete compiled scroll mutation programs with native state and effect ordering").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-scroll-mutation-tests", &.{ "compiled scroll mutation", "TypeScript app adapter supplies placement" })).step);
+        b.step("test-ts-virtual-windows", "Compare complete compiled virtual window coordination and fixed-only views").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-virtual-window-tests", &.{"compiled virtual window"})).step);
+        b.step("test-ts-staged-rebuild", "Compare complete compiled staged split and anchor rebuild programs").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-staged-rebuild-tests", &.{"compiled staged rebuild"})).step);
+        b.step("test-ts-widget-continuity", "Compare complete compiled rebuild semantics and fling continuity").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-continuity-tests", &.{"compiled widget continuity"})).step);
+        b.step("test-ts-scroll-tree", "Compare complete compiled retained scroll geometry and tab reveal traversal").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-scroll-tree-tests", &.{"compiled scroll tree"})).step);
+        b.step("test-ts-widget-reconcile", "Compare complete retained control and text reconciliation with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-widget-reconcile-tests", &.{"compiled widget reconciliation"})).step);
+        b.step("test-ts-host-flow", "Compare complete host event scheduling and runtime coordination with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-host-flow-tests", &.{"compiled host flow"})).step);
+        b.step("test-ts-terminal-paint", "Compare complete terminal paint programs and builder ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-terminal-paint-tests", &.{"compiled terminal paint"})).step);
+        b.step("test-ts-markup-development", "Compare complete markup reload and provenance with native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-markup-development-tests", &.{"compiled markup development"})).step);
+        b.step("test-ts-session-recording", "Compare compiled recording coordination, complete journals and failure transitions").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-session-recording-tests", &.{ "compiled session recording", "compiled input composition sealed journals" })).step);
+        b.step("test-ts-replay-progress", "Compare complete replay reports, target selection, blob validation and finalization").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-replay-progress-tests", &.{"compiled replay progress"})).step);
+        b.step("test-ts-session-journal", "Compare journal framing, complete readers, seals and hostile input mutations").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-session-journal-tests", &.{ "compiled journal", "compiled replay progress consumer" })).step);
+        b.step("test-ts-snapshot-coordination", "Compare complete snapshot projections and frame-profile rings against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-snapshot-coordination-tests", &.{"compiled snapshot"})).step);
+        b.step("test-ts-snapshot-serialization", "Compare complete snapshot text, accessibility, windows, escaping and writer failures").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-snapshot-serialization-tests", &.{"compiled snapshot"})).step);
+        b.step("test-ts-blob-coordination", "Compare complete blob-store decisions and consumers against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-blob-coordination-tests", &.{ "compiled blob", "compiled session recording", "compiled input composition sealed journals" })).step);
+        b.step("test-ts-automation-commands", "Compare complete compiled automation grammar and numeric admission against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-automation-command-tests", &.{"compiled automation commands"})).step);
+        b.step("test-ts-automation-interactions", "Compare complete compiled automation event streams and retained state against native references").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-automation-interaction-tests", &.{"compiled automation interactions"})).step);
+        b.step("test-ts-bridge-descriptors", "Compare compiled bridge descriptors, exact identities and borrowed origin buffers").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-bridge-descriptor-tests", &.{"compiled bridge descriptors"})).step);
+        b.step("test-ts-system-admission", "Compare compiled OS-service descriptors, refusal and native buffer ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-system-admission-tests", &.{"compiled system admission"})).step);
+        b.step("test-ts-font-registry", "Compare compiled font registration and refresh ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-font-registry-tests", &.{"compiled font registry"})).step);
+        b.step("test-ts-view-coordination", "Compare complete compiled cross-view focus and ancestry coordination").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-view-coordination-tests", &.{"compiled view coordination"})).step);
+        b.step("test-ts-canvas-presentation-lifecycle", "Compare complete compiled presentation lifecycle and native capability execution").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-canvas-presentation-lifecycle-tests", &.{ "compiled presentation lifecycle", "presentation lifecycle transport", "compiled GPU presentation runtime" })).step);
+        b.step("test-ts-canvas-frame-coordination", "Compare compiled frame admission and complete surface preparation").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-canvas-frame-coordination-tests", &.{ "compiled frame coordination", "canvas frame coordination copied transport", "compiled GPU presentation runtime" })).step);
+        b.step("test-ts-gpu-presentation", "Compare compiled retained presentation programs and runtime ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-gpu-presentation-tests", &.{ "compiled GPU presentation", "GPU presentation copied transport", "compiled GPU packet preparation gathers" })).step);
+        b.step("test-ts-gpu-planning", "Compare complete compiled GPU packet and encoder planning").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-gpu-planning-tests", &.{ "compiled GPU planning", "GPU planning copied transport", "both runtime damage consumers preserve", "both Runtime consumers preserve full override frames" })).step);
+        b.step("test-ts-vector-raster", "Compare compiled vector flattening stroke geometry and coverage with the native reference").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-raster-tests", &.{ "compiled vector raster", "vector raster copied transport" })).step);
+        b.step("test-ts-vector-effects", "Compare complete compiled vector geometry and visual effect resources").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-vector-effects-tests", &.{ "compiled vector resources", "vector resource copied transport" })).step);
+        b.step("test-ts-glyph-atlas", "Compare complete compiled glyph atlas construction and cache key ownership").dependOn(&b.addRunArtifact(filteredTestArtifact(b, ts_core_artifacts.surface_layout.root_module, "ts-glyph-atlas-tests", &.{ "compiled glyph atlas", "compiled text cache", "compiled text and glyph caches" })).step);
+        ts_core_e2e_step.dependOn(&surface_layout_run.step);
+        test_step.dependOn(&surface_layout_run.step);
+        const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
+        addTestStep(b, "test-ts-services-journal", "Verify devhost recordings replay through the packaged service carrier", filteredTestArtifact(b, ts_core_artifacts.services.root_module, "ts-services-journal-tests", &.{"a devhost-recorded service session"}));
+        const markup_components_e2e_step = b.step("test-ts-markup-components-e2e", "Run root component-file compiled, interpreter, automation, and replay coverage");
+        markup_components_e2e_step.dependOn(&markup_e2e_run.step);
+        markup_components_e2e_step.dependOn(&kanban_e2e_run.step);
+        markup_components_e2e_step.dependOn(&invalid_import_compile.step);
+        ts_services_e2e_step.dependOn(&feed_reader_e2e_run.step);
+        ts_services_e2e_step.dependOn(&services_e2e_run.step);
+        // The same fixture through the in-process carrier (ServicePool over
+        // the linked service archive): parallel keys, per-key FIFO,
+        // cooperative cancellation/deadlines, trap isolation, streaming,
+        // and replay without initializing the archive.
+        const services_pool_e2e_run: ?*std.Build.Step.Run = if (ts_core_artifacts.services_pool) |pool_tests| pool: {
+            const run = b.addRunArtifact(pool_tests);
+            ts_services_e2e_step.dependOn(&run.step);
+            b.step("test-ts-services-pool", "Run the complete in-process service pool suite (FIFO, deadlines, trap isolation, streaming and replay)").dependOn(&run.step);
+            break :pool run;
+        } else null;
+        // Service carrier benchmark: cold start, warm round-trip latency
+        // for small and large payloads, and queued throughput, through the
+        // production carrier bindings of BOTH carriers — the out-of-process
+        // child and the in-process pool — against one bytes-echo service
+        // (see tools/bench_service_host.zig).
+        const bench_service_host_run = b.addRunArtifact(ts_core_artifacts.service_host_bench);
+        bench_service_host_run.has_side_effects = true;
+        // Repo root as cwd so the generated service executable path and the
+        // benchmark's scratch directory resolve regardless of where
+        // `zig build` ran from.
+        bench_service_host_run.setCwd(b.path("."));
+        const bench_service_host_step = b.step("bench-service-host", "Run the service carrier benchmark over both carriers (cold start, round-trip latency, queued throughput; requires node and `npm ci` in packages/core; pass -Doptimize=ReleaseFast for baselines)");
+        bench_service_host_step.dependOn(&bench_service_host_run.step);
+        const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
+        const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
+        sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
+        const profile_tests_mod = module(b, b.graph.host, optimize, "tools/corewire/profile_tests.zig");
+        @import("build/corewire.zig").linkProfile(profile_tests_mod, ts_core_artifacts.profile_archive);
+        const profile_tests_run = b.addRunArtifact(testArtifact(b, profile_tests_mod));
+        const profile_step = b.step("test-corewire-profile", "Test the scriptc-compiled profile generator and its preserved output fixtures");
+        profile_step.dependOn(&profile_tests_run.step);
+        test_step.dependOn(&profile_tests_run.step);
+        const profile_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        profile_cli_tests.addFileArg(b.path("tools/corewire/profile.test.ts"));
+        profile_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        profile_cli_tests.addFileInput(b.path("tools/corewire/emit_profile.ts"));
+        profile_cli_tests.setCwd(b.path("."));
+        profile_cli_tests.has_side_effects = true;
+        profile_step.dependOn(&profile_cli_tests.step);
+        test_step.dependOn(&profile_cli_tests.step);
+        const core_policy_step = b.step("test-corewire-policy", "Test compiled core contract policy and both projection adapters");
+        const corewire_reference_mod = module(b, b.graph.host, optimize, "tools/corewire/main_reference.zig");
+        @import("build/corewire.zig").linkProfile(corewire_reference_mod, ts_core_artifacts.profile_archive);
+        const corewire_reference = b.addExecutable(.{ .name = "corewire-reference", .root_module = corewire_reference_mod });
+        const entry_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        entry_tests.addFileArg(b.path("tools/corewire/entry.test.ts"));
+        entry_tests.addArtifactArg(ts_core_artifacts.corewire);
+        entry_tests.addArtifactArg(corewire_reference);
+        for ([_][]const u8{ "entry_coordination.ts", "invocation.ts", "invocation_fixture.ts", "invocation_cases.ts", "core_cases.ts", "service_cases.ts" }) |source| entry_tests.addFileInput(b.path(b.fmt("tools/corewire/{s}", .{source})));
+        entry_tests.setCwd(b.path("."));
+        entry_tests.has_side_effects = true;
+        const entry_step = b.step("test-corewire-entry", "Test complete compiled corewire entry coordination against the native reference");
+        entry_step.dependOn(&entry_tests.step);
+        core_policy_step.dependOn(&entry_tests.step);
+        test_step.dependOn(&entry_tests.step);
+        const entry_mod = module(b, b.graph.host, optimize, "tools/corewire/entry_coordination.zig");
+        @import("build/corewire.zig").linkProfile(entry_mod, ts_core_artifacts.profile_archive);
+        const entry_run = b.addRunArtifact(testArtifact(b, entry_mod));
+        entry_step.dependOn(&entry_run.step);
+        core_policy_step.dependOn(&entry_run.step);
+        test_step.dependOn(&entry_run.step);
+        const filesystem_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        filesystem_tests.addFileArg(b.path("tools/corewire/filesystem.test.ts"));
+        filesystem_tests.addArtifactArg(ts_core_artifacts.corewire);
+        filesystem_tests.addArtifactArg(corewire_reference);
+        for ([_][]const u8{ "entry_coordination.ts", "filesystem_coordination.ts", "invocation_cases.ts", "invocation_fixture.ts", "core_cases.ts", "service_cases.ts" }) |source| {
+            filesystem_tests.addFileInput(b.path(b.fmt("tools/corewire/{s}", .{source})));
+        }
+        filesystem_tests.has_side_effects = true;
+        filesystem_tests.setCwd(b.path("."));
+        const filesystem_step = b.step("test-corewire-filesystem", "Compare complete compiled filesystem coordination with the independent native reference");
+        filesystem_step.dependOn(&filesystem_tests.step);
+        core_policy_step.dependOn(&filesystem_tests.step);
+        entry_step.dependOn(&filesystem_tests.step);
+        test_step.dependOn(&filesystem_tests.step);
+        for ([_][]const u8{ "contract_intake.zig", "sidecar.zig", "emit.zig", "emit_facade.zig", "invocation_tests.zig" }) |source| {
+            const policy_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
+            @import("build/corewire.zig").linkProfile(policy_mod, ts_core_artifacts.profile_archive);
+            const run = b.addRunArtifact(testArtifact(b, policy_mod));
+            core_policy_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+        }
+        const core_policy_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        core_policy_cli_tests.addFileArg(b.path("tools/corewire/core.test.ts"));
+        core_policy_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        core_policy_cli_tests.addFileInput(b.path("tools/corewire/core_cases.ts"));
+        core_policy_cli_tests.addFileInput(b.path("tools/corewire/core_goldens.json"));
+        core_policy_cli_tests.has_side_effects = true;
+        core_policy_cli_tests.setCwd(b.path("."));
+        core_policy_step.dependOn(&core_policy_cli_tests.step);
+        test_step.dependOn(&core_policy_cli_tests.step);
+        const intake_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        intake_cli_tests.addFileArg(b.path("tools/corewire/intake.test.ts"));
+        intake_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        for ([_][]const u8{ "intake_cases.ts", "intake_goldens.json", "core_cases.ts", "service_cases.ts" }) |source| {
+            intake_cli_tests.addFileInput(b.path(b.fmt("tools/corewire/{s}", .{source})));
+        }
+        intake_cli_tests.has_side_effects = true;
+        intake_cli_tests.setCwd(b.path("."));
+        core_policy_step.dependOn(&intake_cli_tests.step);
+        test_step.dependOn(&intake_cli_tests.step);
+        const invocation_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        invocation_cli_tests.addFileArg(b.path("tools/corewire/invocation.test.ts"));
+        invocation_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        for ([_][]const u8{ "invocation_cases.ts", "invocation_fixture.ts", "invocation_goldens.json", "core_cases.ts", "service_cases.ts" }) |source| {
+            invocation_cli_tests.addFileInput(b.path(b.fmt("tools/corewire/{s}", .{source})));
+        }
+        invocation_cli_tests.has_side_effects = true;
+        invocation_cli_tests.setCwd(b.path("."));
+        core_policy_step.dependOn(&invocation_cli_tests.step);
+        test_step.dependOn(&invocation_cli_tests.step);
+        const service_projection_step = b.step("test-corewire-services", "Test compiled service validation, projections, fingerprints, and owned result bytes");
+        for ([_][]const u8{ "service_contract.zig", "emit_service.zig" }) |source| {
+            const service_tests_mod = module(b, b.graph.host, optimize, b.fmt("tools/corewire/{s}", .{source}));
+            @import("build/corewire.zig").linkProfile(service_tests_mod, ts_core_artifacts.profile_archive);
+            const run = b.addRunArtifact(testArtifact(b, service_tests_mod));
+            service_projection_step.dependOn(&run.step);
+            test_step.dependOn(&run.step);
+        }
+        const service_projection_cli_tests = b.addSystemCommand(&.{b.findProgram(&.{"node"}, &.{}) catch unreachable});
+        service_projection_cli_tests.addFileArg(b.path("tools/corewire/service.test.ts"));
+        service_projection_cli_tests.addArtifactArg(ts_core_artifacts.corewire);
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/emit_service.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_templates.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_cases.ts"));
+        service_projection_cli_tests.addFileInput(b.path("tools/corewire/service_goldens.json"));
+        service_projection_cli_tests.has_side_effects = true;
+        service_projection_cli_tests.setCwd(b.path("."));
+        service_projection_step.dependOn(&service_projection_cli_tests.step);
+        test_step.dependOn(&service_projection_cli_tests.step);
+        // ABI-law suites over real compiled cores: the broad markup fixture
+        // plus the focused mixed bare-Model/[Model, Cmd] return regression.
+        const abi_laws_run = b.addRunArtifact(ts_core_artifacts.external_core_abi_laws);
+        const trap_run = b.addRunArtifact(ts_core_artifacts.external_core_trap);
+        trap_run.expectExitCode(73);
+        _ = trap_run.captureStdErr(.{});
+        const mixed_return_abi_run = b.addRunArtifact(ts_core_artifacts.mixed_return_abi_laws);
+        const abi_laws_step = b.step("test-external-core-abi", "Run the compiled-core ABI-law suites, including mixed update returns (requires node and `npm ci` in packages/core)");
+        abi_laws_step.dependOn(&abi_laws_run.step);
+        abi_laws_step.dependOn(&trap_run.step);
+        test_step.dependOn(&trap_run.step);
+        abi_laws_step.dependOn(&mixed_return_abi_run.step);
+        test_step.dependOn(&abi_laws_run.step);
+        test_step.dependOn(&mixed_return_abi_run.step);
+        // The cross-execution battery staging: the host-fixture and
+        // markup batteries (update/snapshot/effects and the markup view
+        // over genuinely compiled cores) plus, where the target admits
+        // the in-process archive, the service pool battery, installed
+        // under <prefix>/e2e for execution on the target machine. Pair
+        // with -Dtarget and -p; scripts/cross-e2e.sh is the driver.
+        const cross_e2e_step = b.step("stage-cross-e2e", "Install the TS-core e2e batteries under <prefix>/e2e for execution on the build target (pair with -Dtarget and -p; see scripts/cross-e2e.sh)");
+        const e2e_dir: std.Build.Step.InstallArtifact.Options.Dir = .{ .override = .{ .custom = "e2e" } };
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.host, .{ .dest_dir = e2e_dir }).step);
+        cross_e2e_step.dependOn(&b.addInstallArtifact(ts_core_artifacts.markup, .{ .dest_dir = e2e_dir }).step);
+        if (ts_core_artifacts.services_pool) |pool_tests| {
+            cross_e2e_step.dependOn(&b.addInstallArtifact(pool_tests, .{ .dest_dir = e2e_dir }).step);
+        }
+        // The mobile execution battery staging: one static library the
+        // platform toolchain (xcrun clang / NDK clang) links around a tiny
+        // harness for execution on the simulator or emulator. Registered
+        // only for a mobile -Dtarget; scripts/mobile-e2e.sh is the driver.
+        if (ts_core_artifacts.mobile_battery) |battery| {
+            const mobile_e2e_step = b.step("stage-mobile-e2e", "Install the TS mobile e2e battery archive under <prefix>/e2e (pair with -Dtarget=aarch64-ios-simulator or aarch64-linux-android and -p; see scripts/mobile-e2e.sh)");
+            mobile_e2e_step.dependOn(&b.addInstallFileWithDir(battery, .{ .custom = "e2e" }, "libts-mobile-e2e.a").step);
+        }
+        // The corpus contract artifacts an external core toolchain
+        // consumes: per fixture, the frontend-emitted contract sidecar
+        // (after projection), the generated entry module, and the
+        // compiler profile that builds it, under zig-out/core-contracts.
+        const contracts_step = b.step("stage-core-contracts", "Install each ts-core fixture's contract sidecar, generated entry module, and compiler profile under zig-out/core-contracts (requires node)");
+        for (ts_core_artifacts.core_contracts) |contract| {
+            const dir: std.Build.InstallDir = .{ .custom = b.fmt("core-contracts/{s}", .{contract.name}) };
+            contracts_step.dependOn(&b.addInstallFileWithDir(contract.sidecar, dir, "core.contract.json").step);
+            contracts_step.dependOn(&b.addInstallFileWithDir(contract.facade, dir, "core_facade.ts").step);
+            contracts_step.dependOn(&b.addInstallFileWithDir(contract.profile, dir, "core_profile.json").step);
+        }
+        ts_core_e2e_step.dependOn(&host_e2e_run.step);
+        ts_core_e2e_step.dependOn(&persist_e2e_run.step);
+        ts_core_e2e_step.dependOn(&markup_e2e_run.step);
+        ts_core_e2e_step.dependOn(&kanban_e2e_run.step);
+        ts_core_e2e_step.dependOn(&soundboard_e2e_run.step);
+        ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
+        ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
+        ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
+        ts_core_e2e_step.dependOn(&feed_reader_e2e_run.step);
+        ts_core_e2e_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| ts_core_e2e_step.dependOn(&run.step);
+        test_step.dependOn(&host_e2e_run.step);
+        test_step.dependOn(&persist_e2e_run.step);
+        test_step.dependOn(&markup_e2e_run.step);
+        test_step.dependOn(&kanban_e2e_run.step);
+        test_step.dependOn(&soundboard_e2e_run.step);
+        test_step.dependOn(&monitor_e2e_run.step);
+        test_step.dependOn(&scaffold_ide_e2e_run.step);
+        test_step.dependOn(&ai_chat_e2e_run.step);
+        test_step.dependOn(&feed_reader_e2e_run.step);
+        test_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| test_step.dependOn(&run.step);
+        test_step.dependOn(&sidecar_conformance_run.step);
+    }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
     test_step.dependOn(&b.addRunArtifact(automation_cli_tests).step);
+    test_step.dependOn(&b.addRunArtifact(markup_cli_tests).step);
+    test_step.dependOn(&b.addRunArtifact(skills_cli_tests).step);
+    test_step.dependOn(&b.addRunArtifact(evals_cmdview_tests).step);
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-package-types", "Verify package TypeScript platform feature names", &.{
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "NativeSdkCommandInfo" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "list(): Promise<NativeSdkCommandInfo[]>" },
@@ -425,6 +1873,149 @@ pub fn build(b: *std.Build) void {
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "\"gpu_surfaces\"" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "\"gpuSurfaces\"" },
         .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "gpuFirstFrameLatencyNs: number" },
+        .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "gpuBackend: NativeSdkGpuSurfaceBackend;" },
+        .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "export type NativeSdkGpuSurfaceBackendRequest = \"metal\" | \"software\";" },
+        .{ .path = "packages/native-sdk/native-sdk.d.ts", .pattern = "gpuBackend?: NativeSdkGpuSurfaceBackendRequest;" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-ts-toolchain-twins", "Verify the CLI's toolchain-resolution gate and its direct-`zig build` twin stay in lockstep (both resolve the aliased real compiler @typescript/old from packages/core — the same origin runtime imports it from — hold its resolved version against the manifest-read pin, never probe a stray compat wrapper, and teach instead of panicking)", &.{
+        // The resolution twins probe the aliased REAL compiler
+        // (@typescript/old — the package typed_ast.ts and ts_run.mjs
+        // actually load) — manifest AND entrypoint, in lockstep. The
+        // @typescript/typescript6 wrapper is never probed: nothing
+        // imports it at run time, and validating it false-rejects
+        // healthy conflict trees.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"package.json\"" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"lib\", \"typescript.js\"" },
+        .{ .path = "build/app.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"package.json\"" },
+        .{ .path = "build/app.zig", .pattern = "\"node_modules\", \"@typescript\", \"old\", \"lib\", \"typescript.js\"" },
+        // The doctrine both twins document at their predicates: validate
+        // only what runtime loads, from runtime's own walk origin, and
+        // leave the declared-but-unimported wrapper out of the verdict.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "Validation tracks ONLY what runtime loads" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "deliberately NOT probed" },
+        .{ .path = "build/app.zig", .pattern = "Validation tracks ONLY what runtime loads" },
+        .{ .path = "build/app.zig", .pattern = "deliberately NOT probed" },
+        // The reciprocal cross-references that keep the twins findable
+        // from each other.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "build/app.zig's tsToolchainResolution" },
+        .{ .path = "build/app.zig", .pattern = "transpilerResolution, this predicate's deliberate twin" },
+        // The version pin: both twins read the alias's RESOLVED
+        // package.json version and hold it against the exact
+        // `npm:typescript@X.Y.Z` pin read from the SDK's own
+        // packages/core/package.json (never hardcoded), and both carry
+        // the mismatch outcome plus its teaching naming the two versions.
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "parseAliasedCompilerPin" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "version_mismatch" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "npm:typescript@{s}" },
+        .{ .path = "build/app.zig", .pattern = "tsPinnedCompilerVersion" },
+        .{ .path = "build/app.zig", .pattern = "version_mismatch" },
+        .{ .path = "build/app.zig", .pattern = "npm:typescript@{s}" },
+        // The teachings: the checkout's one production-config-safe npm ci
+        // command in both surfaces, the reinstall for npm layouts, and the
+        // build graph's clean configure-time failure (never a panic).
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "pub const npm_ci_teaching_command = \"npm ci --include=dev\";" },
+        .{ .path = "src/tooling/ts_core.zig", .pattern = "reinstall @native-sdk/cli" },
+        .{ .path = "build/app.zig", .pattern = "npm ci --include=dev" },
+        .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
+        .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
+        // SQLite schema generation shares node/toolchain resolution but
+        // never the TS-core-only src/app.native shape assertion: Zig cores
+        // may own their view in code while still embedding migrations.
+        .{ .path = "build/app.zig", .pattern = "return tsToolingPreflight(b, dep, .app_core);" },
+        .{ .path = "build/app.zig", .pattern = "const node = tsToolingPreflight(b, dep, .sqlite_schema);" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
+        .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
+        .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-ts-build-invalidation-boundaries", "Verify generated TypeScript contracts stabilize by content and service implementation inputs cannot dirty the core compiler lane", &.{
+        .{ .path = "build/app.zig", .pattern = "pub fn stabilizeGeneratedFile" },
+        .{ .path = "build/app.zig", .pattern = "const contract = stabilizeGeneratedFile(b, contract_raw, \"core.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "break :services_contract stabilizeGeneratedFile(b, raw, \"services.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, \"src\"));" },
+        .{ .path = "build/app.zig", .pattern = "addStagedCoreSdkInputs(b, dep.builder, stage_run);" },
+        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\", \"internal/image_identity.ts\", \"internal/markdown_policy.ts\" }) |source|" },
+        .{ .path = "build.zig", .pattern = "app_build.addStagedCoreSdkInputs(b, b, stage_run);" },
+        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"bytes.ts\", \"text.ts\", \"events.ts\", \"theme.ts\", \"internal/image_identity.ts\", \"internal/markdown_policy.ts\"])" },
+        .{ .path = "build/app.zig", .pattern = "if (std.mem.startsWith(u8, normalized, \"services/\")) continue;" },
+        .{ .path = "tools/corewire/emit_service.ts", .pattern = "native-sdk.services.abi.v3" },
+        .{ .path = "tools/corewire/service.test.ts", .pattern = "excludes implementation-only facts" },
+        .{ .path = "build/app.zig", .pattern = "link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));" },
+        .{ .path = "build/app.zig", .pattern = "addPlatformLinkSearchPaths(b, selected_platform, web_engine, cef_dir, link_mod);" },
+        .{ .path = "build/app.zig", .pattern = "mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, \"System/Library/Frameworks\" }) });" },
+        .{ .path = "build/app.zig", .pattern = "b.fmt(\"{s}-app-code\", .{app_options.name})" },
+        .{ .path = "src/app_runner/ts_core_main.zig", .pattern = "extern const native_sdk_app_markup: u8;" },
+        .{ .path = "packages/core/scripts/embed_markup_c.mjs", .pattern = "const unsigned char native_sdk_app_markup[]" },
+        .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"dist\", \"bootstrap.js\"" },
+        .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"bin\", \"scriptc.exe\"" },
+        .{ .path = "build/app.zig", .pattern = "setEnvironmentVariable(\"SCRIPTC_TIMING\", \"1\")" },
+        .{ .path = "build/app.zig", .pattern = "service_compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "build/app.zig", .pattern = "compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "build/app.zig", .pattern = "addFileInput(dep.path(\"packages/core/scripts/compiler_command.mjs\"))" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
+        .{ .path = "build.zig", .pattern = "fn repositoryScriptcInstallMarker" },
+        .{ .path = "build.zig", .pattern = "packages/core/node_modules/tar/package.json" },
+        .{ .path = "build.zig", .pattern = "compile.addArg(\"--compiler-package-origin\");" },
+        .{ .path = "build/app.zig", .pattern = "compile.addFileInput(dep.path(\"packages/core/scripts/run_library_compiler.mjs\"))" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "fn rebuildPathIgnored" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "var walker = try root.walkSelectively(allocator);" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "if (!rebuildPathIgnored(path)) try walker.enter(io, entry);" },
+        .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
+        .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
+        .{ .path = "build/app.zig", .pattern = ".windows => !cross or target.result.abi == .gnu" },
+        .{ .path = "build/app.zig", .pattern = ".windows => target.result.cpu.arch == .x86_64" },
+        .{ .path = "build/app.zig", .pattern = "if (linuxGlibcSpellingHitsDefaultFloor(target)) {" },
+        .{ .path = "build.zig", .pattern = "if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;" },
+        .{ .path = "build/app.zig", .pattern = "scriptcPlatformTriple(b, target),\n        // Keep the core and service archives on the same cross compiler" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe," },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--host-platform\", host_platform, \"--target-platform\", app_build.scriptcPlatformTriple(b, target), \"--zig-exe\", b.graph.zig_exe });\n    app_build.addScriptcAndroidNdk(b, compile, target);\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "app_build.scriptcPlatformTriple(b, target),\n        \"--zig-exe\",\n        b.graph.zig_exe,\n    });\n    app_build.addScriptcAndroidNdk(b, compile, target);\n    addScriptcGlibcFloorTeaching(b, target, &compile.step);" },
+        .{ .path = "build.zig", .pattern = "abi_laws_mod.addObjectFile(markup_fixture.archive);\n    addScriptcArchiveSystemLibs(abi_laws_mod, target);" },
+        // Both drivers map the build graph's Zig triple onto the compiler's
+        // own mobile spellings and thread the NDK like --zig-exe.
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "SCRIPTC_TARGET: scriptcTarget" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "SCRIPTC_TARGET: scriptcTarget" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "ANDROID_NDK_ROOT: args[\"android-ndk\"]" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "ANDROID_NDK_ROOT: args[\"android-ndk\"]" },
+        .{ .path = "build/app.zig", .pattern = ".ios => host.os.tag == .macos and target.result.cpu.arch == .aarch64" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
+        .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
+        .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
+        .{ .path = "build/app.zig", .pattern = "test_step.dependOn(&analysis_obj.step);" },
+        .{ .path = "src/runtime/ui_app.zig", .pattern = "has no default value - give every Model field a default" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-owned-runner-window-placement", "Verify owned example runners preserve explicit origins and distinguish successful state restoration", &.{
+        .{ .path = "examples/hello/src/runner.zig", .pattern = ".initial_placement = if (@hasField(@TypeOf(window), \"x\") or @hasField(@TypeOf(window), \"y\")) .explicit else .default" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "window.initial_placement = .restored;" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-window-placement-contracts", "Verify both macOS hosts use the primary display and restore persisted content frames without titlebar growth", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "else if (initialPlacement == 1) {\n        // Fresh authored dimensions are content size" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "else if (initialPlacement == 1) {\n        // AppKit adds titlebar chrome" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "initWithFrame:window.contentView.bounds" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "initWithFrame:window.contentView.bounds" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },
@@ -441,16 +2032,26 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "close:function(options){return invoke('native-sdk.view.close',viewSelectorPayload(options))" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-command-contracts", "Verify command docs match native view update contracts", &.{
-        .{ .path = "docs/src/app/commands/page.mdx", .pattern = ".text = \"Refreshed\"" },
-        .{ .path = "docs/src/app/commands/page.mdx", .pattern = "const commands = await window.zero.commands.list();" },
+        .{ .path = "docs/content/docs/commands.mdx", .pattern = ".text = \"Refreshed\"" },
+        .{ .path = "docs/content/docs/commands.mdx", .pattern = "const commands = await window.zero.commands.list();" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-native-view-contracts", "Verify native surface docs describe view identity", &.{
-        .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "ViewInfo.id" },
-        .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "window.zero.views.update(\"status\"" },
-        .{ .path = "docs/src/app/native-surfaces/page.mdx", .pattern = "first-frame latency budget" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "ViewInfo.id" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "window.zero.views.update(\"status\"" },
+        .{ .path = "docs/content/docs/native-surfaces.mdx", .pattern = "first-frame latency budget" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-shell-manifest-contracts", "Verify app.zon docs describe shell compatibility window labels", &.{
-        .{ .path = "docs/src/app/app-zon/page.mdx", .pattern = "labels must stay unique across both lists" },
+        .{ .path = "docs/content/docs/app-zon.mdx", .pattern = "labels must stay unique across both lists" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-media-producer-contracts", "Verify the media producer docs' typed callback stays mirrored by the compile-shaped pin in media_surface_tests.zig", &.{
+        .{ .path = "docs/content/docs/media-producers.mdx", .pattern = "producer: media.MediaSurfaceProducer" },
+        .{ .path = "src/runtime/media_surface_tests.zig", .pattern = "producer: media.MediaSurfaceProducer" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-session-replay-image-codec", "Verify the replay runner installs the host image codec headlessly (the desktop arms cannot link in unit tests; the null-fallback arm is covered in session_tests.zig)", &.{
+        .{ .path = "src/app_runner/root.zig", .pattern = "native_sdk.platform.installHeadlessImageCodec(build_options.platform, null_platform, &replay_platform.services);" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
+        .{ .path = "src/platform/linux/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
+        .{ .path = "src/platform/windows/root.zig", .pattern = "pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void {\n    services.decode_image_fn = decodeImage;\n}" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-js-view-helper-contracts", "Verify injected view helpers support label-first updates", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "update:function(options,patch)" },
@@ -482,21 +2083,86 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "change != NATIVE_SDK_GST_STATE_CHANGE_ASYNC" },
         .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#define NATIVE_SDK_GST_STATE_CHANGE_ASYNC 2" },
     });
-    // The embedded-WebView layer must stay real: the vendored WebView2
-    // SDK header turns the guard on, every first-party build graph puts
-    // it on the include path, and a build that cannot see it fails at
-    // compile time instead of quietly shipping the stubbed host (whose
-    // WebView loads report WebViewNotFound at runtime).
-    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-webview2-vendor", "Verify the vendored WebView2 SDK stays wired into every Windows build graph", &.{
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-init-close-policy-refusal", "Verify the Linux platform init refuses a .hide main window with the one shared teaching (the pre-created startup window never passes the runtime's create gate, so a silent drop here meant quit-on-close for direct-SDK users)", &.{
+        // The gate itself is unit-tested cross-host (it is extern-free);
+        // this pins its WIRING into initWithOptions, which only a Linux
+        // link can execute.
+        .{ .path = "src/platform/linux/root.zig", .pattern = "try refuseUnsupportedMainWindowClosePolicy(window_options);" },
+        // One message, all seams: the platform-init refusal and the
+        // generated runner's comptime refusal teach with the same text.
+        .{ .path = "src/platform/linux/root.zig", .pattern = "close_policy \\\"hide\\\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \\\"quit\\\" (the default), or scope the .hide declaration to macos/windows builds" },
+        .{ .path = "src/app_runner/root.zig", .pattern = "close_policy \\\"hide\\\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \\\"quit\\\" (the default), or scope the .hide declaration to macos/windows builds" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "close_policy \\\\\\\"hide\\\\\\\" is not supported on linux" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-close-clears-policy-hidden", "Verify every macOS close exit leaves the policy-hidden set before its open=false emit (both hosts derive the frame event's hidden flag from set membership, and the Dock reopen re-shows every member — a close exit that skips the cleanup emits {open=false, hidden=true} and lets the reopen resurrect an app-closed window)", &.{
+        // AppKit: every close routes through NSWindow close/performClose,
+        // so the delegate's windowWillClose is the one cleanup site.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self.host.policyHiddenWindows removeObject:@(self.windowId)];\n    [self.host emitWindowFrameForWindowId:self.windowId open:NO];" },
+        // CEF: the delegate cleanup covers the [window close] fallback,
+        // and the app-driven close of a browser-bearing window exits
+        // through orderOut WITHOUT reaching windowWillClose — that
+        // branch must do the set cleanup itself, before its emit.
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self.host.policyHiddenWindows removeObject:@(self.windowId)];\n    [self.host emitWindowFrameForWindowId:self.windowId open:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self.policyHiddenWindows removeObject:@(windowId)];\n                [window orderOut:nil];\n                [self emitWindowFrameForWindowId:windowId open:NO];" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-cef-window-verbs-synchronous", "Verify the CEF host's show and minimize verbs run synchronously on the main thread, the close verb's discipline (a dispatch_async show returns success while the window is still in policyHiddenWindows — the runtime's post-success focus flip then emits {focused:true, hidden:true} until the queued block lands — and a show-then-close in one dispatch re-orders: the queued show lands AFTER the synchronous close and puts a retained ordered-out closed window back on the glass)", &.{
+        // The show verb: direct on main, dispatch_sync hop otherwise,
+        // with the window lookup INSIDE the block so a window closed
+        // before an off-main hop lands is a no-op, not a resurrection.
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([NSThread isMainThread]) {\n        showBlock();\n    } else {\n        dispatch_sync(dispatch_get_main_queue(), showBlock);\n    }" },
+        // The minimize twin (a queued miniaturize captured past a
+        // synchronous close genies an app-closed window into the Dock).
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([NSThread isMainThread]) {\n        miniaturizeBlock();\n    } else {\n        dispatch_sync(dispatch_get_main_queue(), miniaturizeBlock);\n    }" },
+        // The C shims return success only after the synchronous verb —
+        // no dispatch_async between the lookup and the method call.
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (!object.windows[@(window_id)]) return 0;\n    [object miniaturizeWindowWithId:window_id];\n    return 1;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[object showWindowWithId:window_id];\n    return 1;" },
+        // The AppKit host's twins are already synchronous direct calls
+        // (its runtime callbacks arrive on the main thread); these pins
+        // hold that symmetry.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[object showWindowWithId:window_id];\n    return 1;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[object miniaturizeWindowWithId:window_id];\n    return 1;" },
+    });
+    // The embedded-WebView layer must stay real AND declare-to-use: the
+    // standard build graph puts the vendored WebView2 SDK header on the
+    // include path exactly when app.zon declares web use (`if
+    // (web_layer)`), and only the native-only branch passes the stub
+    // define. In the guard the stub define is tested FIRST, before
+    // header visibility: on a machine where the WebView2 SDK headers are
+    // reachable through the system include paths, an
+    // include-path-decides guard would compile the full layer into a
+    // native-only build and reintroduce the WebView2Loader.dll reference
+    // its executable must not carry. Without the define the header is
+    // required — a web build that cannot see it fails at compile time
+    // instead of quietly shipping the stubbed host (whose WebView loads
+    // report WebViewNotFound at runtime).
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-webview2-vendor", "Verify the vendored WebView2 SDK stays wired into every web-declaring Windows build graph", &.{
         .{ .path = "third_party/webview2/include/WebView2.h", .pattern = "CreateCoreWebView2EnvironmentWithOptions" },
         .{ .path = "third_party/webview2/include/EventToken.h", .pattern = "EventRegistrationToken" },
         .{ .path = "third_party/webview2/LICENSE.txt", .pattern = "Redistribution and use in source and binary forms" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#if defined(NATIVE_SDK_ALLOW_WEBVIEW2_STUB)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#elif __has_include(<WebView2.h>) && __has_include(<wrl.h>)" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "#error \"WebView2.h not found" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "LoadLibraryW(L\"WebView2Loader.dll\")" },
+        .{ .path = "build/app.zig", .pattern = ".system => if (web_layer) {" },
         .{ .path = "build/app.zig", .pattern = "app_mod.addIncludePath(dep.path(\"third_party/webview2/include\"));" },
         .{ .path = "build/app.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
+        .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/include" },
         .{ .path = "src/tooling/templates.zig", .pattern = "third_party/webview2/x64/WebView2Loader.dll" },
+    });
+    // The Linux mirror of the Windows seam: the stub define wins over
+    // header visibility (a native-only build never reintroduces the
+    // libwebkitgtk link even where the dev package is installed), the
+    // header is required for web builds, and both build graphs compile
+    // gtk_host.c with the stub and drop the webkitgtk-6.0 link when the
+    // web layer is excluded.
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-linux-webkitgtk-seam", "Verify the WebKitGTK compile seam stays wired through the GTK host and both Linux build graphs", &.{
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#if defined(NATIVE_SDK_ALLOW_WEBKITGTK_STUB)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#elif __has_include(<webkit/webkit.h>)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "#error \"webkit/webkit.h not found" },
+        .{ .path = "build/app.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
+        .{ .path = "src/tooling/templates.zig", .pattern = "\"-DNATIVE_SDK_ALLOW_WEBKITGTK_STUB\"" },
     });
     addLayoutCheckStep(b, test_step, "test-windows-webview2-loader-layout", "Verify the vendored WebView2 loader binaries are present", &.{
         "third_party/webview2/x64/WebView2Loader.dll",
@@ -517,15 +2183,72 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "self.webviewPendingURLs[[self webViewKeyForWindow:windowId label:label]] = resolvedURL;" },
         .{ .path = "src/platform/macos/cef_host.mm", .pattern = "bridgeOriginForWindowId:window_id_ webViewLabel:labelString sourceURL:sourceURLString" },
     });
+    var appkit_accessibility_step: ?*std.Build.Step = null;
+    if (@import("builtin").os.tag == .macos and target.result.os.tag == .macos) {
+        const compile_accessibility = b.addSystemCommand(&.{ "xcrun", "clang", "-fobjc-arc", "-fno-sanitize=builtin", "-O2" });
+        compile_accessibility.addFileArg(b.path("tests/platform/appkit_accessibility.m"));
+        compile_accessibility.addFileArg(b.path("src/platform/macos/appkit_host.m"));
+        for ([_][]const u8{ "AppKit", "AVFoundation", "ScreenCaptureKit", "MediaToolbox", "Accelerate", "Metal", "QuartzCore", "WebKit", "CoreFoundation", "CoreText", "CoreMedia", "CoreVideo", "ImageIO", "Security", "UniformTypeIdentifiers" }) |framework| {
+            compile_accessibility.addArgs(&.{ "-framework", framework });
+        }
+        compile_accessibility.addArg("-o");
+        const accessibility_exe = compile_accessibility.addOutputFileArg("appkit-accessibility-tests");
+        const run_accessibility = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_accessibility.addFileArg(accessibility_exe);
+        appkit_accessibility_step = b.step("test-appkit-accessibility", "Exercise production AppKit accessibility identity, optional fields and lifetime");
+        appkit_accessibility_step.?.dependOn(&run_accessibility.step);
+    }
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-native-accessibility-roles", "Verify AppKit native views publish accessibility roles", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkAccessibilityRoleForNativeViewKind" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityToolbarRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-audio-capture-start-stop-serialized", "Verify asynchronous ScreenCaptureKit startup cannot publish a stream after stop returns", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, strong) NSLock *lifecycleLock;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[strongSelf.lifecycleLock lock];\n            if (![strongSelf.target isCaptureActive]) {\n                [strongSelf.lifecycleLock unlock];\n                return;\n            }\n            strongSelf.stream = stream;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self.lifecycleLock lock];\n        SCStream *stream = self.stream;\n        self.stream = nil;\n        [self.lifecycleLock unlock];" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-repaints-retained-canvas", "Verify GPU input wakes retained canvas frames", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)requestRetainedCanvasFrame" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-pinch-terminal-delta", "Verify the macOS pinch stream forwards a terminal Ended/Cancelled magnification as a change before the end marker", &.{
+        // AppKit documents every magnifyWithEvent: as carrying the
+        // magnification since the previous event — the terminal one
+        // included. The Ended/Cancelled branch must forward a nonzero
+        // terminal magnification as PINCH_CHANGE before PINCH_END (zero
+        // magnification: end only), or the cumulative product of
+        // (1 + delta) diverges from what the OS delivered. Cancelled
+        // deliberately shares the path: pinch applies deltas
+        // incrementally with no rollback.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (phase & (NSEventPhaseEnded | NSEventPhaseCancelled)) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self emitPinchChangeForEvent:event];\n        [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_END event:event magnification:0];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "PINCH_END event:event magnification:0];" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-pinch-magnification-doctrine", "Verify the macOS host forwards raw NSEvent.magnification as the multiplicative pinch delta (the engine convention), with the per-event floor", &.{
+        // The reading of NSEvent.magnification is SETTLED and this step
+        // exists to keep it settled: Apple's API-reference prose says
+        // "add", Apple's own Event Handling Guide example multiplies,
+        // and every browser engine (WebKit, Chromium) treats raw
+        // magnification as the multiplicative per-event delta. The
+        // doctrine comment at magnifyWithEvent: carries the receipts;
+        // these pins hold both the comment and the code to it. Any
+        // sum-based "additive normalization" of magnification must
+        // change emitPinchChangeForEvent:'s pinned body — and thereby
+        // fail this step, on purpose. Re-read the doctrine comment
+        // before touching either.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "m_magnification += m_magnification * scaleWithResistance;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "pinch_update.scale = event.magnification + 1.0;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Ruling: raw event.magnification IS the multiplicative per-event" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Do NOT reintroduce a running-sum" },
+        // The raw forwarding, pinned as one body: the only transform
+        // between the OS and the wire is the per-event floor (a single
+        // magnification at or below -1 would emit a factor <= 0 — a
+        // zoom inverted through zero scale, physically impossible).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static const double NativeSdkPinchMagnificationFloor = -1.0 + 0x1p-10;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return magnification < NativeSdkPinchMagnificationFloor ? NativeSdkPinchMagnificationFloor : magnification;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitPinchChangeForEvent:(NSEvent *)event {\n    const double magnification = NativeSdkClampedPinchMagnification(event.magnification);\n    if (magnification == 0) return;\n    [self emitPinchInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_PINCH_CHANGE event:event magnification:magnification];\n}" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-paces-retained-canvas", "Verify GPU input frame requests are paced to the display interval", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRetainedFrameIntervalNanoseconds" },
@@ -543,6 +2266,61 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)scheduleFrameEventEmission" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)emitScheduledFrameEvent" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-quit-stop-queued", "Verify the quit verb's stop is queued to the next loop turn on every synchronous-emit host (a synchronous emitShutdown nests the shutdown dispatch inside the requesting command's dispatch, seals the session journal before the command commits, and replay diverges)", &.{
+        // macOS (AppKit and CEF hosts): the main-queue hop, with the
+        // pre-run-loop inline fallback the failed-START precedent needs.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!NSApp.running) {" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (!NSApp.running) {" },
+        // Linux: the idle hop — the same seam the wake and
+        // frame-request paths ride.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "static gboolean native_sdk_stop_idle(gpointer data)" },
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "g_idle_add(native_sdk_stop_idle, host);" },
+        // Windows was queued from the start: stop posts, the loop
+        // exits, and the shutdown emits after the loop at top level.
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "void native_sdk_windows_stop(Host *host) {" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "PostQuitMessage(0);" },
+        // The runtime ordering the queue protects: the recorder seals
+        // on the shutdown dispatch's exit, and the modeled host's
+        // queued seam keeps the runtime suites honest about it.
+        .{ .path = "src/runtime/flow.zig", .pattern = "3 => self.options.session_recorder.?.finish()," },
+        .{ .path = "packages/core/src/host_flow.ts", .pattern = "if (kind === 5) out[2] = 3;" },
+        .{ .path = "src/runtime/flow_reference.zig", .pattern = "if (event_value == .app_shutdown) recorder.finish();" },
+        .{ .path = "src/platform/null_platform.zig", .pattern = "pub fn takeQueuedQuit" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-quit-pre-run-pending", "Verify a PRE-RUN quit verb on the macOS hosts parks as a pending flag drained at top level, never the inline emit (an inline pre-run emit nests the shutdown inside the boot dispatch that requested it — the recorder seals the journal before that dispatch commits, the same bug the running-path queue fixes)", &.{
+        // The quit verb's own landing point: pre-run it PARKS — the
+        // inline emitShutdown+stop stays exclusive to
+        // native_sdk_appkit_stop, the host-side failure request the
+        // failed-START precedent rides (runWithCallback's didShutdown
+        // check).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "object.pendingPreRunStop = YES;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "void native_sdk_appkit_request_stop(native_sdk_appkit_host_t *host) {" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "object.pendingPreRunStop = YES;" },
+        // The drains: after the START dispatch (at the didShutdown
+        // decision point) and after the remaining pre-run dispatches
+        // (appearance/resize/window-frame, and AppKit's synchronous
+        // first canvas frame) — emitShutdown + stop at TOP LEVEL, once.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (BOOL)drainPendingPreRunStop {\n    if (!self.pendingPreRunStop) return NO;\n    self.pendingPreRunStop = NO;\n    if (self.didShutdown) return NO;\n    [self emitShutdown];\n    [self stop];\n    return YES;\n}" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self drainPendingPreRunStop];\n    // A failed START handler requests shutdown synchronously" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([self drainPendingPreRunStop]) return;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "- (BOOL)drainPendingPreRunStop {\n    if (!self.pendingPreRunStop) return NO;\n    self.pendingPreRunStop = NO;\n    if (self.didShutdown) return NO;\n    [self emitShutdown];\n    [self stop];\n    return YES;\n}" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[self drainPendingPreRunStop];\n    // A failed START handler requests shutdown synchronously" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if ([self drainPendingPreRunStop]) {\n        shutdownCefIfNeeded();\n        return;\n    }" },
+        // The Zig split: the quit verb rides request_stop; the failed
+        // emit keeps the byte-for-byte host-side stop.
+        .{ .path = "src/platform/macos/root.zig", .pattern = "native_sdk_appkit_request_stop(self.host);" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = "if (self.self) |mac| native_sdk_appkit_stop(mac.host);" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gtk-stop-idle-tracked", "Verify the GTK quit-stop idle source is tracked on the host, coalesced while pending, skipped after shutdown, and removed at destroy (an untracked second g_idle_add leaves a source holding a freed host after the loop quits)", &.{
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "guint stop_idle_source;" },
+        // The idle retires its own tracking before it emits.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "host->stop_idle_source = 0;\n    if (!host->did_shutdown) {" },
+        // Coalesce + post-shutdown skip, then the tracked add.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "if (host->did_shutdown || host->stop_idle_source) return;\n    host->stop_idle_source = g_idle_add(native_sdk_stop_idle, host);" },
+        // Destroy removes a still-pending stop turn.
+        .{ .path = "src/platform/linux/gtk_host.c", .pattern = "if (host->stop_idle_source) {\n        g_source_remove(host->stop_idle_source);\n        host->stop_idle_source = 0;\n    }" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-gpu-occluded-frame-heartbeat", "Verify occluded windows throttle frame completions to a heartbeat and restore full cadence on reveal", &.{
         // macOS: occluded surfaces pace logical completions on the ~1 Hz
         // heartbeat (never stopping — on_frame-driven models stay gently
@@ -559,13 +2337,20 @@ pub fn build(b: *std.Build) void {
         // sustain a spin.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "scheduleFrameEventEmissionForPresentCompletion:YES" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)noteGpuSurfaceInputActivity" },
-        // Windows: the same throttle keyed on the one reliable Win32
-        // occlusion signal (minimize); restore re-arms the pending
-        // one-shot timer at the frame-grid delay, and the input /
+        // Windows: the same throttle keyed on the two reliable
+        // occlusion facts — minimize (IsIconic) and the close_policy
+        // .hide hide (policy_hidden: a hidden menu-bar app must not
+        // spin its frame loop or its spectrum emissions full-rate for
+        // days). Restore re-arms the pending one-shot timer at the
+        // frame-grid delay through WM_SIZE, re-show through the show
+        // verb (SW_SHOW dispatches no WM_SIZE), and the input /
         // first-present exemptions ride one prompt-frame flag.
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "kGpuOccludedHeartbeatNs = 1000000000ull" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuSurfaceOccludedPacingActive" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "owner->second.policy_hidden) return true;" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "IsIconic(root)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "!IsIconic(entry.second.hwnd) && !entry.second.policy_hidden" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "Re-show returns full frame cadence without dropping a beat" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpu_prompt_frame_pending" },
         .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "native_sdk_windows_note_gpu_surface_input" },
         // The runtime side of the measurement honesty: occluded logical
@@ -625,13 +2410,43 @@ pub fn build(b: *std.Build) void {
     // this step until the encoder comment, the host decoder comment, and
     // the patterns below move with it.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 4;" },
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v4)." },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v4)." },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 5;" },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v5)." },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-gpu-packet-presenter", "Verify Windows uses retained Direct2D packets with recovery, bounded resources, and dirty-region pixel fallback", &.{
+        .{ .path = "src/platform/windows/root.zig", .pattern = ".present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary" },
+        .{ .path = "src/platform/windows/root.zig", .pattern = ".backend = if (event.gpu_backend == 1) .direct2d else .software" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "view.gpu_surface->present(request, &info)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "for (size_t y_index = y0; y_index < y1; ++y_index)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "InvalidateRect(view.hwnd, partial_update ? &dirty_pixels : nullptr, FALSE)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "D2D1_RENDER_TARGET_TYPE_HARDWARE" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "retained_commands_ = std::move(next_retained)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "PushAxisAlignedClip(d2dRect(requested)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "const float expansion = effect.spread + blur" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "releaseImageBitmap(action.id)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "resumeAndDrawBlur" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "const Rect target = blurTarget(*command, outer_clip)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "blur_snapshot_->CopyFromBitmap" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "command.effect.blur * transformScale(command.transform)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "D2D1_EXTEND_MODE_CLAMP" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "!GetClientRect(view.hwnd, &client) || !PtInRect(&client, sample)" },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "draw_line(text.text, text.origin.x, text.origin.y)" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "gpuSurfaceUpdateRegionRects" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "info.dirty_rect_count > 0" },
+        .{ .path = "src/platform/windows/webview2_host.cpp", .pattern = "view->gpu_force_full_repaint_pending = true" },
+        .{ .path = "src/platform/windows/root.zig", .pattern = ".canvas_frame_full_repaint = event.force_full_repaint != 0" },
+        .{ .path = ".github/scripts/windows-canvas-smoke.sh", .pattern = "gpu_backend=direct2d" },
+        .{ .path = ".github/scripts/windows-effects-smoke.sh", .pattern = "gpu_backend=direct2d" },
+        .{ .path = "build/app.zig", .pattern = "app_mod.linkSystemLibrary(\"d2d1\", .{})" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGBitmapContextGetData(context)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkGaussianBoxRadii" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "vImageBoxConvolve_ARGB8888" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSIntersectionRect(rect, clipRect)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTransformRect(transformValue, NativeSdkPacketRect(effect[@\"rect\"]))" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return NativeSdkPacketApplyBlur(effect, opacity, context, scale, transformValue, hasClip, clipRect)" },
@@ -640,8 +2455,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSMutableParagraphStyle" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextLineBreakMode" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTextAlignment" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static BOOL NativeSdkPacketDrawAttributedText(" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "drawGlyphsForGlyphRange:glyphRange atPoint:" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "glyphRangeForTextContainer:container" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketNumber(layout[@\"maxWidth\"], 0)" },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[value drawWithRect:NSMakeRect(origin.x, origin.y - size, textWidth, textHeight)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "native_sdk_appkit_measure_text_ink(" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-font-assets", "Verify AppKit GPU packet text registers bundled font assets", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "#import <CoreText/CoreText.h>" },
@@ -659,6 +2477,100 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkItalicSansFont(base)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkItalicSansFont(NativeSdkWeightedSansFont(@[ @\"Geist-Bold\", @\"Geist Bold\" ], base, NSFontWeightBold, YES, size))" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-registered-font-cache-eviction", "Verify the AppKit host invalidates BOTH per-process registered-font caches at registration (the caches are per-process while font-id permanence is per-runtime, so a new runtime re-registering an id must never resolve the previous runtime's face or its measured widths): the NSFont size cache by prefix eviction and the measured-width NSCache by a process-global registration token in its key", &.{
+        // No SDK test tier links appkit_host.m (only managed app builds
+        // compile it), so the eviction wiring is pinned textually like
+        // the other AppKit host contracts: the shared accessor both the
+        // resolve and registration paths use, the prefix eviction inside
+        // register_font, and the honest lifetime comment.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSMutableDictionary<NSString *, NSFont *> *NativeSdkRegisteredFontSizeCache(void)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSString *stalePrefix = [NSString stringWithFormat:@\"%llu/\", (unsigned long long)font_id];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if ([cachedKey hasPrefix:stalePrefix]) [sizeCache removeObjectForKey:cachedKey];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "an id is only permanent within" },
+        // The width-cache half: NSCache cannot enumerate keys, so the
+        // measured-width cache is invalidated by a registration token
+        // drawn from one process-global monotonic counter (tokens never
+        // repeat, which is what lets unregister DELETE an id's record
+        // instead of retaining a bumped one per retired id) — the token
+        // table, the fresh stamp inside register_font, and the
+        // token-carrying key inside measure_text.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSMutableDictionary<NSNumber *, NSNumber *> *NativeSdkRegisteredFontTokens(void)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "unsigned long long token = ++NativeSdkRegisteredFontTokenCounter;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkRegisteredFontTokens()[@(font_id)] = @(token);" },
+        // The stamp is also the registration's OWNERSHIP token: register
+        // reports it to the caller (`*out_token`), the runtime stores it
+        // beside the captured unregister owner, and unregister removes
+        // the id's state only while the id's current registration still
+        // carries it — an older runtime's deinit must never tear down a
+        // newer runtime's live face under a shared id (ids are
+        // per-runtime, host font state is per-process, last wins).
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "*out_token = token;" },
+        // The token and the registered face reach measure_text from ONE
+        // critical section (the snapshot helper): separate acquisitions
+        // let a registration land between the token read and the face
+        // resolution, pairing token 0 with the new registered face and
+        // caching registered widths under the reusable token-0 key —
+        // stale registered widths served after teardown. The snapshot
+        // signature and its measure_text call site are pinned so the
+        // two-acquisition shape cannot quietly return.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSFont *NativeSdkRegisteredFontSnapshot(unsigned long long value, CGFloat size, unsigned long long *out_token)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSFont *registered = NativeSdkRegisteredFontSnapshot((unsigned long long)font_id, clamped, &token);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSFont *font = registered ?: NativeSdkBuiltInFontForFontId(font_id, clamped);" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NSString stringWithFormat:@\"%llu/%llu/%.3f/%@\", (unsigned long long)font_id, token, (double)clamped, value]" },
+        // The width-cache WRITE is token-rechecked. Shaping runs outside
+        // the guard, so an unregister can land inside the shaping window:
+        // it clears the whole width cache (its only possible eviction),
+        // and an unconditional post-shape write would then repopulate the
+        // cleared cache with a retired-token entry — unreachable for
+        // serving (tokens never repeat) but resident until memory
+        // pressure, breaking the zero-retained-state teardown the clear
+        // exists to guarantee. measure_text therefore re-enters the
+        // descriptor guard after shaping and writes only while the id's
+        // current token still equals the snapshotted one; token 0
+        // (built-in resolution — never registered, so never cleared)
+        // caches without the recheck. Both branches are pinned so the
+        // unconditional-write shape cannot quietly return.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (token == 0) {" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSNumber *currentToken = NativeSdkRegisteredFontTokens()[@(font_id)];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (currentToken && currentToken.unsignedLongLongValue == token) {" },
+        // The teardown half: Runtime.deinit returns the host-side
+        // registration through the unregister owner each font entry
+        // captured at registration time (never live `options.platform`,
+        // which is publicly mutable), and the ObjC removal drops the
+        // descriptor, the size-cache entries, AND the token record —
+        // zero retained state per retired id. Pinned like the
+        // registration half (appkit_host.m has no SDK test tier); the
+        // capture and the deinit call site are pinned too so the seam
+        // can never silently lose its one caller or regress to the live
+        // read, and the embed cycle and platform-swap tests assert both
+        // behaviorally against null platform recorders.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token) {" },
+        // The token-match guard itself: reverting removal to id-keyed
+        // (deleting whatever the id currently holds, whoever registered
+        // it) must fail here — the embed suite's survives-teardown test
+        // pins the same guard behaviorally against the null platform's
+        // host-font mirror.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!current || current.unsignedLongLongValue != token) return 1;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NativeSdkRegisteredFontTokens() removeObjectForKey:@(font_id)];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[table removeObjectForKey:@(font_id)];" },
+        // Teardown must also CLEAR the measured-width NSCache: a
+        // retiring token's entries can never be served again (tokens
+        // never repeat) but they stay resident until memory pressure,
+        // and NSCache cannot enumerate keys, so the whole-cache clear on
+        // the token-matched path is the only release. Pinned textually
+        // because no behavioral tier can observe it — only managed app
+        // builds compile appkit_host.m, so no SDK test can watch the
+        // ObjC cache empty. The shared accessor and its measure_text
+        // call site are pinned with the clear so the cache cannot
+        // quietly retreat to a function-local static the unregister
+        // path has no way to reach.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "static NSCache<NSString *, NSNumber *> *NativeSdkMeasuredWidthCache(void)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[NativeSdkMeasuredWidthCache() removeAllObjects];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSCache<NSString *, NSNumber *> *widthCache = NativeSdkMeasuredWidthCache();" },
+        .{ .path = "src/runtime/canvas_fonts.zig", .pattern = ".host_unregister_fn = services.unregister_gpu_surface_font_fn," },
+        .{ .path = "src/runtime/canvas_fonts.zig", .pattern = ".host_registration_token = host_token," },
+        .{ .path = "src/runtime/core.zig", .pattern = "host_unregister_fn(entry.host_unregister_context, entry.id, entry.host_registration_token) catch {};" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-cursor-bridge", "Verify AppKit GPU widgets apply retained cursor intent", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "native_sdk_appkit_set_view_cursor" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "resetCursorRects" },
@@ -666,6 +2578,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "_surfaceCursor = cursor ?: [NSCursor arrowCursor]" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSCursor pointingHandCursor" },
+        // A full-bounds canvas cursor rect geometrically overlaps a
+        // higher-layer webview even though hit testing does not. The
+        // workbench needs both halves: subtract the overlay from the
+        // cursor rects and refuse a direct canvas cursor set there.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSMutableArray<NSValue *> *visibleCursorRects" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "surfaceView.coveredMouseRects = coveredRects" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (!covered && NSPointInRect(mousePoint, self.bounds)) [_surfaceCursor set]" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-actions", "Verify AppKit GPU widget accessibility actions route to the runtime", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityPerformPress" },
@@ -680,6 +2599,10 @@ pub fn build(b: *std.Build) void {
         // An assistive client's AXFocused WRITE must move the app's
         // real focus, not just flip a flag on the snapshot element.
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "setAccessibilityFocused" },
+        // Native Edit-menu validation follows the retained editor's actual
+        // history directions instead of merely checking text focus.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "focusedText.canUndo" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "focusedText.canRedo" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-widget-accessibility-text-ranges", "Verify AppKit GPU widget accessibility publishes text selection ranges", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilitySelectedTextRange" },
@@ -738,6 +2661,22 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)selectAll:(id)sender" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@selector(selectAll:)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitSyntheticKeyDownWithKey:@\"a\" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)undo:(id)sender" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)redo:(id)sender" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitSyntheticKeyDownWithKey:@\"z\" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "emitSyntheticKeyDownWithKey:@\"z\" modifiers:(NativeSdkShortcutModifierPrimary | NativeSdkShortcutModifierCommand | NativeSdkShortcutModifierShift)" },
+        // Modified horizontal navigation must bypass AppKit's selector
+        // rewrite: the shared editor consumes the raw modifiers, and a
+        // terminal translates them to its shell/protocol bindings.
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkTextNavigationNeedsRawKeyEvent(event)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSEventModifierFlagCommand | NSEventModifierFlagOption" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-widget-accessibility-hierarchy", "Verify AppKit preserves retained-widget accessibility parentage", &.{
+        .{ .path = "src/platform/macos/appkit_host.h", .pattern = "uint64_t parent_id;" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = ".parent_id = node.parent_id orelse 0" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityParent = parent;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityChildren = elementsById[@(element.widgetId)] == element ? (childrenByParentId[@(element.widgetId)] ?: defaults.accessibilityChildren) : defaults.accessibilityChildren;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return self.widgetAccessibilityRootElements ?: @[];" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-appearance-bridge", "Verify AppKit reports system light and dark appearance changes", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "effectiveAppearance" },
@@ -748,9 +2687,17 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = ".high_contrast = event.high_contrast != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".appearance_changed => state.emit" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-tray-segment-source-selection", "Verify both macOS tray hosts keep segmented selection model-owned", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
-        .{ .path = "docs/src/app/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
-        .{ .path = "docs/src/app/bridge/builtin-commands/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
+        .{ .path = "docs/content/docs/security.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
+        .{ .path = "docs/content/docs/bridge/builtin-commands.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
     });
 
     addTestStep(b, "test-geometry", "Run geometry module tests", geometry_tests);
@@ -761,13 +2708,74 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-diagnostics", "Run diagnostics module tests", diagnostics_tests);
     addTestStep(b, "test-platform-info", "Run platform info module tests", platform_info_tests);
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
+    addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
+    addTestStep(b, "test-paragraph-transport", "Reject malformed copied paragraph plans", filteredTestArtifact(b, canvas_tests.root_module, "paragraph-transport-tests", &.{"paragraph copied transport"}));
+    addTestStep(b, "test-markdown-image-boundary", "Verify exact registered-image markup boundaries", filteredTestArtifact(b, canvas_tests.root_module, "markdown-image-boundary-tests", &.{"Markdown image boundary"}));
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
+    addTestStep(b, "test-component-consumers", "Verify menu pins recovery fallback and virtual-scroll consumers", filteredTestArtifact(b, desktop_mod, "component-consumer-tests", &.{
+        "runtime.ui_app_tests.test.a declared context menu presents",
+        "runtime.ui_app_tests.test.ui app dispatches native context menu",
+        "runtime.ui_app_tests.test.a rebuild while the native menu",
+        "runtime.ui_app_tests.test.context menu selection dispatches",
+        "runtime.ui_app_tests.test.any superseding presentation",
+        "runtime.ui_app_tests.test.rebuilds under an open menu",
+        "runtime.ui_app_tests.test.a failing rebuild routed",
+        "runtime.ui_app_tests.test.dismissing the menu after",
+        "runtime.ui_app_tests.test.a selection whose update",
+        "runtime.ui_app_tests.test.a menu presented while",
+        "runtime.ui_app_tests.test.windowed virtual list scrolls",
+        "runtime.ui_app_tests.test.component coordination",
+    }));
+    addTestStep(b, "test-ts-capability-records", "Verify complete TypeScript capability records and ownership", filteredTestArtifact(b, desktop_mod, "ts-capability-record-tests", &.{
+        "named effect host applies policy admission slots cancellation routes and dropped terminal retirement",
+        "runtime.ts_core_host.test.PTY name bindings",
+        "runtime.ts_ui_app.test.web pane exact decimal",
+        "runtime.ts_ui_app.test.TypeScript tween adapter",
+        "runtime.ts_ui_app.test.lifecycle host consumes",
+        "runtime.ui_app_tests.test.dispatch coordination",
+        "runtime.ts_core_host_tests.test.complete subprocess records",
+        "runtime.ts_core_host_tests.test.routed clipboard duplicates",
+        "runtime.ts_core_host_tests.test.routed clipboard keys",
+        "runtime.ts_core_host_tests.test.playback snapshot captures",
+        "runtime.ts_core_host_tests.test.complete storage",
+        "runtime.ts_core_host_tests.test.complete timers",
+        "runtime.ts_core_host_tests.test.timer host applies policy",
+        "runtime.ts_core_host_tests.test.delay host consumes compiled",
+        "runtime.ts_core_host_tests.test.delay admission supplies",
+        "runtime.ts_core_host_tests.test.media host consumes",
+        "runtime.ts_core_host_tests.test.request host consumes",
+        "runtime.ts_core_host_tests.test.file host consumes",
+        "runtime.ts_core_host_tests.test.callback host consumes",
+        "runtime.ts_core_host_tests.test.word image ABI",
+        "runtime.ts_core_host_tests.test.image and named cancellation",
+    }));
+    addTestStep(b, "test-session-replay", "Run complete session codecs, recording, and replay tests", filteredTestArtifact(b, desktop_mod, "session-replay-tests", &.{
+        "runtime.session_journal.test", "runtime.session_record.test", "runtime.session_tests.test", "runtime.session_replay.test", "runtime.host_event_pump.test",
+    }));
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
         addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);
     }
+    // The font-registry suite as its own step so CI lanes on real
+    // Windows hardware can run it natively: the whole font pipeline
+    // (TrueType parsing, glyph rasterization, the reference renderer)
+    // is platform-neutral Zig, and this suite's Chinese-receipt test
+    // registers a committed CJK face through the app-fonts seam and
+    // proves the rendered string is real glyphs, not tofu — running it
+    // on a Windows runner makes that a Windows-native receipt. The same
+    // tests also run inside `zig build test` via the canvas-frame shard.
+    addTestStep(b, "test-canvas-fonts", "Run the runtime font-registry tests (includes the registered-CJK Chinese receipt)", filteredTestArtifact(b, desktop_mod, "canvas-fonts-tests", &.{"runtime.canvas_font_tests.test"}));
+    // The console-attachment regression is Windows-only, so the general
+    // Linux `zig build test` lane can only compile and skip it. Expose the
+    // exact test as a focused step for the real-Windows CI runner; this
+    // keeps CREATE_NO_WINDOW behavior covered without making that runner
+    // execute the entire framework runtime suite.
+    addTestStep(b, "test-windows-effects-no-console", "Verify Windows effect spawns run without an attached console", filteredTestArtifact(b, desktop_mod, "windows-effects-no-console-tests", &.{"runtime.effects_tests.test.Windows background spawns run without an attached console"}));
     addTestStep(b, "test-automation-protocol", "Run automation protocol tests", automation_protocol_tests);
     addTestStep(b, "test-automation-cli", "Run native automate CLI tests", automation_cli_tests);
+    addTestStep(b, "test-markup-cli", "Run native markup CLI tests", markup_cli_tests);
+    addTestStep(b, "test-skills-cli", "Run native skills CLI tests", skills_cli_tests);
+    addTestStep(b, "test-evals-cmdview", "Run the evals harness Cmd wire decoder tests", evals_cmdview_tests);
     addTestStep(b, "test-tooling", "Run Native SDK tooling tests", tooling_tests);
     addTestStep(b, "test-eject-components", "Run ejected-component widget-identity tests", eject_components_tests);
 
@@ -797,11 +2805,80 @@ pub fn build(b: *std.Build) void {
     const browser_system_link_step = b.step("test-browser-system-link", "Build the browser example with the system engine");
     browser_system_link_step.dependOn(&build_browser_system.step);
 
+    // Windows web-layer PE cross-audit: the declare-to-use inference,
+    // proven on real executables from any host via cross-compile.
+    // ui-inbox's manifest declares no web use, so its exe must carry no
+    // WebView2Loader.dll reference (the whole embedded layer compiles
+    // out) and no loader may land beside it; the webview example declares
+    // the "webview" capability, so its exe must keep the reference. The
+    // loader string lives as UTF-16 in the host, so the audit is a
+    // dedicated scanner (tools/audit_web_layer.zig), not a text grep.
+    const web_layer_auditor = b.addExecutable(.{
+        .name = "audit-web-layer",
+        .root_module = module(b, host_target, optimize, "tools/audit_web_layer.zig"),
+    });
+    // A loader installed by a build predating the inference would fail
+    // the absence check below without being this build's fault; clear it
+    // so the assertion tests what THIS build installs.
+    const clean_native_only_loader = b.addSystemCommand(&.{ "sh", "-c", "rm -f examples/ui-inbox/zig-out/bin/WebView2Loader.dll" });
+    const build_native_only_windows = b.addSystemCommand(&.{ "zig", "build", "-Dtarget=x86_64-windows-gnu", "-Dplatform=windows" });
+    build_native_only_windows.setCwd(b.path("examples/ui-inbox"));
+    build_native_only_windows.step.dependOn(&clean_native_only_loader.step);
+    const build_webview_windows = b.addSystemCommand(&.{ "zig", "build", "-Dtarget=x86_64-windows-gnu", "-Dplatform=windows", "-Dweb-engine=system" });
+    build_webview_windows.setCwd(b.path("examples/webview"));
+    const audit_native_only_exe = b.addRunArtifact(web_layer_auditor);
+    audit_native_only_exe.addArgs(&.{ "examples/ui-inbox/zig-out/bin/ui-inbox.exe", "absent" });
+    audit_native_only_exe.has_side_effects = true;
+    audit_native_only_exe.step.dependOn(&build_native_only_windows.step);
+    const audit_webview_exe = b.addRunArtifact(web_layer_auditor);
+    audit_webview_exe.addArgs(&.{ "examples/webview/zig-out/bin/webview.exe", "present" });
+    audit_webview_exe.has_side_effects = true;
+    audit_webview_exe.step.dependOn(&build_webview_windows.step);
+    const audit_native_only_loader = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\test ! -f examples/ui-inbox/zig-out/bin/WebView2Loader.dll || {
+        \\  echo "web-layer audit FAILED: the native-only build installed WebView2Loader.dll" >&2
+        \\  exit 1
+        \\}
+    });
+    audit_native_only_loader.step.dependOn(&build_native_only_windows.step);
+    const web_layer_audit_step = b.step("test-windows-web-layer-audit", "Cross-compile a native-only and a web example for Windows and audit the web layer in each exe");
+    web_layer_audit_step.dependOn(&audit_native_only_exe.step);
+    web_layer_audit_step.dependOn(&audit_webview_exe.step);
+    web_layer_audit_step.dependOn(&audit_native_only_loader.step);
+
+    // Linux web-layer ELF cross-audit: the same declare-to-use proof on
+    // real Linux executables. Unlike the Windows step this cannot
+    // cross-compile from any host — the GTK host needs the system GTK4
+    // (and, for the web example, WebKitGTK) development headers — so the
+    // step runs on Linux with both packages installed and proves the
+    // SEAM, not the environment: the native-only exe must carry no
+    // libwebkitgtk DT_NEEDED entry and no webkit_/jsc_ dynamic symbol
+    // even though the dev package was right there, while the web example
+    // must keep them. The environment half (a native-only app building
+    // on a runner with no WebKitGTK dev package at all) is proven by the
+    // linux-canvas-smoke CI job.
+    const build_native_only_linux = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=linux" });
+    build_native_only_linux.setCwd(b.path("examples/ui-inbox"));
+    const build_webview_linux = b.addSystemCommand(&.{ "zig", "build", "-Dplatform=linux", "-Dweb-engine=system" });
+    build_webview_linux.setCwd(b.path("examples/webview"));
+    const audit_native_only_elf = b.addRunArtifact(web_layer_auditor);
+    audit_native_only_elf.addArgs(&.{ "examples/ui-inbox/zig-out/bin/ui-inbox", "absent" });
+    audit_native_only_elf.has_side_effects = true;
+    audit_native_only_elf.step.dependOn(&build_native_only_linux.step);
+    const audit_webview_elf = b.addRunArtifact(web_layer_auditor);
+    audit_webview_elf.addArgs(&.{ "examples/webview/zig-out/bin/webview", "present" });
+    audit_webview_elf.has_side_effects = true;
+    audit_webview_elf.step.dependOn(&build_webview_linux.step);
+    const linux_web_layer_audit_step = b.step("test-linux-web-layer-audit", "Build a native-only and a web example for Linux (Linux host with GTK4 + WebKitGTK dev packages) and audit the web layer in each ELF");
+    linux_web_layer_audit_step.dependOn(&audit_native_only_elf.step);
+    linux_web_layer_audit_step.dependOn(&audit_webview_elf.step);
+
     const frontend_examples_step = b.step("test-examples-frontends", "Run frontend example tests");
-    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);
-    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react", .owned);
-    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte", .owned);
-    addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue", .owned);
+    _ = addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-next", "Run Next example tests", "examples/next", .owned);
+    _ = addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-react", "Run React example tests", "examples/react", .owned);
+    _ = addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-svelte", "Run Svelte example tests", "examples/svelte", .owned);
+    _ = addExampleTestStep(b, host_cli_exe, frontend_examples_step, "test-example-vue", "Run Vue example tests", "examples/vue", .owned);
     addFileContainsCheckStep(b, file_contains_checker, frontend_examples_step, "test-example-frontend-positioning", "Verify frontend example native shell positioning", &.{
         .{ .path = "examples/next/README.md", .pattern = "opens the native app shell with WebView content." },
         .{ .path = "examples/react/README.md", .pattern = "opens the native app shell with WebView content." },
@@ -810,27 +2887,85 @@ pub fn build(b: *std.Build) void {
     });
 
     const native_examples_step = b.step("test-examples-native", "Run native-first example tests");
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-panels", "Run native panels example tests", "examples/native-panels", .owned);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-calculator", "Run calculator example tests", "examples/calculator", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-collapse", "Run split collapse example tests", "examples/split-collapse", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed);
-    addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned);
-    addFileContainsCheckStep(b, file_contains_checker, native_examples_step, "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
+    const native_example_shard_steps = [_]*std.Build.Step{
+        b.step("test-examples-native-shard-1", "Run the first native-first example test shard"),
+        b.step("test-examples-native-shard-2", "Run the second native-first example test shard"),
+        b.step("test-examples-native-shard-3", "Run the third native-first example test shard"),
+        b.step("test-examples-native-shard-4", "Run the fourth native-first example test shard"),
+    };
+    const ui_inbox_example_step = addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .managed);
+    const native_example_steps = [_]*std.Build.Step{
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-command-app", "Run command app example tests", "examples/command-app", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-shell", "Run native shell example tests", "examples/native-shell", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-native-panels", "Run native panels example tests", "examples/native-panels", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-status-policy", "Run menu desk example tests", "examples/status-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-hold-policy", "Run gesture lab example tests", "examples/hold-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effect-policy", "Run named effect policy example tests", "examples/effect-policy", .managed),
+        ui_inbox_example_step,
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-typography", "Run typography and bundled font startup tests", "examples/typography", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-video-player", "Run video player example tests", "examples/video-player", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-voice-memo", "Run voice memo example tests", "examples/voice-memo", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-editor", "Run code editor example tests", "examples/code-editor", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-calculator", "Run calculator example tests", "examples/calculator", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-notes", "Run notes example tests", "examples/notes", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-collapse", "Run split collapse example tests", "examples/split-collapse", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-system-monitor", "Run system monitor example tests", "examples/system-monitor", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-terminal", "Run terminal example tests", "examples/terminal", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-workbench", "Run workbench example tests", "examples/workbench", .owned),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-effects-probe", "Run effects probe example tests", "examples/effects-probe", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-channel-monitor", "Run channel monitor example tests", "examples/channel-monitor", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-pipeline", "Run portable pipeline component example tests", "examples/pipeline", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-radio-policy", "Run portable radio policy example tests", "examples/radio-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tabs-policy", "Run portable tabs policy example tests", "examples/tabs-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-tree-policy", "Run portable tree policy example tests", "examples/tree-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-list-policy", "Run portable list policy example tests", "examples/list-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-policy", "Run portable menu policy example tests", "examples/menu-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-toggle-policy", "Run portable toggle policy example tests", "examples/toggle-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-accordion-policy", "Run portable accordion policy example tests", "examples/accordion-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-checkable-policy", "Run portable checkable policy example tests", "examples/checkable-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-slider-policy", "Run portable slider policy example tests", "examples/slider-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-split-policy", "Run portable split policy example tests", "examples/split-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-scroll-policy", "Run portable scroll policy example tests", "examples/scroll-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-window-policy", "Run TypeScript window reconciliation example tests", "examples/window-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
+    };
+    for (native_example_shard_steps) |shard_step| {
+        native_examples_step.dependOn(shard_step);
+    }
+    for (native_example_steps, 0..) |example_step, index| {
+        native_example_shard_steps[index % native_example_shard_steps.len].dependOn(example_step);
+    }
+    if (b.graph.host.result.os.tag == .macos) {
+        // The optimized test and model-contract links retain AppKit's C host
+        // without analyzing the app's runtime entry point.
+        const optimized_ui_inbox = managedExampleRun(b, host_cli_exe, &.{ "test", "-Doptimize=ReleaseFast", "-Dplatform=macos" });
+        optimized_ui_inbox.setCwd(b.path("examples/ui-inbox"));
+        optimized_ui_inbox.step.dependOn(ui_inbox_example_step);
+        const optimized_step = b.step("test-example-ui-inbox-macos-optimized", "Link optimized macOS app tests and model contract against AppKit");
+        optimized_step.dependOn(&optimized_ui_inbox.step);
+        native_examples_step.dependOn(optimized_step);
+    }
+    // Keep this companion check in the same shard as capabilities. The
+    // aggregate step depends on every shard, so `test-examples-native`
+    // retains exactly the same coverage as before.
+    addFileContainsCheckStep(b, file_contains_checker, native_example_shard_steps[2], "test-example-capabilities-events", "Verify capabilities example event bridge names", &.{
         .{ .path = "examples/capabilities/src/main.zig", .pattern = "native-sdk:drop:files" },
     });
 
@@ -879,6 +3014,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-ios-layout/calculator.xcodeproj/xcshareddata/xcschemes/calculator.xcscheme",
         "examples/calculator/zig-out/package/test-ios-layout/Host/uikit_host.m",
         "examples/calculator/zig-out/package/test-ios-layout/Host/native_sdk_app.h",
+        "examples/calculator/zig-out/package/test-ios-layout/Host/apple_image_fit.h",
         "examples/calculator/zig-out/package/test-ios-layout/Host/Info.plist",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/Contents.json",
@@ -979,13 +3115,20 @@ pub fn build(b: *std.Build) void {
     });
     addFileContainsCheckStep(b, file_contains_checker, mobile_examples_step, "test-example-mobile-widget-abi", "Verify mobile examples use stable widget ABI lookups", &.{
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_viewport_state_t" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_scroll" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
+        .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/mobile-canvas/ios/native_sdk_app.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "native_sdk_app_widget_semantics_by_id" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIO" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "childrenByParentId[node.parentId, default: []].append(element)" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "parent.accessibilityContainerType = .semanticGroup" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "parent.isAccessibilityElement = false" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeScroll(nativeApp" },
+        .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "WIDGET_ROLE_RADIOGROUP -> \"android.widget.RadioGroup\"" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeWidgetSemanticsByIdFields" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_scroll" },
@@ -1004,13 +3147,62 @@ pub fn build(b: *std.Build) void {
     mobile_canvas_lib_step.dependOn(&build_mobile_canvas_lib.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib.step);
 
-    // Android cross-compile proof: pure Zig (no NDK sysroot — the static
-    // lib links no libc), PIC so the objects can land in the shim's .so.
+    const build_mobile_canvas_store_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true" });
+    build_mobile_canvas_store_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_step = b.step("test-example-mobile-canvas-lib-store", "Build a record-store-capable mobile embed static library");
+    mobile_canvas_store_lib_step.dependOn(&build_mobile_canvas_store_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib.step);
+
+    const build_mobile_canvas_relational_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dsqlite=true", "--prefix", "zig-out/test-relational" });
+    build_mobile_canvas_relational_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_relational_lib_step = b.step("test-example-mobile-canvas-lib-sqlite", "Build a relational-SQLite-capable mobile embed static library");
+    mobile_canvas_relational_lib_step.dependOn(&build_mobile_canvas_relational_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_relational_lib.step);
+
+    const build_mobile_canvas_both_storage_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true", "-Dsqlite=true", "--prefix", "zig-out/test-both-storage" });
+    build_mobile_canvas_both_storage_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_both_storage_lib_step = b.step("test-example-mobile-canvas-lib-storage", "Build both SQLite-backed mobile tiers with one vendored engine object");
+    mobile_canvas_both_storage_lib_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
+
+    // Android cross-compile proofs: the capability-free archive remains pure
+    // Zig, while the store variant must discover the NDK sysroot and compile
+    // the vendored SQLite amalgamation for bionic. Keeping both catches a
+    // capability branch that a host-only store build cannot exercise.
     const build_mobile_canvas_lib_android = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dtarget=aarch64-linux-android" });
     build_mobile_canvas_lib_android.setCwd(b.path("examples/mobile-canvas"));
     const mobile_canvas_lib_android_step = b.step("test-example-mobile-canvas-lib-android", "Cross-compile the mobile-canvas embed static library for aarch64-linux-android");
     mobile_canvas_lib_android_step.dependOn(&build_mobile_canvas_lib_android.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib_android.step);
+
+    const build_mobile_canvas_store_lib_android = b.addSystemCommand(&.{
+        "zig",      "build",                      "lib", "-Dstore=true", "-Dtarget=aarch64-linux-android",
+        "--prefix", "zig-out/test-android-store",
+    });
+    build_mobile_canvas_store_lib_android.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_android_step = b.step("test-example-mobile-canvas-lib-android-store", "Cross-compile SQLite-backed mobile storage for aarch64-linux-android");
+    mobile_canvas_store_lib_android_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+
+    // Apple SDK headers only exist on macOS. This is still part of the local
+    // mobile aggregate there, and CI invokes the named step on its macOS tier.
+    if (b.graph.host.result.os.tag == .macos) {
+        const build_mobile_canvas_store_lib_ios = b.addSystemCommand(&.{
+            "zig",      "build",                  "lib", "-Dstore=true", "-Dtarget=aarch64-ios-simulator",
+            "--prefix", "zig-out/test-ios-store",
+        });
+        build_mobile_canvas_store_lib_ios.setCwd(b.path("examples/mobile-canvas"));
+        const build_mobile_canvas_store_lib_ios_device = b.addSystemCommand(&.{
+            "zig",      "build",                         "lib", "-Dstore=true", "-Dtarget=aarch64-ios",
+            "--prefix", "zig-out/test-ios-device-store",
+        });
+        build_mobile_canvas_store_lib_ios_device.setCwd(b.path("examples/mobile-canvas"));
+        const mobile_canvas_store_lib_ios_step = b.step("test-example-mobile-canvas-lib-ios-store", "Cross-compile SQLite-backed mobile storage for iOS simulator and device");
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+    }
 
     const examples_step = b.step("test-examples", "Run all example tests and layout checks");
     examples_step.dependOn(frontend_examples_step);
@@ -1220,6 +3412,52 @@ pub fn build(b: *std.Build) void {
     native_shell_smoke_run.step.dependOn(&cli_exe.step);
     native_shell_smoke_step.dependOn(&native_shell_smoke_run.step);
 
+    const menu_bar_smoke_step = b.step("test-menu-bar-smoke", "Run zero-config TypeScript app-menu automation smoke test");
+    const menu_bar_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
+    menu_bar_smoke_build.setCwd(b.path("examples/menu-bar"));
+    const menu_bar_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\cd examples/menu-bar
+        \\app="zig-out/bin/menu-bar"
+        \\cli="$1"
+        \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
+        \\automation_dir=".zig-cache/native-sdk-automation"
+        \\mkdir -p "$automation_dir"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
+        \\"$app" > .zig-cache/native-sdk-menu-bar-smoke.log 2>&1 &
+        \\pid=$!
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-menu-bar-smoke.log) ----" >&2; cat .zig-cache/native-sdk-menu-bar-smoke.log >&2 2>/dev/null || true; fi' EXIT
+        \\ready="$("$cli" automate wait 2>&1)"
+        \\case "$ready" in *"ready=true"*) ;; *) echo "menu-bar automation snapshot was not ready" >&2; exit 1 ;; esac
+        \\before="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$before" in *'command id="player.next" title="Next Track" enabled=true checked=false'*) ;; *) echo "app.zon command catalog was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu title="Player" items=6'*) ;; *) echo "app.zon Player menu was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu-item label="Next Track" command="player.next" enabled=true checked=false key="n" modifiers=(primary=true,command=false,control=false,option=false,shift=false)'*) ;; *) echo "app.zon player.next menu item was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in
+        \\  *'Ambient Coast'*) expected='Night Drive' ;;
+        \\  *'Night Drive'*) expected='Paper Planes' ;;
+        \\  *'Paper Planes'*) expected='Ambient Coast' ;;
+        \\  *) echo "menu-bar snapshot did not expose the current TypeScript model track" >&2; exit 1 ;;
+        \\esac
+        \\"$cli" automate menu-command player.next >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *"$expected"*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *"$expected"*) ;; *) echo "app.zon menu command did not reach the zero-config TypeScript commandMsg mapper" >&2; exit 1 ;; esac
+        \\echo "menu-bar smoke ok"
+        ,
+        "sh",
+    });
+    menu_bar_smoke_run.addFileArg(cli_exe.getEmittedBin());
+    menu_bar_smoke_run.step.dependOn(&menu_bar_smoke_build.step);
+    menu_bar_smoke_run.step.dependOn(&cli_exe.step);
+    menu_bar_smoke_step.dependOn(&menu_bar_smoke_run.step);
+
     const gpu_surface_smoke_step = b.step("test-gpu-surface-smoke", "Run macOS GPU surface automation smoke test");
     // The GPU smoke apps are managed examples (no build.zig of their own),
     // so their binaries come from the CLI verb. -Doptimize=Debug keeps the
@@ -1314,8 +3552,8 @@ pub fn build(b: *std.Build) void {
     const writeback_smoke_step = b.step("test-writeback-smoke", "Run macOS provenance + write-back automation smoke test");
     // Debug on purpose: the write-back loop lives on the markup
     // interpreter + hot-reload watch, which apps enable in Debug
-    // (kanban's dev_markup_reload) - the release engine is compiled and
-    // watchless by design.
+    // (including the generated TS-core wiring) - the release engine is
+    // compiled and watchless by design.
     const writeback_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     writeback_smoke_build.setCwd(b.path("examples/kanban"));
     const writeback_smoke_run = b.addSystemCommand(&.{
@@ -1328,45 +3566,45 @@ pub fn build(b: *std.Build) void {
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\mkdir -p "$automation_dir"
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir"/command*.txt "$automation_dir/provenance.txt"
-        \\# The smoke edits src/board.native through the write-back verb and restores
+        \\# The smoke edits src/app.native through the write-back verb and restores
         \\# it through the same verb; the trap restores from the backup on ANY
         \\# failure so an aborted run never leaves the example dirty.
-        \\cp src/board.native .zig-cache/board.native.smoke-backup
+        \\cp src/app.native .zig-cache/app.native.smoke-backup
         \\"$app" > .zig-cache/native-sdk-writeback-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; cp .zig-cache/board.native.smoke-backup src/board.native; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-writeback-smoke.log) ----" >&2; cat .zig-cache/native-sdk-writeback-smoke.log >&2 2>/dev/null || true; fi' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; cp .zig-cache/app.native.smoke-backup src/app.native; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-writeback-smoke.log) ----" >&2; cat .zig-cache/native-sdk-writeback-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\"$cli" automate assert --timeout-ms 30000 'ready=true' >/dev/null
         \\snapshot="$(cat "$automation_dir/snapshot.txt")"
         \\button_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=button name="Add card".*/\1/p' | head -n 1)"
         \\case "$button_id" in ''|*[!0-9]*) echo "writeback smoke: Add card button id was missing from the snapshot" >&2; exit 1 ;; esac
+        \\heading_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Todo".*/\1/p' | head -n 1)"
+        \\case "$heading_id" in ''|*[!0-9]*) echo "writeback smoke: Todo heading id was missing from the snapshot" >&2; exit 1 ;; esac
         \\# 1. Provenance: the button reports its authored span in the root file.
         \\provenance="$("$cli" automate provenance kanban-canvas "$button_id" 2>/dev/null)"
-        \\case "$provenance" in *"authored=markup"*"root=src/board.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
-        \\case "$provenance" in *"node file=src/board.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
-        \\# 2. Template + import chain: a card title reports its definition site in
-        \\# the component file plus the <use> site in the root file, with the
-        \\# for-loop iteration key.
-        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Sketch the board layout".*/\1/p' | head -n 1)"
+        \\case "$provenance" in *"authored=markup"*"root=src/app.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
+        \\case "$provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
+        \\# 2. Imported-loop provenance: a card title reports its authored
+        \\# component file plus its iteration key.
+        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Retry failed agent runs".*/\1/p' | head -n 1)"
         \\case "$card_id" in ''|*[!0-9]*) echo "writeback smoke: card text id was missing from the snapshot" >&2; exit 1 ;; esac
         \\card_provenance="$("$cli" automate provenance kanban-canvas "$card_id" 2>/dev/null)"
-        \\case "$card_provenance" in *"node file=src/components/board-column.native"*) ;; *) echo "writeback smoke: card provenance missed the component file: $card_provenance" >&2; exit 1 ;; esac
-        \\case "$card_provenance" in *"use file=src/board.native"*) ;; *) echo "writeback smoke: card provenance missed the use-site chain: $card_provenance" >&2; exit 1 ;; esac
+        \\case "$card_provenance" in *"node file=src/components/board-column.native"*) ;; *) echo "writeback smoke: card provenance named the wrong file: $card_provenance" >&2; exit 1 ;; esac
         \\case "$card_provenance" in *"keys="*) ;; *) echo "writeback smoke: card provenance missed the iteration key: $card_provenance" >&2; exit 1 ;; esac
-        \\# 3. Write-back: flip the button label through the verb; the app's own
+        \\# 3. Write-back: flip the Todo heading through the verb; the app's own
         \\# hot-reload watch picks the file change up and repaints.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add task" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add task"' >/dev/null
-        \\# The file diff is byte-exact: exactly the label bytes changed.
-        \\sed 's/>Add card</>Add task</' .zig-cache/board.native.smoke-backup > .zig-cache/board.native.smoke-expected
-        \\cmp -s .zig-cache/board.native.smoke-expected src/board.native || { echo "writeback smoke: the edit was not minimal-diff" >&2; exit 1; }
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Backlog" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Backlog"' >/dev/null
+        \\# The file diff is byte-exact: exactly the heading bytes changed.
+        \\sed 's/>Todo</>Backlog</' .zig-cache/app.native.smoke-backup > .zig-cache/app.native.smoke-expected
+        \\cmp -s .zig-cache/app.native.smoke-expected src/app.native || { echo "writeback smoke: the edit was not minimal-diff" >&2; exit 1; }
         \\# 4. Flip it back through the same verb: the structural id survived the
         \\# reload (text is not identity), and the file restores byte-identical.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add card" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add card"' >/dev/null
-        \\cmp -s .zig-cache/board.native.smoke-backup src/board.native || { echo "writeback smoke: the flip-back did not restore the file byte-identically" >&2; exit 1; }
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Todo" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Todo"' >/dev/null
+        \\cmp -s .zig-cache/app.native.smoke-backup src/app.native || { echo "writeback smoke: the flip-back did not restore the file byte-identically" >&2; exit 1; }
         \\# 5. Refusal: an edit that fails validation leaves the file untouched.
         \\if "$cli" automate edit kanban-canvas "$button_id" set-attr bogus 1 >/dev/null 2>&1; then echo "writeback smoke: an invalid edit was not refused" >&2; exit 1; fi
-        \\cmp -s .zig-cache/board.native.smoke-backup src/board.native || { echo "writeback smoke: a refused edit touched the file" >&2; exit 1; }
+        \\cmp -s .zig-cache/app.native.smoke-backup src/app.native || { echo "writeback smoke: a refused edit touched the file" >&2; exit 1; }
         \\echo "writeback smoke ok"
         ,
         "sh",
@@ -1406,6 +3644,16 @@ pub fn build(b: *std.Build) void {
         \\ready_budget_ms="$smoke_budget_ms"
         \\if [ "$ready_budget_ms" -lt 500 ]; then ready_budget_ms=500; fi
         \\ready_budget_ns=$((ready_budget_ms * 1000000))
+        \\# gpu-dashboard is a native-only app (nothing in app.zon declares web
+        \\# use), so its macOS host must never boot the WebKit stack: WKWebView
+        \\# instantiation spawns com.apple.WebKit.* XPC helpers. They are
+        \\# launchd-parented (not app children), so the honest cheap probe is
+        \\# the machine-wide helper set before launch vs at the end of the
+        \\# session — a NEW helper during this headless smoke window means the
+        \\# lazy main-WebView path regressed (the failure lists the processes
+        \\# so a coincidental web app launched mid-smoke is tellable apart).
+        \\webkit_helpers() { pgrep -f 'com\.apple\.WebKit\.(WebContent|Networking|GPU)' 2>/dev/null | tr '\n' ' '; }
+        \\webkit_before="$(webkit_helpers)"
         \\pid=""
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-gpu-dashboard-smoke.log) ----" >&2; cat .zig-cache/native-sdk-gpu-dashboard-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\stop_app() {
@@ -1422,7 +3670,13 @@ pub fn build(b: *std.Build) void {
         \\  ready_uptime="$(printf '%s\n' "$ready" | sed -n 's/.*runtime_uptime_ns=\([0-9][0-9]*\).*/\1/p')"
         \\  case "$ready_uptime" in ''|*[!0-9]*) echo "gpu-dashboard automation ready uptime was missing" >&2; exit 1 ;; esac
         \\  if [ "$ready_uptime" -le 0 ] || [ "$ready_uptime" -gt "$ready_budget_ns" ]; then echo "gpu-dashboard automation ready exceeded $ready_budget_ms ms: $ready_uptime ns" >&2; exit 1; fi
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  attempts=0
+        \\  while [ "$attempts" -lt 50 ]; do
+        \\    snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\    case "$snapshot" in *'window @w1 "Native SDK GPU Dashboard"'*'view @w1/dashboard-canvas kind=gpu_surface'*'accessibility_label="Native-rendered product dashboard canvas"'*) break ;; esac
+        \\    attempts=$((attempts + 1))
+        \\    sleep 0.1
+        \\  done
         \\  case "$snapshot" in *'window @w1 "Native SDK GPU Dashboard"'*) ;; *) echo "gpu-dashboard window was missing from snapshot" >&2; exit 1 ;; esac
         \\  case "$snapshot" in *'view @w1/main kind=webview'*) echo "dashboard should not create an implicit main WebView" >&2; exit 1 ;; *) ;; esac
         \\  case "$snapshot" in *'source kind=html bytes=0'*) echo "dashboard should not publish an empty default WebView source" >&2; exit 1 ;; *) ;; esac
@@ -1572,6 +3826,19 @@ pub fn build(b: *std.Build) void {
         \\if ! grep -q "gpu incremental verify view=dashboard-canvas checks=" "$verify_log" 2>/dev/null; then echo "dashboard verify mode recorded no incremental checks" >&2; exit 1; fi
         \\if grep -q "verify MISMATCH" "$verify_log" 2>/dev/null; then echo "dashboard incremental present diverged from a full redraw:" >&2; grep "verify MISMATCH" "$verify_log" >&2; exit 1; fi
         \\if grep "gpu incremental verify view=dashboard-canvas checks=" "$verify_log" | grep -qv "mismatches=0"; then echo "dashboard incremental verify reported mismatches" >&2; exit 1; fi
+        \\# The whole session ran (two launches, clicks, resizes): a native-only
+        \\# macOS app must have spawned ZERO new WebKit helper processes.
+        \\webkit_after="$(webkit_helpers)"
+        \\new_webkit=""
+        \\for helper_pid in $webkit_after; do
+        \\  case " $webkit_before " in *" $helper_pid "*) ;; *) new_webkit="$new_webkit $helper_pid" ;; esac
+        \\done
+        \\if [ -n "$new_webkit" ]; then
+        \\  echo "native-only gpu-dashboard session spawned WebKit helper processes:$new_webkit" >&2
+        \\  for helper_pid in $new_webkit; do ps -p "$helper_pid" -o pid,ppid,command >&2 || true; done
+        \\  exit 1
+        \\fi
+        \\echo "zero new WebKit helper processes during the native-only session"
         \\echo "gpu-dashboard smoke ok"
         ,
         "sh",
@@ -1587,7 +3854,8 @@ pub fn build(b: *std.Build) void {
     // numbers only mean something on a controlled machine. Runs via
     // `scripts/gate.sh full --perf` locally and a dedicated macos-14 CI job.
     // Knobs: NATIVE_SDK_PERF_LAUNCHES, NATIVE_SDK_PERF_INTERACTIONS, NATIVE_SDK_PERF_BUDGET_MS,
-    // NATIVE_SDK_PERF_INPUT_BUDGET_MS — see scripts/perf-gpu-dashboard.sh.
+    // NATIVE_SDK_PERF_INPUT_BUDGET_MS, and NATIVE_SDK_PERF_ANIMATION_* — see
+    // scripts/perf-gpu-dashboard.sh.
     const gpu_dashboard_perf_step = b.step("test-gpu-dashboard-perf", "Run macOS GPU dashboard percentile performance check (N launches; slow)");
     const gpu_dashboard_perf_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_dashboard_perf_build.setCwd(b.path("examples/gpu-dashboard"));
@@ -1645,7 +3913,8 @@ pub fn build(b: *std.Build) void {
     canvas_preview_smoke_run.step.dependOn(&cli_exe.step);
     canvas_preview_smoke_step.dependOn(&canvas_preview_smoke_run.step);
 
-    const gpu_components_smoke_step = b.step("test-gpu-components-smoke", "Run macOS GPU components automation smoke test");
+    const gpu_components_smoke_step = b.step("test-gpu-components-smoke", "Run the TypeScript component gallery automation smoke test");
+    if (appkit_accessibility_step) |accessibility_step| gpu_components_smoke_step.dependOn(accessibility_step);
     const gpu_components_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     gpu_components_smoke_build.setCwd(b.path("examples/gpu-components"));
     const gpu_components_smoke_run = b.addSystemCommand(&.{
@@ -1657,361 +3926,121 @@ pub fn build(b: *std.Build) void {
         \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\mkdir -p "$automation_dir"
-        \\# Startup latencies are load-sensitive on shared CI/agent machines.
-        \\# NATIVE_SDK_SMOKE_BUDGET_MS raises the first-frame latency budget (default
-        \\# stays 150 ms) and the automation-ready ceiling (default stays
-        \\# 500 ms; the ceiling never drops below it) without weakening the
-        \\# local defaults; every correctness assertion stays strict.
-        \\smoke_budget_ms="${NATIVE_SDK_SMOKE_BUDGET_MS:-150}"
-        \\case "$smoke_budget_ms" in ''|*[!0-9]*) echo "NATIVE_SDK_SMOKE_BUDGET_MS must be a positive integer of milliseconds: $smoke_budget_ms" >&2; exit 1 ;; esac
-        \\if [ "$smoke_budget_ms" -le 0 ]; then echo "NATIVE_SDK_SMOKE_BUDGET_MS must be a positive integer of milliseconds: $smoke_budget_ms" >&2; exit 1; fi
-        \\smoke_budget_ns=$((smoke_budget_ms * 1000000))
-        \\ready_budget_ms="$smoke_budget_ms"
-        \\if [ "$ready_budget_ms" -lt 500 ]; then ready_budget_ms=500; fi
-        \\ready_budget_ns=$((ready_budget_ms * 1000000))
-        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-house.png" "$automation_dir/screenshot-components-geist.png" "$automation_dir"/command*.txt
         \\"$app" > .zig-cache/native-sdk-gpu-components-smoke.log 2>&1 &
         \\pid=$!
         \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-gpu-components-smoke.log) ----" >&2; cat .zig-cache/native-sdk-gpu-components-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\ready="$("$cli" automate wait 2>&1)"
         \\case "$ready" in *"ready=true"*) ;; *) echo "gpu-components automation snapshot was not ready" >&2; exit 1 ;; esac
-        \\ready_uptime="$(printf '%s\n' "$ready" | sed -n 's/.*runtime_uptime_ns=\([0-9][0-9]*\).*/\1/p')"
-        \\case "$ready_uptime" in ''|*[!0-9]*) echo "gpu-components automation ready uptime was missing" >&2; exit 1 ;; esac
-        \\if [ "$ready_uptime" -le 0 ] || [ "$ready_uptime" -gt "$ready_budget_ns" ]; then echo "gpu-components automation ready exceeded $ready_budget_ms ms: $ready_uptime ns" >&2; exit 1; fi
-        \\snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\case "$snapshot" in *'window @w1 "Native SDK GPU Components"'*) ;; *) echo "gpu-components window was missing from snapshot" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/main kind=webview'*) echo "components should not create an implicit main WebView" >&2; exit 1 ;; *) ;; esac
-        \\case "$snapshot" in *'source kind=html bytes=0'*) echo "components should not publish an empty default WebView source" >&2; exit 1 ;; *) ;; esac
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*) ;; *) echo "components GPU surface was not ready and nonblank" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "components GPU frame was not packet-representable" >&2; exit 1 ;; esac
-        \\first_frame_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_first_frame_latency_ns=\([0-9][0-9]*\).*/\1/p')"
-        \\case "$first_frame_latency" in ''|*[!0-9]*) echo "components GPU first frame latency was missing" >&2; exit 1 ;; esac
-        \\if [ "$first_frame_latency" -le 0 ] || [ "$first_frame_latency" -gt "$smoke_budget_ns" ]; then echo "components GPU first frame exceeded $smoke_budget_ms ms: $first_frame_latency ns" >&2; exit 1; fi
-        \\# The runtime publishes its own fixed 150 ms budget verdict. Within that
-        \\# budget the verdict must agree exactly; beyond it (reachable only when
-        \\# NATIVE_SDK_SMOKE_BUDGET_MS > 150) the runtime must report the overrun honestly.
-        \\if [ "$first_frame_latency" -le 150000000 ]; then
-        \\  case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_first_frame_latency_budget_ns=150000000'*'gpu_first_frame_latency_budget_exceeded=0'*'gpu_first_frame_latency_budget_ok=true'*) ;; *) echo "components GPU first frame exceeded the latency budget" >&2; exit 1 ;; esac
-        \\else
-        \\  case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_first_frame_latency_budget_ns=150000000'*'gpu_first_frame_latency_budget_ok=false'*) ;; *) echo "components runtime did not report the first-frame budget overrun" >&2; exit 1 ;; esac
-        \\fi
-        \\gpu_frame_from_snapshot() {
-        \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_frame=\([0-9][0-9]*\).*/\1/p'
+        \\snapshot="$automation_dir/snapshot.txt"
+        \\widget_id() {
+        \\  role="$1"
+        \\  name="$2"
+        \\  lookup_attempts=0
+        \\  while [ "$lookup_attempts" -lt 50 ]; do
+        \\    id="$(sed -n "s/.*widget @w1\\/components-canvas#\\([0-9][0-9]*\\) role=$role name=\\\"$name\\\".*/\\1/p" "$snapshot" | head -1)"
+        \\    case "$id" in ''|*[!0-9]*) ;; *) printf '%s\n' "$id"; return ;; esac
+        \\    lookup_attempts=$((lookup_attempts + 1))
+        \\    sleep 0.1
+        \\  done
         \\}
-        \\canvas_revision_from_snapshot() {
-        \\  printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* canvas_revision=\([0-9][0-9]*\).*/\1/p'
-        \\}
-        \\snapshot_contains() {
-        \\  case "$snapshot" in *"$1"*) return 0 ;; *) return 1 ;; esac
-        \\}
-        \\case "$snapshot" in *'widget @w1/components-canvas#113 role=checkbox'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "checkbox widget was not initially selected" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#114 role=switch'*'value=1'*'actions=[focus,toggle]'*) ;; *) echo "switch widget was not initially selected" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#116 role=progressbar'*'value=1'*) ;; *) echo "progress widget was missing from the initial snapshot" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#117 role=tab'*'value=1'*'actions=[focus,select]'*) ;; *) echo "small segmented control was not initially selected" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#119 role=tab'*'value=0'*'actions=[focus,select]'*) ;; *) echo "large segmented control was not initially available" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#142 role=menuitem'*'actions=[focus,press,select]'*) ;; *) echo "menu item widget was not initially actionable" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#86 role=tab'*'actions=[focus,press,select]'*) ;; *) echo "theme toolbar trigger was not initially actionable" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#83 role=button'*'actions=[focus,press]'*) ;; *) echo "refresh toolbar widget was not initially actionable" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
-        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
-        \\canvas_revision_after="$canvas_revision_before"
-        \\"$cli" automate widget-click components-canvas 86 >/dev/null 2>&1
         \\attempts=0
         \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
-        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
-        \\    if snapshot_contains 'GPU component theme: ' && snapshot_contains ' from native_view. Count 1.' && snapshot_contains 'view @w1/components-canvas kind=gpu_surface' && snapshot_contains 'canvas_frame_gpu_packet_unsupported=0' && snapshot_contains 'canvas_frame_gpu_packet_representable=true'; then break; fi
-        \\  fi
+        \\  ready_snapshot="$(cat "$snapshot" 2>/dev/null || true)"
+        \\  case "$ready_snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
         \\  attempts=$((attempts + 1))
         \\  sleep 0.1
         \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "theme automation command did not update the retained GPU canvas" >&2; exit 1; fi
-        \\case "$snapshot" in *'GPU component theme: '*' from native_view. Count 1.'*) ;; *) echo "theme automation command did not update status" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "theme automation command did not present a packet-renderable GPU frame" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 111 focus >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'focused=true'*'text="native-sdk"'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
+        \\case "$ready_snapshot" in *'window @w1 "Native SDK GPU Components"'*) ;; *) echo "gpu-components window was missing" >&2; exit 1 ;; esac
+        \\case "$ready_snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "component gallery GPU surface was not ready" >&2; exit 1 ;; esac
+        \\case "$ready_snapshot" in *'view @w1/main kind=webview'*) echo "component gallery created an implicit WebView" >&2; exit 1 ;; *) ;; esac
+        \\"$cli" automate assert 'role=tree name="Components"' 'role=treeitem name="Components".*state=\[expanded\]' 'role=treeitem name="Accordion".*state=\[selected\]' 'role=group name="Details".*state=\[selected,expanded\]' 'name="Accordion details are visible. The model owns this expanded state."'
+        \\"$cli" automate assert 'role=group name="Theme pack"' 'role=group name="Color scheme"' 'role=group name="Theme accent"' 'role=button name="Default".*state=\[selected\]' 'role=button name="Geist"' 'role=button name="System".*state=\[selected\]' 'role=button name="Pink"' 'role=button name="Teal"'
+        \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
+        \\cp "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-house.png"
+        \\rm -f "$automation_dir/screenshot-components-canvas.png"
+        \\theme_geist_id="$(widget_id button Geist)"
+        \\case "$theme_geist_id" in ''|*[!0-9]*) echo "Geist theme toggle id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas "$theme_geist_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=button name="Geist".*state=\[[^]]*selected'
+        \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
+        \\cp "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-geist.png"
+        \\test -s "$automation_dir/screenshot-components-house.png" || { echo "house theme screenshot was empty" >&2; exit 1; }
+        \\test -s "$automation_dir/screenshot-components-geist.png" || { echo "Geist theme screenshot was empty" >&2; exit 1; }
+        \\if cmp -s "$automation_dir/screenshot-components-house.png" "$automation_dir/screenshot-components-geist.png"; then echo "theme toggle did not change rendered pixels" >&2; exit 1; fi
+        \\accordion_id="$(widget_id group Details)"
+        \\case "$accordion_id" in ''|*[!0-9]*) echo "accordion id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$accordion_id" toggle >/dev/null 2>&1
+        \\"$cli" automate assert --absent 'name="Accordion details are visible. The model owns this expanded state."'
+        \\"$cli" automate widget-action components-canvas "$accordion_id" toggle >/dev/null 2>&1
+        \\"$cli" automate assert 'name="Accordion details are visible. The model owns this expanded state."'
+        \\accordion_row_id="$(widget_id treeitem Accordion)"
+        \\case "$accordion_row_id" in ''|*[!0-9]*) echo "accordion navigation id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$accordion_row_id" focus >/dev/null 2>&1
+        \\arrow_count=0
+        \\while [ "$arrow_count" -lt 33 ]; do
+        \\  "$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
+        \\  arrow_count=$((arrow_count + 1))
         \\done
-        \\case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'focused=true'*'text="native-sdk"'*) ;; *) echo "widget focus automation did not focus retained text" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-key components-canvas z z >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'focused=true'*'text="native-sdkz"'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'focused=true'*'text="native-sdkz"'*) ;; *) echo "widget keyboard automation did not update retained text" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-key components-canvas tab >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'widget @w1/components-canvas#112 role=textbox'*'focused=true'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\case "$snapshot" in *'widget @w1/components-canvas#112 role=textbox'*'focused=true'*) ;; *) echo "widget keyboard automation did not move focus" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 105 press >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  if snapshot_contains 'Keyed icon_button #105.' && snapshot_contains 'widget @w1/components-canvas#105 role=button' && snapshot_contains 'actions=[focus,press]'; then break; fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if ! snapshot_contains 'Keyed icon_button #105.' || ! snapshot_contains 'widget @w1/components-canvas#105 role=button' || ! snapshot_contains 'actions=[focus,press]'; then echo "icon button automation press did not update status" >&2; exit 1; fi
-        \\"$cli" automate widget-action components-canvas 111 set-text native-engine >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'text="native-engine"'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\case "$snapshot" in *'widget @w1/components-canvas#111 role=textbox'*'text="native-engine"'*) ;; *) echo "text field automation did not update retained text" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 115 increment >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$snapshot" in *'Keyed slider #115: value '*)
-        \\    case "$snapshot" in *'widget @w1/components-canvas#115 role=slider'*'value=0.62'*) ;; *'widget @w1/components-canvas#115 role=slider'*) break ;; esac
-        \\    ;;
-        \\  esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\case "$snapshot" in *'Keyed slider #115: value '*) ;; *) echo "slider automation increment did not update status" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'widget @w1/components-canvas#115 role=slider'*'value=0.62'*) echo "slider automation increment did not change value" >&2; exit 1 ;; *'widget @w1/components-canvas#115 role=slider'*) ;; *) echo "slider widget was missing after increment" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\"$cli" automate widget-drag components-canvas 115 0.25 0.82 >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    if snapshot_contains 'Clicked slider #115: value 0.82.' && snapshot_contains 'widget @w1/components-canvas#115 role=slider' && { snapshot_contains 'value=0.82' || snapshot_contains 'value=0.819'; }; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "slider automation drag did not request a GPU frame" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Clicked slider #115: value 0.82.' || ! snapshot_contains 'widget @w1/components-canvas#115 role=slider' || { ! snapshot_contains 'value=0.82' && ! snapshot_contains 'value=0.819'; }; then echo "slider automation drag did not update retained slider state" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "slider automation drag did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 156 press >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  if snapshot_contains 'Keyed data_cell #156: selected.' && snapshot_contains 'widget @w1/components-canvas#156 role=gridcell' && snapshot_contains 'focused=true' && snapshot_contains 'value=1'; then break; fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if ! snapshot_contains 'Keyed data_cell #156: selected.' || ! snapshot_contains 'widget @w1/components-canvas#156 role=gridcell' || ! snapshot_contains 'focused=true' || ! snapshot_contains 'value=1'; then echo "grid cell automation press did not focus and report status" >&2; exit 1; fi
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\"$cli" automate widget-click components-canvas 119 >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    if snapshot_contains 'Clicked segmented_control #119: selected.' && snapshot_contains 'widget @w1/components-canvas#117 role=tab' && snapshot_contains 'value=0' && snapshot_contains 'widget @w1/components-canvas#119 role=tab' && snapshot_contains 'focused=true' && snapshot_contains 'value=1'; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "segmented control automation click did not request a GPU frame" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Clicked segmented_control #119: selected.' || ! snapshot_contains 'widget @w1/components-canvas#117 role=tab' || ! snapshot_contains 'value=0' || ! snapshot_contains 'widget @w1/components-canvas#119 role=tab' || ! snapshot_contains 'focused=true' || ! snapshot_contains 'value=1'; then echo "segmented control automation click did not update retained selection state" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "segmented control automation click did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\# The catalog's project menu is an ACTIONS menu (no sibling declares a
-        \\# committed row), so automation select mints NO selection: value
-        \\# stays 0. Automation focus follows the pointer contract (rows take
-        \\# focus QUIETLY, no visible affordance), so nothing repaints and no
-        \\# frame is requested — the republished snapshot alone carries the
-        \\# focus move. A picker menu would mint value=1 and repaint; the
-        \\# select specimen's committed-row tests cover that register.
-        \\"$cli" automate widget-action components-canvas 142 select >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  case "$(printf '%s\\n' "$snapshot" | grep -F 'components-canvas#142 role=menuitem' | head -1)" in *'focused=true'*'value=0'*) break ;; esac
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\menu_item_line="$(printf '%s\\n' "$snapshot" | grep -F 'components-canvas#142 role=menuitem' | head -1)"
-        \\case "$menu_item_line" in *'focused=true'*'value=0'*) ;; *) echo "menu item automation select did not move quiet focus without minting a selection" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 113 toggle >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  if snapshot_contains 'Keyed checkbox #113: off.' && snapshot_contains 'widget @w1/components-canvas#113 role=checkbox' && snapshot_contains 'value=0'; then break; fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if ! snapshot_contains 'Keyed checkbox #113: off.' || ! snapshot_contains 'widget @w1/components-canvas#113 role=checkbox' || ! snapshot_contains 'value=0'; then echo "checkbox automation toggle did not update the retained widget snapshot" >&2; exit 1; fi
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\"$cli" automate widget-click components-canvas 113 >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    if snapshot_contains 'Clicked checkbox #113: on.' && snapshot_contains 'widget @w1/components-canvas#113 role=checkbox' && snapshot_contains 'value=1'; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "checkbox automation click did not request a GPU frame" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Clicked checkbox #113: on.' || ! snapshot_contains 'widget @w1/components-canvas#113 role=checkbox' || ! snapshot_contains 'value=1'; then echo "checkbox automation click did not route through pointer input" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "checkbox automation click did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\"$cli" automate widget-action components-canvas 114 toggle >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  if snapshot_contains 'Keyed switch_control #114: off.' && snapshot_contains 'widget @w1/components-canvas#114 role=switch' && snapshot_contains 'value=0'; then break; fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if ! snapshot_contains 'Keyed switch_control #114: off.' || ! snapshot_contains 'widget @w1/components-canvas#114 role=switch' || ! snapshot_contains 'value=0'; then echo "switch automation toggle did not wake the idle app" >&2; exit 1; fi
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\"$cli" automate widget-click components-canvas 114 >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ]; then
-        \\    if snapshot_contains 'Clicked switch_control #114: on.' && snapshot_contains 'widget @w1/components-canvas#114 role=switch' && snapshot_contains 'value=1'; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ]; then echo "switch automation click did not request a GPU frame" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Clicked switch_control #114: on.' || ! snapshot_contains 'widget @w1/components-canvas#114 role=switch' || ! snapshot_contains 'value=1'; then echo "switch automation click did not route through pointer input" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "switch automation click did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
-        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
-        \\canvas_revision_after="$canvas_revision_before"
-        \\"$cli" automate widget-action components-canvas 120 increment >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
-        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
-        \\    if snapshot_contains 'Keyed list #120: offset 56.' && snapshot_contains 'widget @w1/components-canvas#120 role=list' && snapshot_contains 'scroll=[offset=56,viewport=56,content=168]'; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "list automation increment did not update the retained GPU canvas" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Keyed list #120: offset 56.' || ! snapshot_contains 'widget @w1/components-canvas#120 role=list' || ! snapshot_contains 'scroll=[offset=56,viewport=56,content=168]'; then echo "list automation increment did not update retained scroll semantics" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "list automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
-        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
-        \\canvas_revision_after="$canvas_revision_before"
-        \\"$cli" automate widget-action components-canvas 150 increment >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
-        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
-        \\    if snapshot_contains 'Keyed table #150: offset 56.' && snapshot_contains 'widget @w1/components-canvas#150 role=grid' && snapshot_contains 'scroll=[offset=56,viewport=28,content=140]'; then
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\    fi
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "data grid automation increment did not update the retained GPU canvas" >&2; exit 1; fi
-        \\if ! snapshot_contains 'Keyed table #150: offset 56.' || ! snapshot_contains 'widget @w1/components-canvas#150 role=grid' || ! snapshot_contains 'scroll=[offset=56,viewport=28,content=140]'; then echo "data grid automation increment did not update retained scroll semantics" >&2; exit 1; fi
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "data grid automation increment did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\gpu_frame_before="$(gpu_frame_from_snapshot)"
-        \\case "$gpu_frame_before" in ''|*[!0-9]*) gpu_frame_before=0 ;; esac
-        \\gpu_frame_after="$gpu_frame_before"
-        \\canvas_revision_before="$(canvas_revision_from_snapshot)"
-        \\case "$canvas_revision_before" in ''|*[!0-9]*) canvas_revision_before=0 ;; esac
-        \\canvas_revision_after="$canvas_revision_before"
-        \\"$cli" automate widget-wheel components-canvas 130 20 >/dev/null 2>&1
-        \\attempts=0
-        \\while [ "$attempts" -lt 50 ]; do
-        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
-        \\  gpu_frame_after="$(gpu_frame_from_snapshot)"
-        \\  case "$gpu_frame_after" in ''|*[!0-9]*) gpu_frame_after=0 ;; esac
-        \\  canvas_revision_after="$(canvas_revision_from_snapshot)"
-        \\  case "$canvas_revision_after" in ''|*[!0-9]*) canvas_revision_after=0 ;; esac
-        \\  if [ "$gpu_frame_after" -gt "$gpu_frame_before" ] || [ "$canvas_revision_after" -gt "$canvas_revision_before" ]; then
-        \\    case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=84,viewport=56,content=140]'*)
-        \\      case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) break ;; esac
-        \\      ;;
-        \\    esac
-        \\  fi
-        \\  attempts=$((attempts + 1))
-        \\  sleep 0.1
-        \\done
-        \\if [ "$gpu_frame_after" -le "$gpu_frame_before" ] && [ "$canvas_revision_after" -le "$canvas_revision_before" ]; then echo "scroll automation wheel did not update the retained GPU canvas" >&2; exit 1; fi
-        \\case "$snapshot" in *'widget @w1/components-canvas#130 role=group'*'scroll=[offset=84,viewport=56,content=140]'*) ;; *) echo "scroll automation wheel did not update retained scroll semantics" >&2; exit 1 ;; esac
-        \\case "$snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'canvas_frame_full_repaint=false'*'canvas_frame_pipeline_uploads=0'*'canvas_frame_image_uploads=0'*'canvas_frame_glyph_uploads=0'*'canvas_frame_text_uploads=0'*'canvas_frame_gpu_packet_unsupported=0'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "scroll automation wheel did not present an incremental GPU packet without interaction-time uploads" >&2; exit 1 ;; esac
-        \\input_timestamp="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_input_timestamp_ns=\([0-9][0-9]*\).*/\1/p')"
-        \\case "$input_timestamp" in ''|*[!0-9]*) echo "components GPU input timestamp was missing after widget interaction" >&2; exit 1 ;; esac
-        \\if [ "$input_timestamp" -le 0 ]; then echo "components GPU input timestamp was not recorded" >&2; exit 1; fi
-        \\input_latency="$(printf '%s\n' "$snapshot" | sed -n 's/.*view @w1\/components-canvas kind=gpu_surface.* gpu_input_latency_ns=\([0-9][0-9]*\).*/\1/p')"
-        \\case "$input_latency" in ''|*[!0-9]*) echo "components GPU input latency was missing after widget interaction" >&2; exit 1 ;; esac
-        \\# gpu_input_latency now stamps at the RESPONDING present's completion
-        \\# (input to glass), which legitimately spans the paced render wait —
-        \\# up to a couple of display intervals while animations hold the paced
-        \\# loop. Assert an explicit input-to-glass bound (the perf harness
-        \\# budgets the same channel at 100 ms) instead of the one-interval
-        \\# budget flag the old completion-channel stamp happened to satisfy.
-        \\if [ "$input_latency" -le 0 ] || [ "$input_latency" -gt 100000000 ]; then echo "components GPU input-to-glass latency was implausible: $input_latency ns" >&2; exit 1; fi
+        \\"$cli" automate assert 'role=treeitem name="Tree".*state=\[[^]]*selected' 'role=text name="Tree"'
+        \\scroll_line="$(grep 'name="Scrollable component tree"' "$snapshot" | head -1)"
+        \\case "$scroll_line" in *'scroll=[offset=0,'*) echo "tree selection did not scroll the final row into view" >&2; exit 1 ;; *'scroll=[offset='*) ;; *) echo "component tree scroll semantics were missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-key components-canvas arrowleft >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas arrowleft >/dev/null 2>&1
+        \\"$cli" automate assert --absent 'role=treeitem name="Accordion"'
+        \\"$cli" automate widget-key components-canvas arrowright >/dev/null 2>&1
+        \\"$cli" automate assert 'role=treeitem name="Accordion"'
+        \\dropdown_row_id="$(widget_id treeitem "Dropdown Menu")"
+        \\case "$dropdown_row_id" in ''|*[!0-9]*) echo "dropdown navigation id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$dropdown_row_id" press >/dev/null 2>&1
+        \\"$cli" automate assert 'role=text name="Dropdown Menu"' 'role=button name="Actions"'
+        \\actions_id="$(widget_id button Actions)"
+        \\case "$actions_id" in ''|*[!0-9]*) echo "dropdown trigger id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas "$actions_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=menu name=""' 'role=menuitem name="Duplicate"' 'role=menuitem name="Rename"' 'role=menuitem name="Download"' 'role=menuitem name="Delete"'
+        \\"$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas enter >/dev/null 2>&1
+        \\"$cli" automate assert --absent 'role=menu name=""' 'role=menuitem name="Duplicate"'
+        \\"$cli" automate assert 'role=text name="Last action: Rename"'
+        \\"$cli" automate widget-click components-canvas "$actions_id" >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas arrowup >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas enter >/dev/null 2>&1
+        \\"$cli" automate assert 'role=text name="Last action: Delete"'
+        \\select_row_id="$(widget_id treeitem Select)"
+        \\case "$select_row_id" in ''|*[!0-9]*) echo "select navigation id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$select_row_id" press >/dev/null 2>&1
+        \\"$cli" automate assert 'role=text name="Select"' 'role=button name="Environment selector"'
+        \\select_id="$(widget_id button "Environment selector")"
+        \\case "$select_id" in ''|*[!0-9]*) echo "select trigger id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas "$select_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=menuitem name="Production".*state=\[selected\]' 'role=menuitem name="Staging"' 'role=menuitem name="Development"'
+        \\"$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas arrowdown >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas enter >/dev/null 2>&1
+        \\"$cli" automate assert --absent 'role=menu name=""'
+        \\"$cli" automate widget-click components-canvas "$select_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=menuitem name="Staging".*state=\[selected\]'
+        \\"$cli" automate widget-key components-canvas arrowup >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas arrowup >/dev/null 2>&1
+        \\"$cli" automate widget-key components-canvas enter >/dev/null 2>&1
+        \\"$cli" automate widget-click components-canvas "$select_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=menuitem name="Production".*state=\[selected\]'
+        \\"$cli" automate widget-key components-canvas escape >/dev/null 2>&1
+        \\"$cli" automate assert --absent 'role=menu name=""'
+        \\navigation_scroll_id="$(widget_id group "Scrollable component tree")"
+        \\case "$navigation_scroll_id" in ''|*[!0-9]*) echo "component navigation scroll id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-wheel components-canvas "$navigation_scroll_id" 220 >/dev/null 2>&1
+        \\switch_row_id="$(widget_id treeitem Switch)"
+        \\case "$switch_row_id" in ''|*[!0-9]*) echo "switch navigation id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-action components-canvas "$switch_row_id" press >/dev/null 2>&1
+        \\"$cli" automate assert 'role=text name="Switch"' 'role=switch name="Notifications".*value=1' 'role=switch name="Airplane mode".*value=0'
+        \\airplane_id="$(widget_id switch "Airplane mode")"
+        \\case "$airplane_id" in ''|*[!0-9]*) echo "airplane mode switch id was missing" >&2; exit 1 ;; esac
+        \\"$cli" automate widget-click components-canvas "$airplane_id" >/dev/null 2>&1
+        \\"$cli" automate assert 'role=switch name="Notifications".*value=1' 'role=switch name="Airplane mode".*value=1'
+        \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
+        \\test -s "$automation_dir/screenshot-components-canvas.png" || { echo "component gallery screenshot was empty" >&2; exit 1; }
         \\echo "gpu-components smoke ok"
         ,
         "sh",
@@ -2116,6 +4145,8 @@ pub fn build(b: *std.Build) void {
     });
     package_run.addFileArg(embed_lib.getEmittedBin());
     package_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", @tagName(signing_mode), "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+    if (signing_identity) |identity| package_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| package_run.addArgs(&.{ "--entitlements", entitlements });
     if (cef_auto_install) package_run.addArg("--cef-auto-install");
     package_run.step.dependOn(&embed_lib.step);
     package_run.step.dependOn(&bundle_run.step);
@@ -2153,6 +4184,13 @@ pub fn build(b: *std.Build) void {
     const package_cef_smoke_step = b.step("test-package-cef-layout", "Verify macOS Chromium package layout");
     package_cef_smoke_step.dependOn(&package_cef_check.step);
 
+    // The repository's macOS distribution helpers need a real launchable
+    // executable inside the .app. Keep the notarization helper on the same
+    // emitted host CLI binary that the signed-package smoke executes below;
+    // the SDK embed artifact is a static `.a` library and is not a valid
+    // CFBundleExecutable even though codesign can seal a bundle around it.
+    const macos_distribution_executable = host_cli_exe.getEmittedBin();
+
     // Signed-package seal pin: package an ad-hoc signed bundle and prove
     // the signature survives packaging intact with codesign's own strict
     // verifier. This is the regression gate for the ordering bug where a
@@ -2162,10 +4200,15 @@ pub fn build(b: *std.Build) void {
     // carries the CLI as its executable (packaging only needs a real
     // Mach-O to sign); the check skips loudly on hosts without codesign
     // (any non-macOS machine) instead of pretending to have verified.
+    // Signing that claims to sign now fails the package on hosts that
+    // cannot run codesign (that IS the fix this step gates), so only a
+    // macOS host requests adhoc here; elsewhere the package stays
+    // unsigned and the check script below skips loudly as before.
+    const package_signing_mode: []const u8 = if (b.graph.host.result.os.tag == .macos) "adhoc" else "none";
     const package_signing_run = b.addRunArtifact(host_cli_exe);
     package_signing_run.addArgs(&.{ "package", "--target", "macos", "--output", "zig-out/package/native-sdk-signing-verify.app", "--binary" });
-    package_signing_run.addFileArg(host_cli_exe.getEmittedBin());
-    package_signing_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "adhoc" });
+    package_signing_run.addFileArg(macos_distribution_executable);
+    package_signing_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", package_signing_mode });
     package_signing_run.has_side_effects = true;
     const package_signing_check = b.addSystemCommand(&.{
         "sh", "-c",
@@ -2176,6 +4219,7 @@ pub fn build(b: *std.Build) void {
         \\  exit 0
         \\fi
         \\codesign --verify --strict --deep "$app"
+        \\"$app/Contents/MacOS/native-sdk" version >/dev/null
         \\grep -q "ad-hoc signed" "$app/Contents/Resources/signing-plan.txt"
         \\echo "signed package verify ok"
         ,
@@ -2243,27 +4287,41 @@ pub fn build(b: *std.Build) void {
         b.fmt("zig-out/package/native-sdk-{s}-macos-{s}.app", .{ package_version, optimize_name }),
         "--binary",
     });
-    notarize_run.addFileArg(embed_lib.getEmittedBin());
-    notarize_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "identity", "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
+    notarize_run.addFileArg(macos_distribution_executable);
+    notarize_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", "identity", "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir, "--archive", "--notarize" });
+    if (signing_identity) |identity| notarize_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| notarize_run.addArgs(&.{ "--entitlements", entitlements });
+    if (notary_profile) |profile| notarize_run.addArgs(&.{ "--notary-profile", profile });
     if (cef_auto_install) notarize_run.addArg("--cef-auto-install");
-    notarize_run.step.dependOn(&embed_lib.step);
+    notarize_run.step.dependOn(&host_cli_exe.step);
     notarize_run.step.dependOn(&bundle_run.step);
     const notarize_step = b.step("notarize", "Package, sign with identity, and notarize for macOS distribution");
     notarize_step.dependOn(&notarize_run.step);
 
-    const dmg_script = b.addSystemCommand(&.{
-        "sh", "-c",
-        b.fmt(
-            \\APP="zig-out/package/native-sdk-{s}-macos-{s}.app"
-            \\DMG="zig-out/package/native-sdk-{s}-macos-{s}.dmg"
-            \\test -d "$APP" || {{ echo "run 'zig build package' first" >&2; exit 1; }}
-            \\hdiutil create -volname "native-sdk" -srcfolder "$APP" -ov -format UDZO "$DMG"
-            \\echo "created $DMG"
-        , .{ package_version, optimize_name, package_version, optimize_name }),
+    // Run the same styled archive path app developers get from
+    // `native package --archive`: generated/custom background, Applications
+    // alias, Finder geometry, then compressed UDZO output. Keeping this as a
+    // CLI invocation means the repository helper cannot drift into producing
+    // a plainer image than the product surface it documents.
+    const dmg_run = b.addRunArtifact(host_cli_exe);
+    dmg_run.addArgs(&.{
+        "package",
+        "--target",
+        "macos",
+        "--output",
+        b.fmt("zig-out/package/native-sdk-{s}-macos-{s}.app", .{ package_version, optimize_name }),
+        "--binary",
     });
-    dmg_script.step.dependOn(&package_run.step);
-    const dmg_step = b.step("dmg", "Create macOS .dmg disk image from the packaged .app");
-    dmg_step.dependOn(&dmg_script.step);
+    dmg_run.addFileArg(embed_lib.getEmittedBin());
+    dmg_run.addArgs(&.{ "--manifest", "app.zon", "--assets", "assets", "--optimize", optimize_name, "--signing", @tagName(signing_mode), "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir, "--archive" });
+    if (signing_identity) |identity| dmg_run.addArgs(&.{ "--identity", identity });
+    if (signing_entitlements) |entitlements| dmg_run.addArgs(&.{ "--entitlements", entitlements });
+    if (cef_auto_install) dmg_run.addArg("--cef-auto-install");
+    dmg_run.step.dependOn(&embed_lib.step);
+    dmg_run.step.dependOn(&bundle_run.step);
+    dmg_run.has_side_effects = true;
+    const dmg_step = b.step("dmg", "Create a styled macOS .dmg with a drag-to-Applications layout");
+    dmg_step.dependOn(&dmg_run.step);
 
     const cef_bundle_script = b.addSystemCommand(&.{
         "sh", "-c",
@@ -2288,6 +4346,31 @@ pub fn build(b: *std.Build) void {
         cef_bundle_script.step.dependOn(&cef_bundle_auto.step);
     }
     cef_bundle_step.dependOn(&cef_bundle_script.step);
+
+    // Partition only after every test root has been registered. New suites
+    // automatically enter both the full local test command and a CI shard.
+    const core_test_shards = [_]*std.Build.Step{
+        b.step("test-core-shard-1", "Run complete root test shard 1 of 6"),
+        b.step("test-core-shard-2", "Run complete root test shard 2 of 6"),
+        b.step("test-core-shard-3", "Run complete root test shard 3 of 6"),
+        b.step("test-core-shard-4", "Run complete root test shard 4 of 6"),
+        b.step("test-core-shard-5", "Run complete root test shard 5 of 6"),
+        b.step("test-core-shard-6", "Run complete root test shard 6 of 6"),
+    };
+    test_shards.partition(test_step, &core_test_shards);
+}
+
+fn sqliteCompileFlags() []const []const u8 {
+    return &.{
+        "-DSQLITE_THREADSAFE=2",
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_ENABLE_JSON1",
+        "-DSQLITE_ENABLE_UPDATE_HOOK",
+        "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    };
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
@@ -2296,6 +4379,19 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .target = target,
         .optimize = optimize,
     });
+}
+
+/// The framework module's `terminal_vt` import for THIS repository's own
+/// builds: always the stub. The emulator (libghostty-vt) is pinned by
+/// the APPS that want live `<terminal>` sessions, never by this package
+/// — a pin in `build.zig.zon` is materialized into every consumer's
+/// package directory even when lazy and unused, and ghostty's own graph
+/// walks translate_c/wuffs and pulls harfbuzz, which is exactly what a
+/// scaffolded app must never carry. `AppOptions.terminal_sessions`
+/// resolves the app's own pin (see build/app.zig), and the terminal
+/// examples own the enabled path's test coverage.
+fn terminalVtModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return module(b, target, optimize, "src/runtime/terminal_vt_stub.zig");
 }
 
 /// The short commit hash of the framework checkout the CLI is built
@@ -2311,6 +4407,1625 @@ fn cliBuildCommit(b: *std.Build) []const u8 {
 
 fn testArtifact(b: *std.Build, mod: *std.Build.Module) *std.Build.Step.Compile {
     return filteredTestArtifact(b, mod, "test", &.{});
+}
+
+/// The two transpiled-core end-to-end test binaries: the host/markup
+/// fixture suite (tests/ts-core) and the soundboard example suite —
+/// the launch-gate port driven as a REAL app (its committed core, its
+/// shipping markup). Each runs the @native-sdk/core transpiler (node)
+/// over the TS core at build time, pairs the emitted core with its rt
+/// kernel in one generated module, and compiles the Zig test root
+/// against it plus the framework. Returns null — the suites are
+/// skipped, not failed — when node or the transpiler package's
+/// installed dependency (`npm ci` in packages/core) is missing.
+const TsCoreE2eArtifacts = struct {
+    corewire: *std.Build.Step.Compile,
+    profile_archive: std.Build.LazyPath,
+    host: *std.Build.Step.Compile,
+    persist: *std.Build.Step.Compile,
+    construction: *std.Build.Step.Compile,
+    markdown_content: *std.Build.Step.Compile,
+    widget_audits: *std.Build.Step.Compile,
+    widget_routing: *std.Build.Step.Compile,
+    widget_changes: *std.Build.Step.Compile,
+    widget_presentation: *std.Build.Step.Compile,
+    widget_paint_walk: *std.Build.Step.Compile,
+    control_geometry: *std.Build.Step.Compile,
+    control_content: *std.Build.Step.Compile,
+    surface_recipes: *std.Build.Step.Compile,
+    widget_metrics: *std.Build.Step.Compile,
+    motion: *std.Build.Step.Compile,
+    composition: *std.Build.Step.Compile,
+    composition_view: *std.Build.Step.Compile,
+    composition_app: *std.Build.Step.Compile,
+    view_reload: *std.Build.Step.Compile,
+    view_provenance: *std.Build.Step.Compile,
+    code_app: *std.Build.Step.Compile,
+    code_view: *std.Build.Step.Compile,
+    chart_app: *std.Build.Step.Compile,
+    chart_view: *std.Build.Step.Compile,
+    markdown_app: *std.Build.Step.Compile,
+    markdown_view: *std.Build.Step.Compile,
+    /// The markup battery is its own binary: the compiled-core symbol
+    /// set is a fixed-prefix C ABI, so one process carries ONE archive
+    /// — every fixture battery links exactly its own core.
+    markup: *std.Build.Step.Compile,
+    kanban: *std.Build.Step.Compile,
+    habits: *std.Build.Step.Compile,
+    inbox: *std.Build.Step.Compile,
+    effects_probe: *std.Build.Step.Compile,
+    notes: *std.Build.Step.Compile,
+    code_editor: *std.Build.Step.Compile,
+    channel_monitor: *std.Build.Step.Compile,
+    gpu_dashboard: *std.Build.Step.Compile,
+    canvas_layers: *std.Build.Step.Compile,
+    audio_exact: *std.Build.Step.Compile,
+    spawn_exact: *std.Build.Step.Compile,
+    boot_images: *std.Build.Step.Compile,
+    deck: *std.Build.Step.Compile,
+    markdown_viewer: *std.Build.Step.Compile,
+    split_collapse: *std.Build.Step.Compile,
+    feed: *std.Build.Step.Compile,
+    workbench: *std.Build.Step.Compile,
+    video_player: *std.Build.Step.Compile,
+    canvas_preview: *std.Build.Step.Compile,
+    soundboard: *std.Build.Step.Compile,
+    system_monitor: *std.Build.Step.Compile,
+    /// The stock-IDE contract: a fresh scaffold (and the committed TS
+    /// example ports) typecheck under the REAL tsc with zero injected
+    /// paths, and builds keep working with node_modules deleted.
+    scaffold_ide: *std.Build.Step.Compile,
+    ai_chat: *std.Build.Step.Compile,
+    /// The complete services loop over examples/service-feed-reader: a real
+    /// loopback Cmd.fetch, the generated typed client into a real service
+    /// child, the shipping markup, and record→replay without either.
+    feed_reader: *std.Build.Step.Compile,
+    journal_codecs: *std.Build.Step.Compile,
+    shell_layout: *std.Build.Step.Compile,
+    surface_layout: *std.Build.Step.Compile,
+    virtual_fixed: *std.Build.Step.Compile,
+    typography: *std.Build.Step.Compile,
+    /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
+    /// service executable driven through the out-of-process carrier.
+    services: *std.Build.Step.Compile,
+    /// The in-process service carrier: the same fixture compiled as a
+    /// thread-instanced library archive, linked into this battery and driven
+    /// through ServicePool (parallel keys, per-key FIFO, cooperative
+    /// cancellation/deadlines, trap isolation, streaming, replay). Null when
+    /// the target cannot carry the archive (cross or non-desktop builds).
+    services_pool: ?*std.Build.Step.Compile,
+    /// The mobile execution battery: the pool fixture's core and service
+    /// archives linked into one static library exporting `nsme_run`, so
+    /// the platform toolchain links a runnable harness for the simulator
+    /// or emulator (scripts/mobile-e2e.sh). Present only for a mobile
+    /// -Dtarget; the Android archive is flattened to plain objects (Zig's
+    /// ELF static-library emission nests archive inputs).
+    mobile_battery: ?std.Build.LazyPath,
+    /// The service-host carrier benchmark: a bytes-echo service compiled
+    /// through the same lane, driven directly through the production
+    /// carrier bindings of BOTH carriers (cold start, round-trip latency,
+    /// queued throughput).
+    service_host_bench: *std.Build.Step.Compile,
+    /// Sidecar-shim conformance (tests/sidecar): every fixture's
+    /// generated mirror validated over its frontend-emitted contract
+    /// (plus the hand-written ground-truth sidecars), and every shim
+    /// fully analyzed and linked against the stub core.
+    sidecar_conformance: *std.Build.Step.Compile,
+    /// The ABI-law suite over a REAL compiled core: the markup
+    /// fixture's archive driven directly through the C ABI bindings
+    /// (boot fence, collect invariant, deterministic re-init, channel
+    /// envelopes, integer classes).
+    external_core_abi_laws: *std.Build.Step.Compile,
+    external_core_trap: *std.Build.Step.Compile,
+    /// The mixed-return ABI regression: a real compiled core whose update
+    /// returns both bare Model and [Model, Cmd] through the generated facade.
+    mixed_return_abi_laws: *std.Build.Step.Compile,
+    /// Per-fixture contract artifacts for an external core toolchain:
+    /// the effective contract sidecar and its TypeScript facade/profile
+    /// projections, installed by the stage-core-contracts step.
+    core_contracts: []const CoreContract,
+};
+
+const CoreContract = struct {
+    name: []const u8,
+    sidecar: std.Build.LazyPath,
+    facade: std.Build.LazyPath,
+    profile: std.Build.LazyPath,
+};
+
+fn tsCoreE2eArtifact(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    desktop_mod: *std.Build.Module,
+    tooling_mod: *std.Build.Module,
+) ?TsCoreE2eArtifacts {
+    const node = b.findProgram(&.{"node"}, &.{}) catch return null;
+    const build_trace = b.option(bool, "build-trace", "Trace generated TypeScript ABI artifacts and cache reuse") orelse false;
+    // Both toolchains arrive with one `npm ci` in packages/core: the
+    // frontend's TypeScript compiler and the external core compiler
+    // (unless NATIVE_SDK_CORE_COMPILER points at the pinned release's
+    // command directly).
+    b.build_root.handle.access(
+        b.graph.io,
+        "packages/core/node_modules/@typescript/old",
+        .{},
+    ) catch return null;
+    if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER") == null) {
+        b.build_root.handle.access(
+            b.graph.io,
+            repositoryScriptcInstallMarker(b),
+            .{},
+        ) catch return null;
+    }
+
+    // corewire (the contract-sidecar mirror/facade/profile generator),
+    // compiled for the build host: the fixture compiles and the
+    // conformance shims all run it, including under a cross -Dtarget
+    // (the batteries compile for the target; this tool never does).
+    const corewire_mod = b.createModule(.{
+        .root_source_file = b.path("tools/corewire/main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const profile_archive = @import("build/corewire.zig").profileArchive(b, b, node);
+    @import("build/corewire.zig").linkProfile(corewire_mod, profile_archive);
+    const corewire_exe = b.addExecutable(.{
+        .name = "corewire",
+        .root_module = corewire_mod,
+        .use_llvm = @import("build/app.zig").useLlvmWorkaround(b.graph.host),
+    });
+
+    // Each fixture core compiles through the external core compiler at
+    // build time; the battery drives the linked archive through the
+    // generated mirror. The compiled-core symbol set is a fixed-prefix
+    // C ABI, so one process carries ONE archive — each battery below is
+    // its own binary linking exactly its own core. The tests/ts-core
+    // fixtures are single-file cores, staged into their own
+    // compile-source directories.
+    const host_src = b.addWriteFiles();
+    _ = host_src.addCopyFile(b.path("tests/ts-core/fixture.ts"), "fixture.ts");
+    const host_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/fixture.ts",
+        .src_dir = host_src.getDirectory(),
+        .name = "host_fixture_core",
+        .store_capability = true,
+        .relational_capability = true,
+        .credentials_capability = true,
+        // The fixture drives pastBytes to the f64-exact boundary (2^53):
+        // no honest i64 declaration exists there, so the compiled
+        // projection carries the slot as f64.
+        .f64_slots = &.{"Model.pastBytes"},
+    });
+    const fixture_mod = host_fixture.module;
+    const persist_src = b.addWriteFiles();
+    _ = persist_src.addCopyFile(b.path("tests/ts-core/persist_fixture.ts"), "persist_fixture.ts");
+    const persist_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/persist_fixture.ts",
+        .src_dir = persist_src.getDirectory(),
+        .name = "persist_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/persist_fixture.native",
+    });
+    const persist_mod = module(b, target, optimize, "tests/ts-core/persist_e2e_tests.zig");
+    persist_mod.addImport("native_sdk", desktop_mod);
+    persist_mod.addImport("ts_persist_core", persist_fixture.module);
+    const composition_decoder_mod = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    composition_decoder_mod.addImport("native_sdk", desktop_mod);
+    composition_decoder_mod.addImport("core.zig", persist_fixture.module);
+    persist_mod.addImport("persist_decoder", composition_decoder_mod);
+    const composition_src = b.addWriteFiles();
+    _ = composition_src.addCopyFile(b.path("tests/ts-core/composition_fixture.ts"), "composition_fixture.ts");
+    const composition_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/composition_fixture.ts",
+        .src_dir = composition_src.getDirectory(),
+        .name = "composition_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/composition_fixture.native",
+    });
+    const composition_app_mod = module(b, target, optimize, "tests/ts-core/composition_app_e2e_tests.zig");
+    composition_app_mod.addImport("native_sdk", desktop_mod);
+    composition_app_mod.addImport("composition_core", composition_fixture.module);
+    const composition_app_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    composition_app_decoder.addImport("native_sdk", desktop_mod);
+    composition_app_decoder.addImport("core.zig", composition_fixture.module);
+    composition_app_mod.addImport("composition_decoder", composition_app_decoder);
+    const view_reload_src = b.addWriteFiles();
+    _ = view_reload_src.addCopyFile(b.path("tests/ts-core/view_reload/core.ts"), "core.ts");
+    const view_reload_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/view_reload/core.ts",
+        .src_dir = view_reload_src.getDirectory(),
+        .name = "view_reload_fixture_core",
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/view_reload/app.native",
+        .view_reload = true,
+    });
+    // The updates a markup watcher writes for this fixture's edits.
+    const view_reload_updates = b.addSystemCommand(&.{node});
+    view_reload_updates.addFileArg(b.path("tests/ts-core/view_reload_updates.ts"));
+    view_reload_updates.addArg("--contract");
+    view_reload_updates.addFileArg(view_reload_fixture.contract);
+    view_reload_updates.addArg("--markup");
+    view_reload_updates.addDirectoryArg(b.path("tests/ts-core/view_reload"));
+    for ([_][]const u8{ "app.native", "edited.native", "broken.native" }) |name| view_reload_updates.addFileInput(b.path(b.fmt("tests/ts-core/view_reload/{s}", .{name})));
+    @import("build/app.zig").addViewFrontendInputs(b, b, view_reload_updates);
+    @import("build/app.zig").addViewReloadInputs(b, view_reload_updates);
+    view_reload_updates.addArg("--out");
+    const view_reload_updates_dir = view_reload_updates.addOutputDirectoryArg("view-reload-updates");
+    const view_reload_options = b.addOptions();
+    view_reload_options.addOptionPath("updates_dir", view_reload_updates_dir);
+    const view_reload_mod = module(b, target, optimize, "tests/ts-core/view_reload_e2e_tests.zig");
+    view_reload_mod.addImport("native_sdk", desktop_mod);
+    view_reload_mod.addImport("view_reload_core", view_reload_fixture.module);
+    view_reload_mod.addImport("view_reload_updates", view_reload_options.createModule());
+    const view_reload_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    view_reload_decoder.addImport("native_sdk", desktop_mod);
+    view_reload_decoder.addImport("core.zig", view_reload_fixture.module);
+    view_reload_mod.addImport("view_reload_decoder", view_reload_decoder);
+    const view_provenance_mod = module(b, target, optimize, "tests/ts-core/view_provenance_e2e_tests.zig");
+    view_provenance_mod.addImport("native_sdk", desktop_mod);
+    view_provenance_mod.addImport("view_reload_core", view_reload_fixture.module);
+    view_provenance_mod.addImport("view_reload_decoder", view_reload_decoder);
+    const code_src = b.addWriteFiles();
+    _ = code_src.addCopyFile(b.path("tests/ts-core/code_fixture.ts"), "code_fixture.ts");
+    const code_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/code_fixture.ts",
+        .src_dir = code_src.getDirectory(),
+        .name = "code_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/code_fixture.native",
+    });
+    const code_app_mod = module(b, target, optimize, "tests/ts-core/code_app_e2e_tests.zig");
+    code_app_mod.addImport("native_sdk", desktop_mod);
+    code_app_mod.addImport("code_core", code_fixture.module);
+    const code_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    code_decoder.addImport("native_sdk", desktop_mod);
+    code_decoder.addImport("core.zig", code_fixture.module);
+    code_app_mod.addImport("code_decoder", code_decoder);
+    const chart_src = b.addWriteFiles();
+    _ = chart_src.addCopyFile(b.path("tests/ts-core/chart_fixture.ts"), "chart_fixture.ts");
+    const chart_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/chart_fixture.ts",
+        .src_dir = chart_src.getDirectory(),
+        .name = "chart_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/chart_fixture.native",
+    });
+    const chart_app_mod = module(b, target, optimize, "tests/ts-core/chart_app_e2e_tests.zig");
+    chart_app_mod.addImport("native_sdk", desktop_mod);
+    chart_app_mod.addImport("chart_core", chart_fixture.module);
+    const chart_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    chart_decoder.addImport("native_sdk", desktop_mod);
+    chart_decoder.addImport("core.zig", chart_fixture.module);
+    chart_app_mod.addImport("chart_decoder", chart_decoder);
+    const markdown_src = b.addWriteFiles();
+    _ = markdown_src.addCopyFile(b.path("tests/ts-core/markdown_fixture.ts"), "markdown_fixture.ts");
+    const markdown_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/markdown_fixture.ts",
+        .src_dir = markdown_src.getDirectory(),
+        .name = "markdown_fixture_core",
+        .persist_capability = true,
+        .typescript_view = true,
+        .view_markup = "tests/ts-core/markdown_fixture.native",
+    });
+    const markdown_app_mod = module(b, target, optimize, "tests/ts-core/markdown_app_e2e_tests.zig");
+    markdown_app_mod.addImport("native_sdk", desktop_mod);
+    markdown_app_mod.addImport("markdown_core", markdown_fixture.module);
+    markdown_app_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+    const markdown_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    markdown_decoder.addImport("native_sdk", desktop_mod);
+    markdown_decoder.addImport("core.zig", markdown_fixture.module);
+    markdown_app_mod.addImport("markdown_decoder", markdown_decoder);
+    const lifecycle_reference_files = b.addWriteFiles();
+    persist_mod.addImport("lifecycle_policy_reference", b.createModule(.{
+        .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/lifecycle_policy_test_reference.zig"), "lifecycle_policy_reference.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    persist_mod.addImport("dispatch_policy_reference", b.createModule(.{
+        .root_source_file = lifecycle_reference_files.addCopyFile(b.path("src/runtime/app_dispatch_policy.zig"), "dispatch_policy_reference.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const markup_src = b.addWriteFiles();
+    _ = markup_src.addCopyFile(b.path("tests/ts-core/markup_fixture.ts"), "markup_fixture.ts");
+    const markup_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/markup_fixture.ts",
+        .src_dir = markup_src.getDirectory(),
+        .name = "markup_core",
+    });
+    const markup_fixture_mod = markup_fixture.module;
+    const mixed_return_src = b.addWriteFiles();
+    _ = mixed_return_src.addCopyFile(b.path("tests/ts-core/mixed_return_fixture.ts"), "mixed_return_fixture.ts");
+    const mixed_return_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/mixed_return_fixture.ts",
+        .src_dir = mixed_return_src.getDirectory(),
+        .name = "mixed_return_core",
+    });
+
+    const e2e_mod = module(b, target, optimize, "tests/ts-core/host_e2e_tests.zig");
+    e2e_mod.addImport("native_sdk", desktop_mod);
+    e2e_mod.addImport("ts_core_fixture", fixture_mod);
+
+    // The markup battery: the imported .native view + automation +
+    // record/replay guarantees over the markup fixture's compiled core.
+    const markup_view_stage = b.addWriteFiles();
+    const markup_view_root = markup_view_stage.addCopyFile(b.path("tests/ts-core/markup_e2e_tests.zig"), "markup_e2e_tests.zig");
+    _ = markup_view_stage.addCopyFile(b.path("tests/ts-core/markup_view.native"), "markup_view.native");
+    _ = markup_view_stage.addCopyFile(b.path("tests/ts-core/components/actions.native"), "components/actions.native");
+    const markup_e2e_mod = b.createModule(.{
+        .root_source_file = markup_view_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    markup_e2e_mod.addImport("native_sdk", desktop_mod);
+    markup_e2e_mod.addImport("ts_markup_fixture", markup_fixture_mod);
+
+    // The rewritten Kanban example's real TypeScript core and self-contained
+    // shipping markup. Its battery drives native multi-file drops through
+    // the generated dropMsg adapter and then moves the created cards.
+    const kanban_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/kanban/src/core.ts",
+        .src_dir = b.path("examples/kanban/src"),
+        .name = "kanban_core",
+    });
+    const kanban_core_mod = kanban_fixture.module;
+    const kanban_stage = b.addWriteFiles();
+    const kanban_root = kanban_stage.addCopyFile(b.path("tests/ts-core/kanban_e2e_tests.zig"), "kanban_e2e_tests.zig");
+    _ = kanban_stage.addCopyFile(b.path("examples/kanban/src/app.native"), "app.native");
+    _ = kanban_stage.addCopyFile(b.path("examples/kanban/src/components/board-column.native"), "components/board-column.native");
+    const kanban_mod = b.createModule(.{
+        .root_source_file = kanban_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    kanban_mod.addImport("native_sdk", desktop_mod);
+    kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
+
+    const workbench_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/workbench/src/core.ts",
+        .src_dir = b.path("examples/workbench/src"),
+        .name = "workbench_core",
+        .typescript_view = true,
+    });
+    const workbench_stage = b.addWriteFiles();
+    const workbench_root = workbench_stage.addCopyFile(b.path("tests/ts-core/workbench_e2e_tests.zig"), "workbench_e2e_tests.zig");
+    inline for (.{ "workbench_reference.zig", "workbench_reference_tests.zig", "workbench_reference.native", "effects_media_parity.zig" }) |file|
+        _ = workbench_stage.addCopyFile(b.path("tests/ts-core/" ++ file), file);
+    _ = workbench_stage.addCopyFile(b.path("examples/workbench/src/app.native"), "app.native");
+    const workbench_mod = b.createModule(.{ .root_source_file = workbench_root, .target = target, .optimize = optimize });
+    workbench_mod.addImport("native_sdk", desktop_mod);
+    workbench_mod.addImport("workbench_core", workbench_fixture.module);
+    const workbench_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    workbench_decoder.addImport("native_sdk", desktop_mod);
+    workbench_decoder.addImport("core.zig", workbench_fixture.module);
+    workbench_mod.addImport("workbench_decoder", workbench_decoder);
+
+    const feed_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/feed/src/core.ts",
+        .src_dir = b.path("examples/feed/src"),
+        .name = "feed_core",
+        .typescript_view = true,
+    });
+    const feed_stage = b.addWriteFiles();
+    const feed_root = feed_stage.addCopyFile(b.path("tests/ts-core/feed_e2e_tests.zig"), "feed_e2e_tests.zig");
+    inline for (.{ "feed_reference.zig", "feed_reference_tests.zig", "effects_media_parity.zig" }) |file|
+        _ = feed_stage.addCopyFile(b.path("tests/ts-core/" ++ file), file);
+    _ = feed_stage.addCopyFile(b.path("examples/feed/src/app.native"), "app.native");
+    const feed_mod = b.createModule(.{ .root_source_file = feed_root, .target = target, .optimize = optimize });
+    feed_mod.addImport("native_sdk", desktop_mod);
+    feed_mod.addImport("feed_core", feed_fixture.module);
+    const feed_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    feed_decoder.addImport("native_sdk", desktop_mod);
+    feed_decoder.addImport("core.zig", feed_fixture.module);
+    feed_mod.addImport("feed_decoder", feed_decoder);
+
+    const split_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/split-collapse/src/core.ts",
+        .src_dir = b.path("examples/split-collapse/src"),
+        .name = "split_collapse_core",
+        .typescript_view = true,
+    });
+    const split_stage = b.addWriteFiles();
+    const split_root = split_stage.addCopyFile(b.path("tests/ts-core/split_collapse_e2e_tests.zig"), "split_collapse_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "split_collapse.native" }) |file|
+        _ = split_stage.addCopyFile(b.path("tests/ts-core/split-collapse-reference/" ++ file), "split-collapse-reference/" ++ file);
+    _ = split_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = split_stage.addCopyFile(b.path("examples/split-collapse/src/app.native"), "app.native");
+    const split_mod = b.createModule(.{ .root_source_file = split_root, .target = target, .optimize = optimize });
+    split_mod.addImport("native_sdk", desktop_mod);
+    split_mod.addImport("split_core", split_fixture.module);
+    const split_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    split_decoder.addImport("native_sdk", desktop_mod);
+    split_decoder.addImport("core.zig", split_fixture.module);
+    split_mod.addImport("split_decoder", split_decoder);
+
+    const canvas_layers_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/canvas-layers/core.ts",
+        .src_dir = b.path("tests/ts-core/canvas-layers"),
+        .name = "canvas_layers_core",
+        .typescript_view = true,
+    });
+    const canvas_layers_mod = module(b, target, optimize, "tests/ts-core/canvas_layers_e2e_tests.zig");
+    canvas_layers_mod.addImport("native_sdk", desktop_mod);
+    canvas_layers_mod.addImport("canvas_layers_core", canvas_layers_fixture.module);
+    const canvas_layers_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    canvas_layers_decoder.addImport("native_sdk", desktop_mod);
+    canvas_layers_decoder.addImport("core.zig", canvas_layers_fixture.module);
+    canvas_layers_mod.addImport("canvas_layers_decoder", canvas_layers_decoder);
+
+    const audio_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/audio-exact/core.ts",
+        .src_dir = b.path("tests/ts-core/audio-exact"),
+        .name = "audio_exact_core",
+    });
+    const audio_exact_mod = module(b, target, optimize, "tests/ts-core/audio_exact_effect_tests.zig");
+    audio_exact_mod.addImport("native_sdk", desktop_mod);
+    audio_exact_mod.addImport("audio_exact_core", audio_exact_fixture.module);
+
+    const spawn_exact_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/spawn-exact/core.ts",
+        .src_dir = b.path("tests/ts-core/spawn-exact"),
+        .name = "spawn_exact_core",
+    });
+    const spawn_exact_mod = module(b, target, optimize, "tests/ts-core/spawn_exact_effect_tests.zig");
+    spawn_exact_mod.addImport("native_sdk", desktop_mod);
+    spawn_exact_mod.addImport("spawn_exact_core", spawn_exact_fixture.module);
+
+    const boot_images_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/boot-images/core.ts",
+        .src_dir = b.path("tests/ts-core/boot-images"),
+        .name = "boot_images_core",
+    });
+    const boot_images_mod = module(b, target, optimize, "tests/ts-core/boot_images_e2e_tests.zig");
+    boot_images_mod.addImport("native_sdk", desktop_mod);
+    boot_images_mod.addImport("boot_images_core", boot_images_fixture.module);
+
+    const deck_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/deck/src/core.ts",
+        .src_dir = b.path("examples/deck/src"),
+        .name = "deck_core",
+        .typescript_view = true,
+    });
+    const deck_stage = b.addWriteFiles();
+    const deck_root = deck_stage.addCopyFile(b.path("tests/ts-core/deck_e2e_tests.zig"), "deck_e2e_tests.zig");
+    // Expose reference hooks for independent integration tests without
+    // changing the preserved native app sources.
+    _ = deck_stage.add("deck_reference_access.zig", "pub const main = @import(\"deck-reference/main.zig\");\n" ++
+        "pub const view = @import(\"deck-reference/view.zig\");\n" ++
+        "pub const model = @import(\"deck-reference/model.zig\");\n");
+    inline for (.{ "main.zig", "model.zig", "view.zig", "theme.zig", "chrome.zig", "layout.zig", "tests.zig", "music_manifest.zon", "statusbar.native", "spectrum.native", "icons/stop.svg", "icons/minimize.svg", "fonts/GeistPixel-Square.ttf", "fonts/OFL.txt", "art/exit-signs.jpg", "art/blue-season.jpg", "art/second-nature.jpg", "art/no-good-way-out.jpg", "art/glass-flowers.jpg", "art/night-bloom.jpg", "art/motion-picture.jpg", "art/channel-surfing.jpg" }) |file|
+        _ = deck_stage.addCopyFile(b.path("tests/ts-core/deck-reference/" ++ file), "deck-reference/" ++ file);
+    _ = deck_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = deck_stage.addCopyFile(b.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
+    const deck_mod = b.createModule(.{ .root_source_file = deck_root, .target = target, .optimize = optimize });
+    deck_mod.addImport("native_sdk", desktop_mod);
+    deck_mod.addImport("deck_core", deck_fixture.module);
+    const deck_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    deck_decoder.addImport("native_sdk", desktop_mod);
+    deck_decoder.addImport("core.zig", deck_fixture.module);
+    deck_mod.addImport("deck_decoder", deck_decoder);
+    deck_mod.addImport("deck_manifest", b.createModule(.{ .root_source_file = b.path("examples/deck/app.zon"), .target = target, .optimize = optimize }));
+
+    const gpu_dashboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/gpu-dashboard/src/core.ts",
+        .src_dir = b.path("examples/gpu-dashboard/src"),
+        .name = "gpu_dashboard_core",
+        .typescript_view = true,
+    });
+    const gpu_dashboard_stage = b.addWriteFiles();
+    const gpu_dashboard_root = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/gpu_dashboard_e2e_tests.zig"), "gpu_dashboard_e2e_tests.zig");
+    // Test-only access to the unchanged reference's private capability hooks.
+    _ = gpu_dashboard_stage.add("gpu_dashboard_reference_access.zig", @embedFile("tests/ts-core/gpu-dashboard-reference/main.zig") ++
+        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n");
+    _ = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = gpu_dashboard_stage.addCopyFile(b.path("examples/gpu-dashboard/src/app.native"), "app.native");
+    const gpu_dashboard_mod = b.createModule(.{ .root_source_file = gpu_dashboard_root, .target = target, .optimize = optimize });
+    gpu_dashboard_mod.addImport("native_sdk", desktop_mod);
+    gpu_dashboard_mod.addImport("gpu_dashboard_core", gpu_dashboard_fixture.module);
+    gpu_dashboard_mod.addImport("gpu_dashboard_manifest", b.createModule(.{ .root_source_file = b.path("examples/gpu-dashboard/app.zon"), .target = target, .optimize = optimize }));
+    const gpu_dashboard_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    gpu_dashboard_decoder.addImport("native_sdk", desktop_mod);
+    gpu_dashboard_decoder.addImport("core.zig", gpu_dashboard_fixture.module);
+    gpu_dashboard_mod.addImport("gpu_dashboard_decoder", gpu_dashboard_decoder);
+
+    const channel_monitor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/channel-monitor/src/core.ts",
+        .src_dir = b.path("examples/channel-monitor/src"),
+        .name = "channel_monitor_core",
+        .typescript_view = true,
+    });
+    const channel_monitor_stage = b.addWriteFiles();
+    const channel_monitor_root = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/channel_monitor_e2e_tests.zig"), "channel_monitor_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig" }) |file|
+        _ = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/channel-monitor-reference/" ++ file), "channel-monitor-reference/" ++ file);
+    _ = channel_monitor_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = channel_monitor_stage.addCopyFile(b.path("examples/channel-monitor/src/app.native"), "app.native");
+    const channel_monitor_mod = b.createModule(.{ .root_source_file = channel_monitor_root, .target = target, .optimize = optimize });
+    channel_monitor_mod.addImport("native_sdk", desktop_mod);
+    channel_monitor_mod.addImport("channel_monitor_core", channel_monitor_fixture.module);
+    const channel_monitor_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    channel_monitor_decoder.addImport("native_sdk", desktop_mod);
+    channel_monitor_decoder.addImport("core.zig", channel_monitor_fixture.module);
+    channel_monitor_mod.addImport("channel_monitor_decoder", channel_monitor_decoder);
+
+    const code_editor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/code-editor/src/core.ts",
+        .src_dir = b.path("examples/code-editor/src"),
+        .name = "code_editor_core",
+        .typescript_view = true,
+        .window_views = &.{ "code-editor-2", "code-editor-3", "code-editor-4", "code-editor-5" },
+    });
+    const code_editor_stage = b.addWriteFiles();
+    const code_editor_root = code_editor_stage.addCopyFile(b.path("tests/ts-core/code_editor_e2e_tests.zig"), "code_editor_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "code-editor.native" }) |file|
+        _ = code_editor_stage.addCopyFile(b.path("tests/ts-core/code-editor-reference/" ++ file), "code-editor-reference/" ++ file);
+    _ = code_editor_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = code_editor_stage.addCopyFile(b.path("src/runtime/desktop_files.zig"), "desktop_files.zig");
+    const code_editor_mod = b.createModule(.{ .root_source_file = code_editor_root, .target = target, .optimize = optimize });
+    code_editor_mod.addImport("native_sdk", desktop_mod);
+    code_editor_mod.addImport("code_editor_core", code_editor_fixture.module);
+    code_editor_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+    const code_editor_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    code_editor_decoder.addImport("native_sdk", desktop_mod);
+    code_editor_decoder.addImport("core.zig", code_editor_fixture.module);
+    code_editor_mod.addImport("code_editor_decoder", code_editor_decoder);
+
+    const markdown_viewer_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/markdown-viewer/src/core.ts",
+        .src_dir = b.path("examples/markdown-viewer/src"),
+        .name = "markdown_viewer_core",
+        .typescript_view = true,
+    });
+    const markdown_viewer_stage = b.addWriteFiles();
+    const markdown_viewer_root = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/markdown_viewer_e2e_tests.zig"), "markdown_viewer_e2e_tests.zig");
+    inline for (.{ "main.zig", "tests.zig", "viewer.native", "samples/welcome.md", "samples/tour.md", "samples/spec.md", "samples/notes.md" }) |file|
+        _ = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/markdown-viewer-reference/" ++ file), "markdown-viewer-reference/" ++ file);
+    _ = markdown_viewer_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = markdown_viewer_stage.addCopyFile(b.path("examples/markdown-viewer/src/app.native"), "app.native");
+    const markdown_viewer_mod = b.createModule(.{ .root_source_file = markdown_viewer_root, .target = target, .optimize = optimize });
+    markdown_viewer_mod.addImport("native_sdk", desktop_mod);
+    markdown_viewer_mod.addImport("markdown_viewer_core", markdown_viewer_fixture.module);
+    const markdown_viewer_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    markdown_viewer_decoder.addImport("native_sdk", desktop_mod);
+    markdown_viewer_decoder.addImport("core.zig", markdown_viewer_fixture.module);
+    markdown_viewer_mod.addImport("markdown_viewer_decoder", markdown_viewer_decoder);
+
+    const notes_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/notes/src/core.ts",
+        .src_dir = b.path("examples/notes/src"),
+        .name = "notes_core",
+        .typescript_view = true,
+    });
+    const notes_stage = b.addWriteFiles();
+    const notes_root = notes_stage.addCopyFile(b.path("tests/ts-core/notes_e2e_tests.zig"), "notes_e2e_tests.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_reference.zig"), "notes_reference.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_model_reference.zig"), "notes_model_reference.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/notes_reference_tests.zig"), "notes_reference_tests.zig");
+    _ = notes_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = notes_stage.addCopyFile(b.path("examples/notes/src/app.native"), "app.native");
+    const notes_mod = b.createModule(.{ .root_source_file = notes_root, .target = target, .optimize = optimize });
+    notes_mod.addImport("native_sdk", desktop_mod);
+    notes_mod.addImport("notes_core", notes_fixture.module);
+    const notes_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    notes_decoder.addImport("native_sdk", desktop_mod);
+    notes_decoder.addImport("core.zig", notes_fixture.module);
+    notes_mod.addImport("notes_decoder", notes_decoder);
+
+    const effects_probe_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/effects-probe/src/core.ts",
+        .src_dir = b.path("examples/effects-probe/src"),
+        .name = "effects_probe_core",
+        .typescript_view = true,
+    });
+    const effects_probe_stage = b.addWriteFiles();
+    const effects_probe_root = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_e2e_tests.zig"), "effects_probe_e2e_tests.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_reference.zig"), "effects_probe_reference.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_probe_reference_tests.zig"), "effects_probe_reference_tests.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = effects_probe_stage.addCopyFile(b.path("examples/effects-probe/src/app.native"), "app.native");
+    const effects_probe_mod = b.createModule(.{ .root_source_file = effects_probe_root, .target = target, .optimize = optimize });
+    effects_probe_mod.addImport("native_sdk", desktop_mod);
+    effects_probe_mod.addImport("effects_probe_core", effects_probe_fixture.module);
+    const effects_probe_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    effects_probe_decoder.addImport("native_sdk", desktop_mod);
+    effects_probe_decoder.addImport("core.zig", effects_probe_fixture.module);
+    effects_probe_mod.addImport("effects_probe_decoder", effects_probe_decoder);
+
+    const video_player_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/video-player/src/core.ts",
+        .src_dir = b.path("examples/video-player/src"),
+        .name = "video_player_core",
+        .typescript_view = true,
+    });
+    const video_player_stage = b.addWriteFiles();
+    const video_player_root = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_e2e_tests.zig"), "video_player_e2e_tests.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_reference.zig"), "video_player_reference.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/video_player_reference_tests.zig"), "video_player_reference_tests.zig");
+    _ = video_player_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
+    _ = video_player_stage.addCopyFile(b.path("examples/video-player/src/app.native"), "app.native");
+    const video_player_mod = b.createModule(.{ .root_source_file = video_player_root, .target = target, .optimize = optimize });
+    video_player_mod.addImport("native_sdk", desktop_mod);
+    video_player_mod.addImport("video_player_core", video_player_fixture.module);
+    const video_player_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    video_player_decoder.addImport("native_sdk", desktop_mod);
+    video_player_decoder.addImport("core.zig", video_player_fixture.module);
+    video_player_mod.addImport("video_player_decoder", video_player_decoder);
+
+    const inbox_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/ui-inbox/src/core.ts",
+        .src_dir = b.path("examples/ui-inbox/src"),
+        .name = "inbox_core",
+        .typescript_view = true,
+    });
+    const inbox_stage = b.addWriteFiles();
+    const inbox_root = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_e2e_tests.zig"), "inbox_e2e_tests.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference.zig"), "inbox_reference.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference_tests.zig"), "inbox_reference_tests.zig");
+    _ = inbox_stage.addCopyFile(b.path("tests/ts-core/inbox_reference.native"), "inbox_reference.native");
+    _ = inbox_stage.addCopyFile(b.path("examples/ui-inbox/src/app.native"), "app.native");
+    const inbox_mod = b.createModule(.{ .root_source_file = inbox_root, .target = target, .optimize = optimize });
+    inbox_mod.addImport("native_sdk", desktop_mod);
+    inbox_mod.addImport("inbox_core", inbox_fixture.module);
+    const inbox_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    inbox_decoder.addImport("native_sdk", desktop_mod);
+    inbox_decoder.addImport("core.zig", inbox_fixture.module);
+    inbox_mod.addImport("inbox_decoder", inbox_decoder);
+
+    const canvas_preview_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/canvas-preview/src/core.ts",
+        .src_dir = b.path("examples/canvas-preview/src"),
+        .name = "canvas_preview_core",
+        .typescript_view = true,
+    });
+    const canvas_preview_stage = b.addWriteFiles();
+    const canvas_preview_root = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_e2e_tests.zig"), "canvas_preview_e2e_tests.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_reference.zig"), "canvas_preview_reference.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("tests/ts-core/canvas_preview_reference_tests.zig"), "canvas_preview_reference_tests.zig");
+    _ = canvas_preview_stage.addCopyFile(b.path("examples/canvas-preview/src/app.native"), "app.native");
+    const canvas_preview_mod = b.createModule(.{ .root_source_file = canvas_preview_root, .target = target, .optimize = optimize });
+    canvas_preview_mod.addImport("native_sdk", desktop_mod);
+    canvas_preview_mod.addImport("canvas_preview_core", canvas_preview_fixture.module);
+    const canvas_preview_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    canvas_preview_decoder.addImport("native_sdk", desktop_mod);
+    canvas_preview_decoder.addImport("core.zig", canvas_preview_fixture.module);
+    canvas_preview_mod.addImport("canvas_preview_decoder", canvas_preview_decoder);
+
+    const habits_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/habits/src/core.ts",
+        .src_dir = b.path("examples/habits/src"),
+        .name = "habits_core",
+        .typescript_view = true,
+    });
+    const habits_stage = b.addWriteFiles();
+    const habits_root = habits_stage.addCopyFile(b.path("tests/ts-core/habits_e2e_tests.zig"), "habits_e2e_tests.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference.zig"), "habits_reference.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference_tests.zig"), "habits_reference_tests.zig");
+    _ = habits_stage.addCopyFile(b.path("tests/ts-core/habits_reference.native"), "habits_reference.native");
+    _ = habits_stage.addCopyFile(b.path("examples/habits/src/app.native"), "app.native");
+    const habits_mod = b.createModule(.{ .root_source_file = habits_root, .target = target, .optimize = optimize });
+    habits_mod.addImport("native_sdk", desktop_mod);
+    habits_mod.addImport("ts_habits_core", habits_fixture.module);
+
+    // The soundboard example's core and markup, tested as one app:
+    // the test root stages beside a copy of the example's app.native so
+    // the compiled markup engine builds the SHIPPING view over the
+    // core's model.
+    const soundboard_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/soundboard/src/core.ts",
+        .src_dir = b.path("examples/soundboard/src"),
+        .name = "soundboard_core",
+    });
+    const soundboard_core_mod = soundboard_fixture.module;
+    const soundboard_stage = b.addWriteFiles();
+    const soundboard_root = soundboard_stage.addCopyFile(b.path("tests/ts-core/soundboard_e2e_tests.zig"), "soundboard_e2e_tests.zig");
+    _ = soundboard_stage.addCopyFile(b.path("examples/soundboard/src/app.native"), "app.native");
+    const soundboard_mod = b.createModule(.{
+        .root_source_file = soundboard_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    soundboard_mod.addImport("native_sdk", desktop_mod);
+    soundboard_mod.addImport("ts_soundboard_core", soundboard_core_mod);
+
+    // The system-monitor example's core and markup, tested the same
+    // way — plus the ORIGINAL Zig example's committed sampler captures,
+    // staged as fixtures so both ports parse the same recorded truth.
+    const monitor_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/system-monitor/src/core.ts",
+        .src_dir = b.path("examples/system-monitor/src"),
+        .name = "system_monitor_core",
+    });
+    const monitor_core_mod = monitor_fixture.module;
+    const monitor_stage = b.addWriteFiles();
+    const monitor_root = monitor_stage.addCopyFile(b.path("tests/ts-core/system_monitor_e2e_tests.zig"), "system_monitor_e2e_tests.zig");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/app.native"), "app.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/windows/settings.native"), "settings.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/windows/components/sampling.native"), "components/sampling.native");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/sysctl.txt"), "fixtures/sysctl.txt");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/ps.txt"), "fixtures/ps.txt");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/vm_stat.txt"), "fixtures/vm_stat.txt");
+    _ = monitor_stage.addCopyFile(b.path("examples/system-monitor/src/fixtures/ps-edge.txt"), "fixtures/ps-edge.txt");
+    const monitor_mod = b.createModule(.{
+        .root_source_file = monitor_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    monitor_mod.addImport("native_sdk", desktop_mod);
+    monitor_mod.addImport("ts_system_monitor_core", monitor_core_mod);
+
+    // The stock-IDE suite runs the CLI's scaffold + editor-package plumbing
+    // (the tooling module) and shells out to node for the real tsc.
+    const scaffold_ide_mod = module(b, target, optimize, "tests/ts-core/scaffold_ide_e2e_tests.zig");
+    scaffold_ide_mod.addImport("tooling", tooling_mod);
+
+    // The Chatbot example's core and markup, tested the same way:
+    // the chat client for an OpenAI-compatible endpoint, driven through
+    // the fake fetch feed (no network) with its shipping markup.
+    const ai_chat_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/chatbot/src/core.ts",
+        .src_dir = b.path("examples/chatbot/src"),
+        .name = "ai_chat_core",
+    });
+    const ai_chat_core_mod = ai_chat_fixture.module;
+    const ai_chat_stage = b.addWriteFiles();
+    const ai_chat_root = ai_chat_stage.addCopyFile(b.path("tests/ts-core/ai_chat_e2e_tests.zig"), "ai_chat_e2e_tests.zig");
+    _ = ai_chat_stage.addCopyFile(b.path("examples/chatbot/src/app.native"), "app.native");
+    const ai_chat_mod = b.createModule(.{
+        .root_source_file = ai_chat_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    ai_chat_mod.addImport("native_sdk", desktop_mod);
+    ai_chat_mod.addImport("ts_ai_chat_core", ai_chat_core_mod);
+
+    // The service-feed-reader example's core, service child, and shipping
+    // markup, tested as one app: a real buffered Cmd.fetch against a
+    // loopback fixture, the generated typed client into the real child,
+    // and record→replay with neither the service nor the network present.
+    const feed_reader_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/service-feed-reader/src/core.ts",
+        .src_dir = b.path("examples/service-feed-reader/src"),
+        .name = "feed_reader_core",
+        .window_views = &.{"feed"},
+        .emit_services = true,
+        .typescript_view = true,
+    });
+    const shell_layout_mod = module(b, target, optimize, "tests/ts-core/shell_layout_e2e_tests.zig");
+    shell_layout_mod.addImport("native_sdk", desktop_mod);
+    shell_layout_mod.addImport("shell_fixture_core", feed_reader_fixture.module);
+    const typography_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "examples/typography/src/core.ts",
+        .src_dir = b.path("examples/typography/src"),
+        .name = "typography_core",
+        .typescript_view = true,
+    });
+    const typography_mod = module(b, target, optimize, "tests/ts-core/typography_e2e_tests.zig");
+    typography_mod.addImport("native_sdk", desktop_mod);
+    typography_mod.addImport("typography_core", typography_fixture.module);
+    const typography_decoder_mod = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    typography_decoder_mod.addImport("native_sdk", desktop_mod);
+    typography_decoder_mod.addImport("core.zig", typography_fixture.module);
+    typography_mod.addImport("typography_decoder", typography_decoder_mod);
+    const virtual_fixed_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/virtual-fixed/core.ts",
+        .src_dir = b.path("tests/ts-core/virtual-fixed"),
+        .name = "virtual_fixed_core",
+        .typescript_view = true,
+    });
+    const virtual_fixed_mod = module(b, target, optimize, "tests/ts-core/virtual_fixed_e2e_tests.zig");
+    virtual_fixed_mod.addImport("native_sdk", desktop_mod);
+    virtual_fixed_mod.addImport("virtual_fixed_core", virtual_fixed_fixture.module);
+    const virtual_fixed_decoder = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    virtual_fixed_decoder.addImport("native_sdk", desktop_mod);
+    virtual_fixed_decoder.addImport("core.zig", virtual_fixed_fixture.module);
+    virtual_fixed_mod.addImport("virtual_fixed_decoder", virtual_fixed_decoder);
+    const surface_layout_mod = module(b, target, optimize, "tests/ts-core/surface_layout_e2e_tests.zig");
+    surface_layout_mod.addImport("native_sdk", desktop_mod);
+    surface_layout_mod.addImport("surface_fixture_core", feed_reader_fixture.module);
+    const surface_decoder_mod = module(b, target, optimize, "src/app_runner/ts_compiled_view.zig");
+    surface_decoder_mod.addImport("native_sdk", desktop_mod);
+    surface_decoder_mod.addImport("core.zig", feed_reader_fixture.module);
+    surface_layout_mod.addImport("surface_decoder", surface_decoder_mod);
+    const feed_reader_service = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("examples/service-feed-reader/src"),
+        feed_reader_fixture.services_contract.?,
+        "feed_reader_services",
+    );
+    const feed_reader_stage = b.addWriteFiles();
+    const feed_reader_root = feed_reader_stage.addCopyFile(b.path("tests/ts-services/feed_reader_e2e_tests.zig"), "feed_reader_e2e_tests.zig");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/app.native"), "app.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/windows/feed.native"), "windows/feed.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/src/windows/components/items.native"), "windows/components/items.native");
+    _ = feed_reader_stage.addCopyFile(b.path("examples/service-feed-reader/fixtures/feed.xml"), "fixture_feed.xml");
+    _ = feed_reader_stage.addCopyFile(b.path("src/app_runner/ts_compiled_view.zig"), "ts_compiled_view.zig");
+    _ = feed_reader_stage.add("core.zig",
+        \\const core = @import("ts_feed_reader_core");
+        \\pub const rt = core.rt;
+        \\pub const Model = core.Model;
+        \\pub const Msg = core.Msg;
+        \\pub const nativeView = core.nativeView;
+        \\pub const nativeWindowView = core.nativeWindowView;
+        \\pub const nativeViewEvent = core.nativeViewEvent;
+        \\pub const nativeResizablePolicy = core.nativeResizablePolicy;
+        \\pub const nativeTextPolicy = core.nativeTextPolicy;
+    );
+    const feed_reader_mod = b.createModule(.{
+        .root_source_file = feed_reader_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    feed_reader_mod.addImport("native_sdk", desktop_mod);
+    feed_reader_mod.addImport("ts_feed_reader_core", feed_reader_fixture.module);
+    feed_reader_mod.addImport("ts_feed_reader_registry", feed_reader_service.registry);
+    const feed_reader_options = b.addOptions();
+    feed_reader_options.addOptionPath("service_executable", feed_reader_service.executable);
+    feed_reader_mod.addOptions("ts_feed_reader_options", feed_reader_options);
+
+    // Phase-1 TypeScript services, end to end: the frontend emits BOTH
+    // sidecars from one checked two-class program; corewire derives the
+    // registry/host only from the service sidecar; plain scriptc compiles the
+    // child executable; and the Zig battery drives that executable through
+    // the production ServiceHost + effects/session boundary.
+    const services_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-services/ok/src/core.ts",
+        .src_dir = b.path("tests/ts-services/ok/src"),
+        .name = "services_fixture_core",
+        .emit_services = true,
+        .service_packages = &.{"escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d"},
+    });
+    const service_host_fixture = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("tests/ts-services/ok/src"),
+        services_fixture.services_contract.?,
+        "ts_services_fixture_services",
+    );
+    const services_e2e_mod = module(b, target, optimize, "tests/ts-services/service_e2e_tests.zig");
+    services_e2e_mod.addImport("native_sdk", desktop_mod);
+    services_e2e_mod.addImport("ts_services_core", services_fixture.module);
+    services_e2e_mod.addImport("ts_services_registry", service_host_fixture.registry);
+    const service_test_options = b.addOptions();
+    service_test_options.addOptionPath("service_executable", service_host_fixture.executable);
+    service_test_options.addOption([]const u8, "node_executable", node);
+    services_e2e_mod.addOptions("ts_services_options", service_test_options);
+
+    // The same fixture against the in-process carrier: the service archive
+    // links into the battery beside the fixture core's archive (distinct
+    // symbol prefixes), and ServicePool drives it through the identical
+    // TsUiApp/Effects seam.
+    const services_pool_mod: ?*std.Build.Module = if (service_host_fixture.archive) |service_archive| pool: {
+        const pool_mod = module(b, target, optimize, "tests/ts-services/service_pool_e2e_tests.zig");
+        pool_mod.addImport("native_sdk", desktop_mod);
+        pool_mod.addImport("ts_services_core", services_fixture.module);
+        pool_mod.addImport("ts_services_registry", service_host_fixture.registry);
+        pool_mod.link_libc = true;
+        pool_mod.addObjectFile(service_archive);
+        addScriptcArchiveSystemLibs(pool_mod, target);
+        break :pool pool_mod;
+    } else null;
+
+    // The mobile execution battery: a static library over the same pool
+    // fixture, linked into a runnable harness by the platform toolchain —
+    // the same link pattern embedding apps use for the embed library. The
+    // Android objects are PIC like the embed library's (the harness there
+    // is a bionic executable; a future .so embedding needs it regardless).
+    const battery_target_is_mobile = target.result.os.tag == .ios or target.result.abi.isAndroid();
+    const mobile_battery: ?std.Build.LazyPath = if (battery_target_is_mobile and service_host_fixture.archive != null) battery: {
+        const battery_mod = b.createModule(.{
+            .root_source_file = b.path("tests/ts-services/mobile_e2e_battery.zig"),
+            .target = target,
+            .optimize = optimize,
+            .pic = if (target.result.abi.isAndroid()) true else null,
+        });
+        battery_mod.addImport("native_sdk", desktop_mod);
+        battery_mod.addImport("ts_services_core", services_fixture.module);
+        battery_mod.addImport("ts_services_registry", service_host_fixture.registry);
+        battery_mod.link_libc = true;
+        battery_mod.addObjectFile(service_host_fixture.archive.?);
+        const battery_lib = b.addLibrary(.{
+            .linkage = .static,
+            .name = "ts-mobile-e2e",
+            .root_module = battery_mod,
+            .use_llvm = @import("build/app.zig").useLlvmWorkaround(target),
+        });
+        if (target.result.abi.isAndroid()) {
+            // Flatten the nested TypeScript archives (Zig's ELF static-lib
+            // emission stores .a inputs as members) so the NDK link consumes
+            // plain objects — the same normalization the app lane applies.
+            const merge = b.addSystemCommand(&.{node});
+            merge.addFileArg(b.path("packages/core/scripts/merge_static_archives.mjs"));
+            merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", "gnu" });
+            merge.addArg("--out");
+            const merged = merge.addOutputFileArg("libts-mobile-e2e.a");
+            merge.addArg("--in");
+            merge.addFileArg(battery_lib.getEmittedBin());
+            break :battery merged;
+        }
+        break :battery battery_lib.getEmittedBin();
+    } else null;
+
+    // Service-host carrier benchmark: the same production service lane
+    // (frontend contract -> corewire host/registry -> exact-pinned
+    // plain-scriptc executable) over a bytes-echo operation that returns
+    // its request unchanged, so tools/bench_service_host.zig measures the
+    // carrier — lazy spawn, framing, pipes, worker queueing — and never a
+    // workload.
+    const service_bench_core = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tools/service-host-bench/src/core.ts",
+        .src_dir = b.path("tools/service-host-bench/src"),
+        .name = "service_host_bench_core",
+        .emit_services = true,
+    });
+    const service_bench_fixture = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("tools/service-host-bench/src"),
+        service_bench_core.services_contract.?,
+        "service_host_bench_services",
+    );
+    const service_bench_mod = module(b, target, optimize, "tools/bench_service_host.zig");
+    service_bench_mod.addImport("native_sdk", desktop_mod);
+    service_bench_mod.addImport("service_registry", service_bench_fixture.registry);
+    const service_bench_options = b.addOptions();
+    service_bench_options.addOptionPath("service_executable", service_bench_fixture.executable);
+    service_bench_options.addOption(bool, "has_archive", service_bench_fixture.archive != null);
+    service_bench_mod.addOptions("bench_options", service_bench_options);
+    if (service_bench_fixture.archive) |bench_archive| {
+        // The in-process carrier's half of the benchmark: the same echo
+        // service as a linked archive, driven through ServicePool.
+        service_bench_mod.link_libc = true;
+        service_bench_mod.addObjectFile(bench_archive);
+        addScriptcArchiveSystemLibs(service_bench_mod, target);
+    }
+    const service_bench_exe = b.addExecutable(.{
+        .name = "bench-service-host",
+        .root_module = service_bench_mod,
+    });
+
+    // Sidecar-shim conformance: a corewire-generated mirror per corpus
+    // fixture. The markup fixture's sidecar is the committed
+    // hand-written one (independent ground truth for the schema); the
+    // rest are the frontend-emitted contracts from the fixture compiles
+    // above, so corpus mirrors cannot go stale against their cores.
+    const conformance_mod = module(b, target, optimize, "tests/sidecar/conformance_tests.zig");
+    conformance_mod.addImport("native_sdk", desktop_mod);
+    // The canonical value encoder the envelope and snapshot axes compare
+    // against (the same module the generated shims stage).
+    conformance_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+    conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    // Compile-cost guard: this generated mirror carries 160 realistically
+    // named Msg arms and must need no quota setting in app or test code.
+    conformance_mod.addImport("shim_wide_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/wide_msg_fixture.contract.json")));
+    // The integer-class fixture: a hand-written sidecar attesting mixed
+    // i64/u64 slot classes, so the suite drives boundary and full-range
+    // integer values through a generated mirror's decode paths.
+    conformance_mod.addImport("shim_integer_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/integer_fixture.contract.json")));
+    const conformance_fixtures = [_]struct {
+        shim_import: []const u8,
+        contract_name: []const u8,
+        core: ExternalCoreFixture,
+        /// Attested integer slots the compiled projection carries as f64
+        /// (values that reach the f64-exact boundary have no honest i64
+        /// declaration on that side).
+        f64_slots: []const []const u8 = &.{},
+    }{
+        .{ .shim_import = "shim_host_core", .contract_name = "host-fixture", .core = host_fixture, .f64_slots = &.{"Model.pastBytes"} },
+        .{ .shim_import = "shim_kanban_core", .contract_name = "kanban", .core = kanban_fixture },
+        .{ .shim_import = "shim_soundboard_core", .contract_name = "soundboard", .core = soundboard_fixture },
+        .{ .shim_import = "shim_monitor_core", .contract_name = "system-monitor", .core = monitor_fixture },
+        .{ .shim_import = "shim_ai_chat_core", .contract_name = "ai-chat", .core = ai_chat_fixture },
+    };
+    // The corpus contract artifacts an external core toolchain consumes
+    // (stage-core-contracts): the effective sidecar plus its generated
+    // entry module and compiler profile, per fixture. Every corewire
+    // consumer reads the FRONTEND-emitted contract.
+    var core_contracts: std.ArrayList(CoreContract) = .empty;
+    {
+        const projections = facadeProjections(b, corewire_exe, markup_fixture.contract, &.{});
+        core_contracts.append(b.allocator, .{
+            .name = "markup-fixture",
+            .sidecar = projections.sidecar,
+            .facade = projections.facade,
+            .profile = projections.profile,
+        }) catch @panic("OOM");
+    }
+    for (conformance_fixtures) |fixture| {
+        conformance_mod.addImport(fixture.shim_import, sidecarShimModule(b, target, optimize, corewire_exe, fixture.core.contract));
+        const projections = facadeProjections(b, corewire_exe, fixture.core.contract, fixture.f64_slots);
+        core_contracts.append(b.allocator, .{
+            .name = fixture.contract_name,
+            .sidecar = projections.sidecar,
+            .facade = projections.facade,
+            .profile = projections.profile,
+        }) catch @panic("OOM");
+    }
+
+    // The ABI-law suite (tests/sidecar/external_core_abi_tests.zig):
+    // the executable half of the conformance story — the markup
+    // fixture's REAL archive driven directly through the C ABI
+    // bindings, beside a FRESH generated mirror (the conformance
+    // binary's mirror links the stub core's exports — one process
+    // cannot carry both symbol sets). The mirror generates from the
+    // archive's OWN co-emitted sidecar, so its boot fence checks the
+    // compile's real build_id against the identity getters.
+    const abi_laws_mod = module(b, target, optimize, "tests/sidecar/external_core_abi_tests.zig");
+    abi_laws_mod.link_libc = true;
+    abi_laws_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
+    abi_laws_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
+    abi_laws_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, markup_fixture.sidecar));
+    abi_laws_mod.addObjectFile(markup_fixture.archive);
+    addScriptcArchiveSystemLibs(abi_laws_mod, target);
+
+    const trap_mod = module(b, target, optimize, "tests/sidecar/external_core_trap.zig");
+    trap_mod.link_libc = true;
+    trap_mod.addImport("core_abi", module(b, target, optimize, "tools/corewire/core_abi.zig"));
+    trap_mod.addImport("shim_core", sidecarShimModule(b, target, optimize, corewire_exe, markup_fixture.sidecar));
+    trap_mod.addObjectFile(markup_fixture.archive);
+    addScriptcArchiveSystemLibs(trap_mod, target);
+
+    const mixed_return_abi_mod = module(b, target, optimize, "tests/sidecar/mixed_return_abi_tests.zig");
+    mixed_return_abi_mod.addImport("mixed_return_core", mixed_return_fixture.module);
+
+    return .{
+        .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
+        .persist = filteredTestArtifact(b, persist_mod, "ts-persist-e2e-tests", &.{}),
+        .markdown_content = filteredTestArtifact(b, persist_mod, "ts-markdown-content-tests", &.{"compiled Markdown"}),
+        .widget_routing = filteredTestArtifact(b, persist_mod, "ts-widget-routing-tests", &.{"compiled widget routing"}),
+        .widget_changes = filteredTestArtifact(b, persist_mod, "ts-widget-change-tests", &.{"compiled widget change"}),
+        .widget_paint_walk = filteredTestArtifact(b, persist_mod, "ts-widget-paint-walk-tests", &.{"compiled widget paint walk"}),
+        .control_geometry = filteredTestArtifact(b, persist_mod, "ts-control-geometry-tests", &.{"compiled control geometry"}),
+        .control_content = filteredTestArtifact(b, persist_mod, "ts-control-content-tests", &.{"compiled control content"}),
+        .surface_recipes = filteredTestArtifact(b, persist_mod, "ts-surface-recipe-tests", &.{"compiled surface recipe"}),
+        .widget_metrics = filteredTestArtifact(b, persist_mod, "ts-widget-metric-tests", &.{"compiled widget metric"}),
+        .widget_presentation = filteredTestArtifact(b, persist_mod, "ts-widget-presentation-tests", &.{"compiled widget presentation"}),
+        .widget_audits = filteredTestArtifact(b, persist_mod, "ts-widget-audits-tests", &.{"compiled widget audits"}),
+        .construction = filteredTestArtifact(b, persist_mod, "ts-construction-e2e-tests", &.{"compiled construction"}),
+        .composition_view = filteredTestArtifact(b, composition_decoder_mod, "ts-composition-view-tests", &.{"compiled grouped input"}),
+        .composition_app = filteredTestArtifact(b, composition_app_mod, "ts-composition-app-tests", &.{"compiled app composition"}),
+        .view_reload = filteredTestArtifact(b, view_reload_mod, "ts-view-reload-tests", &.{}),
+        .view_provenance = filteredTestArtifact(b, view_provenance_mod, "ts-view-provenance-tests", &.{}),
+        .chart_app = filteredTestArtifact(b, chart_app_mod, "ts-chart-app-tests", &.{"compiled app chart"}),
+        .chart_view = filteredTestArtifact(b, chart_decoder, "ts-chart-view-tests", &.{"compiled app chart"}),
+        .code_app = filteredTestArtifact(b, code_app_mod, "ts-code-app-tests", &.{"compiled app code"}),
+        .code_view = filteredTestArtifact(b, code_decoder, "ts-code-view-tests", &.{"compiled app code"}),
+        .markdown_app = filteredTestArtifact(b, markdown_app_mod, "ts-markdown-app-tests", &.{"compiled app Markdown"}),
+        .markdown_view = filteredTestArtifact(b, markdown_decoder, "ts-markdown-view-tests", &.{"compiled app Markdown"}),
+        .composition = filteredTestArtifact(b, persist_mod, "ts-composition-e2e-tests", &.{"compiled composition"}),
+        .motion = filteredTestArtifact(b, persist_mod, "ts-motion-e2e-tests", &.{"compiled widget motion"}),
+        .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
+        .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
+        .workbench = filteredTestArtifact(b, workbench_mod, "ts-workbench-e2e-tests", &.{}),
+        .feed = filteredTestArtifact(b, feed_mod, "ts-feed-e2e-tests", &.{}),
+        .split_collapse = filteredTestArtifact(b, split_mod, "ts-split-collapse-e2e-tests", &.{}),
+        .canvas_layers = filteredTestArtifact(b, canvas_layers_mod, "ts-canvas-layers-e2e-tests", &.{}),
+        .audio_exact = filteredTestArtifact(b, audio_exact_mod, "ts-audio-exact-effect-tests", &.{}),
+        .spawn_exact = filteredTestArtifact(b, spawn_exact_mod, "ts-spawn-exact-effect-tests", &.{}),
+        .boot_images = filteredTestArtifact(b, boot_images_mod, "ts-boot-images-tests", &.{}),
+        .deck = filteredTestArtifact(b, deck_mod, "ts-deck-e2e-tests", &.{}),
+        .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
+        .channel_monitor = filteredTestArtifact(b, channel_monitor_mod, "ts-channel-monitor-e2e-tests", &.{}),
+        .code_editor = filteredTestArtifact(b, code_editor_mod, "ts-code-editor-e2e-tests", &.{}),
+        .markdown_viewer = filteredTestArtifact(b, markdown_viewer_mod, "ts-markdown-viewer-e2e-tests", &.{}),
+        .notes = filteredTestArtifact(b, notes_mod, "ts-notes-e2e-tests", &.{}),
+        .effects_probe = filteredTestArtifact(b, effects_probe_mod, "ts-effects-probe-e2e-tests", &.{}),
+        .video_player = filteredTestArtifact(b, video_player_mod, "ts-video-player-e2e-tests", &.{}),
+        .inbox = filteredTestArtifact(b, inbox_mod, "ts-inbox-e2e-tests", &.{}),
+        .canvas_preview = filteredTestArtifact(b, canvas_preview_mod, "ts-canvas-preview-e2e-tests", &.{}),
+        .habits = filteredTestArtifact(b, habits_mod, "ts-habits-e2e-tests", &.{}),
+        .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
+        .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
+        .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
+        .corewire = corewire_exe,
+        .profile_archive = profile_archive,
+        .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
+        .journal_codecs = filteredTestArtifact(b, feed_reader_mod, "ts-journal-codecs-tests", &.{"compiled journal codec"}),
+        .feed_reader = filteredTestArtifact(b, feed_reader_mod, "ts-feed-reader-e2e-tests", &.{}),
+        .shell_layout = filteredTestArtifact(b, shell_layout_mod, "ts-shell-layout-e2e-tests", &.{}),
+        .typography = filteredTestArtifact(b, typography_mod, "ts-typography-e2e-tests", &.{}),
+        .virtual_fixed = filteredTestArtifact(b, virtual_fixed_mod, "ts-virtual-fixed-tests", &.{}),
+        .surface_layout = filteredTestArtifact(b, surface_layout_mod, "ts-surface-layout-e2e-tests", &.{}),
+        .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
+        .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
+        .mobile_battery = mobile_battery,
+        .service_host_bench = service_bench_exe,
+        .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
+        .external_core_trap = b.addExecutable(.{ .name = "external-core-trap", .root_module = trap_mod, .use_llvm = @import("build/app.zig").useLlvmWorkaround(target) }),
+        .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
+        .mixed_return_abi_laws = filteredTestArtifact(b, mixed_return_abi_mod, "mixed-return-abi-tests", &.{}),
+        .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
+    };
+}
+
+/// System import libraries scriptc's compiled-archive runtime reaches on
+/// Windows targets — core and service archives alike (Winsock, adapter
+/// enumeration, and crypto-backed randomness). No-op elsewhere; the
+/// archives' other dependencies are libc's. The app lane's twin is the
+/// Windows platform block in build/app.zig.
+fn addScriptcArchiveSystemLibs(mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag != .windows) return;
+    mod.linkSystemLibrary("ws2_32", .{});
+    mod.linkSystemLibrary("iphlpapi", .{});
+    mod.linkSystemLibrary("advapi32", .{});
+}
+
+/// Attach ScriptC's explicit-Linux-target glibc-floor teaching to an actual
+/// compile step. A target can match the host triple and still need the teaching
+/// because Zig's explicitly spelled `-gnu` target uses its default glibc floor.
+/// The root graph constructs fixture lanes even for unrelated selections such
+/// as the release pipeline's cross-compiled `zig build cli`; making the
+/// teaching a dependency preserves those CLI-only builds while still refusing
+/// the unsupported target before a selected ScriptC compile does any work.
+fn addScriptcGlibcFloorTeaching(b: *std.Build, target: std.Build.ResolvedTarget, step: *std.Build.Step) void {
+    const app_build = @import("build/app.zig");
+    if (!app_build.linuxGlibcSpellingHitsDefaultFloor(target)) return;
+    step.dependOn(&b.addFail(app_build.scriptcLinuxGlibcSpellingTeaching(b, target)).step);
+}
+
+const ExternalServiceFixture = struct {
+    executable: std.Build.LazyPath,
+    /// The in-process carrier's library archive (thread-instanced,
+    /// runtime-localized), compiled from the same staged tree. Present
+    /// wherever the pinned compiler's localized-archive matrix covers the
+    /// pairing (native Linux, cross-Linux x86_64/aarch64, Windows x86_64,
+    /// or macOS from a macOS host — see build/app.zig
+    /// serviceArchiveSupported); null elsewhere, and for explicitly spelled
+    /// linux-gnu targets below the glibc 2.36 runtime floor.
+    archive: ?std.Build.LazyPath,
+    registry: *std.Build.Module,
+};
+
+/// Compile one fixture's service class through the production phase-1 lane:
+/// service sidecar -> corewire host/registry -> ordinary source stage (plus
+/// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
+/// scriptc outputs (the child executable, plus the in-process library archive
+/// wherever the compiler's localized-archive matrix covers the host/target
+/// pairing). No author source is re-read for dispatch facts after the sidecar
+/// emission.
+fn externalServiceFixture(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    node: []const u8,
+    corewire_exe: *std.Build.Step.Compile,
+    src_dir: std.Build.LazyPath,
+    contract: std.Build.LazyPath,
+    name: []const u8,
+) ExternalServiceFixture {
+    const app_build = @import("build/app.zig");
+    const emit_archive = app_build.serviceArchiveSupported(b.graph.host.result, target);
+    const project = b.addRunArtifact(corewire_exe);
+    project.addArg("--services-sidecar");
+    project.addFileArg(contract);
+    project.addArg("--service-host-main");
+    const host_main = project.addOutputFileArg("service_host_main.ts");
+    project.addArg("--service-registry");
+    const registry_source = project.addOutputFileArg("services.zig");
+    project.addArg("--service-inproc-main");
+    const inproc_main = project.addOutputFileArg("service_inproc_main.ts");
+    project.addArg("--service-inproc-profile");
+    const inproc_profile = project.addOutputFileArg("service_profile.json");
+
+    const stage = b.addSystemCommand(&.{node});
+    stage.addFileArg(b.path("packages/core/scripts/stage_external_services.mjs"));
+    stage.addArg("--src");
+    stage.addDirectoryArg(src_dir);
+    stage.addArg("--host-main");
+    stage.addFileArg(host_main);
+    stage.addArg("--inproc-main");
+    stage.addFileArg(inproc_main);
+    stage.addArg("--inproc-profile");
+    stage.addFileArg(inproc_profile);
+    stage.addArg("--contract");
+    stage.addFileArg(contract);
+    stage.addArg("--out");
+    const stage_dir = stage.addOutputDirectoryArg("services-stage");
+    // A LazyPath directory records only its producer dependency; source-tree
+    // content does not otherwise participate in Run's cache key. Service
+    // files are discovered recursively by the staging script, so rerun this
+    // cheap copy step whenever the lane is requested rather than risk a stale
+    // compiled host after an author edits a nested service module.
+    stage.has_side_effects = true;
+
+    const compile = b.addSystemCommand(&.{node});
+    compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc-toolchain.json"));
+    compile.addArg("--stage");
+    compile.addDirectoryArg(stage_dir);
+    compile.addArg("--manifest");
+    compile.addFileArg(b.path("packages/core/package.json"));
+    compile.addArg("--contract");
+    compile.addFileArg(contract);
+    // Mobile targets are archive-only (no child process exists there): the
+    // driver refuses --out-exe, so the child-carrier batteries get a stub
+    // path they never execute for those targets.
+    const mobile_target = target.result.os.tag == .ios or target.result.abi.isAndroid();
+    const executable: std.Build.LazyPath = if (mobile_target)
+        b.addWriteFiles().add(b.fmt("{s}-unavailable-on-mobile", .{name}), "")
+    else exe: {
+        compile.addArg("--out-exe");
+        const suffix = if (target.result.os.tag == .windows) ".exe" else "";
+        break :exe compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    };
+    const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
+        compile.addArg("--out-archive");
+        break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
+    } else null;
+    const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
+    compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", app_build.scriptcPlatformTriple(b, target), "--zig-exe", b.graph.zig_exe });
+    app_build.addScriptcAndroidNdk(b, compile, target);
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
+    if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
+        compile.addArgs(&.{ "--compiler", override });
+    } else {
+        compile.addArg("--compiler-package-origin");
+        compile.addFileArg(b.path("packages/core/package.json"));
+    }
+
+    return .{
+        .executable = executable,
+        .archive = archive,
+        .registry = b.createModule(.{
+            .root_source_file = registry_source,
+            .target = target,
+            .optimize = optimize,
+        }),
+    };
+}
+
+const FacadeProjections = struct {
+    sidecar: std.Build.LazyPath,
+    facade: std.Build.LazyPath,
+    profile: std.Build.LazyPath,
+};
+
+/// A sidecar's compiled-core projections: the effective contract after
+/// caller-stated demotions, the generated entry module (core_facade.ts), and
+/// the compiler profile that builds it (core_profile.json), emitted by one
+/// corewire invocation so no staged sibling can describe a different layout.
+fn facadeProjections(
+    b: *std.Build,
+    corewire_exe: *std.Build.Step.Compile,
+    sidecar_json: std.Build.LazyPath,
+    f64_slots: []const []const u8,
+) FacadeProjections {
+    const generate = b.addRunArtifact(corewire_exe);
+    generate.addArg("--sidecar");
+    generate.addFileArg(sidecar_json);
+    generate.addArg("--facade");
+    const facade = generate.addOutputFileArg("core_facade.ts");
+    generate.addArg("--profile");
+    const profile = generate.addOutputFileArg("core_profile.json");
+    generate.addArg("--effective-sidecar");
+    const sidecar = generate.addOutputFileArg("core.contract.json");
+    for (f64_slots) |slot| {
+        generate.addArg("--f64-slot");
+        generate.addArg(slot);
+    }
+    return .{ .sidecar = sidecar, .facade = facade, .profile = profile };
+}
+
+/// One fixture's generated-mirror module: run corewire over the
+/// sidecar, stage the emitted core_shim.zig as core.zig beside its two
+/// staged runtime files (shim_rt.zig, core_abi.zig) — the same staging
+/// shape the transpiler lane gives its emitted core and rt.zig.
+fn sidecarShimModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    corewire_exe: *std.Build.Step.Compile,
+    sidecar_json: std.Build.LazyPath,
+) *std.Build.Module {
+    const generate = b.addRunArtifact(corewire_exe);
+    generate.addArg("--sidecar");
+    generate.addFileArg(sidecar_json);
+    generate.addArg("--out");
+    const generated = generate.addOutputFileArg("core_shim.zig");
+    const staged = b.addWriteFiles();
+    const shim_root = staged.addCopyFile(generated, "core.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    return b.createModule(.{
+        .root_source_file = shim_root,
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+/// One externally compiled TS fixture core: the corewire-generated
+/// mirror over the fixture's compiled archive, staged as one module in
+/// the app lane's exact shape (core.zig + its shim runtime), with the
+/// archive linked behind it — plus the frontend-emitted contract
+/// sidecar (the document corewire's projections consume) and the
+/// archive's own co-emitted sidecar.
+const ExternalCoreFixture = struct {
+    module: *std.Build.Module,
+    /// The frontend-emitted contract (stage-core-contracts, the
+    /// conformance shims).
+    contract: std.Build.LazyPath,
+    /// The compiled-core archive (already linked into `module`; the
+    /// ABI-law suite links it directly).
+    archive: std.Build.LazyPath,
+    /// The archive's OWN co-emitted contract sidecar — the document its
+    /// mirror must generate from (the boot identity fence pairs them).
+    sidecar: std.Build.LazyPath,
+    /// Present only for a two-class fixture that asks the frontend to emit the
+    /// service registry sidecar from the same checked program.
+    services_contract: ?std.Build.LazyPath,
+};
+
+const ExternalCoreFixtureSpec = struct {
+    /// The entry module, build-root-relative (the contract's stated
+    /// entry spelling).
+    entry: []const u8,
+    /// The compile-source directory holding the core's whole import
+    /// graph (an example's src/, or a staged single-file fixture dir).
+    src_dir: std.Build.LazyPath,
+    /// The archive's symbol-safe stem (`lib<name>.a`).
+    name: []const u8,
+    /// The fixture stands in for an app whose manifest declares Tier 1.
+    persist_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 2.
+    store_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 3.
+    relational_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares the Tier-4
+    /// build capability and its matching core-effect permission.
+    credentials_capability: bool = false,
+    /// Attested integer slots the compiled projection carries as f64
+    /// (values that reach the f64-exact boundary have no honest i64
+    /// declaration on that side) — corewire's --f64-slot demotions,
+    /// applied to the compile profile and every downstream projection.
+    f64_slots: []const []const u8 = &.{},
+    emit_services: bool = false,
+    service_packages: []const []const u8 = &.{},
+    typescript_view: bool = false,
+    view_markup: ?[]const u8 = null,
+    window_views: []const []const u8 = &.{},
+    /// Stage the development view evaluator and its exports, as a
+    /// `-Dview-reload` app build does.
+    view_reload: bool = false,
+};
+
+/// Compile one TS fixture core through the external core compiler at
+/// build time — the same pipeline the app lane runs (build/app.zig
+/// tsCoreStage): frontend check + contract, corewire facade/profile
+/// projection, compile-tree staging, the exact-pinned compile, and the
+/// mirror generated from the co-emitted sidecar.
+fn externalCoreFixtureModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    node: []const u8,
+    corewire_exe: *std.Build.Step.Compile,
+    build_trace: bool,
+    spec: ExternalCoreFixtureSpec,
+) ExternalCoreFixture {
+    const app_build = @import("build/app.zig");
+    // The frontend, in check-only mode: the subset checker gates the
+    // compile, and the contract sidecar states the build-root-relative
+    // entry spelling. The frontend reads its own sources, the SDK
+    // modules, and the core's WHOLE import graph at run time; declare
+    // them all so edits re-check the fixture (every sibling .ts of the
+    // entry is a superset of the reachable imports: over-approximation
+    // only re-runs the check, never misses a stale input).
+    const check = b.addSystemCommand(&.{node});
+    check.addFileArg(b.path("packages/core/src/cli.ts"));
+    check.addFileArg(b.path(spec.entry));
+    check.addArg("--contract");
+    const contract_raw = check.addOutputFileArg("core.contract.json");
+    const contract = app_build.stabilizeGeneratedFile(b, contract_raw, "core.contract.json", build_trace);
+    check.addArg("--contract-entry");
+    check.addArg(spec.entry);
+    if (spec.window_views.len > 0) check.addArg("--window-views");
+    for (spec.window_views) |label| check.addArgs(&.{ "--window-view", label });
+    const services_contract: ?std.Build.LazyPath = if (spec.emit_services) services: {
+        check.addArg("--services-contract");
+        const raw = check.addOutputFileArg("services.contract.json");
+        break :services app_build.stabilizeGeneratedFile(b, raw, "services.contract.json", build_trace);
+    } else null;
+    for (spec.service_packages) |package_entry| check.addArgs(&.{ "--service-package", package_entry });
+    const services_client: ?std.Build.LazyPath = if (services_contract) |service_contract| client: {
+        const service_project = b.addRunArtifact(corewire_exe);
+        service_project.addArg("--services-sidecar");
+        service_project.addFileArg(service_contract);
+        service_project.addArg("--service-client");
+        const client_raw = service_project.addOutputFileArg("services.gen.ts");
+        break :client app_build.stabilizeGeneratedFile(b, client_raw, "services.gen.ts", build_trace);
+    } else null;
+    if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
+    if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
+    if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
+    if (std.mem.eql(u8, spec.entry, "tests/ts-core/fixture.ts")) check.addArgs(&.{ "--permission", "filesystem" });
+    tsCoreAddDirInputs(b, check, "packages/core/sdk");
+    tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
+    const frontend_sources = [_][]const u8{
+        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "sqlite_runtime_policy.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+    };
+    for (frontend_sources) |source| {
+        check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
+    }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (spec.emit_services) check.addFileInput(b.path("packages/core/package.json"));
+
+    // corewire projects the generated compile entry and its profile in
+    // one invocation, so the profile's entry spelling and the facade
+    // file can never skew.
+    const project = b.addRunArtifact(corewire_exe);
+    project.addArg("--sidecar");
+    project.addFileArg(contract);
+    project.addArg("--facade");
+    const facade = project.addOutputFileArg("core_facade.ts");
+    project.addArg("--profile");
+    const profile = project.addOutputFileArg("core_profile.json");
+    // Keep root fixture compilation on the same profile as an app build:
+    // Debug uses scriptc's incremental dev objects; release lanes stay optimized.
+    project.addArgs(&.{ "--optimization", app_build.scriptcOptimizationForMode(optimize) });
+    for (spec.f64_slots) |slot| {
+        project.addArg("--f64-slot");
+        project.addArg(slot);
+    }
+
+    // The compile stage: author sources + staged SDK + static surface +
+    // generated entry/profile, one scratch tree.
+    const stage_run = b.addSystemCommand(&.{node});
+    stage_run.addFileArg(b.path("packages/core/scripts/stage_external_core.mjs"));
+    app_build.addViewFrontendInputs(b, b, stage_run);
+    stage_run.addArg("--src");
+    stage_run.addDirectoryArg(spec.src_dir);
+    stage_run.addArg("--sdk");
+    stage_run.addDirectoryArg(b.path("packages/core/sdk"));
+    stage_run.addArg("--static");
+    stage_run.addFileArg(b.path("packages/core/compile-surface/core.ts"));
+    stage_run.addArg("--facade");
+    stage_run.addFileArg(facade);
+    stage_run.addArg("--profile");
+    stage_run.addFileArg(profile);
+    if (services_client) |client| {
+        stage_run.addArg("--services-client");
+        stage_run.addFileArg(client);
+    }
+    if (spec.typescript_view) {
+        stage_run.addArg("--view-markup");
+        stage_run.addFileArg(b.path(spec.view_markup orelse b.fmt("{s}/app.native", .{std.fs.path.dirname(spec.entry).?})));
+        stage_run.addArg("--view-contract");
+        stage_run.addFileArg(contract);
+        if (spec.view_reload) {
+            stage_run.addArg("--view-reload");
+            app_build.addViewReloadInputs(b, stage_run);
+        }
+    }
+    tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".", spec.typescript_view);
+    app_build.addStagedCoreSdkInputs(b, b, stage_run);
+    stage_run.addArg("--out");
+    const stage_dir = stage_run.addOutputDirectoryArg("stage");
+
+    // The external compile: driver-verified against the SDK's exact
+    // pin, archive normalized, the co-emitted sidecar captured.
+    const compile = b.addSystemCommand(&.{node});
+    compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/scriptc-toolchain.json"));
+    compile.addFileInput(b.path("packages/core/scripts/run_library_compiler.mjs"));
+    if (build_trace) compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
+    compile.addArg("--stage");
+    compile.addDirectoryArg(stage_dir);
+    compile.addArgs(&.{ "--name", spec.name });
+    compile.addArg("--manifest");
+    compile.addFileArg(b.path("packages/core/package.json"));
+    compile.addArg("--frontend-sidecar");
+    compile.addFileArg(contract);
+    compile.addArg("--out-archive");
+    const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{spec.name}));
+    compile.addArg("--out-sidecar");
+    const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        app_build.scriptcPlatformTriple(b, target),
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
+    app_build.addScriptcAndroidNdk(b, compile, target);
+    addScriptcGlibcFloorTeaching(b, target, &compile.step);
+    if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
+        // The development override: point at any toolchain command; the
+        // driver still refuses a release other than the SDK's pin.
+        compile.addArgs(&.{ "--compiler", override });
+    } else {
+        compile.addArg("--compiler-package-origin");
+        compile.addFileArg(b.path("packages/core/package.json"));
+    }
+
+    // Compile a complete fixture in isolation when measuring compiler phases.
+    const compile_step = b.step(b.fmt("compile-ts-core-{s}", .{spec.name}), "Compile one complete TypeScript fixture archive and its ABI sidecar");
+    compile_step.dependOn(&compile.step);
+
+    // The mirror, generated from the archive's OWN co-emitted contract,
+    // staged in the app lane's module shape with the archive linked
+    // behind it (the compiler's runtime needs libc).
+    const mirror = b.addRunArtifact(corewire_exe);
+    mirror.addArg("--sidecar");
+    mirror.addFileArg(compiled_sidecar);
+    mirror.addArg("--out");
+    const shim = mirror.addOutputFileArg("core_shim.zig");
+    const staged = b.addWriteFiles();
+    const shim_root = staged.addCopyFile(shim, "core.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
+    _ = staged.addCopyFile(b.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    const mod = b.createModule(.{
+        .root_source_file = shim_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    mod.link_libc = true;
+    mod.addObjectFile(archive);
+    addScriptcArchiveSystemLibs(mod, target);
+    return .{
+        .module = mod,
+        .contract = contract,
+        .archive = archive,
+        .sidecar = compiled_sidecar,
+        .services_contract = services_contract,
+    };
+}
+
+/// Declare every .ts file under `dir_path` (relative to the build root) as a
+/// file input of the transpile step — the recursive multi-file staleness set.
+/// Service modules live below src/services/, so a flat scan would let their
+/// generated contract stay stale in a warm fixture build.
+fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
+        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
+    }
+}
+
+/// The source set stage_external_core.mjs copies: every ordinary `.ts` file,
+/// excluding the independent services compiler class and declaration files.
+/// Compiled views additionally consume every markup source in this tree.
+fn tsCoreAddCoreDirInputs(b: *std.Build, stage: *std.Build.Step.Run, dir_path: []const u8, include_markup: bool) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".ts") and !(include_markup and std.mem.endsWith(u8, entry.basename, ".native"))) continue;
+        const normalized = b.dupe(entry.path);
+        for (normalized) |*char| if (char.* == '\\') {
+            char.* = '/';
+        };
+        if (std.mem.startsWith(u8, normalized, "services/")) continue;
+        stage.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
+    }
 }
 
 fn filteredTestArtifact(b: *std.Build, mod: *std.Build.Module, name: []const u8, filters: []const []const u8) *std.Build.Step.Compile {
@@ -2513,7 +6228,7 @@ fn addTestStep(b: *std.Build, name: []const u8, description: []const u8, artifac
 /// driven through plain in-dir `zig build`.
 const ExampleBuildShape = enum { managed, owned };
 
-fn addExampleTestStep(b: *std.Build, cli_exe: *std.Build.Step.Compile, group: *std.Build.Step, name: []const u8, description: []const u8, example_path: []const u8, shape: ExampleBuildShape) void {
+fn addExampleTestStep(b: *std.Build, cli_exe: *std.Build.Step.Compile, group: *std.Build.Step, name: []const u8, description: []const u8, example_path: []const u8, shape: ExampleBuildShape) *std.Build.Step {
     const run = switch (shape) {
         .owned => b.addSystemCommand(&.{ "zig", "build", "test", "-Dplatform=null" }),
         .managed => managedExampleRun(b, cli_exe, &.{ "test", "-Dplatform=null" }),
@@ -2541,6 +6256,7 @@ fn addExampleTestStep(b: *std.Build, cli_exe: *std.Build.Step.Compile, group: *s
     const step = b.step(name, description);
     step.dependOn(&run.step);
     group.dependOn(&run.step);
+    return step;
 }
 
 /// Run a `native` CLI verb (argv tail) against a managed example. The CLI

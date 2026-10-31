@@ -34,7 +34,8 @@
 //! lives at markup level, where an author can still choose; here the
 //! tree is what ships.
 //!
-//! The audit is deterministic, allocates nothing, and reads no globals —
+//! The native reference is deterministic and allocation-free; a selected
+//! compiled owner uses copied native-owned request/result buffers —
 //! the same shape as the layout audit (layout_audit.zig), and adopted
 //! the same way: `expectA11yAuditSweepClean` in every example suite.
 
@@ -91,6 +92,7 @@ pub const A11yAuditIssues = struct {
 /// same build the app would mount (real model, real tokens), or dynamic
 /// labels will not be the ones the bridges announce.
 pub fn auditWidgetA11y(layout: WidgetLayoutTree, storage: []A11yAuditFinding) A11yAuditIssues {
+    if (layout.audit_policy) |policy| return @import("widget_audit_policy.zig").auditA11y(std.heap.page_allocator, policy, layout, storage) catch @panic("compiled accessibility audit failed");
     var sink = FindingSink{ .storage = storage };
     const node_count = @min(layout.nodes.len, max_a11y_audit_nodes);
 
@@ -140,12 +142,14 @@ fn frameHasArea(frame: geometry.RectF) bool {
 // ---------------------------------------------------------- missing label
 
 /// Roles whose announcement is useless without a name: the control set a
-/// screen reader user OPERATES. Text/status/group/image roles either
-/// carry their name as content or degrade without blocking (images are
-/// the markup lint's warning); progressbars are display-only.
+/// screen reader user OPERATES, plus a radiogroup whose name supplies the
+/// shared question for its otherwise individually named choices. Other
+/// text/status/group/image roles either carry their name as content or
+/// degrade without blocking (images are the markup lint's warning);
+/// progressbars are display-only.
 fn roleNeedsName(role: WidgetRole) bool {
     return switch (role) {
-        .button, .textbox, .checkbox, .radio, .switch_control, .slider, .menuitem, .tab, .link, .treeitem, .listitem => true,
+        .button, .textbox, .checkbox, .radio, .radiogroup, .switch_control, .slider, .menuitem, .tab, .link, .treeitem, .listitem => true,
         else => false,
     };
 }
@@ -207,10 +211,17 @@ fn widgetClipsForAudit(widget: Widget) bool {
     return widget_tree.widgetClipsContent(widget) or widget.layout.virtualized;
 }
 
-/// Scroll scopes scroll vertically by design: content below the fold is
-/// reachable after a scroll, so only a horizontal full-clip counts.
+/// Whether a scroll scope carries content into view along each axis:
+/// content past a granted axis's fold is reachable after a scroll, so a
+/// full-clip on that axis never counts. A horizontal-only shelf grants
+/// x and NOT y — an offscreen-right tile is reachable, a below-viewport
+/// one is genuinely stranded.
 fn scopeScrollsVertically(widget: Widget) bool {
-    return widget.kind == .scroll_view or widget.layout.virtualized;
+    return (widget.kind == .scroll_view and widget.scroll_axes.scrollsVertically()) or widget.layout.virtualized;
+}
+
+fn scopeScrollsHorizontally(widget: Widget) bool {
+    return widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized;
 }
 
 fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *FindingSink) void {
@@ -221,32 +232,47 @@ fn auditFocusReachable(layout: WidgetLayoutTree, node_index: usize, sink: *Findi
 
     const frame = node.frame.normalized();
     var current = node_index;
-    // Once the walk crosses a vertically scrolling scope, the widget's
-    // layout-space y is scroll content, not screen geometry: scrolling
-    // carries it into every OUTER scope's band, so only horizontal
-    // full-clips count from there up (below-the-fold rows in a long
-    // scroll region — windowed virtual lists included — are reachable
-    // by design; a pane column clipping the scroll's frame must not
-    // re-flag them).
+    // Once the walk crosses a scrolling scope, the widget's layout-space
+    // position ALONG THAT AXIS is scroll content, not screen geometry:
+    // scrolling carries it into every OUTER scope's band, so full-clips
+    // on that axis stop counting from there up (below-the-fold rows in
+    // a long scroll region — windowed virtual lists included — and
+    // offscreen-right tiles on a horizontal shelf are reachable by
+    // design; a pane clipping the scroll's frame must not re-flag
+    // them). Each axis tracks independently: a horizontal shelf forgives
+    // x overhang while a below-viewport button inside it stays flagged.
     var scrolls_vertically = false;
+    var scrolls_horizontally = false;
     while (true) {
-        // Anchored floating widgets escape every ancestor clip (the
-        // routing layer keeps focus targets inside open overlays live).
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return;
+        // Window-level surfaces escape every ancestor clip (the routing
+        // layer keeps focus targets inside them live).
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return;
         const parent_index = layout.nodes[current].parent_index orelse return;
         const parent = layout.nodes[parent_index];
         if (widgetClipsForAudit(parent.widget)) {
             const scope = parent.frame.normalized();
             const outside_x = frame.maxX() <= scope.x or frame.x >= scope.maxX();
             const outside_y = frame.maxY() <= scope.y or frame.y >= scope.maxY();
+            const parent_scrolls_horizontally = scopeScrollsHorizontally(parent.widget);
             const vertical_scroll_scope = scrolls_vertically or scopeScrollsVertically(parent.widget);
-            const unreachable_here = if (vertical_scroll_scope) outside_x else (outside_x or outside_y);
+            const horizontal_scroll_scope = scrolls_horizontally or parent_scrolls_horizontally;
+            // A horizontal scroll forgives only what scrolling can
+            // REVEAL. Offsets clamp at zero, so content wholly BEFORE
+            // the origin in content space (layout x plus the region's
+            // own offset, checkable exactly at the immediate scope) is
+            // stranded on the leading side forever.
+            const stranded_leading_x = parent_scrolls_horizontally and !scrolls_horizontally and
+                frame.maxX() + parent.widget.value_x <= scope.x;
+            const unreachable_here = (outside_x and !horizontal_scroll_scope) or
+                (outside_y and !vertical_scroll_scope) or
+                stranded_leading_x;
             if (unreachable_here) {
                 sink.append(.{ .rule = .focus_unreachable, .node_index = node_index, .other_index = parent_index });
                 return;
             }
         }
         if (scopeScrollsVertically(parent.widget)) scrolls_vertically = true;
+        if (scopeScrollsHorizontally(parent.widget)) scrolls_horizontally = true;
         current = parent_index;
     }
 }

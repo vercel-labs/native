@@ -123,6 +123,6 @@ Branch from `main` (fork first if you don't have push access), keep the change f
 scripts/gate.sh fast    # root suites + the example suites your diff touches
 ```
 
-If the change is user-visible, add a changelog fragment in `changelog.d/` (see [changelog.d/README.md](./changelog.d/README.md)) instead of editing `CHANGELOG.md`. Open the PR against `main` describing what changed and why; for larger changes, open an issue first so the design can be discussed.
+Do not edit `CHANGELOG.md` as part of a feature or fix PR; the release agent writes the complete entry from the release-range history. Open the PR against `main` describing what changed and why; for larger changes, open an issue first so the design can be discussed.
 
 Commits must be cryptographically signed (`git commit -S`, or set `commit.gpgsign = true`) so they show as **Verified** — the `Signed-off-by` trailer from `git commit -s` is a DCO attestation, not a signature.

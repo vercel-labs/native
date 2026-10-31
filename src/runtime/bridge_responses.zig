@@ -49,7 +49,7 @@ pub fn writeCommandEventJson(event_value: anytype, output: []u8) ![]const u8 {
     try json.writeString(&writer, @tagName(event_value.source));
     try writer.print(",\"windowId\":{d},\"viewLabel\":", .{event_value.window_id});
     try json.writeString(&writer, event_value.view_label);
-    try writer.print(",\"trayItemId\":{d}", .{event_value.tray_item_id});
+    try writer.print(",\"statusItemId\":{d},\"trayItemId\":{d}", .{ event_value.status_item_id, event_value.tray_item_id });
     try writer.writeByte('}');
     return writer.buffered();
 }
@@ -83,7 +83,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, view.command);
     try writer.writeAll(",\"url\":");
     try json.writeString(writer, view.url);
-    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuFrameIntervalNs\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
+    try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"layer\":{d},\"visible\":{},\"enabled\":{},\"transparent\":{},\"bridge\":{},\"gpuWidth\":{d},\"gpuHeight\":{d},\"gpuScale\":{d},\"gpuFrame\":{d},\"gpuTimestampNs\":{d},\"gpuFrameIntervalNs\":{d},\"gpuInputCount\":{d},\"gpuInputTimestampNs\":{d},\"gpuInputLatencyNs\":{d},\"gpuInputLatencyBudgetNs\":{d},\"gpuInputLatencyBudgetExceededCount\":{d},\"gpuInputLatencyBudgetOk\":{},\"gpuFirstFrameLatencyNs\":{d},\"gpuFirstFrameLatencyBudgetNs\":{d},\"gpuFirstFrameLatencyBudgetExceededCount\":{d},\"gpuFirstFrameLatencyBudgetOk\":{},\"gpuNonblank\":{},\"gpuOccluded\":{},\"gpuSampleColor\":{d},\"gpuBackend\":", .{
         view.frame.x,
         view.frame.y,
         view.frame.width,
@@ -99,6 +99,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.gpu_frame_index,
         view.gpu_timestamp_ns,
         view.gpu_frame_interval_ns,
+        view.gpu_input_event_count,
         view.gpu_input_timestamp_ns,
         view.gpu_input_latency_ns,
         view.gpu_input_latency_budget_ns,
@@ -109,6 +110,7 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
         view.gpu_first_frame_latency_budget_exceeded_count,
         view.gpu_first_frame_latency_budget_ok,
         view.gpu_frame_nonblank,
+        view.gpu_occluded,
         view.gpu_sample_color,
     });
     try json.writeString(writer, @tagName(view.gpu_backend));
@@ -275,6 +277,11 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
     try writer.writeAll(if (window.open) "true" else "false");
     try writer.writeAll(",\"focused\":");
     try writer.writeAll(if (window.focused) "true" else "false");
+    // Alive-but-policy-hidden rides beside open/focused: without it a JS
+    // consumer cannot tell a close_policy = "hide" window (open:true,
+    // focused:false) from a visible unfocused one.
+    try writer.writeAll(",\"hidden\":");
+    try writer.writeAll(if (window.hidden) "true" else "false");
     try writer.print(",\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"scale\":{d}", .{
         window.frame.x,
         window.frame.y,
@@ -288,6 +295,7 @@ pub fn writeWindowJsonToWriter(window: platform.WindowInfo, writer: anytype) !vo
 pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.UnsupportedService => "Native service is not available on this platform",
+        error.UnsupportedWindowTransparency => "This backend cannot make window content transparent",
         error.WindowNotFound => "Window was not found",
         error.WindowLimitReached => "Window limit reached",
         error.DuplicateWindowLabel => "Window id or label already exists",
@@ -299,6 +307,7 @@ pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
         error.CrossWindowWebViewDenied => "WebView windowId must match the calling window",
         error.InvalidWebViewOptions => "WebView options are invalid",
         error.WebViewNotFound => "WebView was not found",
+        error.WebViewLayerNotBuilt => "this app was built without the web layer because nothing in app.zon declared web use; add \"webview\" to .capabilities (or a .frontend block / a .shell webview view) and rebuild",
         error.WebViewLimitReached => "WebView limit reached",
         error.DuplicateWebViewLabel => "WebView label already exists",
         error.ReservedWebViewLabel => "WebView label \"main\" is reserved for the startup WebView",
@@ -355,6 +364,7 @@ pub fn builtinBridgeErrorMessage(err: anyerror) []const u8 {
 pub fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
     return switch (err) {
         error.UnsupportedService,
+        error.UnsupportedWindowTransparency,
         error.InvalidWindowOptions,
         error.WindowNotFound,
         error.WindowLimitReached,
@@ -367,6 +377,7 @@ pub fn builtinBridgeErrorCode(err: anyerror) bridge.ErrorCode {
         error.CrossWindowWebViewDenied,
         error.InvalidWebViewOptions,
         error.WebViewNotFound,
+        error.WebViewLayerNotBuilt,
         error.WebViewLimitReached,
         error.DuplicateWebViewLabel,
         error.ReservedWebViewLabel,

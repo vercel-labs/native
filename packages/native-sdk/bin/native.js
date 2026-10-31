@@ -3,7 +3,8 @@
 // Dispatcher for the `native` CLI: finds the prebuilt binary for this
 // platform and execs it. The binary ships in a per-platform package
 // (@native-sdk/cli-<platform>, an optionalDependency of this package),
-// so installs run no scripts and download exactly one binary.
+// so npm downloads exactly one Native SDK binary. The package install
+// script separately prepares the checksum-verified scriptc toolchain.
 //
 // The SDK source an app builds against ships in THIS package (src/,
 // build/, build.zig) — the dispatcher passes its location down via

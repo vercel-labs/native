@@ -564,13 +564,6 @@ test "runtime rejects unsupported GPU surface configuration" {
     }));
     try std.testing.expectError(error.UnsupportedViewKind, harness.runtime.createView(.{
         .window_id = 1,
-        .label = "transparent-canvas",
-        .kind = .gpu_surface,
-        .frame = geometry.RectF.init(0, 0, 320, 240),
-        .gpu_surface = .{ .alpha_mode = .premultiplied },
-    }));
-    try std.testing.expectError(error.UnsupportedViewKind, harness.runtime.createView(.{
-        .window_id = 1,
         .label = "wide-color-canvas",
         .kind = .gpu_surface,
         .frame = geometry.RectF.init(0, 0, 320, 240),
@@ -601,4 +594,13 @@ test "runtime rejects unsupported GPU surface configuration" {
     try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", supported.gpu_alpha_mode);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, supported.gpu_color_space);
     try std.testing.expect(supported.gpu_vsync);
+
+    const transparent = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "transparent-canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 320, 240),
+        .gpu_surface = .{ .alpha_mode = .premultiplied },
+    });
+    try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.premultiplied, transparent.gpu_alpha_mode);
 }

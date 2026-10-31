@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const web_layer = @import("web_layer.zig");
 
 const ValidationError = types.ValidationError;
 const max_shortcuts = types.max_shortcuts;
@@ -67,12 +68,18 @@ const UrlScheme = types.UrlScheme;
 const PackageMetadata = types.PackageMetadata;
 const UpdateConfig = types.UpdateConfig;
 const Manifest = types.Manifest;
+const ImagesConfig = types.ImagesConfig;
+const default_image_pixel_bytes: usize = 1024 * 1024;
+const max_image_pixel_bytes_ceiling: usize = 8 * 1024 * 1024;
 pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateIdentity(manifest.identity);
     try validateVersion(manifest.version);
     try validateIcons(manifest.icons);
     try validatePermissions(manifest.permissions);
     try validateCapabilities(manifest.capabilities);
+    try validateDockVisibility(manifest.dock_visible, manifest.capabilities);
+    try validatePersist(manifest.persist, manifest.capabilities);
+    try validateImages(manifest.images);
     try validateBridge(manifest.bridge);
     if (manifest.frontend) |frontend| try validateFrontend(frontend);
     try validateSecurity(manifest.security);
@@ -85,8 +92,33 @@ pub fn validateManifest(manifest: Manifest) ValidationError!void {
     try validateFileAssociations(manifest.file_associations);
     try validateUrlSchemes(manifest.url_schemes);
     try validateCefConfig(manifest.package.web_engine, manifest.cef);
+    try validateWebViewLayer(manifest);
     try validatePackageMetadata(manifest.package);
     try validateUpdates(manifest.updates);
+}
+
+pub fn validateImages(images: ImagesConfig) ValidationError!void {
+    if (images.max_image_pixel_bytes < default_image_pixel_bytes or
+        images.max_image_pixel_bytes > max_image_pixel_bytes_ceiling)
+    {
+        return error.InvalidDimension;
+    }
+}
+
+/// Whether the manifest declares web content — the shared declare-to-use
+/// contract (web_layer.zig) over the typed manifest. Validation has no
+/// engine flag, so the manifest's own engine is the resolved engine here;
+/// flag-resolved engines are the build graph's and the CLI's inputs.
+pub fn manifestDeclaresWebContent(manifest: Manifest) bool {
+    return web_layer.webDeclaration(manifest, manifest.package.web_engine) != null;
+}
+
+/// `.webview_layer = "exclude"` promises a native-only app; a manifest
+/// that simultaneously declares web content contradicts itself, and the
+/// contradiction is refused here — never resolved silently in either
+/// direction.
+pub fn validateWebViewLayer(manifest: Manifest) ValidationError!void {
+    _ = web_layer.decide(manifest.webview_layer, web_layer.webDeclaration(manifest, manifest.package.web_engine)) catch return error.WebViewLayerConflict;
 }
 
 pub fn validateIdentity(identity: AppIdentity) ValidationError!void {
@@ -385,7 +417,7 @@ pub const AppIdMode = enum {
 };
 
 pub fn validateAppId(id: []const u8, mode: AppIdMode) ValidationError!void {
-    if (id.len == 0) return error.InvalidId;
+    if (id.len == 0 or id.len > types.max_app_id_bytes) return error.InvalidId;
     if (id[0] == '.' or id[id.len - 1] == '.') return error.InvalidId;
 
     var segments: usize = 0;
@@ -525,6 +557,34 @@ pub fn validateCapabilities(capabilities: []const Capability) ValidationError!vo
     }
 }
 
+/// An accessory app has no Dock or app-switcher route back to its
+/// windows. Require the status-item capability as the explicit re-show
+/// affordance instead of allowing an app to strand itself invisibly.
+pub fn validateDockVisibility(dock_visible: bool, capabilities: []const Capability) ValidationError!void {
+    if (dock_visible) return;
+    for (capabilities) |capability| {
+        if (capability == .tray) return;
+    }
+    return error.MissingTrayCapability;
+}
+
+pub fn validatePersist(config: ?types.PersistConfig, capabilities: []const Capability) ValidationError!void {
+    var declared = false;
+    for (capabilities) |capability| {
+        if (capability == .persist) declared = true;
+    }
+    if (declared != (config != null)) return error.MissingRequiredField;
+    const persist = config orelse return;
+    if (persist.version == 0 or persist.version > 9_007_199_254_740_991) return error.InvalidVersion;
+    if (persist.debounce_ms > 60_000) return error.InvalidTimeout;
+    try validateName(persist.restore.ok);
+    try validateName(persist.restore.none);
+    try validateName(persist.restore.err);
+    if (std.mem.eql(u8, persist.restore.ok, persist.restore.none) or
+        std.mem.eql(u8, persist.restore.ok, persist.restore.err) or
+        std.mem.eql(u8, persist.restore.none, persist.restore.err)) return error.InvalidName;
+}
+
 pub fn validateBridge(bridge: BridgeConfig) ValidationError!void {
     for (bridge.commands, 0..) |command, i| {
         try validateName(command.name);
@@ -594,8 +654,20 @@ pub fn validateSecurity(security: SecurityConfig) ValidationError!void {
 }
 
 pub fn validateUpdates(updates: UpdateConfig) ValidationError!void {
-    if (updates.feed_url) |url| try validateExternalUrlPattern(url);
-    if (updates.public_key) |key| if (key.len == 0) return error.MissingRequiredField;
+    if ((updates.feed_url == null) != (updates.public_key == null)) return error.MissingRequiredField;
+    if (updates.check_on_start and updates.feed_url == null) return error.MissingRequiredField;
+    if (updates.feed_url) |url| {
+        if (url.len > 4096) return error.InvalidUrl;
+        if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidUrl;
+        try validateUrl(url);
+    }
+    if (updates.public_key) |key| {
+        var decoded: [std.crypto.sign.Ed25519.PublicKey.encoded_length]u8 = undefined;
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(key) catch return error.MissingRequiredField;
+        if (decoded_len != decoded.len) return error.MissingRequiredField;
+        std.base64.standard.Decoder.decode(&decoded, key) catch return error.MissingRequiredField;
+        _ = std.crypto.sign.Ed25519.PublicKey.fromBytes(decoded) catch return error.MissingRequiredField;
+    }
 }
 
 fn validateExternalUrlPattern(url: []const u8) ValidationError!void {
@@ -603,10 +675,12 @@ fn validateExternalUrlPattern(url: []const u8) ValidationError!void {
     if (std.mem.endsWith(u8, url, "*")) {
         const prefix = url[0 .. url.len - 1];
         if (prefix.len == 0) return error.InvalidUrl;
+        if (std.mem.indexOfScalar(u8, prefix, '*') != null) return error.InvalidUrl;
         if (std.mem.indexOfAny(u8, prefix, " \t\r\n\x00") != null) return error.InvalidUrl;
         try validateExternalWildcardPrefix(prefix);
         return;
     }
+    if (std.mem.indexOfScalar(u8, url, '*') != null) return error.InvalidUrl;
     return validateUrl(url);
 }
 
@@ -672,6 +746,24 @@ fn validateShortcutKey(key: []const u8) ValidationError!void {
         "arrowright",
         "arrowup",
         "arrowdown",
+        "delete",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "insert",
+        "f1",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "f6",
+        "f7",
+        "f8",
+        "f9",
+        "f10",
+        "f11",
+        "f12",
     };
     for (&specials) |special| {
         if (std.ascii.eqlIgnoreCase(key, special)) return;

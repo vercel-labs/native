@@ -40,6 +40,9 @@ pub const AutomationWidgetTarget = struct {
 pub const AutomationWidgetWheel = struct {
     target: AutomationWidgetTarget,
     delta_y: f32,
+    /// Horizontal wheel delta (the optional fourth token): 0 — the
+    /// classic three-token form — scrolls vertically exactly as before.
+    delta_x: f32 = 0,
 };
 
 /// `widget-context-menu <view-label> <id> <item-index>`: invoke one of
@@ -56,6 +59,21 @@ pub const AutomationWidgetKey = struct {
     key: []const u8,
     text: []const u8 = "",
     modifiers: AutomationKeyModifiers = .{},
+};
+
+/// `widget-pinch <view-label> <scale> [<x> <y>]`: a trackpad pinch
+/// gesture against a gpu-surface view. `scale` is the FINAL
+/// multiplicative zoom for the gesture (1.5 zooms in 50%, 0.5 zooms out
+/// to half) — the dispatch synthesizes begin, one change carrying
+/// `scale - 1`, and end, so the product of `(1 + delta)` lands exactly
+/// on `scale`. The optional
+/// anchor point is view-local canvas points (where the zoom anchors,
+/// like the pointer position under a real pinch); omitted, it defaults
+/// to the view center.
+pub const AutomationWidgetPinch = struct {
+    view_label: []const u8,
+    scale: f32,
+    point: ?geometry.PointF = null,
 };
 
 /// Modifier chord for automation key dispatch, mirroring
@@ -135,8 +153,8 @@ pub fn parseAutomationCommandName(value: []const u8) ![]const u8 {
     return trimmed[0..separator];
 }
 
-/// `tray-action <item-id>`: the numeric dropdown item id printed by the
-/// snapshot's `tray-item #N` lines (bare number, like widget ids).
+/// Parses the one-id `tray-action <item-id>` compatibility form: the
+/// numeric dropdown row id printed by a primary item's `tray-item #N` line.
 pub fn parseAutomationTrayItemId(value: []const u8) !platform.TrayItemId {
     const trimmed = std.mem.trim(u8, value, " \n\r\t");
     if (trimmed.len == 0) return error.InvalidCommand;
@@ -144,6 +162,27 @@ pub fn parseAutomationTrayItemId(value: []const u8) !platform.TrayItemId {
     const id = std.fmt.parseInt(platform.TrayItemId, trimmed, 10) catch return error.InvalidCommand;
     if (id == 0) return error.InvalidCommand;
     return id;
+}
+
+pub const AutomationTrayTarget = struct {
+    status_item_id: platform.StatusItemId = platform.primary_status_item_id,
+    item_id: platform.TrayItemId,
+};
+
+/// `tray-action <item-id>` targets the reserved primary status item;
+/// `tray-action <status-item-id> <item-id>` addresses any live item.
+pub fn parseAutomationTrayTarget(value: []const u8) !AutomationTrayTarget {
+    var tokens = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    const first = tokens.next() orelse return error.InvalidCommand;
+    const second = tokens.next();
+    if (tokens.next() != null) return error.InvalidCommand;
+    if (second) |item_text| {
+        const status_item_id = std.fmt.parseUnsigned(platform.StatusItemId, first, 10) catch return error.InvalidCommand;
+        const item_id = std.fmt.parseUnsigned(platform.TrayItemId, item_text, 10) catch return error.InvalidCommand;
+        if (status_item_id == 0 or item_id == 0) return error.InvalidCommand;
+        return .{ .status_item_id = status_item_id, .item_id = item_id };
+    }
+    return .{ .item_id = try parseAutomationTrayItemId(first) };
 }
 
 pub fn parseAutomationViewLabel(value: []const u8) ![]const u8 {
@@ -223,18 +262,27 @@ pub fn parseAutomationProvenanceTarget(value: []const u8) !AutomationProvenanceT
     return .{ .view_label = view.token, .id = id };
 }
 
+/// `widget-wheel <view-label> <id> <delta-y> [delta-x]`: the optional
+/// fourth token scrolls the horizontal axis (per-axis routing applies,
+/// exactly like a real trackpad gesture with both deltas).
 pub fn parseAutomationWidgetWheel(value: []const u8) !AutomationWidgetWheel {
     const view = takeAutomationToken(value) orelse return error.InvalidCommand;
     const id_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
     const delta_part = takeAutomationToken(id_part.rest) orelse return error.InvalidCommand;
-    if (takeAutomationToken(delta_part.rest) != null) return error.InvalidCommand;
     const id = std.fmt.parseInt(canvas.ObjectId, id_part.token, 10) catch return error.InvalidCommand;
     if (id == 0) return error.InvalidCommand;
     const delta_y = std.fmt.parseFloat(f32, delta_part.token) catch return error.InvalidCommand;
     if (!std.math.isFinite(delta_y)) return error.InvalidCommand;
+    var delta_x: f32 = 0;
+    if (takeAutomationToken(delta_part.rest)) |delta_x_part| {
+        if (takeAutomationToken(delta_x_part.rest) != null) return error.InvalidCommand;
+        delta_x = std.fmt.parseFloat(f32, delta_x_part.token) catch return error.InvalidCommand;
+        if (!std.math.isFinite(delta_x)) return error.InvalidCommand;
+    }
     return .{
         .target = .{ .view_label = view.token, .id = id },
         .delta_y = delta_y,
+        .delta_x = delta_x,
     };
 }
 
@@ -259,6 +307,24 @@ pub fn parseAutomationWidgetKey(value: []const u8) !AutomationWidgetKey {
     if (key_part.token.len == 0) return error.InvalidCommand;
     const chord = parseAutomationKeyChord(key_part.token);
     return .{ .view_label = view.token, .key = chord.key, .text = text, .modifiers = chord.modifiers };
+}
+
+pub fn parseAutomationWidgetPinch(value: []const u8) !AutomationWidgetPinch {
+    const view = takeAutomationToken(value) orelse return error.InvalidCommand;
+    const scale_part = takeAutomationToken(view.rest) orelse return error.InvalidCommand;
+    const scale = std.fmt.parseFloat(f32, scale_part.token) catch return error.InvalidCommand;
+    // A non-positive cumulative scale is not a gesture two fingers can
+    // perform (the product of 1 + delta stays positive); refuse loudly.
+    if (!std.math.isFinite(scale) or scale <= 0) return error.InvalidCommand;
+    const x_part = takeAutomationToken(scale_part.rest) orelse {
+        return .{ .view_label = view.token, .scale = scale };
+    };
+    const y_part = takeAutomationToken(x_part.rest) orelse return error.InvalidCommand;
+    if (takeAutomationToken(y_part.rest) != null) return error.InvalidCommand;
+    const x = std.fmt.parseFloat(f32, x_part.token) catch return error.InvalidCommand;
+    const y = std.fmt.parseFloat(f32, y_part.token) catch return error.InvalidCommand;
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return error.InvalidCommand;
+    return .{ .view_label = view.token, .scale = scale, .point = geometry.PointF.init(x, y) };
 }
 
 pub fn parseAutomationWidgetPointerDrag(value: []const u8) !AutomationWidgetPointerDrag {
@@ -556,6 +622,18 @@ test "runtime parses automation tray item ids" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationTrayItemId("4 5"));
 }
 
+test "runtime parses primary and explicit automation tray targets" {
+    const primary = try parseAutomationTrayTarget("4");
+    try std.testing.expectEqual(platform.primary_status_item_id, primary.status_item_id);
+    try std.testing.expectEqual(@as(platform.TrayItemId, 4), primary.item_id);
+    const explicit = try parseAutomationTrayTarget("23 12");
+    try std.testing.expectEqual(@as(platform.StatusItemId, 23), explicit.status_item_id);
+    try std.testing.expectEqual(@as(platform.TrayItemId, 12), explicit.item_id);
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("0 2"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("2 0"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationTrayTarget("1 2 3"));
+}
+
 test "runtime parses automation widget click targets" {
     const target = try parseAutomationWidgetTarget("canvas 42");
     try std.testing.expectEqualStrings("canvas", target.view_label);
@@ -594,6 +672,12 @@ test "runtime parses automation widget wheel targets" {
     try std.testing.expectEqualStrings("canvas", wheel.target.view_label);
     try std.testing.expectEqual(@as(canvas.ObjectId, 42), wheel.target.id);
     try std.testing.expectEqual(@as(f32, 18.5), wheel.delta_y);
+    try std.testing.expectEqual(@as(f32, 0), wheel.delta_x);
+
+    // The optional fourth token is the horizontal delta.
+    const diagonal = try parseAutomationWidgetWheel("canvas 42 18.5 -6");
+    try std.testing.expectEqual(@as(f32, 18.5), diagonal.delta_y);
+    try std.testing.expectEqual(@as(f32, -6), diagonal.delta_x);
 
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel(""));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas"));
@@ -602,6 +686,7 @@ test "runtime parses automation widget wheel targets" {
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nope"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 nan"));
     try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 18 extra"));
+    try std.testing.expectError(error.InvalidCommand, parseAutomationWidgetWheel("canvas 42 18 6 extra"));
 }
 
 test "runtime parses automation widget context-menu items" {

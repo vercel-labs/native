@@ -2,13 +2,20 @@ const std = @import("std");
 const types = @import("types.zig");
 const validation = @import("validation.zig");
 
+/// The web-layer inference contract: the one declare-to-use definition
+/// every boundary (build graph, CLI tooling, app runner) consumes.
+pub const web_layer = @import("web_layer.zig");
+
 pub const ValidationError = types.ValidationError;
 pub const max_shortcuts = types.max_shortcuts;
 pub const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
+pub const max_app_id_bytes = types.max_app_id_bytes;
 pub const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
 pub const max_shell_windows = types.max_shell_windows;
 pub const max_shell_views_per_window = types.max_shell_views_per_window;
 pub const max_shell_tabs = types.max_shell_tabs;
+pub const max_shell_chrome_label_bytes = types.max_shell_chrome_label_bytes;
+pub const max_shell_chrome_icon_bytes = types.max_shell_chrome_icon_bytes;
 pub const max_view_label_bytes = types.max_view_label_bytes;
 pub const max_view_role_bytes = types.max_view_role_bytes;
 pub const max_view_accessibility_label_bytes = types.max_view_accessibility_label_bytes;
@@ -27,12 +34,15 @@ pub const max_url_schemes = types.max_url_schemes;
 pub const Platform = types.Platform;
 pub const PackageKind = types.PackageKind;
 pub const WebEngine = types.WebEngine;
+pub const WebViewLayer = types.WebViewLayer;
 pub const CefConfig = types.CefConfig;
 pub const IconPurpose = types.IconPurpose;
 pub const PermissionKind = types.PermissionKind;
 pub const Permission = types.Permission;
 pub const CapabilityKind = types.CapabilityKind;
 pub const Capability = types.Capability;
+pub const PersistRestore = types.PersistRestore;
+pub const PersistConfig = types.PersistConfig;
 pub const AppIdentity = types.AppIdentity;
 pub const Version = types.Version;
 pub const Icon = types.Icon;
@@ -47,6 +57,7 @@ pub const FrontendDevConfig = types.FrontendDevConfig;
 pub const FrontendConfig = types.FrontendConfig;
 pub const WindowRestorePolicy = types.WindowRestorePolicy;
 pub const WindowTitlebarStyle = types.WindowTitlebarStyle;
+pub const WindowClosePolicy = types.WindowClosePolicy;
 pub const Window = types.Window;
 pub const ViewKind = types.ViewKind;
 pub const GpuSurfaceBackend = types.GpuSurfaceBackend;
@@ -73,6 +84,7 @@ pub const UrlScheme = types.UrlScheme;
 pub const PackageMetadata = types.PackageMetadata;
 pub const UpdateConfig = types.UpdateConfig;
 pub const Manifest = types.Manifest;
+pub const ImagesConfig = types.ImagesConfig;
 pub const validateManifest = validation.validateManifest;
 pub const validateIdentity = validation.validateIdentity;
 pub const validateDescription = validation.validateDescription;
@@ -87,6 +99,8 @@ pub const validateFileAssociations = validation.validateFileAssociations;
 pub const validateUrlSchemes = validation.validateUrlSchemes;
 pub const validateShortcutsForPlatforms = validation.validateShortcutsForPlatforms;
 pub const validateCefConfig = validation.validateCefConfig;
+pub const validateWebViewLayer = validation.validateWebViewLayer;
+pub const manifestDeclaresWebContent = validation.manifestDeclaresWebContent;
 pub const AppIdMode = validation.AppIdMode;
 pub const validateAppId = validation.validateAppId;
 pub const validateName = validation.validateName;
@@ -94,6 +108,9 @@ pub const validateUrl = validation.validateUrl;
 pub const validateIcons = validation.validateIcons;
 pub const validatePermissions = validation.validatePermissions;
 pub const validateCapabilities = validation.validateCapabilities;
+pub const validateDockVisibility = validation.validateDockVisibility;
+pub const validatePersist = validation.validatePersist;
+pub const validateImages = validation.validateImages;
 pub const validateBridge = validation.validateBridge;
 pub const validateFrontend = validation.validateFrontend;
 pub const validateBridgeOrigin = validation.validateBridgeOrigin;
@@ -102,8 +119,14 @@ pub const validateUpdates = validation.validateUpdates;
 pub const validatePlatforms = validation.validatePlatforms;
 pub const validatePackageMetadata = validation.validatePackageMetadata;
 pub const versionString = validation.versionString;
+pub const shellConfigFrom = comptime_scene.shellConfigFrom;
+pub const firstGpuSurfaceLabel = comptime_scene.firstGpuSurfaceLabel;
+
+const comptime_scene = @import("comptime_scene.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = comptime_scene;
+    _ = @import("web_layer.zig");
 }

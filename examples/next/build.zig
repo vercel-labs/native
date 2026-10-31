@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
@@ -78,6 +79,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
+    options.addOption(?bool, "webview_inspection", webview_inspection);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
     const options_mod = options.createModule();
 
@@ -92,6 +94,14 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
+        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        // miscompiles the SysV C calling convention for the long
+        // mixed-argument signatures the platform hosts use, shifting
+        // stack-passed pointers by one slot (a Debug run on x86_64 Linux
+        // crashes creating its first shell view). Force LLVM there,
+        // mirroring the Native SDK build graph; Release modes already
+        // use LLVM, so only Debug changes.
+        .use_llvm = useLlvmWorkaround(target),
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
@@ -263,9 +273,15 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         if (b.sysroot) |sysroot| {
             app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
         }
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/capture_info_plist.c"), .flags = &.{} });
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("CoreMedia", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{ .weak = true });
+        // CVPixelBuffer for the video frame path (the AppKit host's
+        // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
+        app_mod.linkFramework("CoreVideo", .{});
         // Spectrum analysis of the app's own playback: the MediaToolbox
         // audio tap hands the player's PCM to the host, and Accelerate
         // (vDSP) turns it into band magnitudes.
@@ -334,10 +350,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
             },
         }
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
         app_mod.linkSystemLibrary("c", .{});
         app_mod.linkSystemLibrary("c++", .{});
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("gdi32", .{});
+        app_mod.linkSystemLibrary("d2d1", .{});
+        app_mod.linkSystemLibrary("dwrite", .{});
         app_mod.linkSystemLibrary("imm32", .{});
         app_mod.linkSystemLibrary("comctl32", .{});
         app_mod.linkSystemLibrary("ole32", .{});
@@ -510,4 +529,15 @@ fn boolField(source: []const u8, field: []const u8) ?bool {
     if (std.mem.startsWith(u8, source[index..], "true")) return true;
     if (std.mem.startsWith(u8, source[index..], "false")) return false;
     return null;
+}
+
+// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
+// convention for long mixed int/pointer/double signatures (the platform
+// hosts' view-create calls) and f32-heavy ones (the embed viewport ABI):
+// stack-passed arguments arrive shifted, so a Debug x86_64 build crashes
+// at the first platform call that passes strings on the stack. Force the
+// LLVM backend on x86_64 until the upstream backend is fixed; Release
+// modes already default to LLVM, so this only changes Debug builds.
+fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
 }

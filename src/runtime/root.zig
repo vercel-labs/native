@@ -80,8 +80,44 @@ pub const max_effect_fetch_payload_bytes = runtime_effects.max_effect_fetch_payl
 pub const max_effect_body_bytes = runtime_effects.max_effect_body_bytes;
 pub const default_effect_fetch_timeout_ms = runtime_effects.default_effect_fetch_timeout_ms;
 pub const EffectFileOp = runtime_effects.EffectFileOp;
+pub const EffectFileEvent = runtime_effects.EffectFileEvent;
 pub const EffectFileOutcome = runtime_effects.EffectFileOutcome;
 pub const EffectFileResult = runtime_effects.EffectFileResult;
+pub const FileAccessBinding = runtime_effects.FileAccessBinding;
+pub const effect_file_stream_chunk_bytes = runtime_effects.effect_file_stream_chunk_bytes;
+pub const max_effect_file_streams = runtime_effects.max_effect_file_streams;
+pub const EffectCredentialsOperation = runtime_effects.EffectCredentialsOperation;
+pub const EffectCredentialsOutcome = runtime_effects.EffectCredentialsOutcome;
+pub const EffectCredentialsResult = runtime_effects.EffectCredentialsResult;
+pub const EffectPersistOutcome = runtime_effects.EffectPersistOutcome;
+pub const EffectPersistResult = runtime_effects.EffectPersistResult;
+pub const max_effect_persist_snapshot_bytes = runtime_effects.max_effect_persist_snapshot_bytes;
+pub const EffectStoreOutcome = runtime_effects.EffectStoreOutcome;
+pub const EffectStoreOp = runtime_effects.EffectStoreOp;
+pub const RecordStoreBinding = runtime_effects.RecordStoreBinding;
+pub const EffectDbValue = runtime_effects.EffectDbValue;
+pub const EffectDbStatement = runtime_effects.EffectDbStatement;
+pub const EffectDbOutcome = runtime_effects.EffectDbOutcome;
+pub const EffectDbResultKind = runtime_effects.EffectDbResultKind;
+pub const EffectDbResult = runtime_effects.EffectDbResult;
+pub const RelationalStoreBinding = runtime_effects.RelationalStoreBinding;
+pub const max_db_effects = runtime_effects.max_db_effects;
+pub const max_effect_db_sql_bytes = runtime_effects.max_effect_db_sql_bytes;
+pub const max_effect_db_parameters = runtime_effects.max_effect_db_parameters;
+pub const max_effect_db_exec_statements = runtime_effects.max_effect_db_exec_statements;
+pub const max_effect_db_parameter_bytes = runtime_effects.max_effect_db_parameter_bytes;
+pub const max_effect_db_exec_parameter_bytes = runtime_effects.max_effect_db_exec_parameter_bytes;
+pub const default_effect_db_page_rows = runtime_effects.default_effect_db_page_rows;
+pub const max_effect_db_page_bytes = runtime_effects.max_effect_db_page_bytes;
+pub const max_effect_db_result_rows = runtime_effects.max_effect_db_result_rows;
+pub const max_effect_db_result_bytes = runtime_effects.max_effect_db_result_bytes;
+pub const max_effect_store_key_bytes = runtime_effects.max_effect_store_key_bytes;
+pub const max_effect_store_value_bytes = runtime_effects.max_effect_store_value_bytes;
+pub const max_effect_store_batch_entries = runtime_effects.max_effect_store_batch_entries;
+pub const max_effect_store_batch_bytes = runtime_effects.max_effect_store_batch_bytes;
+pub const max_effect_store_result_bytes = runtime_effects.max_effect_store_result_bytes;
+pub const default_effect_store_scan_limit = runtime_effects.default_effect_store_scan_limit;
+pub const max_effect_store_scan_limit = runtime_effects.max_effect_store_scan_limit;
 pub const max_effect_file_path_bytes = runtime_effects.max_effect_file_path_bytes;
 pub const max_effect_file_bytes = runtime_effects.max_effect_file_bytes;
 pub const EffectClipboardOp = runtime_effects.EffectClipboardOp;
@@ -98,16 +134,102 @@ pub const EffectAudioEventKind = runtime_effects.EffectAudioEventKind;
 pub const EffectAudioSource = runtime_effects.EffectAudioSource;
 pub const audioCachePath = runtime_effects.audioCachePath;
 pub const max_effect_audio_path_bytes = runtime_effects.max_effect_audio_path_bytes;
+pub const EffectVideo = runtime_effects.EffectVideo;
+pub const EffectVideoEventKind = runtime_effects.EffectVideoEventKind;
+pub const EffectVideoSource = runtime_effects.EffectVideoSource;
+pub const max_effect_video_path_bytes = runtime_effects.max_effect_video_path_bytes;
+pub const EffectImageResult = runtime_effects.EffectImageResult;
+pub const EffectImageOutcome = runtime_effects.EffectImageOutcome;
+pub const imageCachePath = runtime_effects.imageCachePath;
+pub const max_effect_image_path_bytes = runtime_effects.max_effect_image_path_bytes;
+pub const max_effect_image_bytes = runtime_effects.max_effect_image_bytes;
+pub const max_effect_image_source_bytes = runtime_effects.max_effect_image_source_bytes;
+pub const effect_image_blob_hash_len = runtime_effects.effect_image_blob_hash_len;
+pub const EffectChannelEvent = runtime_effects.EffectChannelEvent;
+pub const EffectChannelEventKind = runtime_effects.EffectChannelEventKind;
+pub const EffectAudioCaptureEvent = runtime_effects.EffectAudioCaptureEvent;
+pub const EffectAudioCaptureEventKind = runtime_effects.EffectAudioCaptureEventKind;
+pub const decodeAudioCaptureChannelEvent = runtime_effects.decodeAudioCaptureChannelEvent;
+pub const HostChannelSourceBinding = runtime_effects.HostChannelSourceBinding;
+pub const EffectChannelSourceState = runtime_effects.EffectChannelSourceState;
+pub const EffectChannelSourceResult = runtime_effects.EffectChannelSourceResult;
+pub const max_channel_source_payload = runtime_effects.max_channel_source_payload;
+pub const ChannelHandle = runtime_effects.ChannelHandle;
+pub const max_effect_channels = runtime_effects.max_effect_channels;
+pub const max_effect_channel_bytes = runtime_effects.max_effect_channel_bytes;
+pub const max_effect_channel_pending = runtime_effects.max_effect_channel_pending;
+pub const EffectPtyEvent = runtime_effects.EffectPtyEvent;
+pub const EffectPtyEventKind = runtime_effects.EffectPtyEventKind;
+pub const max_effect_ptys = runtime_effects.max_effect_ptys;
+pub const max_effect_pty_chunk_bytes = runtime_effects.max_effect_pty_chunk_bytes;
+pub const max_effect_pty_write_bytes = runtime_effects.max_effect_pty_write_bytes;
+pub const max_effect_pty_term_bytes = runtime_effects.max_effect_pty_term_bytes;
+pub const EffectHostResult = runtime_effects.EffectHostResult;
+pub const HostCallBinding = runtime_effects.HostCallBinding;
+pub const HostCallCompletion = runtime_effects.HostCallCompletion;
+pub const ServiceHost = @import("service_host.zig").ServiceHost;
+pub const serviceEnvironmentVariableAllowed = @import("service_host.zig").environmentVariableAllowed;
+pub const ServicePool = @import("service_pool.zig").ServicePool;
+pub const service_pool = @import("service_pool.zig");
+pub const max_effect_host_name_bytes = runtime_effects.max_effect_host_name_bytes;
+pub const max_effect_host_payload_bytes = runtime_effects.max_effect_host_payload_bytes;
+pub const max_effect_host_result_bytes = runtime_effects.max_effect_host_result_bytes;
+
+const runtime_terminal_session = @import("terminal_session.zig");
+/// Whether this build carries the terminal emulator behind bound
+/// `<terminal pty={key}>` sessions (`AppOptions.terminal_sessions`).
+/// False builds render the empty terminal surface and never traverse the
+/// emulator's dependency graph — the flag an app's tests gate on.
+pub const terminal_sessions_enabled = runtime_terminal_session.enabled;
+pub const max_terminal_sessions = runtime_terminal_session.max_sessions;
+
+const runtime_ts_core_host = @import("ts_core_host.zig");
+pub const TsCoreHost = runtime_ts_core_host.TsCoreHost;
+pub const TsCoreHostWithRuntimeModel = runtime_ts_core_host.TsCoreHostWithRuntimeModel;
+pub const ts_core_request_key_base = runtime_ts_core_host.request_key_base;
+pub const ts_core_timer_key_base = runtime_ts_core_host.timer_key_base;
+pub const ts_core_effect_key_base = runtime_ts_core_host.effect_key_base;
+pub const ts_core_delay_key_base = runtime_ts_core_host.delay_key_base;
+pub const ts_core_clip_write_key_base = runtime_ts_core_host.clip_write_key_base;
+pub const ts_core_spawn_key_base = runtime_ts_core_host.spawn_key_base;
+pub const ts_core_audio_key_base = runtime_ts_core_host.audio_key_base;
+pub const ts_core_video_key_base = runtime_ts_core_host.video_key_base;
+pub const ts_core_db_key_base = runtime_ts_core_host.db_key_base;
+pub const ts_core_file_stream_key_base = runtime_ts_core_host.file_stream_key_base;
+
+const runtime_ts_ui_app = @import("ts_ui_app.zig");
+pub const view_reload = @import("view_reload.zig");
+pub const TsUiApp = runtime_ts_ui_app.TsUiApp;
+pub const TsUiAppWithFeatures = runtime_ts_ui_app.TsUiAppWithFeatures;
 
 const runtime_session_journal = @import("session_journal.zig");
 const runtime_session_record = @import("session_record.zig");
 const runtime_session_replay = @import("session_replay.zig");
+const runtime_session_blobs = @import("session_blobs.zig");
+const runtime_persist_store = @import("persist_store.zig");
+const runtime_record_store = @import("record_store.zig");
+const runtime_relational_store = @import("relational_store.zig");
 pub const session_journal = runtime_session_journal;
+pub const session_codec_reference = @import("session_codec_reference.zig");
+pub const session_blobs = runtime_session_blobs;
+pub const persist_store = runtime_persist_store;
+pub const PersistStore = runtime_persist_store.Store;
+pub const PersistOutcome = runtime_persist_store.Outcome;
+pub const max_persist_snapshot_bytes = runtime_persist_store.max_snapshot_bytes;
+pub const record_store = runtime_record_store;
+pub const RecordStore = runtime_record_store.Store;
+pub const relational_store = runtime_relational_store;
+pub const RelationalStore = runtime_relational_store.Database;
 pub const SessionRecorder = runtime_session_record.SessionRecorder;
 pub const SessionRecorderSink = runtime_session_record.RecorderSink;
+pub const SessionBlobSink = runtime_session_blobs.SessionBlobSink;
+pub const SessionBlobSource = runtime_session_blobs.SessionBlobSource;
+pub const SessionBlobDirStore = runtime_session_blobs.DirBlobStore;
 pub const SessionHeader = runtime_session_journal.Header;
 pub const sessionHeaderNow = runtime_session_record.headerNow;
 pub const sessionPlatformName = runtime_session_replay.currentPlatformName;
+pub const replay_policy = @import("replay_policy.zig");
+pub const component_policy = @import("component_policy.zig");
 pub const replaySession = runtime_session_replay.replaySession;
 pub const ReplayOptions = runtime_session_replay.ReplayOptions;
 pub const ReplayReport = runtime_session_replay.ReplayReport;
@@ -135,6 +257,16 @@ const runtime_canvas_images = @import("canvas_images.zig");
 pub const RegisteredCanvasImage = runtime_canvas_images.RegisteredCanvasImage;
 pub const max_registered_canvas_images = runtime_canvas_images.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = runtime_canvas_images.max_registered_canvas_image_pixel_bytes;
+pub const max_registered_canvas_image_pixel_bytes_ceiling = runtime_canvas_images.max_registered_canvas_image_pixel_bytes_ceiling;
+
+// The media-surface producer channel (media_surface.zig): the handle
+// type `Runtime.acquireMediaSurfaceProducer` returns rides the public
+// root so producer callbacks can be TYPED (the docs' mpv recipe takes a
+// `MediaSurfaceProducer` parameter), alongside the channel budgets.
+const runtime_media_surface = @import("media_surface.zig");
+pub const MediaSurfaceProducer = runtime_media_surface.MediaSurfaceProducer;
+pub const max_media_surface_channels = runtime_media_surface.max_media_surface_channels;
+pub const max_media_surface_pixel_bytes = runtime_media_surface.max_media_surface_pixel_bytes;
 
 const runtime_canvas_fonts = @import("canvas_fonts.zig");
 pub const max_registered_canvas_fonts = runtime_canvas_fonts.max_registered_canvas_fonts;
@@ -147,4 +279,8 @@ pub const CanvasPixelSize = core.CanvasPixelSize;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("ts_canvas_hooks_tests.zig");
 }
+
+pub const host_flow_policy = @import("host_flow_policy.zig");
+pub const host_event_pump = @import("host_event_pump.zig");

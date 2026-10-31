@@ -1,0 +1,2246 @@
+//! End-to-end: a GENUINELY COMPILED core (tests/ts-core/fixture.ts,
+//! built by the external core compiler at build time and reached
+//! through its generated mirror — see the ts-core-e2e wiring in
+//! build.zig) driven through the real
+//! runtime-core dispatch path: the first-class `TsUiApp(core)` adapter
+//! (the committed TS model IS the app model — the view below reads it
+//! straight off the UiApp), the null platform's live timer services, a
+//! stub `HostCallBinding` standing in for host services, and the
+//! session recorder. Timers fire, requests round-trip, replace/cancel
+//! keep the wire contract, `Cmd.now` stamps synchronously, a REAL
+//! subprocess streams lines into the core (and dies to a mid-stream
+//! cancel), desktop notifications reach the platform service, audio and
+//! video events flow the soundboard way (the fake
+//! channel's scripted feed), and recorded sessions — streams included — replay
+//! to identical state without a host call or a process launch.
+//!
+//! The markup-view / automation / pixel-fingerprint guarantees run in
+//! markup_e2e_tests.zig over the markup fixture's core — its own
+//! binary: the compiled-core symbol set is a fixed-prefix C ABI, so
+//! one process carries ONE archive.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const native_sdk = @import("native_sdk");
+const fixture = @import("ts_core_fixture");
+
+const runtime_ns = native_sdk.runtime;
+const Adapter = native_sdk.TsUiAppWithFeatures(fixture, .{ .runtime_markup = false, .compiled_model = true });
+/// The same instantiation the adapter drives (comptime memoization):
+/// assertions may read the committed model straight off the bridge.
+const Bridge = Adapter.Host;
+
+const canvas_label = "ts-core-canvas";
+
+const e2e_views = [_]native_sdk.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const e2e_windows = [_]native_sdk.ShellWindow{.{
+    .label = "main",
+    .title = "TS Core",
+    .width = 400,
+    .height = 300,
+    .views = &e2e_views,
+}};
+const e2e_scene: native_sdk.ShellConfig = .{ .windows = &e2e_windows };
+
+const App = Adapter.App;
+
+/// A hand-written builder view over the COMMITTED TS MODEL — the model
+/// parameter is the UiApp-held root the adapter refreshes each
+/// dispatch, so this view (and the replay fingerprints derived from
+/// what it renders) pins the compiled core's state directly.
+fn e2eView(ui: *App.Ui, model: *const Adapter.Model) App.Ui.Node {
+    const state = model.hostViewState(ui.arena);
+    return ui.column(.{ .gap = 4, .padding = 8 }, .{
+        ui.text(.{}, ui.fmt("ticks {d} failures {d}", .{ state.ticks, state.failures })),
+        ui.text(.{}, ui.fmt("status {s}", .{state.status})),
+    });
+}
+
+fn e2eWindowView(ui: *App.Ui, model: *const Adapter.Model, label: []const u8) App.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, label, "settings"));
+    return ui.text(.{}, if (model.hostViewState(ui.arena).polling) "settings polling" else "settings paused");
+}
+
+fn e2eCommand(name: []const u8) ?fixture.Msg {
+    if (std.mem.eql(u8, name, "core.toggle")) return .toggle;
+    if (std.mem.eql(u8, name, "core.enable")) return .enable;
+    if (std.mem.eql(u8, name, "core.disable")) return .disable;
+    if (std.mem.eql(u8, name, "core.refresh")) return .refresh;
+    if (std.mem.eql(u8, name, "core.abort")) return .abort;
+    if (std.mem.eql(u8, name, "core.stamp")) return .stamp;
+    if (std.mem.eql(u8, name, "core.note")) return .note;
+    if (std.mem.eql(u8, name, "core.save")) return .save;
+    if (std.mem.eql(u8, name, "core.load")) return .load;
+    if (std.mem.eql(u8, name, "core.filestat")) return .stat_file;
+    if (std.mem.eql(u8, name, "core.fileappend")) return .append_file;
+    if (std.mem.eql(u8, name, "core.filedelete")) return .delete_file;
+    if (std.mem.eql(u8, name, "core.streamopen")) return .stream_open;
+    if (std.mem.eql(u8, name, "core.streamchunk")) return .stream_chunk;
+    if (std.mem.eql(u8, name, "core.streamclose")) return .stream_close;
+    if (std.mem.eql(u8, name, "core.streamooo")) return .stream_out_of_order;
+    if (std.mem.eql(u8, name, "core.streamread")) return .stream_read;
+    if (std.mem.eql(u8, name, "core.get")) return .get;
+    if (std.mem.eql(u8, name, "core.stream")) return .stream;
+    if (std.mem.eql(u8, name, "core.cancelstream")) return .cancel_stream;
+    if (std.mem.eql(u8, name, "core.share")) return .share;
+    if (std.mem.eql(u8, name, "core.paste")) return .paste;
+    if (std.mem.eql(u8, name, "core.later")) return .later;
+    if (std.mem.eql(u8, name, "core.halt")) return .halt;
+    if (std.mem.eql(u8, name, "core.run")) return .run;
+    if (std.mem.eql(u8, name, "core.hang")) return .hang;
+    if (std.mem.eql(u8, name, "core.kill")) return .kill;
+    if (std.mem.eql(u8, name, "core.play")) return .play;
+    if (std.mem.eql(u8, name, "core.pause")) return .pause_music;
+    if (std.mem.eql(u8, name, "core.volume")) return .set_volume;
+    if (std.mem.eql(u8, name, "core.stopmusic")) return .stop_music;
+    if (std.mem.eql(u8, name, "core.vplay")) return .play_clip;
+    if (std.mem.eql(u8, name, "core.vpause")) return .pause_clip;
+    if (std.mem.eql(u8, name, "core.vstop")) return .stop_clip;
+    if (std.mem.eql(u8, name, "core.cover")) return .show_cover;
+    if (std.mem.eql(u8, name, "core.coveragain")) return .show_cover_again;
+    if (std.mem.eql(u8, name, "core.covernext")) return .load_next;
+    if (std.mem.eql(u8, name, "core.covertop")) return .load_top;
+    if (std.mem.eql(u8, name, "core.coverpast")) return .load_past;
+    if (std.mem.eql(u8, name, "core.coverflood")) return .load_flood;
+    if (std.mem.eql(u8, name, "core.coverfrac")) return .load_frac;
+    if (std.mem.eql(u8, name, "core.coversized")) return .load_sized;
+    if (std.mem.eql(u8, name, "core.covertopbytes")) return .load_top_bytes;
+    if (std.mem.eql(u8, name, "core.coverpastbytes")) return .load_past_bytes;
+    if (std.mem.eql(u8, name, "core.covercancel")) return .cancel_cover;
+    if (std.mem.eql(u8, name, "core.cancelmissing")) return .cancel_missing;
+    if (std.mem.eql(u8, name, "core.evictfirst")) return .evict_first;
+    if (std.mem.eql(u8, name, "core.evictcover")) return .evict_cover;
+    if (std.mem.eql(u8, name, "core.evictmissing")) return .evict_missing;
+    if (std.mem.eql(u8, name, "core.watch")) return .watch;
+    if (std.mem.eql(u8, name, "core.mixreject")) return .mix_reject;
+    if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
+    if (std.mem.eql(u8, name, "core.notify")) return .notify;
+    if (std.mem.eql(u8, name, "core.open-settings")) return .open_settings;
+    if (std.mem.startsWith(u8, name, "core.close-settings:")) return .{ .close_settings = name["core.close-settings:".len..] };
+    if (std.mem.eql(u8, name, "core.storeput")) return .store_put;
+    if (std.mem.eql(u8, name, "core.storeget")) return .store_get;
+    if (std.mem.eql(u8, name, "core.storedelete")) return .store_delete;
+    if (std.mem.eql(u8, name, "core.storescan")) return .store_scan;
+    if (std.mem.eql(u8, name, "core.storescaninvalid")) return .store_scan_invalid;
+    if (std.mem.eql(u8, name, "core.storemany")) return .store_many;
+    if (std.mem.eql(u8, name, "core.dbexec")) return .db_exec;
+    if (std.mem.eql(u8, name, "core.dbquery")) return .db_query;
+    if (std.mem.eql(u8, name, "core.credentialset")) return .credential_set;
+    if (std.mem.eql(u8, name, "core.credentialget")) return .credential_get;
+    if (std.mem.eql(u8, name, "core.credentialdelete")) return .credential_delete;
+    return null;
+}
+
+/// The fixture's literal store path (cwd-relative, under the zig
+/// cache like every tmp-dir artifact) and its parent, deleted around
+/// tests so every run starts from an absent store.
+const store_path = ".zig-cache/tmp/ts-core-e2e/store.bin";
+const store_dir = ".zig-cache/tmp/ts-core-e2e";
+const tier5_dir = ".zig-cache/tmp/ts-core-tier5";
+const tier5_append_path = ".zig-cache/tmp/ts-core-tier5/append.bin";
+
+fn removeStore() void {
+    std.Io.Dir.cwd().deleteTree(std.testing.io, store_dir) catch {};
+}
+
+fn removeTier5Files() void {
+    std.Io.Dir.cwd().deleteTree(std.testing.io, tier5_dir) catch {};
+}
+
+fn e2eOptions() App.Options {
+    return .{
+        .name = "ts-core-e2e",
+        .scene = e2e_scene,
+        .canvas_label = canvas_label,
+        .view = e2eView,
+        .window_view = e2eWindowView,
+        .on_command = e2eCommand,
+    };
+}
+
+/// The boot request's engine key: the bridge assigns table slot 0 to
+/// the first issued request, deterministically.
+const status_request_key: u64 = runtime_ns.ts_core_request_key_base + 0;
+
+/// The subscription timer's platform id: bridge timer slot 0 lands in
+/// engine timer slot 0.
+const tick_platform_id: u64 = runtime_ns.effect_timer_platform_id_base + 0;
+
+/// The first named engine op (readFile/writeFile/fetch/clipboardRead)
+/// takes bridge op slot 0, deterministically in issue order.
+const first_effect_key: u64 = runtime_ns.ts_core_effect_key_base + 0;
+
+fn storePayloadU32(bytes: []const u8, at: *usize) u32 {
+    const value = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+    at.* += 4;
+    return value;
+}
+
+fn storePayloadField(bytes: []const u8, at: *usize) []const u8 {
+    const len: usize = @intCast(storePayloadU32(bytes, at));
+    const field = bytes[at.*..][0..len];
+    at.* += len;
+    return field;
+}
+
+/// The delay's platform id: with the subscription tick occupying
+/// engine timer slot 0 from boot, the first armed delay lands in
+/// engine timer slot 1.
+const delay_platform_id: u64 = runtime_ns.effect_timer_platform_id_base + 1;
+
+/// The stub host service: records sends and parks requests (name/key)
+/// for the test to answer through `feedHostResult` — an async host in
+/// miniature.
+const HostStub = struct {
+    var send_count: usize = 0;
+    var last_send_name: [64]u8 = undefined;
+    var last_send_name_len: usize = 0;
+    var last_send_payload: [64]u8 = undefined;
+    var last_send_payload_len: usize = 0;
+    var request_count: usize = 0;
+    var last_request_name: [64]u8 = undefined;
+    var last_request_name_len: usize = 0;
+    var last_request_payload: [64]u8 = undefined;
+    var last_request_payload_len: usize = 0;
+    var last_request_key: u64 = 0;
+    var cancel_count: usize = 0;
+
+    fn reset() void {
+        send_count = 0;
+        request_count = 0;
+        cancel_count = 0;
+    }
+
+    fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
+        _ = context;
+        send_count += 1;
+        @memcpy(last_send_name[0..name.len], name);
+        last_send_name_len = name.len;
+        @memcpy(last_send_payload[0..payload.len], payload);
+        last_send_payload_len = payload.len;
+    }
+
+    fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
+        _ = context;
+        request_count += 1;
+        @memcpy(last_request_name[0..name.len], name);
+        last_request_name_len = name.len;
+        @memcpy(last_request_payload[0..payload.len], payload);
+        last_request_payload_len = payload.len;
+        last_request_key = key;
+    }
+
+    fn cancelNotice(context: *anyopaque, key: u64) void {
+        _ = context;
+        _ = key;
+        cancel_count += 1;
+    }
+
+    fn binding() native_sdk.HostCallBinding {
+        return .{
+            .context = @ptrCast(&stub_context),
+            .send_fn = send,
+            .request_fn = request,
+            .cancel_fn = cancelNotice,
+        };
+    }
+
+    var stub_context: u8 = 0;
+};
+
+const Harness = struct {
+    harness: *native_sdk.TestHarness(),
+    app_state: *App,
+    app: native_sdk.App,
+    clock: native_sdk.TestClock,
+
+    fn create() !*Harness {
+        return createFull(null, .real);
+    }
+
+    /// A harness whose effects channel runs the fake executor: named
+    /// engine ops park in fake slots for `feed*` answers (the fetch
+    /// tests — real-mode fetch would reach the network).
+    fn createFake() !*Harness {
+        return createFull(null, .fake);
+    }
+
+    fn createRecorded(recorder: ?*runtime_ns.SessionRecorder) !*Harness {
+        return createFull(recorder, .real);
+    }
+
+    /// `recorder` (if any) attaches BEFORE start so the journal holds
+    /// the app_start and installing-frame events — replay re-runs
+    /// init_fx (and its boot request) from those.
+    fn createFull(recorder: ?*runtime_ns.SessionRecorder, executor: runtime_ns.EffectExecutor) !*Harness {
+        const self = try std.testing.allocator.create(Harness);
+        errdefer std.testing.allocator.destroy(self);
+        self.clock = .{};
+        self.clock.setWallMs(50_000);
+        // This fixture declares the credentials capability/permission. The
+        // standard test lane must bind the hermetic NullPlatform store before
+        // UiApp installs its first-bind-sticks effect seams.
+        self.harness = try native_sdk.TestHarness().createWithCredentials(std.testing.allocator, .{
+            .size = native_sdk.geometry.SizeF.init(400, 300),
+        });
+        errdefer self.harness.destroy(std.testing.allocator);
+        self.harness.runtime.options.security.permissions = &.{
+            native_sdk.security.permission_credentials,
+            native_sdk.security.permission_filesystem,
+        };
+        self.harness.runtime.options.file_access = .{
+            .roots = &.{},
+            .permitted = true,
+            .enforce = true,
+        };
+        self.harness.null_platform.gpu_surfaces = true;
+        self.harness.runtime.options.session_recorder = recorder;
+        self.app_state = try std.testing.allocator.create(App);
+        errdefer std.testing.allocator.destroy(self.app_state);
+        self.app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+        // Bind the stub host services, the executor mode, and the
+        // deterministic clock BEFORE install: init_fx issues the boot
+        // request.
+        self.app_state.effects.bindHostCalls(HostStub.binding());
+        self.app_state.effects.executor = executor;
+        self.app_state.effects.clock = self.clock.clock();
+        self.app = self.app_state.app();
+        try self.harness.start(self.app);
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = native_sdk.geometry.SizeF.init(400, 300),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+        } });
+        try std.testing.expect(self.app_state.installed);
+        return self;
+    }
+
+    fn destroy(self: *Harness) void {
+        self.app_state.deinit();
+        std.testing.allocator.destroy(self.app_state);
+        self.harness.destroy(std.testing.allocator);
+        std.testing.allocator.destroy(self);
+    }
+
+    fn menu(self: *Harness, name: []const u8) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .menu_command = .{ .name = name, .window_id = 1 } });
+    }
+
+    fn wake(self: *Harness) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .wake);
+    }
+
+    fn fireTick(self: *Harness, timestamp_ns: u64) !bool {
+        const event = self.harness.null_platform.fireTimer(tick_platform_id, timestamp_ns) orelse return false;
+        try self.harness.runtime.dispatchPlatformEvent(self.app, event);
+        return true;
+    }
+
+    fn tickArmed(self: *Harness) bool {
+        const timer = self.harness.null_platform.startedTimer(tick_platform_id) orelse return false;
+        return timer.active;
+    }
+
+    fn fireDelay(self: *Harness, timestamp_ns: u64) !bool {
+        const event = self.harness.null_platform.fireTimer(delay_platform_id, timestamp_ns) orelse return false;
+        try self.harness.runtime.dispatchPlatformEvent(self.app, event);
+        return true;
+    }
+
+    fn delayArmed(self: *Harness) bool {
+        const timer = self.harness.null_platform.startedTimer(delay_platform_id) orelse return false;
+        return timer.active;
+    }
+
+    /// Wall-clock budget for the real-executor waits below. These
+    /// waits prove CORRECTNESS (a real child's lines and exit arrive),
+    /// never latency, and they poll — a healthy run returns in
+    /// milliseconds no matter how large the bound is. The generosity
+    /// is for congested shared CI runners, where scheduling a /bin/sh
+    /// child (or reaping a killed one) has been observed to take tens
+    /// of seconds under load.
+    const wait_budget_ms: usize = 200_000;
+
+    /// Wait for a real-executor worker's terminal to reach the queue
+    /// WITHOUT dispatching events — the wait leaves no trace in a
+    /// recorded session, so the one `wake` that drains afterwards
+    /// keeps journals byte-identical across recordings.
+    fn waitPending(self: *Harness) !void {
+        const io = std.testing.io;
+        var waited_ms: usize = 0;
+        while (waited_ms < wait_budget_ms) : (waited_ms += 10) {
+            if (self.app_state.effects.hasPending()) return;
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+        return self.timedOut();
+    }
+
+    /// Wait for every running effect to FINISH (not just for the first
+    /// queued entry) — the streaming determinism wait: a spawned
+    /// child's lines and exit all sit in the queue before the one
+    /// `wake` drains them, so two recordings journal identical event
+    /// boundaries regardless of worker timing.
+    fn waitIdle(self: *Harness) !void {
+        const io = std.testing.io;
+        var waited_ms: usize = 0;
+        while (waited_ms < wait_budget_ms) : (waited_ms += 10) {
+            if (self.app_state.effects.activeCount() == 0 and self.app_state.effects.hasPending()) return;
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+        return self.timedOut();
+    }
+
+    /// A blown wait budget must fail THIS test only: tear the effects
+    /// channel down right here — kill the real children, join every
+    /// worker thread — before surfacing the error, so a straggling
+    /// child can never bleed into the next test's harness (the
+    /// teardown is idempotent; the deferred `destroy` repeats it
+    /// inertly).
+    fn timedOut(self: *Harness) error{TestTimedOut} {
+        self.app_state.effects.deinit();
+        return error.TestTimedOut;
+    }
+};
+
+test "the compiled core boots through init_fx: boot request and subscription timer are live" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // The init command reached the stub host service before the first
+    // frame, with the bridge's deterministic engine key.
+    try std.testing.expectEqual(@as(usize, 1), HostStub.request_count);
+    try std.testing.expectEqualStrings("status.read", HostStub.last_request_name[0..HostStub.last_request_name_len]);
+    try std.testing.expectEqualStrings("boot", HostStub.last_request_payload[0..HostStub.last_request_payload_len]);
+    try std.testing.expectEqual(status_request_key, HostStub.last_request_key);
+
+    // The model-declared subscription armed a REAL platform timer.
+    try std.testing.expect(h.tickArmed());
+
+    // The boot model committed — and the UiApp-held root IS the
+    // committed value (the adapter's refresh), not a shim.
+    try std.testing.expect(Bridge.model().polling);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().ticks);
+    try std.testing.expect(Bridge.model().polling);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().ticks);
+}
+
+test "the compiled core's statusItem helper installs and updates title and menu" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // The installing frame derived the status item from the committed
+    // boot model without any per-app Zig status_item_fn wiring.
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.trayCreateCount());
+    try std.testing.expectEqualStrings("TS ON", h.harness.null_platform.lastTrayTitle());
+    try std.testing.expectEqualStrings("assets/tray.svg", h.harness.null_platform.lastTrayIconPath());
+    try std.testing.expectEqualStrings("TypeScript status fixture · UTF-8 😀", h.harness.null_platform.lastTrayTooltip());
+    try std.testing.expectEqualStrings("core.refresh", h.harness.null_platform.lastTrayActivationCommand());
+    try std.testing.expectEqualStrings("core.toggle", h.harness.null_platform.lastTrayAlternateActivationCommand());
+    try std.testing.expectEqualStrings("core.refresh", h.harness.null_platform.lastTrayOpenCommand());
+    const installed_presentation = h.harness.null_platform.lastTrayPresentation();
+    try std.testing.expectEqual(@as(f32, 64), installed_presentation.width);
+    try std.testing.expectEqual(native_sdk.platform.TrayTone.normal, installed_presentation.tone);
+    try std.testing.expectEqual(@as(f32, 1), installed_presentation.icon_opacity);
+    try std.testing.expect(installed_presentation.monospaced);
+    try std.testing.expectEqual(@as(f32, 12), installed_presentation.font_size);
+    try std.testing.expectEqual(native_sdk.platform.TrayFontWeight.medium, installed_presentation.font_weight);
+    try std.testing.expectEqual(@as(usize, 6), h.harness.null_platform.trayItems().len);
+    try std.testing.expectEqualStrings("2,494 requests", h.harness.null_platform.trayItems()[0].metric.?.primary_text);
+    try std.testing.expectEqualStrings("Today · production", h.harness.null_platform.trayItems()[0].metric.?.secondary_text);
+    const segmented = h.harness.null_platform.trayItems()[1].segmented.?;
+    try std.testing.expectEqual(@as(usize, 2), segmented.options.len);
+    try std.testing.expectEqualStrings("core.enable", segmented.options[0].command);
+    try std.testing.expect(segmented.options[0].selected);
+    try std.testing.expectEqualStrings("Load rising", h.harness.null_platform.trayItems()[2].chart.?.accessibility_label);
+    try std.testing.expectEqual(@as(f32, 0.75), h.harness.null_platform.trayItems()[2].chart.?.values[2]);
+    try std.testing.expectEqualStrings("Pause polling…", h.harness.null_platform.trayItems()[3].label);
+    try std.testing.expectEqualStrings("configured ✓", h.harness.null_platform.trayItems()[3].detail);
+    try std.testing.expectEqual(native_sdk.platform.TrayItemRole.agent, h.harness.null_platform.trayItems()[3].role);
+    try std.testing.expect(h.harness.null_platform.trayItems()[4].separator);
+    try std.testing.expect(h.harness.null_platform.trayItems()[5].enabled);
+    try std.testing.expectEqualStrings("r", h.harness.null_platform.trayItems()[5].key);
+    try std.testing.expect(h.harness.null_platform.trayItems()[5].modifiers.primary);
+    const menu_updates = h.harness.null_platform.trayUpdateCount();
+    const title_updates = h.harness.null_platform.trayTitleUpdateCount();
+
+    // Native tray selection resolves id -> command, command -> Msg, then
+    // the committed model drives both live shell patches.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = .{ .item_id = 1 } });
+    try std.testing.expect(!Bridge.model().polling);
+    try std.testing.expectEqualStrings("TS OFF", h.harness.null_platform.lastTrayTitle());
+    const updated_presentation = h.harness.null_platform.lastTrayPresentation();
+    try std.testing.expectEqual(@as(f32, 72), updated_presentation.width);
+    try std.testing.expectEqual(native_sdk.platform.TrayTone.warning, updated_presentation.tone);
+    try std.testing.expectEqual(@as(f32, 0.5), updated_presentation.icon_opacity);
+    try std.testing.expectEqual(@as(f32, 13), updated_presentation.font_size);
+    try std.testing.expectEqual(native_sdk.platform.TrayFontWeight.semibold, updated_presentation.font_weight);
+    try std.testing.expectEqualStrings("1,240 requests", h.harness.null_platform.trayItems()[0].metric.?.primary_text);
+    try std.testing.expect(!h.harness.null_platform.trayItems()[1].segmented.?.options[0].selected);
+    try std.testing.expect(h.harness.null_platform.trayItems()[1].segmented.?.options[1].selected);
+    try std.testing.expectEqualStrings("Load falling", h.harness.null_platform.trayItems()[2].chart.?.accessibility_label);
+    try std.testing.expectEqualStrings("Resume polling…", h.harness.null_platform.trayItems()[3].label);
+    try std.testing.expectEqualStrings("warning ⚠", h.harness.null_platform.trayItems()[3].detail);
+    try std.testing.expect(!h.harness.null_platform.trayItems()[5].enabled);
+    try std.testing.expectEqual(title_updates + 1, h.harness.null_platform.trayTitleUpdateCount());
+    try std.testing.expectEqual(menu_updates + 1, h.harness.null_platform.trayUpdateCount());
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.trayCreateCount());
+
+    // A segment's stable id uses the exact ordinary tray action path.
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .tray_action = .{ .item_id = 11 } });
+    try std.testing.expect(Bridge.model().polling);
+}
+
+test "requests round-trip, replace, and cancel through the real dispatch path" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // The host answers the boot request; the ok arm lands on the next
+    // drain and the bytes commit into the core's model heap — visible
+    // through the bridge and the UiApp-held root alike.
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+
+    // refresh re-issues the same wire key: the stub sees a second
+    // request under the SAME engine key (replace, not a new slot).
+    try h.menu("core.refresh");
+    try std.testing.expectEqual(@as(usize, 2), HostStub.request_count);
+    try std.testing.expectEqual(status_request_key, HostStub.last_request_key);
+    try std.testing.expectEqualStrings("ready", HostStub.last_request_payload[0..HostStub.last_request_payload_len]);
+
+    // The err route counts a failure.
+    try fx.feedHostResult(status_request_key, false, "boom");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+
+    // cancel drops the in-flight request silently: the host gets the
+    // abort notice, a late answer finds nothing, neither arm runs.
+    try h.menu("core.refresh");
+    try h.menu("core.abort");
+    try std.testing.expectEqual(@as(usize, 1), HostStub.cancel_count);
+    try std.testing.expectError(error.EffectNotFound, fx.feedHostResult(status_request_key, true, "late"));
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+}
+
+test "subscription timers fire through the platform and reconcile on model changes" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // A platform fire dispatches the tick arm with the time in ms.
+    try std.testing.expect(try h.fireTick(250_000_000));
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().ticks);
+    try std.testing.expectEqual(@as(f64, 250), Bridge.model().lastTickAt);
+
+    // Pausing removes the timer from the platform; a stale fire event
+    // dispatches nothing.
+    try h.menu("core.toggle");
+    try std.testing.expect(!h.tickArmed());
+    try std.testing.expect(!try h.fireTick(300_000_000));
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().ticks);
+
+    // Resuming re-arms the same deterministic slot.
+    try h.menu("core.toggle");
+    try std.testing.expect(h.tickArmed());
+    try std.testing.expect(try h.fireTick(400_000_000));
+    try std.testing.expectEqual(@as(i64, 2), Bridge.model().ticks);
+    try std.testing.expectEqual(@as(f64, 400), Bridge.model().lastTickAt);
+}
+
+test "Cmd.now stamps synchronously and host_bytes reaches the stub service" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // now: the stamped arm ran within the dispatch, with the bound
+    // (test) clock's journal-ready reading.
+    try h.menu("core.stamp");
+    try std.testing.expectEqual(@as(f64, 50_000), Bridge.model().stampMs);
+
+    // host_bytes: fire-and-forget to the named service.
+    try h.menu("core.note");
+    try std.testing.expectEqual(@as(usize, 1), HostStub.send_count);
+    try std.testing.expectEqualStrings("blob.put", HostStub.last_send_name[0..HostStub.last_send_name_len]);
+    try std.testing.expectEqualStrings("hi", HostStub.last_send_payload[0..HostStub.last_send_payload_len]);
+}
+
+// -------------------------------------------------- named engine ops
+
+test "writeFile and readFile round-trip real disk through the compiled core" {
+    const io = std.testing.io;
+    HostStub.reset();
+    removeStore();
+    defer removeStore();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // Give the model content to persist.
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // save: the core's write_file record reaches the REAL executor and
+    // the bytes land on disk whole; the payload-less ok arm counts.
+    try h.menu("core.save");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().saved);
+    const on_disk = try std.Io.Dir.cwd().readFileAlloc(io, store_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(on_disk);
+    try std.testing.expectEqualStrings("ready", on_disk);
+
+    // Overwrite the model, then load: the read routes the ok arm with
+    // the disk bytes and they commit into the model heap.
+    try h.menu("core.refresh");
+    try fx.feedHostResult(status_request_key, true, "stale");
+    try h.wake();
+    try std.testing.expectEqualStrings("stale", Bridge.model().status);
+    try h.menu("core.load");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+
+    // A missing store routes the err arm with the outcome name.
+    removeStore();
+    try h.menu("core.load");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+}
+
+test "compiled stat, append, and file-stream verbs route through the runtime" {
+    const io = std.testing.io;
+    HostStub.reset();
+    removeTier5Files();
+    defer removeTier5Files();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "chunk-bytes");
+    try h.wake();
+
+    try h.menu("core.streamopen");
+    try h.waitPending();
+    try h.wake();
+    // Two chunks in one command batch: the second refuses out_of_order at
+    // its own command-stream position without stealing the first chunk's
+    // route tags. The accepted first chunk still lands and is acknowledged.
+    const saved_before_chunk = Bridge.model().saved;
+    try h.menu("core.streamooo");
+    try h.wake();
+    try std.testing.expectEqualStrings("out_of_order", Bridge.model().lastErr);
+    if (Bridge.model().saved == saved_before_chunk) {
+        try h.waitPending();
+        try h.wake();
+    }
+    try h.menu("core.streamclose");
+    try h.waitPending();
+    try h.wake();
+
+    try h.menu("core.streamread");
+    while (true) {
+        try h.waitPending();
+        try h.wake();
+        if (Bridge.model().fileTotal == "chunk-bytes".len) break;
+    }
+    try std.testing.expectEqualStrings("chunk-bytes", Bridge.model().status);
+    try std.testing.expectEqual(@as(f64, "chunk-bytes".len), Bridge.model().fileTotal);
+
+    try std.Io.Dir.cwd().createDirPath(io, tier5_dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = tier5_append_path, .data = "chunk-bytes" });
+    try h.menu("core.fileappend");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.filestat");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expect(Bridge.model().fileExists);
+    try std.testing.expectEqual(@as(f64, "chunk-bytes".len * 2), Bridge.model().fileTotal);
+    const appended = try std.Io.Dir.cwd().readFileAlloc(io, tier5_append_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(appended);
+    try std.testing.expectEqualStrings("chunk-byteschunk-bytes", appended);
+
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, tier5_append_path, .{}));
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
+}
+
+test "every Cmd.store factory emits its bounded v3 record through the external core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    try h.menu("core.storeput");
+    var request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.set", request.name);
+    var at: usize = 0;
+    try std.testing.expectEqual(@as(u32, 0), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("ready", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.storeget");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.get", request.name);
+    at = 4;
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, &.{ 1, 'o', 'n', 'e' });
+    try h.wake();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'o', 'n', 'e' }, Bridge.model().status);
+
+    try h.menu("core.storescan");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.scan", request.name);
+    at = 4;
+    try std.testing.expectEqualStrings("fixture/café/", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(@as(u32, 7), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/café/🚀", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "page");
+    try h.wake();
+
+    // A dynamic fractional limit must not truncate to zero (the default page
+    // size) in the facade. It reaches the host as the over-bound sentinel and
+    // takes the declared error route without issuing a storage request.
+    try h.menu("core.storescaninvalid");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("over_bound", Bridge.model().lastErr);
+
+    try h.menu("core.storemany");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.setMany", request.name);
+    at = 4;
+    try std.testing.expectEqual(@as(u32, 3), storePayloadU32(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("one", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/two", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("page", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("fixture/café/🚀/next", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("page", storePayloadField(request.payload, &at));
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.storedelete");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.store.delete", request.name);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+}
+
+test "Cmd.db wire values execute against SQLite and route an encoded page through the external core" {
+    HostStub.reset();
+    var database = try native_sdk.RelationalStore.openMemory(std.testing.allocator);
+    defer database.deinit();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.bindRelationalStore(database.binding());
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+    try h.menu("core.dbexec");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().saved);
+
+    try h.menu("core.dbquery");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 2), Bridge.model().saved);
+    const page = Bridge.model().status;
+    var at: usize = 0;
+    try std.testing.expectEqual(@as(u32, 6), storePayloadU32(page, &at));
+    try std.testing.expectEqual(@as(u32, 1), storePayloadU32(page, &at));
+    for ([_][]const u8{ "id", "label", "score", "body", "enabled", "absent" }) |name| {
+        try std.testing.expectEqualStrings(name, storePayloadField(page, &at));
+    }
+    try std.testing.expectEqual(@as(u8, 1), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(i64, 7), std.mem.readInt(i64, page[at..][0..8], .little));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 3), page[at]);
+    at += 1;
+    try std.testing.expectEqualStrings("café", storePayloadField(page, &at));
+    try std.testing.expectEqual(@as(u8, 2), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(f64, 1.5), @as(f64, @bitCast(std.mem.readInt(u64, page[at..][0..8], .little))));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 4), page[at]);
+    at += 1;
+    try std.testing.expectEqualStrings("ready", storePayloadField(page, &at));
+    try std.testing.expectEqual(@as(u8, 1), page[at]);
+    at += 1;
+    try std.testing.expectEqual(@as(i64, 1), std.mem.readInt(i64, page[at..][0..8], .little));
+    at += 8;
+    try std.testing.expectEqual(@as(u8, 0), page[at]);
+    at += 1;
+    try std.testing.expectEqual(page.len, at);
+}
+
+test "every Cmd.credentials factory emits app-scoped bounded records through the external core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    try h.menu("core.credentialset");
+    var request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.set", request.name);
+    var at: usize = 0;
+    try std.testing.expectEqualStrings("api-token", storePayloadField(request.payload, &at));
+    try std.testing.expectEqualStrings("ready", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(request.payload.len, at);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+
+    try h.menu("core.credentialget");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.get", request.name);
+    at = 0;
+    try std.testing.expectEqualStrings("api-token", storePayloadField(request.payload, &at));
+    try std.testing.expectEqual(request.payload.len, at);
+    try fx.feedHostResult(request.key, true, "secret-from-host");
+    try h.wake();
+    try std.testing.expectEqualStrings("secret-from-host", Bridge.model().status);
+
+    try h.menu("core.credentialdelete");
+    request = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualStrings("core.credentials.delete", request.name);
+    try fx.feedHostResult(request.key, true, "");
+    try h.wake();
+}
+
+test "clipboardWrite and clipboardRead ride the platform pasteboard" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // share: fire-and-forget onto the real (null-platform) pasteboard.
+    try h.menu("core.share");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.clipboardWriteCount());
+    try std.testing.expectEqualStrings("ready", h.harness.null_platform.lastClipboardData());
+
+    // Change the model, then paste: the read's ok arm restores it.
+    try h.menu("core.refresh");
+    try fx.feedHostResult(status_request_key, true, "fresh");
+    try h.wake();
+    try std.testing.expectEqualStrings("fresh", Bridge.model().status);
+    try h.menu("core.paste");
+    try h.wake();
+    try std.testing.expectEqualStrings("ready", Bridge.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+}
+
+test "showNotification reaches the desktop platform from the compiled core" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // Prove the title can come from model bytes, not only a literal in the
+    // command factory, then pin every field after the compiled wire crosses
+    // the native host decoder.
+    try fx.feedHostResult(status_request_key, true, "Build finished");
+    try h.wake();
+    try h.menu("core.notify");
+
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.notificationCount());
+    try std.testing.expectEqualStrings("Build finished", h.harness.null_platform.lastNotificationTitle());
+    try std.testing.expectEqualStrings("native-sdk", h.harness.null_platform.lastNotificationSubtitle());
+    try std.testing.expectEqualStrings("TS core notification", h.harness.null_platform.lastNotificationBody());
+    try std.testing.expectEqualStrings("build-status", h.harness.null_platform.lastNotificationId());
+    try std.testing.expectEqualStrings("Pause polling", h.harness.null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("core.toggle", h.harness.null_platform.lastNotificationActionCommand());
+
+    const activation = h.harness.null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, activation);
+    try std.testing.expect(!Bridge.model().polling);
+}
+
+test "compiled TypeScript windows helper projects hide close policy and command-routed close" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    try h.menu("core.open-settings");
+    try std.testing.expect(Bridge.model().settingsOpen);
+    var buffer: [native_sdk.platform.max_windows]native_sdk.WindowInfo = undefined;
+    var settings_id: native_sdk.WindowId = 0;
+    for (h.harness.runtime.listWindows(&buffer)) |window| {
+        if (std.mem.eql(u8, window.label, "settings")) settings_id = window.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try std.testing.expectEqual(native_sdk.WindowClosePolicy.hide, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = "settings-canvas",
+        .size = native_sdk.geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    _ = try h.harness.runtime.canvasWidgetLayout(settings_id, "settings-canvas");
+
+    const hide = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, hide);
+    try std.testing.expect(Bridge.model().settingsOpen);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.window_slot_count);
+
+    // Switch the descriptor to .quit through the compiled helper's model
+    // source, then close through the normal command mapper. This pins that
+    // onCloseCommand resolves to an ordinary Msg and removes the declaration.
+    try h.menu("core.close-settings:manual");
+    try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
+
+    // Recreate under .quit, then exercise the USER close path. The close
+    // command resolves through the same commandMsg mapper and clears the
+    // declaration after the platform has already closed the window.
+    try h.menu("core.toggle");
+    try h.menu("core.open-settings");
+    settings_id = 0;
+    for (h.harness.runtime.listWindows(&buffer)) |window| {
+        if (std.mem.eql(u8, window.label, "settings")) settings_id = window.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try std.testing.expectEqual(native_sdk.WindowClosePolicy.quit, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+    var settings_index: ?usize = null;
+    for (h.harness.null_platform.windows[0..h.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id == settings_id) settings_index = index;
+    }
+    const platform_index = settings_index orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(native_sdk.WindowTitlebarStyle.chromeless, h.harness.null_platform.window_titlebar[platform_index]);
+    try std.testing.expect(h.harness.null_platform.window_transparent[platform_index]);
+    // Reuse the decode arena that produced the close message before the
+    // user closes the window. This proves the live slot owns the payload
+    // rather than retaining a borrowed pointer into that arena.
+    fixture.rt.frameReset();
+    const overwrite = fixture.rt.frameAlloc(u8, "core.close-settings:payload".len);
+    @memset(overwrite, '!');
+    const close = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, close);
+    try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqualStrings("payload", Bridge.model().status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
+}
+
+test "fetch parks on the engine and routes the { status, body } record and err reasons" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // The fetch record decodes whole: verb, url, header pair, body
+    // (the model's bytes), and the explicit timeout.
+    try h.menu("core.get");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    const request = fx.pendingFetchAt(0).?;
+    try std.testing.expectEqual(first_effect_key, request.key);
+    try std.testing.expectEqual(std.http.Method.POST, request.method);
+    try std.testing.expectEqualStrings("https://status.test/feed", request.url);
+    try std.testing.expectEqual(@as(usize, 1), request.headers.len);
+    try std.testing.expectEqualStrings("accept", request.headers[0].name);
+    try std.testing.expectEqualStrings("text/plain", request.headers[0].value);
+    try std.testing.expectEqualStrings("ready", request.body);
+
+    // A non-2xx response is still the ok route: the number field takes
+    // the status, the bytes field the body.
+    try fx.feedResponse(first_effect_key, 404, "feed data");
+    try h.wake();
+    try std.testing.expectEqual(@as(f64, 404), Bridge.model().code);
+    try std.testing.expectEqualStrings("feed data", Bridge.model().status);
+
+    // A transport failure routes the err arm with the outcome name.
+    try h.menu("core.get");
+    try fx.feedResponseOutcome(first_effect_key, .timed_out, 0, "");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("timed_out", Bridge.model().lastErr);
+    try std.testing.expectEqual(@as(f64, 404), Bridge.model().code);
+}
+
+test "streaming fetch routes response lines and one terminal status through the compiled TypeScript core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "prompt");
+    try h.wake();
+    try h.menu("core.stream");
+
+    const request = fx.pendingFetchAt(0).?;
+    try std.testing.expectEqual(job_spawn_key, request.key);
+    try std.testing.expectEqual(runtime_ns.FetchResponseMode.stream, request.response);
+    try std.testing.expectEqual(@as(usize, 65_536), request.max_line_bytes);
+    try std.testing.expectEqual(std.http.Method.POST, request.method);
+    try std.testing.expectEqualStrings("https://status.test/events", request.url);
+    try std.testing.expectEqualStrings("prompt", request.body);
+    try std.testing.expectEqualStrings("text/event-stream", request.headers[0].value);
+
+    try fx.feedLine(job_spawn_key, "data: first");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 1), Bridge.model().lines);
+    try std.testing.expectEqualStrings("data: first", Bridge.model().lastLine);
+
+    try fx.feedLine(job_spawn_key, "data: second");
+    try fx.feedResponse(job_spawn_key, 206, "ignored");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 2), Bridge.model().lines);
+    try std.testing.expectEqualStrings("data: second", Bridge.model().lastLine);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().code), 206), Bridge.model().code);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+
+    // A second stream can reuse the key after the terminal; cancellation is
+    // loud for streams and routes the ordinary err arm.
+    try h.menu("core.stream");
+    try h.menu("core.cancelstream");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("cancelled", Bridge.model().lastErr);
+}
+
+test "a delay arms a real platform timer, fires once, re-arms on re-issue, and cancels" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // later: one-shot platform timer in the delay slot (the tick
+    // subscription holds engine timer slot 0 from boot).
+    try h.menu("core.later");
+    try std.testing.expect(h.delayArmed());
+    const timer = h.harness.null_platform.startedTimer(delay_platform_id).?;
+    try std.testing.expectEqual(@as(u64, 150 * std.time.ns_per_ms), timer.interval_ns);
+    try std.testing.expect(!timer.repeats);
+
+    // The fire dispatches the named arm with the time in fractional ms
+    // and the slot retires (one-shots self-stop).
+    try std.testing.expect(try h.fireDelay(500_000_000));
+    try std.testing.expectEqual(@as(f64, 500), Bridge.model().firedAt);
+
+    // Re-issuing a live delay key re-arms the SAME slot; halt cancels
+    // it silently — a later stale fire event dispatches nothing.
+    try h.menu("core.later");
+    try h.menu("core.later");
+    try std.testing.expect(h.delayArmed());
+    try h.menu("core.halt");
+    try std.testing.expect(!h.delayArmed());
+    try std.testing.expect(!try h.fireDelay(900_000_000));
+    try std.testing.expectEqual(@as(f64, 500), Bridge.model().firedAt);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+}
+
+// ------------------------------------------------------------- streams
+
+/// The first spawn stream's engine key: bridge stream slot 0,
+/// deterministic in issue order like every bridge table.
+const job_spawn_key: u64 = runtime_ns.ts_core_spawn_key_base + 0;
+
+test "a spawn stream runs a real subprocess: lines route in order and the exit code lands" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // Retire the boot request first: the idle wait below watches the
+    // engine's ACTIVE slots, and an unanswered host request would hold
+    // one forever.
+    try h.app_state.effects.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A real /bin/sh child prints two lines and exits 0. Waiting for
+    // the channel to go idle parks the whole stream (both lines, then
+    // the exit) in the queue before one deterministic drain.
+    try h.menu("core.run");
+    try h.waitIdle();
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 2), Bridge.model().lines);
+    try std.testing.expectEqualStrings("two", Bridge.model().lastLine);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().exitCode), 0), Bridge.model().exitCode);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+
+    // The exit retired the stream: the wire key is free for a rerun.
+    try h.menu("core.run");
+    try h.waitIdle();
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 4), Bridge.model().lines);
+}
+
+test "cancelling a spawn mid-stream ends the real child and routes the err arm" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    try h.app_state.effects.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // The child would sleep 30s; the wire cancel ends it now and the
+    // engine's `.cancelled` exit routes the err arm — never silent.
+    try h.menu("core.hang");
+    try h.menu("core.kill");
+    try h.waitIdle();
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("cancelled", Bridge.model().lastErr);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 0), Bridge.model().lines);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().exitCode), -1), Bridge.model().exitCode);
+}
+
+test "audio playback streams events into the compiled core through the fake channel" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // play opens the stream: the engine channel records the request
+    // whole under the bridge's audio key.
+    try h.menu("core.play");
+    const request = fx.pendingAudio().?;
+    try std.testing.expectEqual(runtime_ns.ts_core_audio_key_base, request.key);
+    try std.testing.expectEqualStrings("music/track.mp3", request.path);
+
+    // The scripted event feed (the same drive soundboard's tests use)
+    // routes the six-field arm: loaded, position ticks, spectrum bands.
+    try fx.feedAudioEvent(.loaded, 0, 183_000, true);
+    try h.wake();
+    try std.testing.expect(Bridge.model().audioState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().durMs), 183_000), Bridge.model().durMs);
+    try std.testing.expect(Bridge.model().playing);
+
+    try fx.feedAudioEvent(.position, 1_500, 183_000, true);
+    try h.wake();
+    try std.testing.expect(Bridge.model().audioState == .position);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().posMs), 1_500), Bridge.model().posMs);
+
+    var bands: [32]u8 = undefined;
+    for (&bands, 0..) |*b, i| b.* = @intCast(i * 7);
+    try fx.feedAudioSpectrum(bands, 2_000, 183_000);
+    try h.wake();
+    try std.testing.expect(Bridge.model().audioState == .spectrum);
+    try std.testing.expectEqualSlices(u8, &bands, Bridge.model().bands);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().audioEvents), 3), Bridge.model().audioEvents);
+
+    // Control verbs drive the channel in place; stop closes the stream
+    // — a later feed finds no playback to receive it.
+    try h.menu("core.pause");
+    try std.testing.expect(!fx.audioSnapshot().playing);
+    try h.menu("core.volume");
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8), fx.pendingAudio().?.volume, 0.001);
+    try h.menu("core.stopmusic");
+    try std.testing.expect(!fx.audioSnapshot().active);
+    try std.testing.expectError(error.EffectNotFound, fx.feedAudioEvent(.position, 3_000, 183_000, true));
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().audioEvents), 3), Bridge.model().audioEvents);
+}
+
+test "video playback streams events into the compiled core through the fake channel" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // play opens the stream: the engine channel records the request
+    // whole under the bridge's video key, the media-surface id included.
+    try h.menu("core.vplay");
+    const request = fx.pendingVideo().?;
+    // The key's high bits are the bridge's video namespace; the low
+    // byte carries the issuing load's event-arm tag (per-load routing).
+    try std.testing.expectEqual(runtime_ns.ts_core_video_key_base, request.key & ~@as(u64, 0xFF));
+    try std.testing.expectEqual(@as(u64, 5), request.surface);
+    try std.testing.expectEqualStrings("media/clip.mp4", request.path);
+    try std.testing.expect(request.playing);
+
+    // The scripted event feed routes the seven-field arm: loaded
+    // carries the decoded dimensions, then position ticks keep flowing.
+    try fx.feedVideoEvent(.loaded, 0, 12_000, true, false, 640, 360);
+    try h.wake();
+    try std.testing.expect(Bridge.model().videoState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vDurMs), 12_000), Bridge.model().vDurMs);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vW), 640), Bridge.model().vW);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vH), 360), Bridge.model().vH);
+    try std.testing.expect(Bridge.model().vPlaying);
+
+    try fx.feedVideoEvent(.position, 1_500, 12_000, true, false, 0, 0);
+    try h.wake();
+    try std.testing.expect(Bridge.model().videoState == .position);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().vPosMs), 1_500), Bridge.model().vPosMs);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().videoEvents), 2), Bridge.model().videoEvents);
+
+    // Control verbs drive the channel in place; stop closes the stream
+    // — a later feed finds no playback to receive it.
+    try h.menu("core.vpause");
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try h.menu("core.vstop");
+    try std.testing.expect(!fx.videoSnapshot().active);
+    try std.testing.expectError(error.EffectNotFound, fx.feedVideoEvent(.position, 3_000, 12_000, true, false, 0, 0));
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().videoEvents), 2), Bridge.model().videoEvents);
+}
+
+test "image loads route their one terminal into the compiled core through the fake channel" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // The load parks the whole request shape under the app's own id —
+    // the engine key IS the ImageId, no bridge namespace.
+    try h.menu("core.cover");
+    const request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 21), request.id);
+    try std.testing.expectEqualStrings("art/cover.png", request.path);
+    try std.testing.expectEqualStrings("https://cdn.test/cover.png", request.url);
+
+    // A duplicate LIVE id rejects the new load (the spawn discipline):
+    // the event arm carries state "rejected" — echoing the refused id —
+    // delivered at the next drain, and the in-flight load stays parked.
+    try h.menu("core.coveragain");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+
+    // Feeding encoded bytes runs the REAL decode+register path: the
+    // five-field arm carries the decoded dimensions, the model adopts
+    // the id, and the pixels are live in the runtime registry.
+    var pixels: [4 * 3 * 4]u8 = undefined;
+    var seed: u8 = 11;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 37 +% 5;
+    }
+    var encoded_buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 4, 3, &pixels);
+    try fx.feedImageBytes(21, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    // The model adopted the ECHOED id — store-on-success reads it off
+    // the result record rather than hardcoding the issue-site id.
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverW), 4), Bridge.model().coverW);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().coverH), 3), Bridge.model().coverH);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
+
+    // The entry retired with its terminal: the id is free again, and a
+    // failure class routes the same arm honestly.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try fx.feedImageResult(21, .decode_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 3), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .decode_failed);
+    // The model kept the previously adopted id (store-on-success).
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+
+    // The resource class crosses the wire by NAME like every other
+    // member: a registration the host refused memory for reaches TS as
+    // "alloc_failed" — the fifteenth ImageState, distinct from
+    // decode_failed because the bytes may be perfectly valid.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try fx.feedImageResult(21, .alloc_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 4), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .alloc_failed);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+}
+
+test "concurrent image loads distinguish their completions by the echoed id" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Two loads in flight at once, sharing the ONE image_done arm:
+    // id 21 (core.cover) and id 100 (the first core.covernext).
+    try h.menu("core.cover");
+    try h.menu("core.covernext");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+
+    // The SECOND load completes first: the arm's echoed id names the
+    // completion, so update adopts 100 — never the other in-flight id.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 7;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 31 +% 13;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(100, writer.buffered());
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 100), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 100), Bridge.model().cover);
+
+    // The first load's failure then names ITSELF — not the load that
+    // happened to finish before it.
+    try fx.feedImageResult(21, .decode_failed, 0, 0, 0, "");
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .decode_failed);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 100), Bridge.model().cover);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+}
+
+test "a seventeenth in-flight image load rejects instead of crashing" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen dynamic model-owned ids fill the bridge's image table
+    // (and the engine's matching slot budget) without a single result.
+    var issued: usize = 0;
+    while (issued < 16) : (issued += 1) {
+        try h.menu("core.covernext");
+    }
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // The 17th finds no free entry: the exactly-one-result contract
+    // answers state "rejected" through the event arm — the engine's own
+    // slot-exhaustion vocabulary, never a crash — echoing the refused id
+    // (the 17th dynamic id, 100 + 16), delivered at the next drain.
+    try h.menu("core.covernext");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 116), Bridge.model().lastImageId);
+
+    // The sixteen live loads are untouched by the refusal...
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    // ...and still healthy: the first runs the real decode+register
+    // path to its loaded terminal, retiring only its own entry.
+    const first = fx.pendingImageLoadAt(0).?;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 3;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 29 +% 11;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(first.id, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(first.id) != null);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
+}
+
+test "a seventeen-load batch against a full table yields seventeen rejections, never a crash" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen live loads fill the bridge's image table.
+    var issued: usize = 0;
+    while (issued < 16) : (issued += 1) {
+        try h.menu("core.covernext");
+    }
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+
+    // ONE command value carrying seventeen more loads: the reject
+    // staging outgrows the engine stage's inline buffer, and every
+    // load still gets its one "rejected" result at the next drain in
+    // record order — the last echo is the batch's last id.
+    try h.menu("core.coverflood");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 216), Bridge.model().lastImageId);
+
+    // The sixteen live loads are untouched by the flood: the first
+    // still runs the real decode+register path to its loaded terminal.
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingImageLoadCount());
+    const first = fx.pendingImageLoadAt(0).?;
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 5;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 23 +% 7;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(first.id, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingImageLoadCount());
+}
+
+test "Cmd.imageCancel ends the load loudly and frees the id for a same-id retry" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A load parks under id 21; its cancel is NOT the string-keyed
+    // Cmd.cancel (image loads are keyed by numeric id) but the
+    // dedicated imageCancel verb.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+
+    // Cancel is LOUD, the spawn discipline: the load's one terminal
+    // arrives as its own event arm with state "cancelled", echoing the
+    // id — the documented outcome, reachable from TS.
+    try h.menu("core.covercancel");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .cancelled);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 21), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+
+    // The cancelled terminal retired the bridge entry: the SAME id
+    // parks a fresh load instead of rejecting — the stale-load pin on
+    // same-id retries is gone.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+
+    // ...and the retried load runs to its loaded terminal normally.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 9;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 41 +% 3;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(21, writer.buffered());
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 21), Bridge.model().cover);
+
+    // A cancel aimed at an id with no live load is the documented
+    // no-op: no result, no crash.
+    try h.menu("core.cancelmissing");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+}
+
+/// Feed one tiny decodable PNG (2x2, pixels varied by `seed`) as the
+/// pending load's encoded bytes — the real decode+register path, the
+/// step the gallery tests below repeat per id.
+fn feedTinyPng(fx: anytype, id: u64, seed: u8) !void {
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var byte_seed: u8 = seed;
+    for (&pixels) |*byte| {
+        byte.* = byte_seed;
+        byte_seed = byte_seed *% 41 +% 3;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(id, writer.buffered());
+}
+
+test "Cmd.imageUnregister frees a full registry's slot for a new image: the gallery eviction" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Sixteen distinct dynamic ids (100..115) load to their `loaded`
+    // terminal one after another: every registry slot is occupied.
+    const slots = runtime_ns.max_registered_canvas_images;
+    var loaded: usize = 0;
+    while (loaded < slots) : (loaded += 1) {
+        try h.menu("core.covernext");
+        try feedTinyPng(fx, 100 + loaded, @intCast(loaded + 1));
+        try h.wake();
+        try std.testing.expect(Bridge.model().imageState == .loaded);
+    }
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 16), Bridge.model().imageResults);
+
+    // The 17th distinct id decodes fine but finds no slot: the load's
+    // own terminal answers "registry_full" through the event arm — the
+    // gallery's dead end without an unregister verb.
+    try h.menu("core.covernext");
+    try feedTinyPng(fx, 116, 33);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .registry_full);
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+
+    // Cmd.imageUnregister(100) is the recourse: the evictee's slot
+    // frees NOW (synchronous registry surgery — no result Msg, so the
+    // result count is untouched), and views bound to 100 fall back.
+    try h.menu("core.evictfirst");
+    try h.wake();
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(100) == null);
+    try std.testing.expectEqual(slots - 1, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 17), Bridge.model().imageResults);
+
+    // ...and the freed slot accepts the next image: a 17th distinct id
+    // registers where id 116 was refused.
+    try h.menu("core.covernext");
+    try feedTinyPng(fx, 117, 47);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().cover), 117), Bridge.model().cover);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(117) != null);
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+
+    // Unregister aimed at an id with no registration is the documented
+    // no-op: no result, no crash, the registry untouched.
+    try h.menu("core.evictmissing");
+    try h.wake();
+    try std.testing.expectEqual(slots, h.harness.runtime.registeredCanvasImageCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 18), Bridge.model().imageResults);
+}
+
+test "Cmd.imageUnregister never touches a load in flight: its terminal still registers" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A load parks under id 21; unregister aimed at it is a registry
+    // MISS (nothing is registered yet — a load in flight is not a
+    // registry occupant), so it no-ops: the load stays parked and no
+    // result dispatches.
+    try h.menu("core.cover");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try h.menu("core.evictcover");
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // The unregister did not steer the load: its terminal registers
+    // the pixels as if the unregister never happened.
+    try feedTinyPng(fx, 21, 9);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
+
+    // The sharper interaction, pinned as the engine behaves today: id
+    // 21 is REGISTERED and a reload is in flight under it. Unregister
+    // frees the slot now — but registration happens at the load's
+    // terminal, so the reload's completion RE-REGISTERS the id. An app
+    // that wants the slot to stay free cancels the load first
+    // (Cmd.imageCancel), then unregisters.
+    try h.menu("core.coveragain");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try h.menu("core.evictcover");
+    try h.wake();
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) == null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try feedTinyPng(fx, 21, 13);
+    try h.wake();
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expect(h.harness.runtime.registeredCanvasImage(21) != null);
+}
+
+test "the image id wire bound is exclusive at 2^53 for dynamic values" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // 2^53 - 1 (the model-owned top id) is the last integer every tier
+    // carries exactly: the load parks with the id intact.
+    try h.menu("core.covertop");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(u64, 9007199254740991), fx.pendingImageLoadAt(0).?.id);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 0), Bridge.model().imageResults);
+
+    // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot carry
+    // exactly. The bridge answers "rejected" (the runtime twin of the
+    // emitter's NS1030 literal gate) and the parked load stays live.
+    try h.menu("core.coverpast");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 1), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .rejected);
+    // An id the wire cannot carry exactly has no honest integer to
+    // echo: the rejection carries 0, the no-image sentinel.
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lastImageId), 0), Bridge.model().lastImageId);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+}
+
+test "a fractional dynamic expectedBytes reaches the engine as unknown size, a whole one exactly" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    // The deterministic decode seam: the strict PNG subset decodes
+    // without a bundled codec.
+    h.harness.null_platform.image_decode = true;
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // A model-owned 1.5 the emitter's literal gate never sees: not a
+    // whole byte count, so the bridge hands the engine "unknown size"
+    // (0) — @intFromFloat truncation to 1 would make every cache
+    // install verify against a size the app never declared and
+    // re-download on every launch. The load itself parks healthy: an
+    // unknown size skips verification, it never fails the load.
+    try h.menu("core.coverfrac");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    const frac_request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 61), frac_request.id);
+    try std.testing.expectEqual(@as(u64, 0), frac_request.expected_bytes);
+
+    // The whole-number control rides the wire into the engine exactly.
+    try h.menu("core.coversized");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+    const sized_request = fx.pendingImageLoadAt(1).?;
+    try std.testing.expectEqual(@as(u64, 62), sized_request.id);
+    try std.testing.expectEqual(@as(u64, 4096), sized_request.expected_bytes);
+
+    // Both loads complete: the fractional declaration degraded to
+    // unverified caching, never to a failed or silently-wrong load.
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    var seed: u8 = 3;
+    for (&pixels) |*byte| {
+        byte.* = seed;
+        seed = seed *% 41 +% 7;
+    }
+    var encoded_buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&encoded_buffer);
+    try native_sdk.canvas.png.writeRgba8(&writer, 2, 2, &pixels);
+    try fx.feedImageBytes(61, writer.buffered());
+    try fx.feedImageBytes(62, writer.buffered());
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imageResults), 2), Bridge.model().imageResults);
+    try std.testing.expect(Bridge.model().imageState == .loaded);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+}
+
+test "the dynamic expectedBytes bound is exclusive at 2^53" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // 2^53 - 1, the emitter gate's own top (Number.isSafeInteger), as
+    // a model-owned DYNAMIC count: the last one the f64 wire carries
+    // exactly, so it installs as the verification size verbatim.
+    try h.menu("core.covertopbytes");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    const top_request = fx.pendingImageLoadAt(0).?;
+    try std.testing.expectEqual(@as(u64, 63), top_request.id);
+    try std.testing.expectEqual(@as(u64, 9007199254740991), top_request.expected_bytes);
+
+    // 2^53 — and 2^53 + 1, which arrives as this same wire value (the
+    // f64 grid steps by 2 there): no one honest count exists, so the
+    // bridge maps it to "unknown size" (0) with the fractionals. An
+    // installed 2^53 would be a verification size every real download
+    // misses — silently re-fetching on every launch. The load itself
+    // parks healthy: unknown size skips verification, never fails.
+    try h.menu("core.coverpastbytes");
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingImageLoadCount());
+    const past_request = fx.pendingImageLoadAt(1).?;
+    try std.testing.expectEqual(@as(u64, 64), past_request.id);
+    try std.testing.expectEqual(@as(u64, 0), past_request.expected_bytes);
+}
+
+test "a mixed refused batch rejects in command-stream order across channel and image" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+
+    // Park the live occupants: channel 41 opens, image load 21 parks.
+    try h.menu("core.watch");
+    try h.menu("core.cover");
+    try std.testing.expect(fx.channelHandle(41) != null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), -1), Bridge.model().chanRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), -1), Bridge.model().imgRejectAt);
+
+    // Both batch records are refused (duplicate live key/id): the
+    // rejections deliver at the next drain in the batch's own order —
+    // channel first, image second, Cmd.batch's performed-in-order
+    // contract.
+    try h.menu("core.mixreject");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 1), Bridge.model().chanRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 2), Bridge.model().imgRejectAt);
+
+    // The flipped batch flips the delivery: stream order, never a
+    // family-blocked drain.
+    try h.menu("core.mixrejectflip");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().imgRejectAt), 3), Bridge.model().imgRejectAt);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().chanRejectAt), 4), Bridge.model().chanRejectAt);
+
+    // The refusals left the live occupants untouched.
+    try std.testing.expect(fx.channelHandle(41) != null);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+}
+
+// -------------------------------------------------------- record / replay
+
+const JournalBuffer = struct {
+    bytes: [256 * 1024]u8 = undefined,
+    len: usize = 0,
+
+    fn sink(self: *JournalBuffer) runtime_ns.SessionRecorderSink {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(context: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *JournalBuffer = @ptrCast(@alignCast(context));
+        if (self.len + bytes.len > self.bytes.len) return error.NoSpaceLeft;
+        @memcpy(self.bytes[self.len .. self.len + bytes.len], bytes);
+        self.len += bytes.len;
+    }
+
+    fn journalBytes(self: *const JournalBuffer) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// A value snapshot of the bridge's committed model (the committed
+/// slices live in the core's heap, which record and replay share —
+/// copy what outlives a session).
+const CoreSnapshot = struct {
+    polling: bool,
+    ticks: i64,
+    lastTickAt: f64,
+    stampMs: f64,
+    failures: i64,
+    saved: i64,
+    code: f64,
+    firedAt: f64,
+    status: [32]u8,
+    statusLen: usize,
+    lastErr: [32]u8,
+    lastErrLen: usize,
+
+    fn take() CoreSnapshot {
+        const m = Bridge.model();
+        var snapshot: CoreSnapshot = .{
+            .polling = m.polling,
+            .ticks = m.ticks,
+            .lastTickAt = m.lastTickAt,
+            .stampMs = m.stampMs,
+            .failures = m.failures,
+            .saved = m.saved,
+            .code = m.code,
+            .firedAt = m.firedAt,
+            .status = [_]u8{0} ** 32,
+            .statusLen = @min(m.status.len, 32),
+            .lastErr = [_]u8{0} ** 32,
+            .lastErrLen = @min(m.lastErr.len, 32),
+        };
+        @memcpy(snapshot.status[0..snapshot.statusLen], m.status[0..snapshot.statusLen]);
+        @memcpy(snapshot.lastErr[0..snapshot.lastErrLen], m.lastErr[0..snapshot.lastErrLen]);
+        return snapshot;
+    }
+};
+
+/// Record the reference session: boot answered ok, a refresh answered
+/// err, two timer fires, a synchronous stamp, a host_bytes send, a
+/// real-disk write/read round trip, a pasteboard write/read, and a
+/// one-shot delay fire. Real-executor waits poll WITHOUT dispatching
+/// events (Harness.waitPending), so two recordings stay byte-identical.
+fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
+    const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "ts-core-e2e", .window_width = 400, .window_height = 300 });
+
+    HostStub.reset();
+    removeStore();
+    var record_store = try native_sdk.RecordStore.openMemory(std.testing.allocator);
+    defer record_store.deinit();
+    var relational_store = try native_sdk.RelationalStore.openMemory(std.testing.allocator);
+    defer relational_store.deinit();
+    const h = try Harness.createRecorded(recorder);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    fx.bindRecordStore(record_store.binding());
+    fx.bindRelationalStore(relational_store.binding());
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    try h.menu("core.refresh");
+    try fx.feedHostResult(status_request_key, false, "declined");
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    _ = try h.fireTick(250_000_000);
+    _ = try h.fireTick(350_000_000);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    try h.menu("core.stamp");
+    try h.menu("core.note");
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    // Named ops: write the model bytes to real disk, read them back,
+    // share and paste through the pasteboard, then fire a delay.
+    try h.menu("core.save");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.load");
+    try h.waitPending();
+    try h.wake();
+    // Real SQLite-backed writes, a hit, and a non-empty scan page all enter
+    // the ordinary journaled host-result stream. Replay below binds no
+    // database at all, so those recorded terminals are the sole result source.
+    try h.menu("core.storeput");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.storemany");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.storeget");
+    try h.wake();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 'o', 'n', 'e' }, Bridge.model().status);
+    try h.menu("core.storescan");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, Bridge.model().status[0..4], .little));
+    // Relational rows and the transaction terminal are journaled as their
+    // own result family. Replay intentionally binds no SQLite database.
+    try h.menu("core.dbexec");
+    try h.wake();
+    try h.menu("core.dbquery");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 6), std.mem.readInt(u32, Bridge.model().status[0..4], .little));
+    // Restore a human-readable final model value after the scan's framed
+    // binary page so the snapshot remains easy to diagnose.
+    try h.menu("core.load");
+    try h.waitPending();
+    try h.wake();
+    try h.menu("core.share");
+    try h.menu("core.paste");
+    try h.wake();
+    try h.menu("core.later");
+    _ = try h.fireDelay(450_000_000);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return CoreSnapshot.take();
+}
+
+test "a recorded compiled-core session replays byte-identically with no host calls" {
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordSession(buffer);
+    try std.testing.expectEqual(@as(i64, 2), recorded.ticks);
+    try std.testing.expectEqual(@as(f64, 50_000), recorded.stampMs);
+    try std.testing.expectEqual(@as(i64, 1), recorded.failures);
+    try std.testing.expectEqualStrings("ready", recorded.status[0..recorded.statusLen]);
+    try std.testing.expectEqual(@as(i64, 5), recorded.saved);
+    try std.testing.expectEqual(@as(f64, 450), recorded.firedAt);
+
+    // Determinism pin: the same driven session records byte-identical
+    // journal bytes.
+    const second = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(second);
+    second.len = 0;
+    const recorded_again = try recordSession(second);
+    try std.testing.expectEqualDeep(recorded, recorded_again);
+    try std.testing.expectEqualSlices(u8, buffer.journalBytes(), second.journalBytes());
+
+    // Replay into a fresh app: journaled `.host`/`.file`/`.clipboard`/`.db`
+    // results (including record-store writes, get hit, scan page, relational
+    // transaction, and row page) and the journaled clock feed the stub executor; the
+    // platform timer events (subscription ticks AND the delay fire)
+    // replay from the event log; the host binding is NEVER called.
+    // Deleting the store first proves the replayed file ops touch no
+    // disk — their results come from the journal alone.
+    removeStore();
+    HostStub.reset();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = native_sdk.geometry.SizeF.init(400, 300),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    defer app_state.deinit();
+    app_state.effects.bindHostCalls(HostStub.binding());
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    // Fed from the journal: the ok and err host answers, the clock
+    // read, the file write and read terminals, both clipboard terminals,
+    // and the DB transaction/page/done trio. The clipboard write
+    // routes no Msg, but its terminal is executor truth (the
+    // pasteboard ran), so it journals and its feed is what retires
+    // the replayed request, which parks in the stub executor instead
+    // of running. (Timer fires ride the event log.) Nothing touched
+    // the stub host — and the deleted store proves nothing touched
+    // the disk.
+    try std.testing.expectEqual(@as(u64, 15), report.effects_fed);
+    try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
+    try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
+    try std.testing.expectEqualDeep(recorded, CoreSnapshot.take());
+}
+
+/// A value snapshot of the stream-facing model fields (see CoreSnapshot
+/// for the lifetime rule).
+const StreamSnapshot = struct {
+    lines: i64,
+    exitCode: i64,
+    failures: i64,
+    audioState: fixture.AudioState,
+    posMs: i64,
+    durMs: i64,
+    playing: bool,
+    audioEvents: i64,
+    lastLine: [32]u8,
+    lastLineLen: usize,
+    lastErr: [32]u8,
+    lastErrLen: usize,
+
+    fn take() StreamSnapshot {
+        const m = Bridge.model();
+        var snapshot: StreamSnapshot = .{
+            .lines = @intFromFloat(asF64(m.lines)),
+            .exitCode = @intFromFloat(asF64(m.exitCode)),
+            .failures = m.failures,
+            .audioState = m.audioState,
+            .posMs = @intFromFloat(asF64(m.posMs)),
+            .durMs = @intFromFloat(asF64(m.durMs)),
+            .playing = m.playing,
+            .audioEvents = @intFromFloat(asF64(m.audioEvents)),
+            .lastLine = [_]u8{0} ** 32,
+            .lastLineLen = @min(m.lastLine.len, 32),
+            .lastErr = [_]u8{0} ** 32,
+            .lastErrLen = @min(m.lastErr.len, 32),
+        };
+        @memcpy(snapshot.lastLine[0..snapshot.lastLineLen], m.lastLine[0..snapshot.lastLineLen]);
+        @memcpy(snapshot.lastErr[0..snapshot.lastErrLen], m.lastErr[0..snapshot.lastErrLen]);
+        return snapshot;
+    }
+
+    /// The emitted number fields class i64 or f64 per the subset's
+    /// inference; normalize through f64 so the snapshot never chases
+    /// the classing.
+    fn asF64(value: anytype) f64 {
+        return if (@TypeOf(value) == f64) value else @floatFromInt(value);
+    }
+};
+
+/// Record the stream session: a REAL subprocess whose lines and exit
+/// journal in order, a mid-stream cancel, and an audio stream driven by
+/// a scripted event feed — everything a streaming effect can journal.
+fn recordStreamSession(buffer: *JournalBuffer) !StreamSnapshot {
+    const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "ts-core-e2e", .window_width = 400, .window_height = 300 });
+
+    HostStub.reset();
+    const h = try Harness.createRecorded(recorder);
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+    try fx.feedHostResult(status_request_key, true, "ready");
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    // The real child: both lines and the exit drain in ONE wake (the
+    // idle wait), so the journal's event boundaries are deterministic.
+    try h.menu("core.run");
+    try h.waitIdle();
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    // Cancel mid-stream: the journaled terminal is the `.cancelled`
+    // exit the err arm consumed.
+    try h.menu("core.hang");
+    try h.menu("core.kill");
+    try h.waitIdle();
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    // The audio stream: a real playAudio against the null platform's
+    // hermetic player, events scripted through the feed.
+    try h.menu("core.play");
+    try fx.feedAudioEvent(.loaded, 0, 183_000, true);
+    try fx.feedAudioEvent(.position, 1_500, 183_000, true);
+    var bands: [32]u8 = undefined;
+    for (&bands, 0..) |*b, i| b.* = @intCast(i * 7);
+    try fx.feedAudioSpectrum(bands, 2_000, 183_000);
+    try h.wake();
+    try h.menu("core.stopmusic");
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return StreamSnapshot.take();
+}
+
+test "a recorded stream session replays byte-identically with no process launches or host calls" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordStreamSession(buffer);
+    try std.testing.expectEqual(@as(i64, 2), recorded.lines);
+    try std.testing.expectEqualStrings("two", recorded.lastLine[0..recorded.lastLineLen]);
+    try std.testing.expectEqual(@as(i64, 0), recorded.exitCode);
+    try std.testing.expectEqual(@as(i64, 1), recorded.failures);
+    try std.testing.expectEqualStrings("cancelled", recorded.lastErr[0..recorded.lastErrLen]);
+    try std.testing.expectEqual(fixture.AudioState.spectrum, recorded.audioState);
+    try std.testing.expectEqual(@as(i64, 3), recorded.audioEvents);
+
+    // Replay into a fresh app: the spawn re-issues onto the FAKE
+    // executor (no /bin/sh runs), the journaled lines, exits — the
+    // cancelled one included — and audio events feed the parked
+    // requests in recorded order, and the host binding is never
+    // called.
+    HostStub.reset();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = native_sdk.geometry.SizeF.init(400, 300),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    defer app_state.deinit();
+    app_state.effects.bindHostCalls(HostStub.binding());
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    // Fed from the journal: the boot host answer (1), the run stream's
+    // two lines and exit (3), the cancelled stream's exit (1), and the
+    // three audio events (3).
+    try std.testing.expectEqual(@as(u64, 8), report.effects_fed);
+    try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
+    try std.testing.expectEqual(@as(usize, 0), HostStub.send_count);
+    try std.testing.expectEqualDeep(recorded, StreamSnapshot.take());
+}
+
+/// The mixed-rejection order probe fields, snapshotted by value (the
+/// committed slices live in the shared core heap; these are scalars).
+const MixSnapshot = struct {
+    chan_state: @FieldType(fixture.Model, "chanState"),
+    reject_seq: @FieldType(fixture.Model, "rejectSeq"),
+    chan_reject_at: @FieldType(fixture.Model, "chanRejectAt"),
+    img_reject_at: @FieldType(fixture.Model, "imgRejectAt"),
+    image_results: @FieldType(fixture.Model, "imageResults"),
+
+    fn take() MixSnapshot {
+        const m = Bridge.model();
+        return .{
+            .chan_state = m.chanState,
+            .reject_seq = m.rejectSeq,
+            .chan_reject_at = m.chanRejectAt,
+            .img_reject_at = m.imgRejectAt,
+            .image_results = m.imageResults,
+        };
+    }
+};
+
+/// Record the mixed-rejection session: a live channel and a parked
+/// image load, then both mixed refused batches. Bridge-refused
+/// rejections are never engine results, so the journal carries no
+/// record for them — replay REGENERATES them by re-running the same
+/// command walk against the same table state, and the order probe
+/// proves the regenerated delivery matches the recorded one.
+fn recordMixedRejectSession(buffer: *JournalBuffer) !MixSnapshot {
+    const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
+    defer std.heap.page_allocator.destroy(recorder);
+    recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "ts-core-e2e", .window_width = 400, .window_height = 300 });
+
+    HostStub.reset();
+    const h = try Harness.createFull(recorder, .fake);
+    defer h.destroy();
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+    try h.menu("core.watch");
+    try h.menu("core.cover");
+    try h.menu("core.mixreject");
+    try h.wake();
+    try h.menu("core.mixrejectflip");
+    try h.wake();
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
+
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    return MixSnapshot.take();
+}
+
+test "a recorded mixed-rejection session replays with identical cross-family order" {
+    const buffer = try std.heap.page_allocator.create(JournalBuffer);
+    defer std.heap.page_allocator.destroy(buffer);
+    buffer.len = 0;
+
+    const recorded = try recordMixedRejectSession(buffer);
+    // Two batches, two rejections each — and the second batch's flipped
+    // record order flipped the delivery order.
+    try std.testing.expectEqual(@as(@TypeOf(recorded.reject_seq), 4), recorded.reject_seq);
+    try std.testing.expectEqual(@as(@TypeOf(recorded.img_reject_at), 3), recorded.img_reject_at);
+    try std.testing.expectEqual(@as(@TypeOf(recorded.chan_reject_at), 4), recorded.chan_reject_at);
+    try std.testing.expect(recorded.chan_state == .rejected);
+
+    // Replay into a fresh app: the journal holds the menu commands and
+    // frame boundaries — NO rejection records — so identical snapshots
+    // prove the replayed command walk regenerated every rejection in
+    // the recorded order.
+    HostStub.reset();
+    const harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
+        .size = native_sdk.geometry.SizeF.init(400, 300),
+    });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    defer app_state.deinit();
+    app_state.effects.bindHostCalls(HostStub.binding());
+
+    const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
+        .verify = true,
+        .require_same_platform = false,
+    });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(usize, 0), HostStub.request_count);
+    try std.testing.expectEqualDeep(recorded, MixSnapshot.take());
+}
+
+test "compiled host projects views windows status and subscriptions without model decoding" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    try h.menu("core.disable");
+    try std.testing.expect(!h.tickArmed());
+    try h.menu("core.open-settings");
+    try h.menu("core.enable");
+    try std.testing.expect(h.tickArmed());
+    try std.testing.expect(try h.fireTick(2_000_000));
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    const model = Bridge.model();
+    try std.testing.expect(model.settingsOpen);
+    try std.testing.expect(model.polling);
+    try std.testing.expectEqual(@as(i64, 1), model.ticks);
+    try std.testing.expectEqual(@as(usize, 1), fixture.rt.snapshotDecodeCount());
+}
+
+test "compiled host projects frame channels through stateless models and preserves idle behavior" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const frame: native_sdk.platform.GpuSurfaceFrameEvent = .{
+        .label = canvas_label,
+        .size = native_sdk.geometry.SizeF.init(731, 257),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 23_000_000,
+        .frame_interval_ns = 16_000_000,
+    };
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = frame });
+    try std.testing.expectEqual(@as(usize, 0), fixture.rt.snapshotDecodeCount());
+    try std.testing.expect(!h.tickArmed());
+    try std.testing.expect(!Bridge.model().polling);
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = frame });
+    try std.testing.expect(!h.tickArmed());
+    try std.testing.expect(!Bridge.model().polling);
+    var next = frame;
+    next.frame_index = 3;
+    next.timestamp_ns = 24_000_000;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = next });
+    try std.testing.expect(h.tickArmed());
+    try std.testing.expect(Bridge.model().polling);
+}

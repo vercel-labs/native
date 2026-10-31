@@ -1,0 +1,5 @@
+.native/
+zig-out/
+.zig-cache/
+node_modules/
+recordings/

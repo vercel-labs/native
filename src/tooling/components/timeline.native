@@ -16,12 +16,14 @@
      are only reachable through <use>, so the built-in <timeline> element
      keeps meaning what it always did at call sites you have not
      migrated. <timeline-item> children work unchanged inside the <use> -
-     they land at the <slot/> below.
+     they land at the <slot/> below. The `global_key` template arg uses an
+     underscore because template args are binding names; it forwards to the
+     element's `global-key` attribute.
 
      Deleting this file costs nothing; `native eject component timeline`
      writes it again. -->
-<template name="timeline" args="gap=0 grow=0 label=">
-  <column role="list" gap="{gap}" grow="{grow}" label="{label}">
+<template name="timeline" args="gap=0 grow=0 label= key= global_key=">
+  <column role="list" gap="{gap}" grow="{grow}" label="{label}" key="{key}" global-key="{global_key}">
     <slot/>
   </column>
 </template>

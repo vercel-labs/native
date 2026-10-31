@@ -1,6 +1,6 @@
 # Markdown Viewer
 
-A split-pane markdown editor built with **native-sdk** — the document you are reading lives in the editor on the left, and everything on this side is rendered live by the native widget engine. No webview, no HTML: headings, tables, and links below are ordinary widgets.
+A split-pane markdown editor built with **native-sdk** — the document you are reading lives in the editor on the left, and everything on this side is rendered live by the native widget engine. No webview or DOM: headings, tables, links, and safe presentational HTML are lowered to ordinary widgets.
 
 Edit anything on the left and watch this pane keep up keystroke for keystroke.
 

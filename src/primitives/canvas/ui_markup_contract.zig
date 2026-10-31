@@ -46,8 +46,24 @@ pub const ValueKind = expr.ValueKind;
 
 /// Bumped when the artifact layout or its checking semantics change; a
 /// reader refuses versions it does not know (loudly, degrading to
-/// structural checks — never a false pass).
-pub const format_version: u32 = 1;
+/// structural checks — never a false pass). Version 2: the scroll-state
+/// payload class became TWO-AXIS — a format-1 artifact classified the
+/// retired four-field record as `.scroll_state`, which both engines now
+/// reject, so accepting the stale artifact would be a false pass.
+/// Version 3: the `terminal_state` payload class arrived and `on-terminal`
+/// gained a bare-tag rule — a format-2 artifact classified a four-field
+/// terminal message as `.unsupported` and would reject valid `<terminal>`
+/// markup, so a stale artifact must force regeneration rather than pass.
+/// Version 4: `drag_drop` classifies the closed release-geometry record
+/// used by `on-drag`; older artifacts call it unsupported and would reject
+/// a valid binding.
+/// Version 5: that record gained the numeric live `phase` field so apps can
+/// preview insertion/reordering on change and restore on cancellation.
+/// Version 6: live drag geometry requires floating-point fields so captured
+/// out-of-view coordinates cannot trap an integer conversion at dispatch.
+/// Version 7: windowed queries and stable extent helpers have explicit
+/// authoring contracts; older artifacts cannot validate that surface.
+pub const format_version: u32 = 7;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).
@@ -124,13 +140,16 @@ pub const Iterable = struct {
     item_scalar: bool = false,
     item: Group = .{},
     fn_backed: bool = false,
+    virtual_window: bool = false,
 };
 
 /// Payload classes a markup dispatch can (or cannot) construct. The
 /// special classes match the engines exactly: text_input/scroll_state
 /// tags bind through on-input/on-scroll only, and `unsupported` payloads
-/// cannot be built from markup at all.
-pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, unsupported };
+/// cannot be built from markup at all. `legacy_scroll_state` is the
+/// RETIRED one-axis scroll record, recognized only so `on-scroll` can
+/// teach the two-axis migration by field name.
+pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, drag_drop, unsupported };
 
 pub const MsgTag = struct {
     name: []const u8,
@@ -149,6 +168,7 @@ pub const Contract = struct {
     msg_type: []const u8 = "",
     model: Group = .{},
     iterables: []const Iterable = &.{},
+    virtual_estimators: []const []const u8 = &.{},
     msgs: []const MsgTag = &.{},
     /// Names opted out of the dead-state lint via `pub const view_unbound`.
     model_unbound: []const []const u8 = &.{},
@@ -170,6 +190,7 @@ pub const Contract = struct {
 pub const Specials = struct {
     TextInputEvent: type,
     ScrollState: type,
+    TerminalState: type,
 };
 
 /// Reflect a concrete Model/Msg pair into a contract, at comptime. The
@@ -183,6 +204,7 @@ pub fn describe(comptime Model: type, comptime Msg: type, comptime specials: Spe
             .msg_type = @typeName(Msg),
             .model = describeGroup(Model),
             .iterables = describeIterables(Model),
+            .virtual_estimators = describeVirtualEstimators(Model),
             .msgs = describeMsgs(Msg, specials),
             .model_unbound = optOutNames(Model),
             .msg_unbound = optOutNames(Msg),
@@ -191,6 +213,10 @@ pub fn describe(comptime Model: type, comptime Msg: type, comptime specials: Spe
 }
 
 fn describeGroup(comptime T: type) Group {
+    return describeGroupSeen(T, &.{});
+}
+
+fn describeGroupSeen(comptime T: type, comptime seen: []const type) Group {
     comptime {
         var scalars: []const Scalar = &.{};
         var groups: []const NamedGroup = &.{};
@@ -203,11 +229,17 @@ fn describeGroup(comptime T: type) Group {
                 }};
                 continue;
             }
-            if (@typeInfo(field.type) == .@"struct") {
+            // `reflect.Pointee` transparency: a `*const Row` field
+            // traverses like the struct it shares. Pointer models can
+            // cycle (unlike by-value structs), so already-described
+            // types stop the walk — the engines resolve such paths
+            // segment by segment and never recurse into the type graph.
+            const Nested = reflect.Pointee(field.type);
+            if (@typeInfo(Nested) == .@"struct" and !typeListed(Nested, seen ++ &[_]type{T})) {
                 groups = groups ++ &[_]NamedGroup{.{
                     .name = field.name,
-                    .type_name = @typeName(field.type),
-                    .group = describeGroup(field.type),
+                    .type_name = @typeName(Nested),
+                    .group = describeGroupSeen(Nested, seen ++ &[_]type{T}),
                 }};
             }
         }
@@ -238,14 +270,24 @@ fn describeGroup(comptime T: type) Group {
     }
 }
 
+fn typeListed(comptime T: type, comptime seen: []const type) bool {
+    for (seen) |S| {
+        if (S == T) return true;
+    }
+    return false;
+}
+
 fn describeItem(comptime Item: type) Iterable {
     comptime {
+        // `reflect.Pointee` transparency: `[]const *const Row` iterates
+        // items that bind like Row itself.
+        const Bare = reflect.Pointee(Item);
         return .{
             .name = "",
-            .item_type = @typeName(Item),
+            .item_type = @typeName(Bare),
             .item_kind = if (reflect.supportedScalar(Item)) reflect.scalarKindOf(Item) else null,
             .item_scalar = reflect.supportedScalar(Item),
-            .item = if (@typeInfo(Item) == .@"struct") describeGroup(Item) else .{},
+            .item = if (@typeInfo(Bare) == .@"struct") describeGroup(Bare) else .{},
         };
     }
 }
@@ -271,14 +313,28 @@ fn describeIterables(comptime Model: type) []const Iterable {
             if (@typeInfo(DeclType) != .@"fn") continue;
             const Return = @typeInfo(DeclType).@"fn".return_type orelse continue;
             const Item = reflect.sliceElement(Return) orelse continue;
-            if (reflect.isItemFn(DeclType, Item, false) or reflect.isItemFn(DeclType, Item, true)) {
+            const virtual = reflect.isVirtualItemFn(Model, DeclType);
+            if (reflect.isItemFn(DeclType, Item, false) or reflect.isItemFn(DeclType, Item, true) or virtual) {
                 var entry = describeItem(Item);
                 entry.name = decl.name;
                 entry.fn_backed = true;
+                entry.virtual_window = virtual;
                 iterables = iterables ++ &[_]Iterable{entry};
             }
         }
         return iterables;
+    }
+}
+
+fn describeVirtualEstimators(comptime Model: type) []const []const u8 {
+    comptime {
+        var names: []const []const u8 = &.{};
+        if (@hasDecl(Model, "virtualExtentHelper") and @hasDecl(Model, "virtualExtentEstimate")) {
+            for (@typeInfo(Model).@"struct".decls) |decl| {
+                if (Model.virtualExtentHelper(decl.name) != null) names = names ++ &[_][]const u8{decl.name};
+            }
+        }
+        return names;
     }
 }
 
@@ -299,7 +355,26 @@ fn describeMsgs(comptime Msg: type, comptime specials: Specials) []const MsgTag 
 fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     if (T == void) return .none;
     if (T == specials.TextInputEvent) return .text_input;
+    // A declared mirror of the text-input event union (transpiled cores,
+    // where type identity cannot cross the emission boundary) binds
+    // through on-input exactly like the canvas type — same resolution as
+    // both engines' inputConstructor.
+    if (reflect.declaredTextInputUnion(T)) return .text_input;
     if (T == specials.ScrollState) return .scroll_state;
+    // A declared mirror of the scroll-state record (transpiled cores) binds
+    // through on-scroll exactly like the canvas type — same resolution as
+    // both engines' scrollConstructor.
+    if (reflect.declaredScrollStateRecord(T)) return .scroll_state;
+    // The retired ONE-AXIS record classifies separately so on-scroll can
+    // teach the two-axis migration by field name instead of rejecting
+    // the payload generically.
+    if (reflect.declaredLegacyScrollStateRecord(T)) return .legacy_scroll_state;
+    if (T == specials.TerminalState) return .terminal_state;
+    // A declared mirror of the terminal-state record (transpiled cores)
+    // binds through on-terminal exactly like the canvas type — same
+    // resolution as both engines' terminalConstructor.
+    if (reflect.declaredTerminalStateRecord(T)) return .terminal_state;
+    if (reflect.declaredWidgetDragDropRecord(T)) return .drag_drop;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -592,6 +667,7 @@ const Binder = union(enum) {
     slice: ItemRef,
     value: ?ValueKind,
     slot: SlotCapture,
+    virtual: void,
 };
 
 const ScopeEntry = struct {
@@ -687,6 +763,14 @@ const Checker = struct {
                     return .{ .kind = kind };
                 },
                 .slice => return self.fail(node, slice_arg_value_message),
+                .virtual => {
+                    const tail = pathTail(path) orelse return self.fail(node, "virtual window requires a range field");
+                    const integers = [_][]const u8{ "start_index", "end_index", "first_visible_index", "last_visible_index" };
+                    const geometry = [_][]const u8{ "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent" };
+                    if (nameListed(&integers, tail)) return .{ .kind = .integer };
+                    if (nameListed(&geometry, tail)) return .{ .kind = .float };
+                    return self.fail(node, "unknown virtual range field");
+                },
                 // Slot captures carry an empty name, which no binding
                 // head can equal.
                 .slot => unreachable,
@@ -718,12 +802,15 @@ const Checker = struct {
     /// against the contract and the whole expression run through the
     /// shared type checker with those kinds — `{count > 'a'}` fails here
     /// with the evaluator's teaching message and the model field's type.
-    fn attrKind(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr, raw: []const u8) CheckErr!?ValueKind {
+    fn expressionKind(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr, raw: []const u8, attribute_aware: bool) CheckErr!?ValueKind {
         const expression = markup.parseAttrExpression(raw) orelse {
             return self.failAttr(node, attribute, markup.invalid_expression_message);
         };
         return switch (expression) {
-            .literal => |text| expr.kindOf(reflect.literalValue(text)),
+            .literal => |text| expr.kindOf(if (attribute_aware)
+                reflect.literalValueForAttribute(text, attribute.name)
+            else
+                reflect.literalValue(text)),
             .binding => |path| (try self.resolveBinding(node, path, true)).kind,
             .equals => |sides| blk: {
                 // Arena-computed bindings are excluded from equality on
@@ -735,6 +822,14 @@ const Checker = struct {
             },
             .expression => |inner| try self.exprTreeKind(node, inner),
         };
+    }
+
+    fn attrKind(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr, raw: []const u8) CheckErr!?ValueKind {
+        return self.expressionKind(node, attribute, raw, true);
+    }
+
+    fn unclassifiedKind(self: *Checker, node: markup.MarkupNode, attribute: markup.MarkupAttr, raw: []const u8) CheckErr!?ValueKind {
+        return self.expressionKind(node, attribute, raw, false);
     }
 
     fn exprTreeKind(self: *Checker, node: markup.MarkupNode, inner: []const u8) CheckErr!?ValueKind {
@@ -827,15 +922,55 @@ const Checker = struct {
         }
         if (std.mem.eql(u8, event, "scroll")) {
             const found = tag orelse return self.failAttr(node, attribute, markup.on_scroll_payload_message);
+            // The retired one-axis record gets the migration teaching —
+            // it names the new per-axis fields — instead of the generic
+            // payload rejection.
+            if (found.payload == .legacy_scroll_state) return self.failAttr(node, attribute, markup.on_scroll_legacy_payload_message);
             if (found.payload != .scroll_state) return self.failAttr(node, attribute, markup.on_scroll_payload_message);
             return;
         }
+        if (std.mem.eql(u8, event, "terminal")) {
+            // The runtime supplies the TerminalState payload, so the tag
+            // is BARE: an authored `:{binding}` would be silently
+            // discarded, which is the teaching error (dead data), not a
+            // pass.
+            if (expression.payload.len > 0) return self.failAttr(node, attribute, markup.on_terminal_payload_message);
+            const found = tag orelse return self.failAttr(node, attribute, markup.on_terminal_payload_message);
+            if (found.payload != .terminal_state) return self.failAttr(node, attribute, markup.on_terminal_payload_message);
+            return;
+        }
         if (std.mem.eql(u8, event, "resize")) {
+            // f32 is the canvas-native arm; f64 the transpiled one-number
+            // float arm (engine parity — integer arms stay excluded, a
+            // fraction rounded into an integer would be useless data).
             const found = tag orelse return self.failAttr(node, attribute, markup.on_resize_payload_message);
-            if (found.payload != .float or !std.mem.eql(u8, found.payload_type, "f32")) {
+            const resize_ok = found.payload == .float and
+                (std.mem.eql(u8, found.payload_type, "f32") or std.mem.eql(u8, found.payload_type, "f64"));
+            if (!resize_ok) {
                 return self.failAttr(node, attribute, markup.on_resize_payload_message);
             }
             return;
+        }
+        if (std.mem.eql(u8, event, "drag")) {
+            const found = tag orelse return self.failAttr(node, attribute, markup.on_drag_payload_message);
+            if (found.payload != .drag_drop or expression.payload.len == 0) {
+                return self.failAttr(node, attribute, markup.on_drag_payload_message);
+            }
+            const resolved = try self.resolveBinding(node, expression.payload, true);
+            try self.requirePayloadKind(node, attribute, resolved, &.{.integer}, found);
+            return;
+        }
+        // The value-payload change event (engine parity): a slider's
+        // on-change with a bare tag naming a value-carrying arm — f32 (the
+        // canvas-native shape) or the transpiled one-number float arm
+        // (f64) — dispatches the applied 0..1 fraction. Void arms fall
+        // through to the static form below.
+        if (std.mem.eql(u8, event, "change") and std.mem.eql(u8, node.name, "slider") and expression.payload.len == 0) {
+            if (tag) |found| {
+                const value_arm = found.payload == .float and
+                    (std.mem.eql(u8, found.payload_type, "f32") or std.mem.eql(u8, found.payload_type, "f64"));
+                if (value_arm) return;
+            }
         }
         const found = tag orelse return self.failNamed(node, unknown_tag_message, expression.tag, .{ .msgs = self.contract });
         if (found.payload == .none) {
@@ -852,7 +987,7 @@ const Checker = struct {
             .boolean => {},
             // These payloads cannot be constructed from a markup binding
             // (input/scroll payloads bind through their own events).
-            .text_input, .scroll_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
+            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .drag_drop, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
             .none => unreachable,
         }
     }
@@ -936,6 +1071,15 @@ const Checker = struct {
         const template_node = self.document.templates[template_index];
         if (template_node.children.len != 1 or template_node.children[0].kind != .element) return;
 
+        // A use-site press is forwarded to the expanded template root. It
+        // is a message expression, not a template argument, and its payload
+        // resolves in the consumer's scope.
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "on-press")) {
+                try self.checkMessageAttr(node, attribute);
+            }
+        }
+
         // Evaluate every arg's kind against the pristine use-site scope
         // before any entry is pushed, so args cannot see each other.
         const saved_len = self.len;
@@ -1003,7 +1147,7 @@ const Checker = struct {
         if (expression == .binding) {
             const path = expression.binding;
             if (self.lookup(pathHead(path))) |entry| {
-                if (entry.binder == .slice and pathTail(path) == null) {
+                if ((entry.binder == .slice or entry.binder == .virtual) and pathTail(path) == null) {
                     return entry.binder;
                 }
             } else {
@@ -1015,7 +1159,7 @@ const Checker = struct {
                 }
             }
         }
-        return .{ .value = try self.attrKind(node, attribute, attribute.value) };
+        return .{ .value = try self.unclassifiedKind(node, attribute, attribute.value) };
     }
 
     fn checkSlot(self: *Checker, node: markup.MarkupNode) CheckErr!void {
@@ -1103,12 +1247,75 @@ const Checker = struct {
         }
     }
 
+    fn checkVirtualWindow(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (markup.virtualAttributeError(node)) |info| {
+            self.failure = info;
+            return error.ContractCheck;
+        }
+        for (self.entries[self.floor..self.len]) |entry| if (entry.binder == .virtual) return self.fail(node, "virtual-window declarations cannot nest");
+        for (node.attrs) |attribute| {
+            if (nameListed(&.{ "item-count", "index-base", "overscan" }, attribute.name)) {
+                const kind = try self.unclassifiedKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.integer}, "virtual window count requires an integer");
+            } else if (nameListed(&.{ "item-extent", "gap", "viewport-fallback" }, attribute.name)) {
+                try self.checkClassAttr(node, attribute, .number);
+            } else if (std.mem.eql(u8, attribute.name, "extent-estimate")) {
+                if (!nameListed(self.contract.virtual_estimators, attribute.value)) return self.failAttr(node, attribute, "extent-estimate requires a stable compiled numeric index helper");
+                self.markModel(attribute.value);
+            }
+        }
+        if (self.len >= max_scope_depth) return self.fail(node, "virtual window nesting is too deep");
+        self.entries[self.len] = .{ .name = node.attr("as").?, .binder = .virtual };
+        self.len += 1;
+        defer self.len -= 1;
+        return self.checkChildList(node.children);
+    }
+
+    fn checkVirtualList(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (markup.virtualAttributeError(node)) |info| {
+            self.failure = info;
+            return error.ContractCheck;
+        }
+        const window = self.lookup(node.attr("window").?) orelse return self.fail(node, "virtual-list requires an enclosing window");
+        if (window.binder != .virtual) return self.fail(node, "virtual-list requires an enclosing window");
+        const each = node.attr("each").?;
+        var found: ?*const Iterable = null;
+        for (self.contract.iterables) |*iterable| if (std.mem.eql(u8, iterable.name, each) and iterable.virtual_window) {
+            found = iterable;
+            break;
+        };
+        const query = found orelse return self.fail(node, "virtual-list each requires a Model-first complete range query");
+        self.markModel(each);
+        var proxy = node;
+        proxy.name = "scroll";
+        proxy.children = &.{};
+        var attributes: [markup.virtual_list_attrs.len]markup.MarkupAttr = undefined;
+        var count: usize = 0;
+        for (node.attrs) |attribute| {
+            if (nameListed(&.{ "window", "each", "as" }, attribute.name)) continue;
+            if (count >= attributes.len) return self.failAttr(node, attribute, "too many virtual-list attributes");
+            attributes[count] = attribute;
+            count += 1;
+        }
+        proxy.attrs = attributes[0..count];
+        try self.checkElement(proxy);
+        if (self.len >= max_scope_depth) return self.fail(node, "virtual list nesting is too deep");
+        self.entries[self.len] = .{ .name = node.attr("as").?, .binder = .{ .item = itemRefOf(query) } };
+        self.len += 1;
+        defer self.len -= 1;
+        return self.checkChildList(node.children);
+    }
+
     fn checkElement(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        if (std.mem.eql(u8, node.name, "virtual-window")) return self.checkVirtualWindow(node);
+        if (std.mem.eql(u8, node.name, "virtual-list")) return self.checkVirtualList(node);
         if (std.mem.eql(u8, node.name, "span")) return self.checkSpan(node);
         if (std.mem.eql(u8, node.name, "markdown")) return self.checkMarkdown(node);
+        if (std.mem.eql(u8, node.name, "code")) return self.checkCode(node);
         if (std.mem.eql(u8, node.name, "stepper")) return self.checkStepper(node);
         if (std.mem.eql(u8, node.name, "timeline-item")) return self.checkTimelineItem(node);
         if (std.mem.eql(u8, node.name, "chart")) return self.checkChart(node);
+        if (std.mem.eql(u8, node.name, "video")) return self.checkVideo(node);
         if (std.mem.eql(u8, node.name, "timeline")) {
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "gap") or std.mem.eql(u8, attribute.name, "grow")) {
@@ -1144,10 +1351,41 @@ const Checker = struct {
             }
             if (std.mem.eql(u8, attribute.name, "image")) {
                 // Runtime image ids are model integers (engine parity).
+                if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                    return self.failAttr(node, attribute, markup.image_binding_element_message);
+                }
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const resolved = try self.resolveBinding(node, expression.binding, true);
-                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.avatar_image_message);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.image_binding_message);
+                continue;
+            }
+            if (markup.imageSourceAttrName(attribute.name)) {
+                // Structural validation owns the atomic/scoped rectangle
+                // rules; the model-aware pass verifies every coordinate
+                // binding is numeric and marks it used.
+                try self.checkClassAttr(node, attribute, .number);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "surface")) {
+                // Media-surface ids are model integers (engine parity —
+                // the runtime-image-id shape exactly).
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.integer}, markup.media_surface_surface_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "pty")) {
+                // Terminal bindings carry native integer keys or byte names —
+                // the surface/image binding shape exactly): resolve the
+                // binding so an undefined field is caught here and a
+                // valid one is marked used (never a false dead-state
+                // finding), and a non-integer is the teaching error.
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{ .integer, .string }, markup.terminal_pty_message);
                 continue;
             }
             if (std.mem.eql(u8, attribute.name, "icon") or
@@ -1216,7 +1454,7 @@ const Checker = struct {
             if (std.mem.eql(u8, attribute.name, "on-details")) {
                 const expression = markup.parseMessageExpression(attribute.value) orelse continue;
                 const tag = self.findMsg(expression.tag) orelse return self.failAttr(node, attribute, markup.markdown_on_details_message);
-                if (tag.payload != .integer or !std.mem.eql(u8, tag.payload_type, "usize")) {
+                if (tag.payload != .integer or (!std.mem.eql(u8, tag.payload_type, "usize") and !std.mem.eql(u8, tag.payload_type, "i64"))) {
                     return self.failAttr(node, attribute, markup.markdown_on_details_message);
                 }
                 continue;
@@ -1230,9 +1468,67 @@ const Checker = struct {
                 }
                 continue;
             }
+            if (std.mem.eql(u8, attribute.name, "images")) {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const item = try self.resolveIterable(node, expression.binding, markup.markdown_images_message);
+                if (!markdownImageGroup(item.group)) {
+                    return self.failAttr(node, attribute, markup.markdown_images_message);
+                }
+                continue;
+            }
             if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
                 const kind = try self.attrKind(node, attribute, attribute.value);
                 try self.requireAttrKind(node, attribute, kind, &.{.string}, markup.markdown_issue_link_base_message);
+            }
+        }
+    }
+
+    fn checkCode(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "source")) {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.string}, markup.code_source_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "line-numbers") or
+                std.mem.eql(u8, attribute.name, "wrap") or
+                std.mem.eql(u8, attribute.name, "editable"))
+            {
+                if (attribute.value.len == 0) continue;
+                _ = try self.attrKind(node, attribute, attribute.value);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "added-lines") or
+                std.mem.eql(u8, attribute.name, "removed-lines"))
+            {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression == .literal) continue;
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.string}, markup.code_diff_lines_message);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "on-input")) {
+                try self.checkMessageAttr(node, attribute);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "width") or
+                std.mem.eql(u8, attribute.name, "height") or
+                std.mem.eql(u8, attribute.name, "min-width") or
+                std.mem.eql(u8, attribute.name, "grow"))
+            {
+                try self.checkClassAttr(node, attribute, .number);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "key") or std.mem.eql(u8, attribute.name, "global-key")) {
+                try self.checkKeyAttr(node, attribute);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "label")) {
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.string}, label_attr_message);
             }
         }
     }
@@ -1250,6 +1546,12 @@ const Checker = struct {
             }
         }
         for (node.children) |child| {
+            if (child.kind == .slot_block) {
+                // Ejected steppers pass their actual children through the
+                // slot. Check those children in the consumer's scope.
+                try self.checkSlot(child);
+                continue;
+            }
             for (child.children) |run| {
                 if (run.kind == .text) try self.checkTextRun(run);
             }
@@ -1258,7 +1560,7 @@ const Checker = struct {
 
     /// `<chart>` and its `<series>` children: options resolve like the
     /// engines' (numbers, whole numbers, truthy flags, text), and every
-    /// series `values` binding must name an f32 iterable — a wrong item
+    /// series `values` binding must name an f32 or f64 iterable — a wrong item
     /// type fails with the model type named, so the fix is visible from
     /// the finding.
     fn checkChart(self: *Checker, node: markup.MarkupNode) CheckErr!void {
@@ -1315,13 +1617,52 @@ const Checker = struct {
         }
     }
 
+    /// `<video>`: a bound `src` must resolve to a string model field
+    /// (the playback source is text — engine parity), the flags resolve
+    /// truthy over any kind like every flag attribute (bare presence is
+    /// true and resolves nothing), and sizing/identity resolve like the
+    /// engines'.
+    fn checkVideo(self: *Checker, node: markup.MarkupNode) CheckErr!void {
+        for (node.attrs) |attribute| {
+            if (std.mem.eql(u8, attribute.name, "src")) {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const resolved = try self.resolveBinding(node, expression.binding, true);
+                try self.requireAttrKind(node, attribute, resolved.kind, &.{.string}, markup.video_src_message);
+                continue;
+            }
+            if (markup.videoFlagAttrName(attribute.name)) {
+                if (attribute.value.len == 0) continue;
+                _ = try self.attrKind(node, attribute, attribute.value);
+                continue;
+            }
+            const number_attr = std.mem.eql(u8, attribute.name, "width") or
+                std.mem.eql(u8, attribute.name, "height") or
+                std.mem.eql(u8, attribute.name, "grow");
+            if (number_attr) {
+                try self.checkClassAttr(node, attribute, .number);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "key") or std.mem.eql(u8, attribute.name, "global-key")) {
+                try self.checkKeyAttr(node, attribute);
+                continue;
+            }
+            if (std.mem.eql(u8, attribute.name, "label")) {
+                const kind = try self.attrKind(node, attribute, attribute.value);
+                try self.requireAttrKind(node, attribute, kind, &.{.string}, label_attr_message);
+            }
+        }
+    }
+
     fn checkSeries(self: *Checker, node: markup.MarkupNode) CheckErr!void {
         for (node.attrs) |attribute| {
             if (std.mem.eql(u8, attribute.name, "values")) {
                 const expression = markup.parseAttrExpression(attribute.value) orelse continue;
                 if (expression != .binding) continue;
                 const item = try self.resolveIterable(node, expression.binding, markup.series_values_message);
-                if (!std.mem.eql(u8, item.type_name, "f32")) {
+                // f32 is the canvas-native series element; f64 the
+                // transpiled-core one (both engines narrow it per sample).
+                if (!std.mem.eql(u8, item.type_name, "f32") and !std.mem.eql(u8, item.type_name, "f64")) {
                     const message = std.fmt.allocPrint(self.arena, "{s} (\"{s}\" iterates {s})", .{
                         markup.series_values_message, expression.binding, item.type_name,
                     }) catch return error.OutOfMemory;
@@ -1442,6 +1783,21 @@ fn resolveOnGroup(group: *const Group, path: []const u8, allow_arena: bool) Grou
     return .missing;
 }
 
+fn markdownImageGroup(group: *const Group) bool {
+    const source = resolveOnGroup(group, "source", false);
+    if (source != .ok or source.ok.kind != .string) return false;
+    for ([_][]const u8{ "width", "height" }) |path| if (!imageNumberPath(group, path)) return false;
+    if (imageNumberPath(group, "image")) return true;
+    for (group.groups) |entry| if (std.mem.eql(u8, entry.name, "image")) {
+        return entry.group.groups.len == 0 and entry.group.scalars.len == 2 and imageNumberPath(&entry.group, "imageLower") and imageNumberPath(&entry.group, "imageUpper");
+    };
+    return false;
+}
+fn imageNumberPath(group: *const Group, path: []const u8) bool {
+    const value = resolveOnGroup(group, path, false);
+    return value == .ok and (value.ok.kind == .integer or value.ok.kind == .float);
+}
+
 fn pathHead(path: []const u8) []const u8 {
     const dot = std.mem.indexOfScalar(u8, path, '.') orelse return path;
     return path[0..dot];
@@ -1520,11 +1876,16 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
 
 // -------------------------------------------------------------- artifact
 
-/// Hash the app's Zig sources: every `.zig` file under `root_path`,
-/// path-sorted, path and contents both mixed in. The emit step stamps
-/// this into the artifact; `native check` recomputes it and DEGRADES to
-/// structural checking on any mismatch — a stale contract can hide new
-/// fields or resurrect deleted ones, so it must never pass silently.
+/// Hash the app's core sources: every `.zig` and `.ts` file under
+/// `root_path`, path-sorted, path and contents both mixed in. TypeScript
+/// cores are hashed too because on that track the Model/Msg truth lives
+/// in `src/core.ts` — a core edit changes no `.zig` file, and a contract
+/// that stays "fresh" through it reports phantom unknown-tag and
+/// unknown-field errors against the user's new state. The emit step
+/// stamps this into the artifact; `native check` recomputes it and
+/// DEGRADES to structural checking on any mismatch — a stale contract
+/// can hide new fields or resurrect deleted ones, so it must never pass
+/// silently.
 pub fn hashSourceDir(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8) !u64 {
     return hashSourceDirAt(allocator, io, std.Io.Dir.cwd(), root_path);
 }
@@ -1540,7 +1901,8 @@ pub fn hashSourceDirAt(allocator: std.mem.Allocator, io: std.Io, base: std.Io.Di
     var walker = try root.walk(allocator);
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".zig")) {
+        if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.path, ".zig") or std.mem.endsWith(u8, entry.path, ".ts")) {
             try paths.append(allocator, try allocator.dupe(u8, entry.path));
         }
     }
@@ -1587,7 +1949,8 @@ pub fn writeArtifact(contract: Contract, writer: *std.Io.Writer) !void {
 /// no-op for them.
 pub fn emitMain(comptime app: type, comptime specials: Specials, init: std.process.Init) !void {
     if (comptime !(@hasDecl(app, "Model") and @hasDecl(app, "Msg"))) return;
-    if (comptime (@typeInfo(app.Model) != .@"struct" or @typeInfo(app.Msg) != .@"union")) return;
+    const SourceModel = if (@hasDecl(app, "SourceModel")) app.SourceModel else app.Model;
+    if (comptime (@typeInfo(SourceModel) != .@"struct" or @typeInfo(app.Msg) != .@"union")) return;
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     var src_root: []const u8 = default_source_root;
@@ -1602,7 +1965,7 @@ pub fn emitMain(comptime app: type, comptime specials: Specials, init: std.proce
             out_path = args[index];
         }
     }
-    var contract = comptime describe(app.Model, app.Msg, specials);
+    var contract = comptime describe(SourceModel, app.Msg, specials);
     // The registered icon vocabulary rides the same artifact: one
     // `pub const app_icons` declaration feeds boot-time registration and
     // this reflection, so `native check` verifies `app:` markup

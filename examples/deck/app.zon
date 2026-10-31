@@ -7,6 +7,21 @@
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces", "shortcuts" },
+    .assets = .{
+        .fonts = .{
+            .{ .id = 64, .path = "assets/fonts/GeistPixel-Square.ttf" },
+        },
+        .images = .{
+            .{ .id = 1, .path = "assets/art/exit-signs.jpg" },
+            .{ .id = 2, .path = "assets/art/blue-season.jpg" },
+            .{ .id = 3, .path = "assets/art/second-nature.jpg" },
+            .{ .id = 4, .path = "assets/art/no-good-way-out.jpg" },
+            .{ .id = 5, .path = "assets/art/glass-flowers.jpg" },
+            .{ .id = 6, .path = "assets/art/night-bloom.jpg" },
+            .{ .id = 7, .path = "assets/art/motion-picture.jpg" },
+            .{ .id = 8, .path = "assets/art/channel-surfing.jpg" },
+        },
+    },
     .shortcuts = .{
         .{ .id = "deck.play-pause", .key = "p", .modifiers = .{"primary"} },
         .{ .id = "deck.next", .key = "arrowright", .modifiers = .{"primary"} },
@@ -23,7 +38,6 @@
                 .height = 264,
                 .resizable = false,
                 .titlebar = "chromeless",
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .views = .{
                     .{ .label = "deck-canvas", .kind = "gpu_surface", .fill = true, .role = "Deck canvas", .accessibility_label = "Deck music player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },

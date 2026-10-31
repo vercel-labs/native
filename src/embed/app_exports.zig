@@ -5,7 +5,19 @@
 //! (window 1, label "mobile-surface").
 
 const native_sdk = @import("native_sdk");
+const mobile_build_options = @import("mobile_build_options");
+const relational_migrations = @import("relational_migrations");
 
 comptime {
-    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHost(@import("app")));
+    native_sdk.embed.exportMobileCApi(native_sdk.embed.UiAppHostWithStorageCredentialsAndImages(
+        @import("app"),
+        mobile_build_options.store_capability,
+        mobile_build_options.relational_capability,
+        &relational_migrations.migrations,
+        mobile_build_options.credentials_capability,
+        mobile_build_options.credentials_permission,
+        mobile_build_options.filesystem_permission,
+        mobile_build_options.credentials_service,
+        mobile_build_options.max_image_pixel_bytes,
+    ));
 }

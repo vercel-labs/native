@@ -1,0 +1,39 @@
+<!-- A compact tour of the five record-store commands. The core boots with a
+     prefix scan, while these controls demonstrate an atomic batch, one-key
+     get/set/delete, and another scan without exposing paths or SQL. -->
+<column background="background" padding="28" gap="20">
+  <column gap="6">
+    <text size="display">Record Store</text>
+    <text foreground="text_muted" wrap="true">Independent byte records, routed back through Msg. Close and reopen the app to see that the values remain in the engine-owned app-data database.</text>
+  </column>
+
+  <panel padding="18" background="surface" radius="lg">
+    <column gap="12">
+      <row cross="center">
+        <text grow="1">Records under drafts/</text>
+        <badge variant="secondary">{recordCount}</badge>
+      </row>
+      <separator />
+      <if test="{present}">
+        <column gap="6">
+          <text size="sm" foreground="text_muted">drafts/current</text>
+          <text wrap="true">{current}</text>
+        </column>
+      </if>
+      <else>
+        <text foreground="text_muted">Load drafts/current to inspect its value.</text>
+      </else>
+    </column>
+  </panel>
+
+  <row gap="10">
+    <button variant="primary" on-press="seed">Seed atomically</button>
+    <button variant="outline" on-press="load">Load current</button>
+    <button variant="outline" on-press="save">Save current</button>
+    <button variant="destructive" on-press="remove">Delete current</button>
+    <button variant="ghost" on-press="refresh">Refresh count</button>
+  </row>
+
+  <spacer grow="1" />
+  <status-bar>{status}</status-bar>
+</column>

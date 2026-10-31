@@ -1,0 +1,50 @@
+<!-- The inbox view. Compiled into the binary and, in dev, watched and
+     hot-reloaded: edit this file while `native dev` is running (a Debug
+     build - release builds compile the watcher out) and the window
+     updates without losing task state. -->
+<column background="background">
+  <!-- The header IS the titlebar (tall hidden-inset chrome): it is the
+       window's drag surface, leads with a spacer sized to the traffic
+       lights via on_chrome, and matches its height to the titlebar band
+       so its controls and the lights share a centerline. -->
+  <!-- Band contents: Clear done holds the trailing corner only while
+       there is something to clear — availability is shown by presence,
+       not by a permanently dead button — and the rest of the band stays
+       bare drag surface. -->
+  <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Inbox header">
+    <spacer width="{chrome_leading}" />
+    <spacer grow="1" />
+    <if test="{hasDone}">
+      <button variant="ghost" on-press="clear_done">Clear done</button>
+    </if>
+  </row>
+  <separator />
+  <column grow="1" gap="12" padding="16">
+    <row gap="8" cross="center">
+      <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
+      <button variant="primary" on-press="add">Add task</button>
+    </row>
+    <tabs>
+      <for each="filters" as="f">
+        <button size="sm" selected="{f == filter}" on-press="set_filter:{f}">{f}</button>
+      </for>
+    </tabs>
+    <scroll grow="1">
+      <column gap="2">
+        <for each="visible" key="id" as="t">
+          <!-- The composite list row: one hit target whose right-click
+               carries the row's menu; the checkbox child keeps its own
+               press. -->
+          <list-item gap="8" padding="6" label="{t.title}">
+            <checkbox checked="{t.done}" on-toggle="toggle:{t.id}" label="Done" />
+            <text grow="1">{t.title}</text>
+            <context-menu>
+              <menu-item on-press="toggle:{t.id}">Toggle done</menu-item>
+            </context-menu>
+          </list-item>
+        </for>
+      </column>
+    </scroll>
+  </column>
+  <status-bar>{openCount} open · {doneCount} done</status-bar>
+</column>

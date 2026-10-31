@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.theme-policy",
+  "name": "theme-policy",
+  "display_name": "Palette Studio",
+  "description": "Model-owned palettes, appearance, and accents.",
+  "version": "0.1.0",
+  "platforms": [
+    "macos",
+    "linux"
+  ],
+  "permissions": [
+    "view",
+    "command"
+  ],
+  "capabilities": [
+    "native_views",
+    "gpu_surfaces"
+  ],
+  "shell": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Palette Studio",
+        "width": 680,
+        "height": 600,
+        "views": [
+          {
+            "label": "main-canvas",
+            "kind": "gpu_surface",
+            "fill": true,
+            "role": "Palette studio canvas",
+            "accessibility_label": "Palette Studio",
+            "gpu_backend": "metal",
+            "gpu_pixel_format": "bgra8_unorm",
+            "gpu_present_mode": "timer",
+            "gpu_alpha_mode": "opaque",
+            "gpu_color_space": "srgb",
+            "gpu_vsync": true
+          }
+        ]
+      }
+    ]
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": [
+        "zero://app",
+        "zero://inline"
+      ],
+      "external_links": {
+        "action": "deny"
+      }
+    }
+  },
+  "web_engine": "system",
+  "cef": {
+    "dir": "third_party/cef/macos",
+    "auto_install": false
+  },
+  "theme": "geist",
+  "theme_accent": "#5865f2"
+}

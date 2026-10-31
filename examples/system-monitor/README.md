@@ -1,70 +1,45 @@
-# Native SDK system monitor example
+# Native SDK system monitor example (TypeScript)
 
-A live CPU / memory / process monitor built to showcase the effects channel: a repeating `fx.startTimer` tick spawns the OS's own commands through `fx.spawn` (collect mode), `update` parses their stdout with pure fixture-tested parsers, and the UI derives everything from the model — stat tiles with 60-sample `ui.chart` sparklines, a top-CPU process table with search and sort toggles, and a context-menu SIGTERM action behind a real confirmation dialog. Zero third-party services; the "backend" is `ps`, `vm_stat`, and `sysctl`.
+The live CPU / memory / process monitor authored entirely in **TypeScript + Native markup**. Zero Zig: the logic tier is the app-core subset under `src/`, compiled to native code at build time; `src/app.native` is the whole view tier and `app.zon` the manifest. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
 
-## The sampling loop (the showcase)
+The core is a multi-module reference split of the app-core subset's import-graph support:
 
-Every 2 seconds a repeating timer effect fires and `update` spawns two commands in `.collect` mode:
+- `src/core.ts` — the entry module: Model, Msg, update, subscriptions, the chromeMsg channel, and every exported binding helper (the app's public face — markup and node both see exactly its exports).
+- `src/parsers.ts` — the pure byte parsers over the sampler tools' output (`ps`, `vm_stat`, `/proc/meminfo`, the probes), the integer number tier (`intDiv`), and the byte/format helpers.
+- `src/table.ts` — the process table's search/sort/row-formatting machinery; type-imports `Model` from the entry (the legal back-edge shape).
+- `@native-sdk/core/text` — the SDK's byte-splice text engine, compiled in for the filter field's caret/selection/IME fidelity.
 
-- `/bin/ps axo pid=,pcpu=,pmem=,rss=,etime=,comm=` — the shared process list. One invocation yields the top-CPU table rows, the exact process count, the summed %cpu (normalized by core count for the CPU tile — honest label: ps %cpu is a per-process decaying average, so this is a smooth load figure), and the uptime, read from pid 1's elapsed time (launchd/init started at boot, so its `etime` IS the uptime — no wall-clock math, no extra command).
-- the per-OS memory command, switched at comptime: macOS parses `vm_stat` (used = active + wired + compressor pages) against a boot-time `sysctl hw.memsize` total; Linux parses `/proc/meminfo` (`MemTotal - MemAvailable`, totals included). Other OSes get no sampler and the status bar says so instead of pretending.
-
-A tick that lands while the previous spawns are still running is **skipped and counted** (`ticks_skipped`, shown in the status bar) — overlapping two `ps` runs would only add the load this app measures. Boot also runs one host-info spawn (`sysctl -n hw.ncpu hw.memsize` / `nproc`) and an eager first sample so the window never sits empty for a full interval. Pause/resume cancels and re-arms the timer through the same message the toolbar chip presses.
-
-## Sparklines
-
-Each charted stat keeps 60 samples (a 2-minute window at the 2 s cadence), shifted in place. The charts are markup `<chart>` elements (`src/spark_*.native`, one compiled fragment per tile) lowered through the chart primitive — series drawn through the vector path pipeline with token colors, so they re-theme with the palette, invalidate on data changes, and report series semantics in automation snapshots. CPU and memory draw zero-baseline **bars** pinned to the absolute 0..1 domain (`y-min="0" y-max="1"`); the process count draws a filled **area** against the chart's auto domain (the window's own min..max), since counts have no natural ceiling and an absolute scale would render a featureless block. The series bind model fns (`cpuSpark`/`memSpark`/`procSpark`) that pad short histories with leading NaN — missing samples draw nothing — so the trace enters from the right like a scope. (This app originally hand-built the sparklines as sixty bar widgets per tile because three 60-point polylines blew the old 128 path-elements-per-view budget; the chart primitive plus the 2048 budget retired that idiom, and the markup chart element then retired the Zig sparkline view.)
-
-## Terminating a process (safety, documented)
-
-Right/ctrl-click a table row for the native context menu. **Terminate (SIGTERM)…** never signals directly: it opens a confirmation dialog naming the process and pid (copied into the model at request time, so a later sample can never retarget a confirmation you are reading). Confirming spawns exactly `/bin/kill -TERM <pid>` — the polite, catchable request. There is no SIGKILL anywhere in this app. A refused kill (not your process) lands as a status note, never a crash. The scrim cancels on click; the dialog body absorbs presses so a click inside it never falls through to the cancel.
-
-## The settings window (model-declared)
-
-**Settings** opens the standard way — the app menu's Settings item or its keyboard shortcut (primary+comma, registered in `app.zon` under `.shortcuts` and mapped to `.open_settings` in `main.zig`'s `command`) — in its own fixed-size window; there is no in-window settings button. It is the model-declared window pattern: `windows_fn` declares the window descriptor while `model.settings_open` is set, `window_view` renders `settingsView` (one grouped form row: the sampling switch with its cadence facts) from the same model as the main canvas, so flipping the switch updates both windows on one dispatch — live, no Apply step — and a system appearance change rethemes both canvases through `on_appearance`. Close it with the window's close button — the platform close dispatches `.settings_closed` and the model clears its flag. Automation drives it like any canvas: `native automate shortcut monitor.settings` opens it through the real command path, its widgets are in the snapshot, and `widget-click settings-canvas <id>` works while it is open.
-
-## Authoring split (markup-first)
-
-- `src/header.native` — brand and the live/paused status line holding the trailing corner (the status line itself is an imported component, `src/header_status.native`). The app follows the system appearance; there is no in-window theme control. All four markup fragments — the header and the sparklines — are registered with the runtime's fragment watch in `main.zig`, so a Debug `native dev` run hot reloads any of them (or the imported status component) on save.
-- `src/spark_cpu.native`, `src/spark_mem.native`, `src/spark_proc.native` — the three sparkline charts, one `<chart>` fragment per stat tile, built into the Zig tile chrome as ordinary children.
-- `src/view.zig` — the Zig sections: stat tiles, the toolbar (every control on the `.sm` register so the row renders one height — pause/resume button with its inline play/pause icon, filter field with the search component's own built-in clear affordance, sort toggles), the process table as flat `list_item` rows under a hairline-separated heading (one surface, full-width hover washes, per-row context menus) with a controlled scroll (the model echoes the applied offset, so the 2 s sample rebuild never resets it mid-gesture), and the modal confirmation overlaid through a z-stack root.
-- `src/sampler.zig` — the pure parsers and per-OS command lines; no effects, no allocation.
-- `src/model.zig` — sampling state, history, table derivations, `update`, `boot`.
-- `src/theme.zig` — the teal/slate "ops room" token set for both modes, derived live from the system appearance; high-contrast falls back to the framework palettes.
-
-## Fixtures (committed real output)
-
-`src/fixtures/ps.txt`, `vm_stat.txt`, and `sysctl.txt` are a real capture from a macOS machine (10 cores, 32 GiB). The ps capture was reduced to its system rows (`/sbin`, `/usr`, `/bin`, `/System` — 561 of the original 644) so no user-account processes are committed; what remains is verbatim, including real spaces-in-path commands. `ps-edge.txt` is constructed (stated here, not passed off as a capture) to pin the edge cases a quiet capture cannot: day-form etimes, un-pathed names with spaces, a garbage line that must count as skipped. The Linux `/proc/meminfo` parser test uses a constructed sample in the documented shape for the same reason — no Linux capture machine here.
-
-## Fixed capacities
-
-- 60 history samples per charted stat; 2 s cadence.
-- 128 top-CPU rows kept per sample (an exact top-K selection over the full ps output — never "the first 128 lines"; count and CPU sum still cover every process). 14 rows shown in the table.
-- 48-byte process names (display cut, never dropped), 32-byte search buffer, 160-byte status note.
-- 3 context-menu entries per row x 14 rows = 42 of the 128 per-view budget.
-- Widget tree peaks around 140 nodes of the 1024 per-view budget (the chart retrofit collapsed three 60-bar sparklines into 3 leaves).
-
-## Run
+Everything the Zig monitor's core does is here: the 2 s sampling cadence as a declarative `Sub.timer` that exists exactly while sampling is live, collect-mode `Cmd.spawn` for the OS's own commands (`ps axo pid=,pcpu=,pmem=,rss=,etime=,comm=` shared across platforms, `vm_stat` or `/proc/meminfo` for memory, a boot host-info probe), pure byte parsers over the collected stdout (fixture-proven against the committed real captures), skipped-tick accounting (a tick that lands mid-spawn is counted, never overlapped), the exact top-128-by-CPU row selection with the full count and CPU sum still covering every process, uptime from pid 1's elapsed time, 60-sample NaN-padded sparkline windows drawn by markup `<chart>` elements, the search/sort/filter table on the real table register with controlled scroll, the confirmed SIGTERM context-menu action (`/bin/kill -TERM <pid>` — no SIGKILL anywhere), Copy Name onto the clipboard, the journaled `Cmd.now` sample timestamp, the honest no-sampler empty state, and the tall hidden-inset titlebar header driven by the `chromeMsg` channel.
 
 ```sh
-native dev
+native dev                                    # run the real app
+native dev --core --script dev-script.ndjson  # the core-logic loop under node - no renderer
+native check                                  # subset-check the core's import graph + markup + app.zon
+native test -Dplatform=null                   # the hermetic suite
 ```
 
-Watch the tiles fill in, filter the table, flip the sort chips, pause and resume sampling. Right-click a row you own (a `sleep 600 &` makes a safe target) and confirm the SIGTERM.
+The end-to-end proof battery lives in the SDK repo (`tests/ts-core/system_monitor_e2e_tests.zig`, run by `zig build test-ts-core-e2e`): it drives this example's real core and shipping markup headlessly through the boot probe, scripted sampler outputs (the committed `ps`/`vm_stat`/`sysctl` captures and its constructed edge fixture), the timer cadence with pause/resume, search, sorting, the kill round trip, the no-sampler state, and record→replay.
 
-Run the deterministic suite (fixture parsers, the sampling loop through the fake effects executor with TestClock timestamps, the history ring, sort/search/kill through typed dispatch, theming, markup parity, snapshot assertions, and the exact-frame tile layout):
+## The wiring channels this port uses
 
-```sh
-native test -Dplatform=null
-```
+- **`chromeMsg`** — the tall hidden-inset titlebar geometry lands in the model: the header row leads with a spacer sized to the traffic lights and matches its height to the band, exactly like the Zig original's `on_chrome`.
+- **`Sub.timer`** — the sampling cadence is declarative: `subscriptions(model)` returns the 2 s timer while the probe has answered and sampling is live; pause reconciles it away, resume re-arms it (and samples eagerly on the same dispatch).
+- **`Cmd.spawn` (collect mode)** — every sampler run delivers its whole stdout on the exit arm; a truncated block routes the err arm and never parses as whole.
+- **`Cmd.now`** — the applied sample's wall-clock stamp is a journaled clock read, so recorded sessions replay the same "sampled at" time.
+- **`windows(model)`** — the standard Settings command and primary+comma shortcut set model state, which declares `src/windows/settings.native`; its `.quit` close routes `monitor.settings.closed` through `commandMsg` and clears the declaration.
 
-The suite also carries an env-gated screenshot renderer (`SYSTEM_MONITOR_SHOTS=1`, skipped by default): it replays real `ps`/`vm_stat` captures through the normal update path and renders both themes OFFSCREEN through the deterministic reference renderer — no live window, no screen access, no macOS screen-recording permission. See the test's comment for the capture loop.
+## Where this port still deliberately differs from the Zig system-monitor
 
-Verify live through the automation harness:
+Every remaining divergence is a decided posture, listed here on purpose:
 
-```sh
-native build -Dautomation=true
-./zig-out/bin/system-monitor &
-native automate assert 'gpu_nonblank=true' 'role=button name="Pause or resume sampling"' 'name="CPU tile"'
-native automate screenshot monitor-canvas
-```
+- **The OS is probed at runtime, not switched at comptime.** A TS core has no comptime OS, so boot spawns `sysctl -n hw.ncpu hw.memsize`; a clean answer means macOS conventions (vm_stat), falling through to `nproc` means Linux (/proc/meminfo), and both failing is the honest "no sampler for this OS" state — the same empty state, discovered instead of compiled in. The probe also carries the host facts the Zig original fetched in its boot spawn.
+- **Theme comes from app.zon, not a tokens_fn.** The Zig original derives a custom teal/slate "ops room" token set; a TS app owns no tokens_fn, so this port keeps the house register (composed with the live system appearance — light/dark still follows the OS with no core code). Full brand-token fidelity is the register-token tier, out of the three-file shape by design.
+- **CPU numbers live in tenths of a percent, as integers.** The number tier splits integer and float domains, so `%cpu` parses to integer tenths (lossless for ps output, which prints one decimal) and the tile derives its display and sparkline fraction from them. A hypothetical tool printing more decimals would round at the second decimal where the Zig f32 parse would keep it; sort order can tie where sub-tenth values would have ordered.
+- **Display rounding is round-half-up.** `formatBytes` and the percent labels round with integer math; Zig's `{d:.1}`/`{d:.0}` can differ in the last digit on exact halfway ties, which the real samplers do not produce.
+- **A truncated ps block drops the sample whole.** The Zig original parses the first 512 KiB and counts one failure; collect-mode spawn routes `truncated` through the err arm with no payload, so this port notes the failure and keeps the previous sample — a cut block never parses as whole.
+- **The sample timestamp lands one dispatch later.** `fx.wallMs` is a same-dispatch journaled read; the TS analogue is a `Cmd.now` round trip after the sample commits. Same journal, same replay determinism, one extra Msg.
+- **Copy Name is fire-and-forget.** `Cmd.clipboardWrite` has no result routing, so the status note reports the request; the Zig original notes the confirmed outcome.
+- **Row presses are absorbed by a no-op arm.** Markup context menus need a pressable host, so each table row binds `on-press="row_pressed"`; the Zig builder's `data_row` is its own hit target and needs none.
+- **The kill confirmation's scrim is the `scrim` token.** The Zig original's cancel catcher is a fully transparent panel under the dialog chrome's scrim; markup panels take token backgrounds, so the catcher wears the scrim wash itself (the `notes` example's shipped overlay idiom).
+- **Fragment hot reload covers the whole view.** The Zig original registers four compiled fragments; here `src/app.native` is the entire view tier and `native dev` hot-reloads it as one document.
+- **Desktop only.** TypeScript cores build desktop apps today; there was no phone shell to port.

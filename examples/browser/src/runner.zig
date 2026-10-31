@@ -26,6 +26,10 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -118,6 +122,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (@hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y")) .explicit else .default,
     };
 }
 
@@ -188,31 +193,32 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
 fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     try runRuntime(app, options, init, null_platform.platform());
 }
 
 fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(1120, 780), webEngine(), app_info);
-    defer mac_platform.deinit();
+    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(1120, 780), webEngine(), app_info);
+    defer mac_platform.destroy();
     try runRuntime(app, options, init, mac_platform.platform());
 }
 
 fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(960, 720), webEngine(), app_info);
-    defer linux_platform.deinit();
+    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(960, 720), webEngine(), app_info);
+    defer linux_platform.destroy();
     try runRuntime(app, options, init, linux_platform.platform());
 }
 
 fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) !void {
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(960, 720), webEngine(), app_info);
-    defer windows_platform.deinit();
+    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(960, 720), webEngine(), app_info);
+    defer windows_platform.destroy();
     try runRuntime(app, options, init, windows_platform.platform());
 }
 

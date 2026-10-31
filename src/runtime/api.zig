@@ -1,12 +1,14 @@
 const std = @import("std");
 const trace = @import("trace");
 const canvas = @import("canvas");
+const geometry = @import("geometry");
 const automation = @import("../automation/root.zig");
 const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 const runtime_effects = @import("effects.zig");
+const canvas_limits = @import("canvas_limits.zig");
 const runtime_session_record = @import("session_record.zig");
 const runtime_view = @import("view.zig");
 const security = @import("../security/root.zig");
@@ -26,6 +28,7 @@ pub const CommandEvent = struct {
     source: CommandSource = .runtime,
     window_id: platform.WindowId = 0,
     view_label: []const u8 = "",
+    status_item_id: platform.StatusItemId = 0,
     tray_item_id: platform.TrayItemId = 0,
 };
 
@@ -37,6 +40,7 @@ pub const CommandSource = enum {
     shortcut,
     toolbar,
     tray,
+    notification,
     native_view,
     bridge,
 };
@@ -64,11 +68,12 @@ pub const CanvasWidgetPointerEvent = struct {
     /// cursor, and text selection stay on `target`.
     press_target: ?canvas.WidgetHit = null,
     route: []const canvas.WidgetEventRouteEntry = &.{},
-    /// A text edit this pointer gesture performed on `target` (the
-    /// search field's built-in clear affordance). The runtime already
-    /// applied it (the optimistic echo; the source tree is truth on the
-    /// next rebuild); `UiApp` maps it through the tree's handler table
-    /// to the field's `on_input` Msg so a model-owned buffer clears too.
+    /// A text edit this pointer gesture performed on `target` (an
+    /// editable field's caret/selection move, or the search field's
+    /// built-in clear affordance). The runtime already applied it (the
+    /// optimistic echo; the source tree is truth on the next rebuild);
+    /// `UiApp` maps it through the tree's handler table to the field's
+    /// `on_input` Msg so a model-owned buffer stays in lockstep too.
     edit: ?canvas.TextInputEvent = null,
 };
 
@@ -78,6 +83,30 @@ pub const CanvasWidgetKeyboardEvent = struct {
     keyboard: canvas.WidgetKeyboardEvent,
     target: ?canvas.WidgetFocusTarget = null,
     route: []const canvas.WidgetEventRouteEntry = &.{},
+    /// This committed-text payload came from terminal Paste (the
+    /// clipboard shortcut or context menu), not ordinary typing or IME
+    /// input. UiApp routes it through the emulator's paste encoder
+    /// (bracketed-paste framing, newline normalization, and unsafe-
+    /// control stripping) before writing it to the pty.
+    terminal_paste: bool = false,
+    /// True when this event is dispatched OUTSIDE a gpu-surface input
+    /// cycle — the accessibility selection edits and the default
+    /// context-menu cut/paste/select-all, which have no terminal
+    /// `gpu_surface_input` dispatch following them. The ui-app layer's
+    /// hover drain, which normally defers mid-cycle keyboard events to
+    /// that terminal dispatch, drains standalone ones at their own
+    /// tail so an edit that unmounts the hovered listener never
+    /// strands its leave.
+    standalone: bool = false,
+    /// Continuation edits replay an existing history entry and must not
+    /// themselves create a new entry.
+    history_replay: bool = false,
+    /// Stable retained-history identity for a compound undo/redo. Follow-up
+    /// edits are re-derived from this entry after every controlled-tree
+    /// rebuild instead of retaining borrowed slices into the compactable
+    /// history byte pool.
+    history_replay_serial: u64 = 0,
+    history_replay_redo: bool = false,
 };
 
 /// A scroll container's offset changed from a user gesture (wheel,
@@ -202,6 +231,38 @@ pub const CanvasWidgetContextMenuEvent = struct {
     view_label: []const u8,
     target_id: canvas.ObjectId,
     item_index: usize,
+    /// The resolved request's correlation token. When it matches a
+    /// `canvas_widget_context_menu_shown` snapshot, `UiApp` resolves the
+    /// selection against that snapshot — never the live tree, which may
+    /// have rebuilt (and reordered or re-mapped the items) while the
+    /// asynchronous menu was open. A token without a snapshot (the
+    /// automation verb's direct dispatch, which validates against the
+    /// live tree itself) resolves through the live tree.
+    token: u64 = 0,
+};
+
+/// A widget's app-declared context menu was handed to the native
+/// presenter. `UiApp` answers by snapshotting the shown items' dispatch
+/// payloads keyed by `token`: presentation is asynchronous (GTK
+/// popovers outlive event dispatch), so the selection must resolve
+/// against what the user SAW, not the tree at selection time.
+pub const CanvasWidgetContextMenuShownEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    target_id: canvas.ObjectId,
+    token: u64,
+    item_count: usize,
+};
+
+/// The presented app-declared context menu closed WITHOUT a selection.
+/// `UiApp` answers by disarming the matching token's snapshot and
+/// releasing the presented build's pinned storage — without this
+/// notice, a dismissed menu's pin would hold that storage until the
+/// next presentation.
+pub const CanvasWidgetContextMenuDismissedEvent = struct {
+    window_id: platform.WindowId = 1,
+    view_label: []const u8,
+    token: u64,
 };
 
 /// A right/ctrl-click landed on a widget with a declared context menu,
@@ -213,6 +274,10 @@ pub const CanvasWidgetContextMenuRequestEvent = struct {
     window_id: platform.WindowId = 1,
     view_label: []const u8,
     target_id: canvas.ObjectId,
+    /// The secondary click's pointer location (view-local canvas points):
+    /// the fallback surface anchors here — like a native menu — not at a
+    /// target-widget edge.
+    point: geometry.PointF = .{},
 };
 
 /// A window the RUNTIME knew as open was closed by the platform — the
@@ -269,6 +334,12 @@ pub const Event = union(enum) {
     /// tick, completion, failure): the ui-app layer routes it back
     /// through `Effects.takeAudioMsg` into the app's `on_event` Msg.
     audio: platform.AudioEvent,
+    /// A platform video player report (load acknowledgment with
+    /// dimensions, position tick, completion, failure): routed back
+    /// through `Effects.takeVideoMsg` into the app's `on_event` Msg.
+    /// Pixels never ride events — frames feed the media-surface
+    /// texture channel platform-side.
+    video: platform.VideoEvent,
     files_dropped: platform.FileDropEvent,
     gpu_surface_frame: GpuSurfaceFrameEvent,
     gpu_surface_resized: GpuSurfaceResizeEvent,
@@ -279,6 +350,8 @@ pub const Event = union(enum) {
     canvas_widget_file_drop: CanvasWidgetFileDropEvent,
     canvas_widget_drag: CanvasWidgetDragEvent,
     canvas_widget_context_menu: CanvasWidgetContextMenuEvent,
+    canvas_widget_context_menu_shown: CanvasWidgetContextMenuShownEvent,
+    canvas_widget_context_menu_dismissed: CanvasWidgetContextMenuDismissedEvent,
     canvas_widget_context_menu_request: CanvasWidgetContextMenuRequestEvent,
     canvas_widget_dismiss: CanvasWidgetDismissEvent,
     canvas_widget_context_press: CanvasWidgetContextPressEvent,
@@ -296,6 +369,7 @@ pub const Event = union(enum) {
             .timer => "timer",
             .effects_wake => "effects_wake",
             .audio => "audio",
+            .video => "video",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",
             .gpu_surface_resized => "gpu_surface_resized",
@@ -306,6 +380,8 @@ pub const Event = union(enum) {
             .canvas_widget_file_drop => "canvas_widget_file_drop",
             .canvas_widget_drag => "canvas_widget_drag",
             .canvas_widget_context_menu => "canvas_widget_context_menu",
+            .canvas_widget_context_menu_shown => "canvas_widget_context_menu_shown",
+            .canvas_widget_context_menu_dismissed => "canvas_widget_context_menu_dismissed",
             .canvas_widget_context_menu_request => "canvas_widget_context_menu_request",
             .canvas_widget_dismiss => "canvas_widget_dismiss",
             .canvas_widget_context_press => "canvas_widget_context_press",
@@ -322,10 +398,16 @@ pub const Event = union(enum) {
 /// switches the app's effects channel into replay mode (fake executor,
 /// journaled results as the only terminal source) before the first
 /// replayed event; `.feed` delivers one journaled effect result into
-/// the stub executor's pending request with the matching key.
+/// the stub executor's pending request with the matching key; `.finish`
+/// runs the end-of-journal consistency checks and must ERROR if any
+/// journaled feed went unconsumed, any replayed read outran the
+/// journal, or any queued record was never claimed by the load it
+/// named — divergence a fingerprint checkpoint cannot see because the
+/// optimistic answer changed no state.
 pub const ReplayControl = union(enum) {
     arm,
     feed: runtime_effects.EffectResultRecord,
+    finish,
 };
 
 pub fn App(comptime Runtime: type) type {
@@ -343,6 +425,35 @@ pub fn App(comptime Runtime: type) type {
         source: platform.WebViewSource = platform.WebViewSource.html(""),
         source_fn: ?SourceFn = null,
         scene_fn: ?SceneFn = null,
+        /// Portable shell frame planning. Results are copied into native
+        /// storage before any OS operation; the owning core cycle resets.
+        shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+        view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+        window_lifecycle_policy: ?*const fn ([]const u8, []u8) usize = null,
+        image_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+        font_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+        shell_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+        shell_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+        system_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+        bridge_descriptor_policy: ?*const fn ([]const u8, []u8) usize = null,
+        authorization_policy: ?*const fn ([]const u8, []u8) usize = null,
+        builtin_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+        automation_command_policy: ?*const fn ([]const u8, []u8) usize = null,
+        automation_interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
+        snapshot_policy: ?*const fn ([]const u8, []u8) usize = null,
+        host_flow_policy: ?*const fn ([]const u8, []u8) usize = null,
+        /// Portable command routing and status-item selection. Native retains
+        /// registry bytes, exact handles and OS capability execution.
+        command_policy: ?*const fn ([]const u8, []u8) usize = null,
+        context_menu_policy: ?*const fn ([]const u8, []u8) usize = null,
+        text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+        render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+        render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+        render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+        replay_policy: ?*const fn ([]const u8, []u8) usize = null,
+        recording_policy: ?*const fn ([]const u8, []u8) usize = null,
+        blob_policy: ?*const fn ([]const u8, []u8) usize = null,
+        render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
         start_fn: ?StartFn = null,
         event_fn: ?EventFn = null,
         stop_fn: ?StopFn = null,
@@ -384,6 +495,26 @@ pub fn App(comptime Runtime: type) type {
 
 pub const Options = struct {
     platform: platform.Platform,
+    /// Allocator for the runtime's on-demand storage (registered
+    /// canvas font bytes, sized per file at registration; registered
+    /// canvas image slot buffers, one slot-budget buffer per used slot
+    /// allocated at the slot's first registration; and adopted
+    /// media-surface texture buffers, one frame-budget buffer per
+    /// texture entry allocated at first adoption — a runtime with no
+    /// registered fonts, no registered images, and no media producers
+    /// allocates nothing; the fixed-capacity per-view storage stays
+    /// embedded in the Runtime struct). The default suits process-lifetime runtimes; embedders
+    /// that create and destroy runtimes in one process (tests, the docs
+    /// wasm preview host) pass their own and call `Runtime.deinit`. The
+    /// runtime captures this into its `owned_allocator` at init:
+    /// mutating `options.allocator` on a live runtime retargets
+    /// nothing — pick the owning allocator here, before init.
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    /// Runtime-frozen registered-image pixel budget. The standard app
+    /// runner reads this from app.zon's `.images.max_image_pixel_bytes`;
+    /// custom runners may set it directly. Storage remains lazy per used
+    /// slot, so raising the budget reserves nothing by itself.
+    max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     trace_sink: ?trace.Sink = null,
     log_path: ?[]const u8 = null,
     extensions: ?extensions.ModuleRegistry = null,
@@ -395,7 +526,31 @@ pub const Options = struct {
     shortcuts: []const platform.Shortcut = &.{},
     automation: ?automation.Server = null,
     window_state_store: ?window_state.Store = null,
+    /// Engine-owned record-store service. The app runner sets this only
+    /// when app.zon declares the `store` capability; replay leaves it null
+    /// because journaled effect results are the whole external world.
+    record_store: ?runtime_effects.RecordStoreBinding = null,
+    /// Engine-owned relational database, installed only for the `sqlite`
+    /// capability. Replay keeps it null and feeds journaled DB results.
+    relational_store: ?runtime_effects.RelationalStoreBinding = null,
+    /// Whether the app declared the `credentials` capability. Permission is
+    /// checked separately; both gates must be open before core effects may
+    /// reach the platform keychain.
+    credentials_enabled: bool = false,
+    /// Raw-file policy resolved by the app runner. Six app-owned roots are
+    /// allowed without a grant; `filesystem` opens arbitrary paths.
+    /// Standard runners install the six resolved app-owned roots here. If a
+    /// custom runner omits the binding, UiApp fails closed with no exempt roots
+    /// while still honoring an explicit `filesystem` permission.
+    file_access: ?runtime_effects.FileAccessBinding = null,
     js_window_api: bool = false,
+    /// Whether this build ships the embedded web layer. The app runner
+    /// sets it from the build graph's app.zon inference (declare-to-use:
+    /// a .frontend block, the "webview" capability, or a .shell webview
+    /// view). When false, every webview-creating path fails fast with
+    /// `error.WebViewLayerNotBuilt` and its teaching message instead of
+    /// reaching a platform host whose web layer was compiled out.
+    web_layer: bool = true,
     gpu_surface_frame_diagnostics: bool = true,
     /// Pixels-only presentation hosts (the mobile embed host) opt in to
     /// keeping the view's keyed command mirror alive across PIXEL

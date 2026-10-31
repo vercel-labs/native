@@ -14,6 +14,8 @@ const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const textSpansEqual = @import("text_spans.zig").textSpansEqual;
 const chartDataEqual = @import("chart.zig").chartDataEqual;
+const change_policy = @import("widget_change_policy.zig");
+const paint_policy = @import("widget_paint_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -37,6 +39,7 @@ const strokeBounds = drawing_model.strokeBounds;
 const shadowBounds = drawing_model.shadowBounds;
 const rectsEqual = equality_model.rectsEqual;
 const optionalRectsEqual = equality_model.optionalRectsEqual;
+const optionalSizesEqual = equality_model.optionalSizesEqual;
 const sizesEqual = equality_model.sizesEqual;
 const insetsEqual = equality_model.insetsEqual;
 const optionalColorsEqual = equality_model.optionalColorsEqual;
@@ -54,7 +57,7 @@ const controlStrokeWidth = widget_render.controlStrokeWidth;
 const componentControlVisualTokens = widget_render.componentControlVisualTokens;
 const surfaceControlVisualTokens = widget_render.surfaceControlVisualTokens;
 const buttonStrokeWidth = widget_render.buttonStrokeWidth;
-const selectControlVisualTokens = widget_render.selectControlVisualTokens;
+const selectControlVisualTokens = @import("widget_render_style.zig").selectControlVisualTokensForWidget;
 const textInputControlVisualTokens = widget_render.textInputControlVisualTokens;
 const selectionControlVisualTokens = widget_render.selectionControlVisualTokens;
 const listItemControlVisualTokens = widget_render.listItemControlVisualTokens;
@@ -70,8 +73,15 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
 fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     var copy = widget;
     if (state.focused_id != null or state.focus_visible_id != null) {
-        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
-            copy.id != 0 and copy.id == focus_visible_id
+        // Keep dirty-bounds projection identical to display emission:
+        // menu rows paint logical focus as their active-row wash, while
+        // all focus-ring controls continue to follow focus-visible.
+        const painted_focus_id = if (copy.kind == .menu_item)
+            state.focused_id
+        else
+            state.focus_visible_id;
+        copy.state.focused = if (painted_focus_id) |focused_id|
+            copy.id != 0 and copy.id == focused_id
         else
             false;
     }
@@ -85,6 +95,11 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 }
 
 pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation) Error![]const WidgetInvalidation {
+    const previous_root_bounds = widget_render.widgetLayoutRootBounds(previous);
+    const next_root_bounds = widget_render.widgetLayoutRootBounds(next);
+    if (tokens.widget_change_policy orelse tokens.widget_paint_policy orelse change_policy.owner(next) orelse change_policy.owner(previous) orelse paint_policy.owner(next) orelse paint_policy.owner(previous)) |policy|
+        return diffWithPolicy(previous, next, tokens, output, policy, previous_root_bounds, next_root_bounds);
+    const root_bounds_dirty = !optionalRectsEqual(previous_root_bounds, next_root_bounds);
     // Id lookups ride the probe-table index whenever the trees are big
     // enough to be worth a table reset and fit its half-full bound;
     // otherwise the linear scans run as before. Same invalidations
@@ -94,9 +109,10 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
         next.nodes.len >= plan_key_index.min_entries_for_index) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, previous.nodes.len) and
         plan_key_index.fitsHashSlots(diff_widget_id_index_slots, next.nodes.len);
-    if (use_index) {
-        try buildDiffWidgetIdIndex(previous, &diff_previous_widget_id_index);
-        try buildDiffWidgetIdIndex(next, &diff_next_widget_id_index);
+    const id_scratch: ?*DiffWidgetIdScratch = if (use_index) diff_widget_id_scratch.get() else null;
+    if (id_scratch) |scratch| {
+        try buildDiffWidgetIdIndex(previous, &scratch.previous);
+        try buildDiffWidgetIdIndex(next, &scratch.next);
     } else {
         try validateUniqueWidgetIds(previous);
         try validateUniqueWidgetIds(next);
@@ -106,7 +122,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (previous.nodes, 0..) |previous_node, previous_index| {
         const id = previous_node.widget.id;
         if (id == 0) continue;
-        const next_lookup = if (use_index) findWidgetNodeByIdIndexed(next, &diff_next_widget_id_index, id) else findWidgetNodeById(next, id);
+        const next_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(next, &scratch.next, id) else findWidgetNodeById(next, id);
         const next_ref = next_lookup orelse {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .removed,
@@ -123,7 +139,16 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
             continue;
         };
 
-        var change = widgetChange(previous_node, next_ref.node, previous_index, next_ref.index, tokens);
+        var change = widgetChange(
+            previous_node,
+            next_ref.node,
+            previous_index,
+            next_ref.index,
+            tokens,
+            root_bounds_dirty and previous_node.parent_index == null and next_ref.node.parent_index == null,
+            previous_root_bounds,
+            next_root_bounds,
+        );
         if (previous_node.widget.semantics.hidden != next_ref.node.widget.semantics.hidden) {
             change.dirty_bounds = unionOptionalBounds(
                 unionOptionalBounds(
@@ -157,7 +182,7 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     for (next.nodes, 0..) |next_node, next_index| {
         const id = next_node.widget.id;
         if (id == 0) continue;
-        const previous_lookup = if (use_index) findWidgetNodeByIdIndexed(previous, &diff_previous_widget_id_index, id) else findWidgetNodeById(previous, id);
+        const previous_lookup = if (id_scratch) |scratch| findWidgetNodeByIdIndexed(previous, &scratch.previous, id) else findWidgetNodeById(previous, id);
         if (previous_lookup == null) {
             try appendWidgetInvalidation(output, &len, .{
                 .kind = .added,
@@ -175,6 +200,66 @@ pub fn diffWidgetLayoutTrees(previous: anytype, next: anytype, tokens: DesignTok
     }
 
     return output[0..len];
+}
+
+/// Change and paint owners exchange complete copied plans. The independent
+/// native geometry remains the reference for layouts without paint ownership.
+fn diffWithPolicy(previous: anytype, next: anytype, tokens: DesignTokens, output: []WidgetInvalidation, policy: change_policy.Policy, previous_root: ?geometry.RectF, next_root: ?geometry.RectF) Error![]const WidgetInvalidation {
+    const plan = change_policy.Plan.init(std.heap.page_allocator, policy, previous, next, previous_root, next_root, output.len) catch @panic("widget change allocation");
+    defer plan.deinit();
+    const geometry_owner = tokens.widget_paint_policy orelse paint_policy.owner(next) orelse paint_policy.owner(previous);
+    // The reference evaluates the overflowing entry's geometry before its
+    // append fails. Keep those font capability calls, but never write that
+    // entry into the caller's complete capacity-error prefix.
+    const overflow: ?change_policy.Plan = if (geometry_owner != null and plan.status == 2)
+        change_policy.Plan.init(std.heap.page_allocator, policy, previous, next, previous_root, next_root, output.len + 1) catch @panic("widget paint overflow allocation")
+    else
+        null;
+    defer if (overflow) |extra| extra.deinit();
+    if (overflow) |extra| {
+        if (extra.length != plan.length + 1 or !std.mem.eql(u8, plan.result[16 .. 16 + plan.length * 16], extra.result[16 .. 16 + plan.length * 16])) @panic("inconsistent compiled paint overflow prefix");
+    }
+    const damage: ?paint_policy.Plan = if (geometry_owner) |owner| paint_policy.Plan.diff(std.heap.page_allocator, owner, previous, next, tokens, previous_root, next_root, overflow orelse plan) catch @panic("widget paint allocation") else null;
+    defer if (damage) |owned| owned.deinit();
+    for (0..plan.length) |i| {
+        const entry = plan.entry(i);
+        const flags = entry.flags;
+        const bounds: ?geometry.RectF = if (damage) |owned| owned.bounds(i) else switch (entry.kind) {
+            .removed => blk: {
+                const p = entry.previous.?;
+                break :blk widgetClippedDirtyBounds(previous, p, unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetModalScrimBounds(previous, previous.nodes[p].widget, tokens)));
+            },
+            .added => blk: {
+                const n = entry.next.?;
+                break :blk widgetClippedDirtyBounds(next, n, unionOptionalBounds(widgetFullPaintBounds(next.nodes[n], tokens), widgetModalScrimBounds(next, next.nodes[n].widget, tokens)));
+            },
+            .changed => blk: {
+                const p = entry.previous.?;
+                const n = entry.next.?;
+                if (flags.visibility or flags.subtree) break :blk unionOptionalBounds(
+                    unionOptionalBounds(widgetVisibleSubtreeFullPaintBounds(previous, p, tokens), widgetModalScrimBounds(previous, previous.nodes[p].widget, tokens)),
+                    unionOptionalBounds(widgetVisibleSubtreeFullPaintBounds(next, n, tokens), widgetModalScrimBounds(next, next.nodes[n].widget, tokens)),
+                );
+                const paint_bounds = if (flags.root)
+                    unionOptionalBounds(unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetFullPaintBounds(next.nodes[n], tokens)), unionOptionalBounds(previous_root, next_root))
+                else if (flags.layout or flags.visibility or flags.layer)
+                    unionOptionalBounds(widgetFullPaintBounds(previous.nodes[p], tokens), widgetFullPaintBounds(next.nodes[n], tokens))
+                else if (flags.paint)
+                    widgetPaintChangeBounds(previous.nodes[p].widget, next.nodes[n].widget, tokens)
+                else
+                    null;
+                break :blk widgetChangedClippedDirtyBounds(previous, p, next, n, paint_bounds);
+            },
+        };
+        output[i] = .{ .kind = entry.kind, .id = if (entry.previous) |p| previous.nodes[p].widget.id else next.nodes[entry.next.?].widget.id, .previous_index = entry.previous, .next_index = entry.next, .dirty_bounds = bounds, .layout_dirty = flags.layout, .paint_dirty = flags.paint, .semantics_dirty = flags.semantics };
+    }
+    // The reference leaves the complete written prefix on capacity failure.
+    return switch (plan.status) {
+        0 => output[0..plan.length],
+        1 => error.DuplicateWidgetId,
+        2 => error.WidgetInvalidationListFull,
+        else => unreachable,
+    };
 }
 
 fn appendWidgetInvalidation(output: []WidgetInvalidation, len: *usize, invalidation: WidgetInvalidation) Error!void {
@@ -201,8 +286,14 @@ fn findWidgetNodeById(layout: anytype, id: ObjectId) ?WidgetNodeRef {
 /// bound; small or oversized trees keep the linear scans.
 const diff_widget_id_index_slots = 2048;
 const DiffWidgetIdIndex = plan_key_index.HashSlots(diff_widget_id_index_slots);
-threadlocal var diff_previous_widget_id_index: DiffWidgetIdIndex = .{};
-threadlocal var diff_next_widget_id_index: DiffWidgetIdIndex = .{};
+// Lazily heap-allocated per thread (16 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff widget trees never allocate it.
+const DiffWidgetIdScratch = struct {
+    previous: DiffWidgetIdIndex = .{},
+    next: DiffWidgetIdIndex = .{},
+};
+const diff_widget_id_scratch = @import("lazy_tls.zig").LazyTls(DiffWidgetIdScratch);
 
 /// Fill `table` with the keyed nodes' id->index mapping, erroring on the
 /// duplicate ids `validateUniqueWidgetIds` rejects — one pass does both
@@ -239,26 +330,60 @@ fn validateUniqueWidgetIds(layout: anytype) Error!void {
     }
 }
 
-fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_index: usize, next_index: usize, tokens: DesignTokens) WidgetInvalidation {
+/// Terminal bindings compare clean only while UNBOUND (matching pty and
+/// scrollback, no grid on either side): a bound grid is live emulator
+/// content whose snapshot may be republished at a new address or
+/// refreshed in place between diffs, so it always reports paint damage —
+/// conservative, never stale terminal pixels for partial-invalidation
+/// consumers; the command-level retained diff downstream still keeps the
+/// actual repaint row-shaped.
+fn terminalBindingClean(previous: widget_model.TerminalBinding, next: widget_model.TerminalBinding) bool {
+    if (previous.pty != next.pty or previous.scrollback != next.scrollback) return false;
+    return previous.grid == null and next.grid == null;
+}
+
+fn widgetChange(
+    previous: WidgetLayoutNode,
+    next: WidgetLayoutNode,
+    previous_index: usize,
+    next_index: usize,
+    tokens: DesignTokens,
+    root_bounds_dirty: bool,
+    previous_root_bounds: ?geometry.RectF,
+    next_root_bounds: ?geometry.RectF,
+) WidgetInvalidation {
+    const previous_diff_lines = previous.widget.codeDiffLines();
+    const next_diff_lines = next.widget.codeDiffLines();
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
         previous.depth != next.depth or
         previous.parent_index != next.parent_index or
+        root_bounds_dirty or
         !rectsEqual(previous.frame, next.frame) or
+        previous.widget.code_line_number_digits != next.widget.code_line_number_digits or
         !widgetLayoutStylesEqual(previous.widget.layout, next.widget.layout);
     const content_dirty = !std.mem.eql(u8, previous.widget.text, next.widget.text) or
         !textSpansEqual(previous.widget.spans, next.widget.spans) or
+        previous.widget.code_language != next.widget.code_language or
+        previous.widget.static_text_group_id != next.widget.static_text_group_id or
+        !codeDiffLinesEqual(previous_diff_lines, next_diff_lines) or
+        (previous_diff_lines == null and next_diff_lines == null and
+            previous.widget.static_text_group_offset != next.widget.static_text_group_offset) or
         !chartDataEqual(previous.widget.chart, next.widget.chart) or
         !std.mem.eql(u8, previous.widget.placeholder, next.widget.placeholder) or
         !std.mem.eql(u8, previous.widget.icon, next.widget.icon) or
         previous.widget.value != next.widget.value or
+        previous.widget.value_x != next.widget.value_x or
+        previous.widget.scroll_axes != next.widget.scroll_axes or
         previous.widget.image_id != next.widget.image_id or
         !optionalRectsEqual(previous.widget.image_src, next.widget.image_src) or
         previous.widget.image_fit != next.widget.image_fit or
         previous.widget.image_sampling != next.widget.image_sampling or
         previous.widget.image_opacity != next.widget.image_opacity or
+        !optionalSizesEqual(previous.widget.stream_size, next.widget.stream_size) or
         !optionalTextSelectionsEqual(previous.widget.text_selection, next.widget.text_selection) or
-        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition);
+        !optionalTextRangesEqual(previous.widget.text_composition, next.widget.text_composition) or
+        !terminalBindingClean(previous.widget.terminal, next.widget.terminal);
     const behavior_dirty = !std.mem.eql(u8, previous.widget.command, next.widget.command);
     const visual_dirty = previous.widget.opacity != next.widget.opacity or
         !affinesEqual(previous.widget.transform, next.widget.transform) or
@@ -282,7 +407,12 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !widgetSemanticsEqual(previous.widget.semantics, next.widget.semantics);
     const paint_dirty = layout_dirty or content_dirty or visual_dirty or state_dirty or visibility_dirty or layer_dirty;
 
-    const dirty_bounds = if (layout_dirty or visibility_dirty or layer_dirty)
+    const dirty_bounds = if (root_bounds_dirty)
+        unionOptionalBounds(
+            unionOptionalBounds(widgetFullPaintBounds(previous, tokens), widgetFullPaintBounds(next, tokens)),
+            unionOptionalBounds(previous_root_bounds, next_root_bounds),
+        )
+    else if (layout_dirty or visibility_dirty or layer_dirty)
         unionOptionalBounds(widgetFullPaintBounds(previous, tokens), widgetFullPaintBounds(next, tokens))
     else if (paint_dirty)
         widgetPaintChangeBounds(previous.widget, next.widget, tokens)
@@ -302,9 +432,15 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
 }
 
 pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens) ?geometry.RectF {
+    if (tokens.widget_change_policy orelse tokens.widget_paint_policy orelse change_policy.owner(layout) orelse paint_policy.owner(layout)) |policy|
+        return renderStateWithPolicy(layout, previous, next, tokens, policy);
     var ids: [8]?ObjectId = [_]?ObjectId{null} ** 8;
     var id_len: usize = 0;
     if (previous.focused_id != next.focused_id) {
+        appendOptionalObjectId(&ids, &id_len, previous.focused_id);
+        appendOptionalObjectId(&ids, &id_len, next.focused_id);
+    }
+    if (previous.keyboard_active != next.keyboard_active) {
         appendOptionalObjectId(&ids, &id_len, previous.focused_id);
         appendOptionalObjectId(&ids, &id_len, next.focused_id);
     }
@@ -329,8 +465,40 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         const base = widgetWithFrame(node.widget, node.frame);
         const previous_widget = widgetWithRenderState(base, previous);
         const next_widget = widgetWithRenderState(base, next);
+        // A terminal's cursor follows LOGICAL focus (`focused_id`), not
+        // the focus-visible state projected into `WidgetState.focused`.
+        // Dirtiness has to mirror that extra render dependency or a
+        // quiet pointer-focus/window-focus transition can change the
+        // cursor from hollow to filled while this API reports no pixels.
+        if (terminalLogicalFocusPaintChanged(base, previous, next)) {
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(
+                layout,
+                index,
+                widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens),
+            ));
+        }
         if (widgetStatesEqual(previous_widget.state, next_widget.state)) continue;
         bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(previous_widget, next_widget, tokens)));
+    }
+    // With no runtime focus ids, baked `WidgetState.focused` is the
+    // renderer's source of truth. A keyboard-active transition still
+    // changes a baked-focused terminal cursor, but the targeted id list
+    // above is empty in exactly that state. Walk the layout only for
+    // this rare window/app activity edge so the dirty-bounds API mirrors
+    // the pixels without taxing ordinary hover/press/focus changes.
+    if (previous.keyboard_active != next.keyboard_active and
+        renderStateUsesBakedFocus(previous) and
+        renderStateUsesBakedFocus(next))
+    {
+        for (layout.nodes, 0..) |node, index| {
+            const base = widgetWithFrame(node.widget, node.frame);
+            if (!terminalLogicalFocusPaintChanged(base, previous, next)) continue;
+            bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(
+                layout,
+                index,
+                widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens),
+            ));
+        }
     }
     // Focus-within chrome: an `.input_group` ancestor wears the focus
     // ring FOR its focused descendant, so a focus-visible change dirties
@@ -348,7 +516,86 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, previous, tokens));
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, next, tokens));
     }
+    // The drag preview is a late overlay that can cross every ancestor
+    // clip and column boundary. Dirty the viewport whenever it appears,
+    // moves, changes source, or disappears; display-list diffing still
+    // narrows the concrete command changes for the frame planner.
+    if (previous.drag_preview_id != next.drag_preview_id or
+        !optionalPointsEqual(previous.drag_preview_origin, next.drag_preview_origin) or
+        previous.drag_preview_offset.dx != next.drag_preview_offset.dx or
+        previous.drag_preview_offset.dy != next.drag_preview_offset.dy)
+    {
+        bounds = unionOptionalBounds(bounds, widget_render.widgetLayoutRootBounds(layout));
+    }
     return bounds;
+}
+
+fn widgetWithProjectedState(base: Widget, bits: u32) Widget {
+    var result = base;
+    result.state.hovered = bits & 1 != 0;
+    result.state.pressed = bits & 2 != 0;
+    result.state.focused = bits & 4 != 0;
+    return result;
+}
+fn renderStateWithPolicy(layout: anytype, previous: WidgetRenderState, next: WidgetRenderState, tokens: DesignTokens, policy: change_policy.Policy) ?geometry.RectF {
+    const plan = change_policy.RenderPlan.init(std.heap.page_allocator, policy, layout, previous, next) catch @panic("render change allocation");
+    defer plan.deinit();
+    const geometry_owner = tokens.widget_paint_policy orelse paint_policy.owner(layout);
+    const damage: ?paint_policy.Plan = if (geometry_owner) |owner| paint_policy.Plan.render(std.heap.page_allocator, owner, layout, tokens, plan) catch @panic("render paint allocation") else null;
+    defer if (damage) |owned| owned.deinit();
+    var bounds: ?geometry.RectF = if (damage) |owned| owned.bounds(0) else null;
+    if (damage == null) {
+        for (0..plan.length) |i| {
+            const item = plan.entry(i);
+            const index = item.node_index;
+            const node = layout.nodes[index];
+            if (item.terminal) bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetFullPaintBoundsWithTransform(node, widgetAccumulatedTransform(layout, index), tokens)));
+            if (item.state) {
+                const base = widgetWithFrame(node.widget, node.frame);
+                bounds = unionOptionalBounds(bounds, widgetClippedDirtyBounds(layout, index, widgetRenderStatePaintChangeBounds(widgetWithProjectedState(base, item.previous), widgetWithProjectedState(base, item.next), tokens)));
+            }
+        }
+        for (0..2) |g| {
+            var group_bounds: ?geometry.RectF = null;
+            for (0..plan.group_lengths[g]) |i| {
+                const index = plan.groupIndex(g, i);
+                const node = layout.nodes[index];
+                var focused = widgetWithFrame(node.widget, node.frame);
+                focused.state.focused = true;
+                group_bounds = unionOptionalBounds(group_bounds, widgetClippedDirtyBounds(layout, index, widgetFocusPaintBounds(focused, tokens)));
+            }
+            bounds = unionOptionalBounds(bounds, group_bounds);
+        }
+    }
+    if (plan.chart) {
+        bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, previous, tokens));
+        bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, next, tokens));
+    }
+    if (plan.drag) bounds = unionOptionalBounds(bounds, widget_render.widgetLayoutRootBounds(layout));
+    return bounds;
+}
+
+/// Whether a live, visible terminal cursor changes fill-vs-outline
+/// because logical keyboard focus moved. Ended sessions are always
+/// hollow and a grid without a cursor paints no focus-dependent pixels.
+fn terminalLogicalFocusPaintChanged(widget: Widget, previous: WidgetRenderState, next: WidgetRenderState) bool {
+    if (widget.kind != .terminal) return false;
+    const grid = widget.terminal.grid orelse return false;
+    if (!grid.running or grid.cursor == null) return false;
+    return widgetHasLogicalFocus(widget, previous) != widgetHasLogicalFocus(widget, next);
+}
+
+fn widgetHasLogicalFocus(widget: Widget, state: WidgetRenderState) bool {
+    if (!state.keyboard_active) return false;
+    if (state.focused_id != null or state.focus_visible_id != null) {
+        const focused_id = state.focused_id orelse return false;
+        return widget.id != 0 and widget.id == focused_id;
+    }
+    return widget.state.focused;
+}
+
+fn renderStateUsesBakedFocus(state: WidgetRenderState) bool {
+    return state.focused_id == null and state.focus_visible_id == null;
 }
 
 fn optionalPointsEqual(a: ?geometry.PointF, b: ?geometry.PointF) bool {
@@ -357,6 +604,11 @@ fn optionalPointsEqual(a: ?geometry.PointF, b: ?geometry.PointF) bool {
         return point_a.x == point_b.x and point_a.y == point_b.y;
     }
     return b == null;
+}
+
+fn codeDiffLinesEqual(a: ?widget_model.CodeDiffLines, b: ?widget_model.CodeDiffLines) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.added == b.?.added and a.?.removed == b.?.removed;
 }
 
 /// The paint bounds of every `.input_group` ancestor's focus ring for a
@@ -495,9 +747,9 @@ fn widgetClippedDirtyBounds(layout: anytype, node_index: usize, bounds: ?geometr
     var clipped = (bounds orelse return null).normalized();
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clips (they render in
-        // the hoisted window-level pass), so their dirty bounds do too.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) break;
+        // Window-level surfaces render in the hoisted pass, so their dirty
+        // bounds escape ancestor clips too.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) break;
         const parent_index = layout.nodes[current].parent_index orelse break;
         if (parent_index >= layout.nodes.len) return null;
         const parent = layout.nodes[parent_index];
@@ -593,7 +845,7 @@ fn widgetFrameStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
     return switch (widget.kind) {
         .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu => controlStrokeWidth(widget, surfaceControlVisualTokens(widget, tokens), tokens.stroke.hairline),
         .button, .toggle_button, .toggle, .icon_button => if (widget.state.focused) tokens.stroke.focus else buttonStrokeWidth(widget, tokens),
-        .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(tokens), tokens.stroke.regular),
+        .select => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .input, .text_field, .search_field, .combobox, .textarea, .input_group => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, textInputControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .segmented_control => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, selectionControlVisualTokens(widget, tokens), tokens.stroke.regular),
         .data_cell => if (widget.state.focused) tokens.stroke.focus else controlStrokeWidth(widget, listItemControlVisualTokens(widget, tokens), tokens.stroke.hairline),
@@ -625,6 +877,10 @@ fn widgetFocusStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
         .switch_control,
         .toggle,
         .slider,
+        // The terminal wears the same ring-offset focus stroke, so a
+        // focus enter/leave must reserve the same outside-the-frame
+        // damage or a retained renderer leaves the ring stale.
+        .terminal,
         => tokens.stroke.focus,
         else => 0,
     };
@@ -680,6 +936,7 @@ fn widgetStatesEqual(a: WidgetState, b: WidgetState) bool {
 
 fn widgetLayoutStylesEqual(a: WidgetLayoutStyle, b: WidgetLayoutStyle) bool {
     return insetsEqual(a.padding, b.padding) and
+        a.padding_is_kind_default == b.padding_is_kind_default and
         a.gap == b.gap and
         a.grow == b.grow and
         a.main_alignment == b.main_alignment and

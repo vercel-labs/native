@@ -94,6 +94,16 @@ pub fn designTokens(color_scheme: ColorScheme, contrast: ColorContrast) DesignTo
             // the primary ink under the active label (see the tabs
             // entries in `controlTokens` below).
             .tabs_indicator_thickness = 2,
+            // Primary Tabs are a 50px, full-width ruled row. Each
+            // trigger hugs 14px regular text with 2px shoulders and the
+            // list adds no pill-style outer inset; these fields are read
+            // only by the underline register, so house tabs keep their
+            // existing control ladder and 3px container hug.
+            .tabs_list_inset = 0,
+            .tabs_list_full_width = true,
+            .tabs_trigger_height = 50,
+            .tabs_trigger_inset = 2,
+            .tabs_label_size_step = 1,
             // The underline register's inter-trigger gap: measured at a
             // 24px flex gap between triggers on the reference strip
             // (28px optical once each trigger's 2px horizontal padding
@@ -153,6 +163,14 @@ fn light() ColorTokens {
         .text = Color.rgb8(23, 23, 23),
         // Secondary ink: gray-900 #4d4d4d.
         .text_muted = Color.rgb8(77, 77, 77),
+        // Geist Code Block syntax inks (the published 900 steps).
+        .syntax_plain = Color.rgb8(23, 23, 23),
+        .syntax_comment = Color.rgb8(77, 77, 77),
+        .syntax_keyword = Color.rgb8(189, 40, 100),
+        .syntax_literal = Color.rgb8(41, 122, 58),
+        .syntax_function = Color.rgb8(120, 32, 188),
+        .syntax_property = Color.rgb8(203, 42, 47),
+        .syntax_constant = Color.rgb8(0, 104, 214),
         // Hairline: black at 8% — the translucent border register.
         .border = Color.rgba8(0, 0, 0, 20),
         // The monochrome primary FILL: pure black #000000 filled
@@ -205,6 +223,13 @@ fn dark() ColorTokens {
         .text = Color.rgb8(237, 237, 237),
         // Secondary ink: gray-900 #a0a0a0.
         .text_muted = Color.rgb8(160, 160, 160),
+        .syntax_plain = Color.rgb8(237, 237, 237),
+        .syntax_comment = Color.rgb8(161, 161, 161),
+        .syntax_keyword = Color.rgb8(247, 95, 143),
+        .syntax_literal = Color.rgb8(98, 192, 115),
+        .syntax_function = Color.rgb8(191, 122, 240),
+        .syntax_property = Color.rgb8(255, 97, 102),
+        .syntax_constant = Color.rgb8(82, 168, 255),
         // Hairline: white at 14% — hairlines brighten what they overlap.
         .border = Color.rgba8(255, 255, 255, 36),
         // Porcelain primary with black knockout text.
@@ -247,6 +272,13 @@ fn highContrastLight() ColorTokens {
         .text = Color.rgb8(0, 0, 0),
         // Secondary ink darkens to gray-1000.
         .text_muted = Color.rgb8(23, 23, 23),
+        .syntax_plain = Color.rgb8(23, 23, 23),
+        .syntax_comment = Color.rgb8(77, 77, 77),
+        .syntax_keyword = Color.rgb8(189, 40, 100),
+        .syntax_literal = Color.rgb8(41, 122, 58),
+        .syntax_function = Color.rgb8(120, 32, 188),
+        .syntax_property = Color.rgb8(203, 42, 47),
+        .syntax_constant = Color.rgb8(0, 104, 214),
         .border = Color.rgba8(0, 0, 0, 180),
         .accent = Color.rgb8(0, 0, 0),
         .accent_text = Color.rgb8(255, 255, 255),
@@ -281,6 +313,13 @@ fn highContrastDark() ColorTokens {
         .surface_pressed = Color.rgb8(41, 41, 41),
         .text = Color.rgb8(255, 255, 255),
         .text_muted = Color.rgb8(237, 237, 237),
+        .syntax_plain = Color.rgb8(237, 237, 237),
+        .syntax_comment = Color.rgb8(161, 161, 161),
+        .syntax_keyword = Color.rgb8(247, 95, 143),
+        .syntax_literal = Color.rgb8(98, 192, 115),
+        .syntax_function = Color.rgb8(191, 122, 240),
+        .syntax_property = Color.rgb8(255, 97, 102),
+        .syntax_constant = Color.rgb8(82, 168, 255),
         .border = Color.rgba8(255, 255, 255, 190),
         .accent = Color.rgb8(255, 255, 255),
         .accent_text = Color.rgb8(0, 0, 0),
@@ -304,17 +343,34 @@ fn highContrastDark() ColorTokens {
 }
 
 /// The pack's control tables: the treatments that are MORE than a
-/// palette swap. Geist's disabled register is a color SWAP (gray-100
-/// chip under gray-700 ink — the new disabled channels exist for
-/// exactly this), its destructive button is a FILLED error block
+/// palette swap. Geist's main disabled register is a color SWAP
+/// (gray-100 chip under gray-700 ink with a gray-400 edge), while its
+/// tertiary button is that chip at half opacity with primary ink. Its
+/// destructive button is a FILLED error block
 /// rather than the house quiet chip, and its floating surfaces sit on
 /// the 12px corner while controls hold 6.
 fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlTokens {
     const colors = colorTokens(color_scheme, contrast);
-    // Disabled pair: gray-100 fill under gray-700 #8f8f8f ink, the same
-    // hex in both schemes (the scales cross at their quiet middle).
+    // Disabled register: gray-100 fill under gray-700 #8f8f8f ink (the
+    // same hex in both schemes), with the solid gray-400 edge used by
+    // bordered variants.
     const disabled_background = colors.disabled;
     const disabled_foreground = Color.rgb8(143, 143, 143);
+    const disabled_border: ?Color = switch (contrast) {
+        .standard => switch (color_scheme) {
+            .light => Color.rgb8(235, 235, 235),
+            .dark => Color.rgb8(31, 31, 31),
+        },
+        // High contrast keeps its louder palette edge.
+        .high => null,
+    };
+    // Tertiary is the one exception in the reference: gray-100 and the
+    // primary ink are composited together at 50% over the page. The
+    // renderer's opacity is per command, so state the equivalent opaque
+    // pair here; glyph coverage then blends between the same two final
+    // colors as the reference layer.
+    const tertiary_disabled_background = compositeOver(colors.disabled, colors.background, 0.5);
+    const tertiary_disabled_foreground = compositeOver(colors.text, colors.background, 0.5);
     // The filled error button: solid red under white text, hover one
     // step deeper in light (red-900 #d8001b) and one step brighter in
     // dark (red-700 #f13242) — feedback moves TOWARD the scheme's ink.
@@ -351,6 +407,10 @@ fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlToke
             .disabled_background = disabled_background,
             .disabled_foreground = disabled_foreground,
         },
+        .button_ghost = .{
+            .disabled_background = tertiary_disabled_background,
+            .disabled_foreground = tertiary_disabled_foreground,
+        },
         .button_destructive = .{
             .background = destructive_rest,
             .hover_background = destructive_hover,
@@ -359,6 +419,7 @@ fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlToke
             .disabled_foreground = disabled_foreground,
             .stroke_width = 0,
         },
+        .button_disabled_border = disabled_border,
         // The slider is the one control whose fill keeps a hue in the
         // monochrome register: rail on gray-200, range in blue-700 (the
         // same #0072f5 step in both schemes), and a paper-white
@@ -473,4 +534,18 @@ fn controlTokens(color_scheme: ColorScheme, contrast: ColorContrast) ControlToke
         .alert = .{ .radius = surface_radius },
         .panel = .{ .radius = surface_radius },
     };
+}
+
+/// Composite one opaque theme color over another at `opacity`. Used for
+/// Geist's tertiary disabled layer, whose reference opacity applies to
+/// the whole chip while the current display list carries opacity on
+/// individual commands.
+fn compositeOver(foreground: Color, background: Color, opacity: f32) Color {
+    const alpha = std.math.clamp(opacity, 0, 1);
+    return Color.rgba(
+        foreground.r * alpha + background.r * (1 - alpha),
+        foreground.g * alpha + background.g * (1 - alpha),
+        foreground.b * alpha + background.b * (1 - alpha),
+        1,
+    );
 }

@@ -1,4 +1,5 @@
 const support = @import("test_support.zig");
+const widget_metrics = @import("widget_metrics.zig");
 const std = support.std;
 const geometry = support.geometry;
 const canvas = support.canvas;
@@ -437,15 +438,16 @@ test "icon widgets render built-in vector icons as tinted path commands" {
     }
 }
 
-test "checkbox check mark strokes one anti-aliased vector path" {
+test "checkbox check mark and label render through their pinned part slots" {
     const checkbox = Widget{
         .id = 63,
         .kind = WidgetKind.checkbox,
-        .frame = geometry.RectF.init(0, 0, 24, 24),
+        .frame = geometry.RectF.init(0, 0, 80, 24),
         .value = 1,
+        .text = "Done",
     };
     const tokens = DesignTokens{};
-    var commands: [8]CanvasCommand = undefined;
+    var commands: [9]CanvasCommand = undefined;
     var builder = Builder.init(&commands);
     try emitWidgetTree(&builder, checkbox, tokens);
     const display_list = builder.displayList();
@@ -464,18 +466,22 @@ test "checkbox check mark strokes one anti-aliased vector path" {
         },
         else => return error.TestUnexpectedResult,
     }
+    switch (display_list.findCommandById(widgetPartId(63, 6)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("Done", text.text),
+        else => return error.TestUnexpectedResult,
+    }
 
-    // Rasterized, the diagonal carries partial-coverage edge pixels —
-    // anti-aliasing a binary point-in-capsule test can never produce —
-    // and the whole render pins byte-identical.
-    var render_commands: [8]RenderCommand = undefined;
+    // Rasterized, the diagonal carries partial-coverage edge pixels and
+    // the label is present at its stable part slot. The whole 80x24
+    // checkbox-plus-label render pins byte-identical.
+    var render_commands: [9]RenderCommand = undefined;
     const plan = try (DisplayList{ .commands = display_list.commands }).renderPlan(&render_commands);
-    var pixels: [24 * 24 * 4]u8 = undefined;
+    var pixels: [80 * 24 * 4]u8 = undefined;
     @memset(&pixels, 0);
-    const surface = try ReferenceRenderSurface.init(24, 24, &pixels);
+    const surface = try ReferenceRenderSurface.init(80, 24, &pixels);
     try surface.renderPass(.{
         .commands = plan.commands,
-        .surface_size = geometry.SizeF.init(24, 24),
+        .surface_size = geometry.SizeF.init(80, 24),
         .full_repaint = true,
     }, Color.rgb8(255, 255, 255));
     // Sample strictly inside the accent fill (the 16px box spans y 4-20;
@@ -486,12 +492,12 @@ test "checkbox check mark strokes one anti-aliased vector path" {
     while (y < 18) : (y += 1) {
         var x: usize = 2;
         while (x < 14) : (x += 1) {
-            const value = pixels[(y * 24 + x) * 4];
+            const value = pixels[(y * 80 + x) * 4];
             if (value > 60 and value < 200) partial += 1;
         }
     }
     try std.testing.expect(partial >= 4);
-    try std.testing.expectEqual(@as(u64, 10271374105851145327), support.referenceSurfaceSignature(&pixels));
+    try std.testing.expectEqual(@as(u64, 516383874562490834), support.referenceSurfaceSignature(&pixels));
 }
 
 test "a builder accumulating two widget trees keeps each checkbox mark's own geometry" {
@@ -540,6 +546,240 @@ test "a builder accumulating two widget trees keeps each checkbox mark's own geo
                 try std.testing.expectEqual(expected_element.points[0], element.points[0]);
             }
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compact radio and switch chrome stays circular and disabled selection fills wash" {
+    const tokens = DesignTokens{};
+    const disabled_fill = Color.rgba(
+        tokens.colors.surface.r,
+        tokens.colors.surface.g,
+        tokens.colors.surface.b,
+        tokens.colors.surface.a * tokens.states.disabled_alpha,
+    );
+    const controls = [_]struct { kind: WidgetKind, frame: geometry.RectF }{
+        .{ .kind = .checkbox, .frame = geometry.RectF.init(0, 0, 80, 28) },
+        .{ .kind = .radio, .frame = geometry.RectF.init(0, 0, 80, 28) },
+    };
+    for (controls) |control| {
+        const widget = Widget{
+            .id = 67,
+            .kind = control.kind,
+            .frame = control.frame,
+            .size = .sm,
+            .state = .{ .disabled = true },
+        };
+        var commands: [8]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, widget, tokens);
+        switch (builder.displayList().findCommandById(widgetPartId(67, 1)).?.command) {
+            .fill_rounded_rect => |fill| {
+                try expectFillColor(disabled_fill, fill.fill);
+                if (control.kind == .radio) {
+                    try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001);
+                }
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    const toggle = Widget{
+        .id = 68,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+        .size = .sm,
+    };
+    var toggle_commands: [8]CanvasCommand = undefined;
+    var toggle_builder = Builder.init(&toggle_commands);
+    try emitWidgetTree(&toggle_builder, toggle, tokens);
+    switch (toggle_builder.displayList().findCommandById(widgetPartId(68, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (toggle_builder.displayList().findCommandById(widgetPartId(68, 3)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectApproxEqAbs(fill.rect.height * 0.5, fill.radius.top_left, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "selection controls honor explicit disabled background and foreground tokens" {
+    const disabled_background = Color.rgb8(34, 68, 102);
+    const disabled_foreground = Color.rgb8(238, 204, 170);
+    const disabled_border = Color.rgb8(51, 119, 85);
+    const tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+        .radio = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+        .switch_control = .{ .disabled_background = disabled_background, .disabled_foreground = disabled_foreground, .border = disabled_border },
+    } };
+    const cases = [_]struct {
+        kind: WidgetKind,
+        foreground_slot: ObjectId,
+        label_slot: ObjectId,
+    }{
+        .{ .kind = .checkbox, .foreground_slot = 4, .label_slot = 6 },
+        .{ .kind = .radio, .foreground_slot = 4, .label_slot = 5 },
+        .{ .kind = .switch_control, .foreground_slot = 3, .label_slot = 5 },
+    };
+    for (cases, 0..) |case, index| {
+        const id: ObjectId = @intCast(80 + index);
+        const widget = Widget{
+            .id = id,
+            .kind = case.kind,
+            .frame = geometry.RectF.init(0, 0, 120, 28),
+            .text = "Disabled",
+            .value = 1,
+            .state = .{ .disabled = true },
+        };
+        var commands: [10]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, widget, tokens);
+        const list = builder.displayList();
+        switch (list.findCommandById(widgetPartId(id, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(disabled_background, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, 2)).?.command) {
+            .stroke_rect => |stroke| try expectFillColor(disabled_border, stroke.stroke.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, case.foreground_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(disabled_foreground, fill.fill),
+            .stroke_path => |stroke| try expectFillColor(disabled_foreground, stroke.stroke.fill),
+            else => return error.TestUnexpectedResult,
+        }
+        switch (list.findCommandById(widgetPartId(id, case.label_slot)).?.command) {
+            .draw_text => |text| try std.testing.expectEqualDeep(disabled_foreground, text.color),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    // Like the slider register, stating either disabled channel opts the
+    // control into color-swap mode: an unstated counterpart stays at full
+    // rest strength instead of being alpha-washed behind the swap.
+    const background_only_tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_background = disabled_background },
+    } };
+    const background_only = Widget{
+        .id = 83,
+        .kind = .checkbox,
+        .frame = geometry.RectF.init(0, 0, 120, 28),
+        .text = "Background only",
+        .value = 1,
+        .state = .{ .disabled = true },
+    };
+    var background_only_commands: [10]CanvasCommand = undefined;
+    var background_only_builder = Builder.init(&background_only_commands);
+    try emitWidgetTree(&background_only_builder, background_only, background_only_tokens);
+    switch (background_only_builder.displayList().findCommandById(widgetPartId(83, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(disabled_background, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (background_only_builder.displayList().findCommandById(widgetPartId(83, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(background_only_tokens.colors.accent_text, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const foreground_only_tokens = DesignTokens{ .controls = .{
+        .checkbox = .{ .disabled_foreground = disabled_foreground },
+    } };
+    var foreground_only_commands: [10]CanvasCommand = undefined;
+    var foreground_only_builder = Builder.init(&foreground_only_commands);
+    try emitWidgetTree(&foreground_only_builder, background_only, foreground_only_tokens);
+    switch (foreground_only_builder.displayList().findCommandById(widgetPartId(83, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(foreground_only_tokens.colors.accent, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (foreground_only_builder.displayList().findCommandById(widgetPartId(83, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(disabled_foreground, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "radio and switch shape overrides beat circular house fallbacks" {
+    const tokens = DesignTokens{
+        .controls = .{
+            .radio = .{ .radius = 5 },
+            .switch_control = .{ .radius = 4 },
+        },
+    };
+    const themed_radio = Widget{
+        .id = 70,
+        .kind = .radio,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+    };
+    var themed_radio_commands: [8]CanvasCommand = undefined;
+    var themed_radio_builder = Builder.init(&themed_radio_commands);
+    try emitWidgetTree(&themed_radio_builder, themed_radio, tokens);
+    switch (themed_radio_builder.displayList().findCommandById(widgetPartId(70, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(5), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const authored_radio = Widget{
+        .id = 72,
+        .kind = .radio,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+        .style = .{ .radius = 3 },
+    };
+    var authored_radio_commands: [8]CanvasCommand = undefined;
+    var authored_radio_builder = Builder.init(&authored_radio_commands);
+    try emitWidgetTree(&authored_radio_builder, authored_radio, tokens);
+    switch (authored_radio_builder.displayList().findCommandById(widgetPartId(72, 1)).?.command) {
+        .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(3), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const toggle = Widget{
+        .id = 71,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 28),
+    };
+    var toggle_commands: [8]CanvasCommand = undefined;
+    var toggle_builder = Builder.init(&toggle_commands);
+    try emitWidgetTree(&toggle_builder, toggle, tokens);
+    inline for (.{ @as(ObjectId, 1), @as(ObjectId, 3) }) |slot| {
+        switch (toggle_builder.displayList().findCommandById(widgetPartId(71, slot)).?.command) {
+            .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(4), fill.radius),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var authored_toggle = toggle;
+    authored_toggle.id = 73;
+    authored_toggle.style.radius = 2;
+    var authored_toggle_commands: [8]CanvasCommand = undefined;
+    var authored_toggle_builder = Builder.init(&authored_toggle_commands);
+    try emitWidgetTree(&authored_toggle_builder, authored_toggle, tokens);
+    inline for (.{ @as(ObjectId, 1), @as(ObjectId, 3) }) |slot| {
+        switch (authored_toggle_builder.displayList().findCommandById(widgetPartId(73, slot)).?.command) {
+            .fill_rounded_rect => |fill| try std.testing.expectEqualDeep(Radius.all(2), fill.radius),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "an off switch keeps authored track and thumb colors on separate channels" {
+    const track_color = Color.rgb8(12, 34, 56);
+    const thumb_color = Color.rgb8(240, 244, 248);
+    const toggle = Widget{
+        .id = 69,
+        .kind = .switch_control,
+        .frame = geometry.RectF.init(0, 0, 80, 32),
+        .style = .{
+            .background = track_color,
+            .accent_foreground = thumb_color,
+        },
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, toggle, .{});
+    switch (builder.displayList().findCommandById(widgetPartId(69, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(track_color, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().findCommandById(widgetPartId(69, 3)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(thumb_color, fill.fill),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -686,15 +926,13 @@ test "buttons draw an inline vector icon and label as one widget with one tint" 
     try std.testing.expect(icon_only_list.findCommandById(widgetPartId(63, 6)) != null);
 }
 
-test "disabled filled buttons mute their border with the fill" {
-    // A disabled primary button washes its fill to half strength; the
-    // border must wash with it, in the SAME hue — a full-strength
-    // accent edge over the washed fill read as a focus ring on every
-    // idle disabled button (the "Comment button wearing an outline at
-    // rest" regression), and the old neutral-gray border made the
-    // faded fill look like a live secondary control. Destructive is
-    // the quiet borderless chip, so its edge stays at width 0 in both
-    // states — nothing to wash.
+test "disabled filled buttons match their reference edge treatment" {
+    // A primary button's implicit structural edge is the same accent as
+    // its opaque fill at rest. shadcn's actual edge is transparent; if
+    // the fill and fallback edge are each washed to half strength, their
+    // overlap becomes darker and invents an outline around the disabled
+    // control. Destructive is already the quiet borderless chip, so its
+    // edge emits no command in either state.
     const tokens = DesignTokens{};
     const button = Widget{
         .id = 71,
@@ -716,9 +954,21 @@ test "disabled filled buttons mute their border with the fill" {
     var disabled_commands: [8]CanvasCommand = undefined;
     var disabled_builder = Builder.init(&disabled_commands);
     try emitWidgetTree(&disabled_builder, disabled, tokens);
-    const washed_border = Color.rgba(tokens.colors.accent.r, tokens.colors.accent.g, tokens.colors.accent.b, 0.5 * tokens.colors.accent.a);
     switch (disabled_builder.displayList().findCommandById(widgetPartId(71, 2)).?.command) {
-        .stroke_rect => |stroke| try expectFillColor(washed_border, stroke.stroke.fill),
+        .stroke_rect => |stroke| try expectFillColor(Color.rgba8(0, 0, 0, 0), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    // shadcn applies opacity to the composed button. Its knockout label
+    // therefore lands back near the matching page/surface color instead
+    // of being blended through the already-faded fill a second time.
+    const disabled_label = Color.rgba(
+        tokens.colors.accent_text.r * tokens.states.disabled_alpha + tokens.colors.background.r * (1 - tokens.states.disabled_alpha),
+        tokens.colors.accent_text.g * tokens.states.disabled_alpha + tokens.colors.background.g * (1 - tokens.states.disabled_alpha),
+        tokens.colors.accent_text.b * tokens.states.disabled_alpha + tokens.colors.background.b * (1 - tokens.states.disabled_alpha),
+        1,
+    );
+    switch (disabled_builder.displayList().findCommandById(widgetPartId(71, 4)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(disabled_label, text.color),
         else => return error.TestUnexpectedResult,
     }
 
@@ -730,10 +980,175 @@ test "disabled filled buttons mute their border with the fill" {
     var chip_commands: [8]CanvasCommand = undefined;
     var chip_builder = Builder.init(&chip_commands);
     try emitWidgetTree(&chip_builder, chip, tokens);
-    switch (chip_builder.displayList().findCommandById(widgetPartId(71, 2)).?.command) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
+    try std.testing.expect(chip_builder.displayList().findCommandById(widgetPartId(71, 2)) == null);
+}
+
+test "geist disabled buttons use the reference swap and tertiary registers" {
+    const buttonFillColor = @import("widget_render_style.zig").buttonFillColor;
+    const buttonTextColorForWidget = @import("widget_render_style.zig").buttonTextColorForWidget;
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const schemes = [_]canvas.ColorScheme{ .light, .dark };
+
+    for (schemes) |scheme| {
+        const tokens = DesignTokens.theme(.{ .pack = .geist, .color_scheme = scheme });
+        const disabled_background = if (scheme == .light) Color.rgb8(242, 242, 242) else Color.rgb8(26, 26, 26);
+        const disabled_border = if (scheme == .light) Color.rgb8(235, 235, 235) else Color.rgb8(31, 31, 31);
+        const variants = [_]canvas.WidgetVariant{ .default, .secondary, .outline };
+        for (variants) |variant| {
+            const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+            try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+            try std.testing.expectEqualDeep(Color.rgb8(143, 143, 143), buttonTextColorForWidget(button, tokens));
+            try expectFillColor(disabled_border, buttonBorderFill(button, tokens));
+        }
+
+        const filled_variants = [_]canvas.WidgetVariant{ .primary, .destructive };
+        for (filled_variants) |variant| {
+            const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+            try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+            try std.testing.expectEqualDeep(Color.rgb8(143, 143, 143), buttonTextColorForWidget(button, tokens));
+            try expectFillColor(Color.rgba8(0, 0, 0, 0), buttonBorderFill(button, tokens));
+        }
+
+        const tertiary = Widget{ .kind = .button, .variant = .ghost, .state = .{ .disabled = true } };
+        const tertiary_background = Color.rgba(
+            disabled_background.r * 0.5 + tokens.colors.background.r * 0.5,
+            disabled_background.g * 0.5 + tokens.colors.background.g * 0.5,
+            disabled_background.b * 0.5 + tokens.colors.background.b * 0.5,
+            1,
+        );
+        const tertiary_foreground = Color.rgba(
+            tokens.colors.text.r * 0.5 + tokens.colors.background.r * 0.5,
+            tokens.colors.text.g * 0.5 + tokens.colors.background.g * 0.5,
+            tokens.colors.text.b * 0.5 + tokens.colors.background.b * 0.5,
+            1,
+        );
+        try std.testing.expectEqualDeep(tertiary_background, buttonFillColor(tertiary, tokens));
+        try std.testing.expectEqualDeep(tertiary_foreground, buttonTextColorForWidget(tertiary, tokens));
     }
+}
+
+test "disabled primary fallback honors the state alpha" {
+    const buttonTextColorForWidget = @import("widget_render_style.zig").buttonTextColorForWidget;
+    const background = Color.rgb8(20, 40, 60);
+    const accent_text = Color.rgb8(220, 180, 140);
+    const disabled_alpha: f32 = 0.25;
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .colors = .{ .background = background, .accent_text = accent_text },
+        .states = .{ .disabled_alpha = disabled_alpha },
+    });
+    const button = Widget{ .kind = .button, .variant = .primary, .state = .{ .disabled = true } };
+    const expected = Color.rgba(
+        accent_text.r * disabled_alpha + background.r * (1 - disabled_alpha),
+        accent_text.g * disabled_alpha + background.g * (1 - disabled_alpha),
+        accent_text.b * disabled_alpha + background.b * (1 - disabled_alpha),
+        1,
+    );
+    try std.testing.expectEqualDeep(expected, buttonTextColorForWidget(button, tokens));
+
+    var transparent_state = tokens;
+    transparent_state.states.disabled_alpha = 0;
+    try std.testing.expectEqualDeep(background, buttonTextColorForWidget(button, transparent_state));
+}
+
+test "disabled filled buttons preserve explicit token borders" {
+    const buttonFillColor = @import("widget_render_style.zig").buttonFillColor;
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const disabled_background = Color.rgba8(80, 100, 120, 128);
+    const border = Color.rgb8(24, 96, 160);
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{
+            .button_primary = .{ .disabled_background = disabled_background, .border = border },
+            .button_destructive = .{ .disabled_background = disabled_background, .border = border },
+        },
+    });
+    const expected_border = Color.rgba(border.r, border.g, border.b, border.a * tokens.states.disabled_alpha);
+    const variants = [_]canvas.WidgetVariant{ .primary, .destructive };
+    for (variants) |variant| {
+        const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+        try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+        try expectFillColor(expected_border, buttonBorderFill(button, tokens));
+    }
+
+    const implicit_tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{ .button_primary = .{ .disabled_background = disabled_background } },
+    });
+    const implicit = Widget{ .kind = .button, .variant = .primary, .state = .{ .disabled = true } };
+    try expectFillColor(Color.rgba8(0, 0, 0, 0), buttonBorderFill(implicit, implicit_tokens));
+}
+
+test "button disabled border override does not require a disabled background" {
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const disabled_border = Color.rgb8(24, 96, 160);
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{ .button_disabled_border = disabled_border },
+    });
+    const button = Widget{
+        .kind = .button,
+        .variant = .outline,
+        .state = .{ .disabled = true },
+    };
+
+    try expectFillColor(disabled_border, buttonBorderFill(button, tokens));
+}
+
+test "disabled colors wash resolved identity and secondary accents use the accent channel" {
+    const style_mod = @import("widget_render_style.zig");
+    const tokens = DesignTokens{};
+    const accent = Color.rgb8(180, 24, 48);
+    const accent_foreground = Color.rgb8(250, 226, 232);
+    const foreground = Color.rgb8(36, 92, 148);
+    const background = Color.rgb8(24, 56, 88);
+    const washed_accent = Color.rgba(accent.r, accent.g, accent.b, tokens.states.disabled_alpha);
+    const washed_accent_foreground = Color.rgba(accent_foreground.r, accent_foreground.g, accent_foreground.b, tokens.states.disabled_alpha);
+    const washed_foreground = Color.rgba(foreground.r, foreground.g, foreground.b, tokens.states.disabled_alpha);
+    const washed_background = Color.rgba(background.r, background.g, background.b, tokens.states.disabled_alpha);
+
+    const disabled = Widget{
+        .kind = .text,
+        .state = .{ .disabled = true },
+        .style = .{
+            .foreground = foreground,
+            .accent_foreground = accent_foreground,
+        },
+    };
+    try std.testing.expectEqualDeep(washed_foreground, style_mod.widgetForegroundColor(disabled, tokens, tokens.colors.text));
+    try std.testing.expectEqualDeep(washed_accent_foreground, style_mod.widgetAccentForegroundColor(disabled, tokens, tokens.colors.accent_text));
+
+    const secondary = Widget{
+        .kind = .button,
+        .variant = .secondary,
+        .style = .{ .accent = accent },
+    };
+    try std.testing.expectEqualDeep(accent, style_mod.buttonFillColor(secondary, tokens));
+    try expectFillColor(accent, style_mod.buttonBorderFill(secondary, tokens));
+
+    const disabled_input = Widget{
+        .kind = .text_field,
+        .state = .{ .disabled = true },
+        .style = .{ .background = background },
+    };
+    try expectFillColor(washed_background, style_mod.textInputFill(disabled_input, tokens, .{}));
+
+    const secondary_badge = Widget{
+        .kind = .badge,
+        .variant = .secondary,
+        .style = .{ .accent = accent },
+    };
+    try std.testing.expectEqualDeep(accent, style_mod.badgeBackgroundColor(secondary_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(accent, style_mod.badgeBorderColor(secondary_badge, tokens, .{}));
+
+    const disabled_destructive_badge = Widget{
+        .kind = .badge,
+        .variant = .destructive,
+        .state = .{ .disabled = true },
+        .style = .{
+            .accent = accent,
+            .accent_foreground = accent_foreground,
+        },
+    };
+    try std.testing.expectEqualDeep(washed_accent, style_mod.badgeBackgroundColor(disabled_destructive_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(washed_accent, style_mod.badgeBorderColor(disabled_destructive_badge, tokens, .{}));
+    try std.testing.expectEqualDeep(washed_accent_foreground, style_mod.badgeTextColor(disabled_destructive_badge, tokens, .{}));
 }
 
 /// The flush-group segment assertions, shared by the tree-walk and
@@ -865,11 +1280,8 @@ test "detached button groups render chip members with the group table and the me
     // No seam clips anywhere: a chip has no shared boundary.
     try std.testing.expect(list.findCommandById(widgetPartId(2, 0)) == null);
     try std.testing.expect(list.findCommandById(widgetPartId(3, 0)) == null);
-    // The chips are borderless: the border stroke carries zero width.
-    switch (list.findCommandById(widgetPartId(2, 2)).?.command) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
+    // The chips are borderless: no dead zero-width stroke command.
+    try std.testing.expect(list.findCommandById(widgetPartId(2, 2)) == null);
     // Knockout ink on the selected label, the stated rest ink elsewhere.
     switch (list.findCommandById(widgetPartId(2, 4)).?.command) {
         .draw_text => |text| try std.testing.expectEqualDeep(Color.rgb8(255, 255, 255), text.color),
@@ -945,6 +1357,365 @@ test "underline tab strips separate triggers by the tabs metric gap" {
     var pill_nodes: [4]WidgetLayoutNode = undefined;
     const pill_layout = try layoutWidgetTreeWithTokens(strip, strip.frame, pill_tokens, &pill_nodes);
     try std.testing.expectApproxEqAbs(@as(f32, 0), pill_layout.nodes[2].frame.x - pill_layout.nodes[1].frame.maxX(), 0.001);
+}
+
+test "geist primary tabs use the measured row while house tabs remain unchanged" {
+    const triggers = [_]Widget{
+        .{ .id = 2, .kind = .segmented_control, .text = "Apple", .state = .{ .selected = true, .disabled = true } },
+        .{ .id = 3, .kind = .segmented_control, .text = "Orange" },
+        .{ .id = 4, .kind = .segmented_control, .text = "Files", .icon = "folder" },
+    };
+    const strip = builtinComponentWidget(.tabs, .{
+        .id = 1,
+        .frame = geometry.RectF.init(0, 0, 240, 50),
+        .children = &triggers,
+    });
+    try std.testing.expect(strip.layout.padding_is_kind_default);
+
+    const geist = DesignTokens.theme(.{ .pack = .geist });
+    var geist_nodes: [4]WidgetLayoutNode = undefined;
+    const geist_layout = try layoutWidgetTreeWithTokens(strip, strip.frame, geist, &geist_nodes);
+    try std.testing.expectEqual(geometry.RectF.init(0, 0, geist_layout.nodes[1].frame.width, 50), geist_layout.nodes[1].frame);
+    try std.testing.expectApproxEqAbs(@as(f32, 24), geist_layout.nodes[2].frame.x - geist_layout.nodes[1].frame.maxX(), 0.001);
+
+    var commands: [24]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try geist_layout.emitDisplayList(&builder, geist);
+    const list = builder.displayList();
+    switch (list.findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rect => |rail| try std.testing.expectEqualDeep(geometry.RectF.init(0, 49, 240, 1), rail.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (list.findCommandById(widgetPartId(2, 2)).?.command) {
+        .fill_rect => |indicator| try std.testing.expectEqualDeep(geometry.RectF.init(0, 48, geist_layout.nodes[1].frame.width, 2), indicator.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    // Disabled does not dim the selected primary tab in the reference.
+    switch (list.findCommandById(widgetPartId(2, 3)).?.command) {
+        .draw_text => |label| {
+            try std.testing.expectEqual(@as(f32, 14), label.size);
+            try std.testing.expectEqualDeep(Color.rgb8(23, 23, 23), label.color);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(list.findCommandById(widgetPartId(4, 5)) != null or list.findCommandById(widgetPartId(4, 6)) != null);
+
+    // A numerically identical 3px author inset is not the builder
+    // default. Geist preserves it instead of translating it to the
+    // underline register's zero inset.
+    const explicitly_padded_strip = builtinComponentWidget(.tabs, .{
+        .id = 11,
+        .frame = geometry.RectF.init(0, 0, 240, 50),
+        .layout = .{ .padding = geometry.InsetsF.all(3) },
+        .children = &triggers,
+    });
+    try std.testing.expect(!explicitly_padded_strip.layout.padding_is_kind_default);
+    var explicitly_padded_nodes: [4]WidgetLayoutNode = undefined;
+    const explicitly_padded_layout = try layoutWidgetTreeWithTokens(explicitly_padded_strip, explicitly_padded_strip.frame, geist, &explicitly_padded_nodes);
+    try std.testing.expectEqual(@as(f32, 3), explicitly_padded_layout.nodes[1].frame.x);
+    try std.testing.expectEqual(@as(f32, 3), explicitly_padded_layout.nodes[1].frame.y);
+    try std.testing.expectEqual(@as(f32, 44), explicitly_padded_layout.nodes[1].frame.height);
+
+    // The identical authored tree under the default register retains
+    // its canonical 3px pill hug, 32px trigger, 13px label, and gap 0.
+    const house = DesignTokens{};
+    var house_nodes: [4]WidgetLayoutNode = undefined;
+    const house_layout = try layoutWidgetTreeWithTokens(strip, strip.frame, house, &house_nodes);
+    try std.testing.expectEqual(@as(f32, 3), house_layout.nodes[1].frame.x);
+    try std.testing.expectEqual(@as(f32, 32), house_layout.nodes[1].frame.height);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), house_layout.nodes[2].frame.x - house_layout.nodes[1].frame.maxX(), 0.001);
+    var house_commands: [24]CanvasCommand = undefined;
+    var house_builder = Builder.init(&house_commands);
+    try house_layout.emitDisplayList(&house_builder, house);
+    switch (house_builder.displayList().findCommandById(widgetPartId(2, 3)).?.command) {
+        .draw_text => |label| try std.testing.expectEqual(@as(f32, 13), label.size),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A theme-agnostic stack may carry the pill register's old hug
+    // width. Geist translates that primary TabsList to the containing
+    // width so the closing rail continues after the last trigger; the
+    // identical house tree keeps its authored pill width.
+    var nested_strip = strip;
+    nested_strip.frame = geometry.RectF.init(0, 0, 148, 50);
+    const nested_children = [_]Widget{nested_strip};
+    const host = Widget{
+        .kind = .stack,
+        .frame = geometry.RectF.init(0, 0, 352, 80),
+        .children = &nested_children,
+    };
+    var nested_geist_nodes: [5]WidgetLayoutNode = undefined;
+    const nested_geist = try layoutWidgetTreeWithTokens(host, host.frame, geist, &nested_geist_nodes);
+    try std.testing.expectEqual(@as(f32, 352), nested_geist.nodes[1].frame.width);
+    var nested_geist_commands: [24]CanvasCommand = undefined;
+    var nested_geist_builder = Builder.init(&nested_geist_commands);
+    try nested_geist.emitDisplayList(&nested_geist_builder, geist);
+    switch (nested_geist_builder.displayList().findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rect => |rail| try std.testing.expectEqualDeep(geometry.RectF.init(0, 49, 352, 1), rail.rect),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var nested_house_nodes: [5]WidgetLayoutNode = undefined;
+    const nested_house = try layoutWidgetTreeWithTokens(host, host.frame, house, &nested_house_nodes);
+    try std.testing.expectEqual(@as(f32, 148), nested_house.nodes[1].frame.width);
+    var nested_house_commands: [24]CanvasCommand = undefined;
+    var nested_house_builder = Builder.init(&nested_house_commands);
+    try nested_house.emitDisplayList(&nested_house_builder, house);
+    switch (nested_house_builder.displayList().findCommandById(widgetPartId(1, 1)).?.command) {
+        .fill_rounded_rect => |pill| try std.testing.expectEqual(@as(f32, 148), pill.rect.width),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // Underline paint does not imply Geist's width:100% policy. A
+    // custom underline theme must opt into that layout metric, otherwise
+    // the same authored strip keeps its 148px hug.
+    var custom_underline = DesignTokens{};
+    custom_underline.controls.tabs_indicator = .underline;
+    var nested_custom_nodes: [5]WidgetLayoutNode = undefined;
+    const nested_custom = try layoutWidgetTreeWithTokens(host, host.frame, custom_underline, &nested_custom_nodes);
+    try std.testing.expectEqual(@as(f32, 148), nested_custom.nodes[1].frame.width);
+
+    // Full-width is a minimum, not a cap. A deliberately wider Geist
+    // strip inside a horizontal viewport retains its authored overflow,
+    // including when the strip clips its own trigger content: the rail and
+    // the scroll semantics must cover the full scrollable width.
+    var wide_strip = nested_strip;
+    wide_strip.frame.width = 480;
+    wide_strip.layout.clip_content = true;
+    const wide_scroll_children = [_]Widget{wide_strip};
+    const wide_scroll = Widget{
+        .id = 7,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 240, 50),
+        .scroll_axes = .horizontal,
+        .layout = .{ .clip_content = true },
+        .children = &wide_scroll_children,
+    };
+    var wide_scroll_nodes: [5]WidgetLayoutNode = undefined;
+    const wide_scroll_layout = try layoutWidgetTreeWithTokens(wide_scroll, wide_scroll.frame, geist, &wide_scroll_nodes);
+    try std.testing.expectEqual(@as(f32, 480), wide_scroll_layout.findById(1).?.frame.width);
+    var wide_scroll_commands: [32]CanvasCommand = undefined;
+    var wide_scroll_builder = Builder.init(&wide_scroll_commands);
+    try wide_scroll_layout.emitDisplayList(&wide_scroll_builder, geist);
+    switch (wide_scroll_builder.displayList().findCommandById(widgetPartId(1, 2)).?.command) {
+        .fill_rect => |rail| try std.testing.expectEqual(@as(f32, 480), rail.rect.width),
+        else => return error.TestUnexpectedResult,
+    }
+    var wide_scroll_semantics_buffer: [5]WidgetSemanticsNode = undefined;
+    const wide_scroll_semantics = try wide_scroll_layout.collectSemantics(&wide_scroll_semantics_buffer);
+    try std.testing.expect(wide_scroll_semantics[0].scroll.present);
+    try std.testing.expectEqual(@as(f32, 240), wide_scroll_semantics[0].scroll.viewport_extent);
+    try std.testing.expectEqual(@as(f32, 480), wide_scroll_semantics[0].scroll.content_extent);
+
+    // Flow layout keeps the same contract. The row + growing spacer is
+    // the common theme-agnostic shape used to make the house strip hug;
+    // Geist gives the TabsList first claim on the row's flexible width,
+    // while the identical house tree leaves that width to the spacer.
+    const row_children = [_]Widget{
+        nested_strip,
+        .{ .id = 5, .kind = .stack, .layout = .{ .grow = 1 } },
+    };
+    const row_host = Widget{
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 352, 50),
+        .children = &row_children,
+    };
+    var row_geist_nodes: [6]WidgetLayoutNode = undefined;
+    const row_geist = try layoutWidgetTreeWithTokens(row_host, row_host.frame, geist, &row_geist_nodes);
+    try std.testing.expectEqual(@as(f32, 352), row_geist.nodes[1].frame.width);
+    try std.testing.expectEqual(@as(f32, 0), row_geist.nodes[5].frame.width);
+
+    var row_house_nodes: [6]WidgetLayoutNode = undefined;
+    const row_house = try layoutWidgetTreeWithTokens(row_host, row_host.frame, house, &row_house_nodes);
+    try std.testing.expectEqual(@as(f32, 148), row_house.nodes[1].frame.width);
+    try std.testing.expectEqual(@as(f32, 204), row_house.nodes[5].frame.width);
+
+    var row_custom_nodes: [6]WidgetLayoutNode = undefined;
+    const row_custom = try layoutWidgetTreeWithTokens(row_host, row_host.frame, custom_underline, &row_custom_nodes);
+    try std.testing.expectEqual(@as(f32, 148), row_custom.nodes[1].frame.width);
+    try std.testing.expectEqual(@as(f32, 204), row_custom.nodes[5].frame.width);
+
+    // Anchored primary tabs consume no flow allocation, including the
+    // second pass that totals clamped fill widths. The bounded flow tab
+    // takes its 100px maximum and leaves the rest to the growing sibling.
+    var bounded_strip = nested_strip;
+    bounded_strip.layout.max_size.width = 100;
+    const anchored_strip = Widget{
+        .id = 6,
+        .kind = .tabs,
+        .frame = geometry.RectF.init(0, 0, 40, 50),
+        .layout = .{ .anchor = .{} },
+    };
+    const anchored_row_children = [_]Widget{
+        bounded_strip,
+        .{ .id = 5, .kind = .stack, .layout = .{ .grow = 1 } },
+        anchored_strip,
+    };
+    var anchored_row = row_host;
+    anchored_row.children = &anchored_row_children;
+    var anchored_row_nodes: [7]WidgetLayoutNode = undefined;
+    const anchored_row_layout = try layoutWidgetTreeWithTokens(anchored_row, anchored_row.frame, geist, &anchored_row_nodes);
+    try std.testing.expectEqual(@as(f32, 100), anchored_row_layout.findById(1).?.frame.width);
+    try std.testing.expectEqual(@as(f32, 252), anchored_row_layout.findById(5).?.frame.width);
+}
+
+test "geist primary tabs translate fixed trigger frames onto the content-hugging underline register" {
+    const tokens = DesignTokens.theme(.{ .pack = .geist });
+    const triggers = [_]Widget{.{
+        .id = 2,
+        .kind = .segmented_control,
+        // A theme-agnostic tree can retain the house trigger's fixed
+        // height and a wider hit target. Geist must still join the active
+        // marker to its 50px rail and keep that marker on the content.
+        .frame = geometry.RectF.init(0, 0, 120, 32),
+        .text = "Files",
+        .icon = "folder",
+        .state = .{ .selected = true },
+    }};
+    const strip = builtinComponentWidget(.tabs, .{
+        .id = 1,
+        .frame = geometry.RectF.init(0, 0, 240, 50),
+        .children = &triggers,
+    });
+
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTreeWithTokens(strip, strip.frame, tokens, &nodes);
+    const trigger = layout.findById(2).?.widget;
+    try std.testing.expectEqual(@as(f32, 50), trigger.frame.height);
+    try std.testing.expectEqual(@as(f32, 120), trigger.frame.width);
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayList(&builder, tokens);
+    switch (builder.displayList().findCommandById(widgetPartId(2, 2)).?.command) {
+        .fill_rect => |indicator| {
+            try std.testing.expectEqual(@as(f32, 48), indicator.rect.y);
+            try std.testing.expectEqual(@as(f32, 2), indicator.rect.height);
+            try std.testing.expect(indicator.rect.width < trigger.frame.width);
+
+            var hug_trigger = trigger;
+            hug_trigger.frame = geometry.RectF.init(0, 0, 0, 0);
+            const hug_width = intrinsicWidgetSize(hug_trigger, tokens).width;
+            try std.testing.expectApproxEqAbs(hug_width, indicator.rect.width, 1);
+            try std.testing.expectApproxEqAbs(trigger.frame.center().x, indicator.rect.center().x, 0.5);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "geist primary tabs fill the remaining width of an indented vertical flow" {
+    const geist = DesignTokens.theme(.{ .pack = .geist });
+    const triggers = [_]Widget{.{
+        .id = 3,
+        .kind = .segmented_control,
+        .text = "Files",
+        .state = .{ .selected = true },
+    }};
+    const strip = builtinComponentWidget(.tabs, .{
+        .id = 2,
+        .frame = geometry.RectF.init(20, 0, 148, 50),
+        .children = &triggers,
+    });
+    const children = [_]Widget{strip};
+    const column = Widget{
+        .id = 1,
+        .kind = .column,
+        .frame = geometry.RectF.init(0, 0, 352, 80),
+        .children = &children,
+    };
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTreeWithTokens(column, column.frame, geist, &nodes);
+    try std.testing.expectEqual(geometry.RectF.init(20, 0, 332, 50), layout.findById(2).?.frame);
+
+    // Full width remains a floor, not a cap: an authored overflow keeps
+    // its extent just as it does in stack and horizontal-scroll parents.
+    var wide_strip = strip;
+    wide_strip.frame.width = 480;
+    const wide_children = [_]Widget{wide_strip};
+    var wide_column = column;
+    wide_column.children = &wide_children;
+    var wide_nodes: [4]WidgetLayoutNode = undefined;
+    const wide_layout = try layoutWidgetTreeWithTokens(wide_column, wide_column.frame, geist, &wide_nodes);
+    try std.testing.expectEqual(geometry.RectF.init(20, 0, 480, 50), wide_layout.findById(2).?.frame);
+}
+
+test "geist primary tabs preserve authored overflow in rows" {
+    const geist = DesignTokens.theme(.{ .pack = .geist });
+    const triggers = [_]Widget{.{
+        .id = 3,
+        .kind = .segmented_control,
+        .text = "Files",
+        .state = .{ .selected = true },
+    }};
+    const strip = builtinComponentWidget(.tabs, .{
+        .id = 2,
+        .frame = geometry.RectF.init(0, 0, 480, 50),
+        .children = &triggers,
+    });
+    const children = [_]Widget{
+        strip,
+        .{ .id = 4, .kind = .stack, .layout = .{ .grow = 1 } },
+    };
+    const row = Widget{
+        .id = 1,
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 352, 50),
+        .children = &children,
+    };
+
+    var nodes: [5]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTreeWithTokens(row, row.frame, geist, &nodes);
+    try std.testing.expectEqual(@as(f32, 480), layout.findById(2).?.frame.width);
+    try std.testing.expectEqual(@as(f32, 0), layout.findById(4).?.frame.width);
+}
+
+test "geist primary tabs fill regular and virtual grid cells" {
+    const geist = DesignTokens.theme(.{ .pack = .geist });
+    const house = DesignTokens{};
+    const triggers = [_]Widget{.{
+        .id = 3,
+        .kind = .segmented_control,
+        .text = "Files",
+        .state = .{ .selected = true },
+    }};
+    const strip = builtinComponentWidget(.tabs, .{
+        .id = 2,
+        .frame = geometry.RectF.init(0, 0, 148, 50),
+        .children = &triggers,
+    });
+    const children = [_]Widget{strip};
+    const grid = Widget{
+        .id = 1,
+        .kind = .grid,
+        .frame = geometry.RectF.init(0, 0, 352, 50),
+        .layout = .{ .columns = 1 },
+        .children = &children,
+    };
+
+    var geist_nodes: [4]WidgetLayoutNode = undefined;
+    const geist_layout = try layoutWidgetTreeWithTokens(grid, grid.frame, geist, &geist_nodes);
+    try std.testing.expectEqual(@as(f32, 352), geist_layout.findById(2).?.frame.width);
+
+    var house_nodes: [4]WidgetLayoutNode = undefined;
+    const house_layout = try layoutWidgetTreeWithTokens(grid, grid.frame, house, &house_nodes);
+    try std.testing.expectEqual(@as(f32, 148), house_layout.findById(2).?.frame.width);
+
+    var virtual_grid = grid;
+    virtual_grid.layout.virtualized = true;
+    virtual_grid.layout.virtual_item_extent = 50;
+    var virtual_nodes: [4]WidgetLayoutNode = undefined;
+    const virtual_layout = try layoutWidgetTreeWithTokens(virtual_grid, virtual_grid.frame, geist, &virtual_nodes);
+    try std.testing.expectEqual(@as(f32, 352), virtual_layout.findById(2).?.frame.width);
+
+    var wide_strip = strip;
+    wide_strip.frame.width = 480;
+    const wide_children = [_]Widget{wide_strip};
+    var wide_grid = grid;
+    wide_grid.children = &wide_children;
+    var wide_nodes: [4]WidgetLayoutNode = undefined;
+    const wide_layout = try layoutWidgetTreeWithTokens(wide_grid, wide_grid.frame, geist, &wide_nodes);
+    try std.testing.expectEqual(@as(f32, 480), wide_layout.findById(2).?.frame.width);
 }
 
 test "the bubble reaction pill straddles the bottom edge on the page plane" {
@@ -1171,6 +1942,22 @@ test "list and menu items draw a leading vector icon with the label shifted righ
     const registered = canvas.icons.find("folder").?;
     try std.testing.expectEqual(registered.elements.ptr, icon_stroke.elements.ptr);
 
+    // `tree_level` is logical hierarchy metadata, not renderer-owned
+    // spacing. A flat tree can author indentation with ordinary layout
+    // (including a composed list row), so the same built-in row keeps its
+    // label position when only its semantic level changes.
+    var tree_child = plain;
+    tree_child.semantics.role = .treeitem;
+    tree_child.tree_level = 2;
+    var tree_commands: [8]CanvasCommand = undefined;
+    var tree_builder = Builder.init(&tree_commands);
+    try emitWidgetTree(&tree_builder, tree_child, tokens);
+    const tree_label = switch (tree_builder.displayList().findCommandById(widgetPartId(70, 3)).?.command) {
+        .draw_text => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualDeep(plain_label.origin, tree_label.origin);
+
     // menu_item keeps the same leading-icon slot contract even though
     // it draws with its own emitter (menu rows add the trailing
     // checkmark slot and drop the focus ring).
@@ -1185,8 +1972,10 @@ test "list and menu items draw a leading vector icon with the label shifted righ
     // Intrinsic row width grows by the shared icon metrics; height holds.
     const plain_size = canvas.intrinsicWidgetSize(plain, tokens);
     const iconed_size = canvas.intrinsicWidgetSize(iconed, tokens);
+    const tree_size = canvas.intrinsicWidgetSize(tree_child, tokens);
     try std.testing.expect(iconed_size.width > plain_size.width);
     try std.testing.expectEqual(plain_size.height, iconed_size.height);
+    try std.testing.expectEqualDeep(plain_size, tree_size);
 }
 
 test "menu rows wash the active row, never outline, and checkmark the committed row" {
@@ -1325,6 +2114,176 @@ test "the quiet-surface knob silences the hover wash and nothing else" {
     try std.testing.expect(focused_builder.displayList().findCommandById(widgetPartId(74, 2)) != null);
 }
 
+test "actionable layout containers paint the row hover and pressed ladder in both emit paths" {
+    const tokens = DesignTokens{};
+    inline for (.{ WidgetKind.row, WidgetKind.column, WidgetKind.stack }) |kind| {
+        const base = Widget{
+            .id = 75,
+            .kind = kind,
+            .frame = geometry.RectF.init(0, 0, 160, 40),
+            .semantics = .{ .actions = .{ .press = true } },
+        };
+
+        var hovered = base;
+        hovered.state.hovered = true;
+        var commands: [4]CanvasCommand = undefined;
+        var builder = Builder.init(&commands);
+        try emitWidgetTree(&builder, hovered, tokens);
+        switch (builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        // The laid-out/live emitter resolves the same state and part slot.
+        var nodes: [1]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(hovered, hovered.frame, &nodes);
+        var layout_commands: [4]CanvasCommand = undefined;
+        var layout_builder = Builder.init(&layout_commands);
+        try layout.emitDisplayList(&layout_builder, tokens);
+        switch (layout_builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var pressed = base;
+        pressed.state.pressed = true;
+        var pressed_commands: [4]CanvasCommand = undefined;
+        var pressed_builder = Builder.init(&pressed_commands);
+        try emitWidgetTree(&pressed_builder, pressed, tokens);
+        switch (pressed_builder.displayList().findCommandById(widgetPartId(75, 1)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var quiet = hovered;
+        quiet.style.quiet_hover = true;
+        var quiet_commands: [4]CanvasCommand = undefined;
+        var quiet_builder = Builder.init(&quiet_commands);
+        try emitWidgetTree(&quiet_builder, quiet, tokens);
+        try std.testing.expect(quiet_builder.displayList().findCommandById(widgetPartId(75, 1)) == null);
+    }
+}
+
+test "drag-only layout containers own hover and pressed washes through child content" {
+    const tokens = DesignTokens{};
+    const label = [_]Widget{.{
+        .id = 79,
+        .kind = .text,
+        .text = "Drag me",
+    }};
+    const draggable = Widget{
+        .id = 78,
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 160, 40),
+        .semantics = .{ .actions = .{ .drag = true } },
+        .children = &label,
+    };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(draggable, draggable.frame, &nodes);
+    const label_node = layout.findById(79) orelse return error.TestUnexpectedResult;
+    const raw_hit = layout.hitTest(label_node.frame.center()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 79), raw_hit.id);
+    const hover_target = layout.hoverTargetForHit(raw_hit) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 78), hover_target.id);
+    const press_target = canvas.widgetPressTargetForHit(layout, raw_hit) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ObjectId, 78), press_target.id);
+
+    var hover_commands: [4]CanvasCommand = undefined;
+    var hover_builder = Builder.init(&hover_commands);
+    try layout.emitDisplayListWithState(&hover_builder, tokens, .{ .hovered_id = hover_target.id });
+    switch (hover_builder.displayList().findCommandById(widgetPartId(78, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var press_commands: [4]CanvasCommand = undefined;
+    var press_builder = Builder.init(&press_commands);
+    try layout.emitDisplayListWithState(&press_builder, tokens, .{ .pressed_id = press_target.id });
+    switch (press_builder.displayList().findCommandById(widgetPartId(78, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "an actionable container uses authored background only at rest" {
+    const authored = Color.rgb8(28, 52, 76);
+    const tokens = DesignTokens{};
+    const base = Widget{
+        .id = 77,
+        .kind = .row,
+        .frame = geometry.RectF.init(0, 0, 160, 40),
+        .style = .{ .background = authored },
+        .semantics = .{ .actions = .{ .press = true } },
+    };
+    var rest_commands: [4]CanvasCommand = undefined;
+    var rest_builder = Builder.init(&rest_commands);
+    try emitWidgetTree(&rest_builder, base, tokens);
+    switch (rest_builder.displayList().findCommandById(widgetPartId(77, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(authored, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var hovered = base;
+    hovered.state.hovered = true;
+    var hover_commands: [4]CanvasCommand = undefined;
+    var hover_builder = Builder.init(&hover_commands);
+    try emitWidgetTree(&hover_builder, hovered, tokens);
+    switch (hover_builder.displayList().findCommandById(widgetPartId(77, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "house alert card and panel surfaces have visible hover and pressed fallbacks" {
+    const themed_rest = Color.rgb8(28, 52, 76);
+    const tokens = DesignTokens{ .controls = .{
+        .alert = .{ .background = themed_rest },
+        .card = .{ .background = themed_rest },
+        .panel = .{ .background = themed_rest },
+    } };
+    const cases = [_]struct { kind: WidgetKind, fill_slot: u4 }{
+        .{ .kind = .alert, .fill_slot = 1 },
+        .{ .kind = .card, .fill_slot = 1 },
+        .{ .kind = .panel, .fill_slot = 2 },
+    };
+    for (cases) |case| {
+        const base = Widget{
+            .id = 76,
+            .kind = case.kind,
+            .frame = geometry.RectF.init(0, 0, 160, 48),
+            .semantics = .{ .actions = .{ .press = true } },
+        };
+
+        var rest_commands: [8]CanvasCommand = undefined;
+        var rest_builder = Builder.init(&rest_commands);
+        try emitWidgetTree(&rest_builder, base, tokens);
+        switch (rest_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(themed_rest, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var hovered = base;
+        hovered.state.hovered = true;
+        var hovered_commands: [8]CanvasCommand = undefined;
+        var hovered_builder = Builder.init(&hovered_commands);
+        try emitWidgetTree(&hovered_builder, hovered, tokens);
+        switch (hovered_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_subtle, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+
+        var pressed = base;
+        pressed.state.pressed = true;
+        var pressed_commands: [8]CanvasCommand = undefined;
+        var pressed_builder = Builder.init(&pressed_commands);
+        try emitWidgetTree(&pressed_builder, pressed, tokens);
+        switch (pressed_builder.displayList().findCommandById(widgetPartId(76, case.fill_slot)).?.command) {
+            .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.surface_pressed, fill.fill),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
 test "icon buttons draw registry names as vector icons and keep the glyph fallback" {
     const tokens = DesignTokens{};
     const vector = Widget{
@@ -1412,6 +2371,149 @@ test "design tokens provide theme and contrast palettes" {
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.normal));
     try std.testing.expectEqual(@as(u32, 0), reduced_motion.motion.durationMs(.slow));
     try std.testing.expectEqual(Easing.linear, reduced_motion.motion.easing);
+}
+
+test "the accent override desaturates its dark-scheme focus ring" {
+    const accent = Color.rgb8(223, 38, 112);
+
+    // Light keeps the raw accent on every identity slot, ring included.
+    const light = canvas.accentOverrides(accent, .light);
+    try std.testing.expectEqualDeep(accent, light.colors.accent.?);
+    try std.testing.expectEqualDeep(accent, light.colors.focus_ring.?);
+
+    // Dark keeps the accent identity but derives the ring at half the
+    // accent's HSL saturation — a quiet outline instead of a neon glare
+    // — through the exported derivation, so hand-authored token sets
+    // can state the same value.
+    const dark = canvas.accentOverrides(accent, .dark);
+    try std.testing.expectEqualDeep(accent, dark.colors.accent.?);
+    const ring = dark.colors.focus_ring.?;
+    try std.testing.expectEqualDeep(canvas.accentFocusRing(accent, .dark), ring);
+    try std.testing.expect(!std.meta.eql(accent, ring));
+    // Same lightness (HSL max+min preserved), lower chroma: the channel
+    // spread shrinks to half while the hue's ordering holds.
+    const accent_spread = @max(accent.r, @max(accent.g, accent.b)) - @min(accent.r, @min(accent.g, accent.b));
+    const ring_spread = @max(ring.r, @max(ring.g, ring.b)) - @min(ring.r, @min(ring.g, ring.b));
+    try std.testing.expect(ring_spread < accent_spread);
+    try std.testing.expect(ring.r > ring.b and ring.b > ring.g);
+
+    // An achromatic accent has no saturation to halve: the ring passes
+    // through untouched.
+    const gray = Color.rgb8(115, 115, 115);
+    try std.testing.expectEqualDeep(gray, canvas.accentFocusRing(gray, .dark));
+}
+
+test "accent overrides compose over either built-in pack without moving unrelated tokens" {
+    const accent = Color.rgb8(0, 120, 111);
+    for ([_]canvas.ThemePack{ .house, .geist }) |pack| {
+        const base = DesignTokens.theme(.{ .pack = pack, .color_scheme = .dark });
+        const branded = base.withOverrides(canvas.accentOverrides(accent, .dark));
+        try std.testing.expectEqualDeep(accent, branded.colors.accent);
+        try std.testing.expectEqualDeep(canvas.accentFocusRing(accent, .dark), branded.colors.focus_ring);
+        try std.testing.expectEqualDeep(accent, branded.controls.slider.active_background);
+        try std.testing.expectEqual(base.metrics.control_height, branded.metrics.control_height);
+        try std.testing.expectEqualDeep(base.colors.background, branded.colors.background);
+    }
+}
+
+test "the dark accent focus ring holds the non-text contrast floor across hues" {
+    // Rings draw OUTSIDE controls, so the tones that matter are the
+    // dark containers controls commonly sit on, across BOTH shipped
+    // packs: page background, card/popover surface, and the muted
+    // surface (the tabs-list pill container focusable triggers sit
+    // inside). accentFocusRing floors against the LIGHTEST of these
+    // (house surface_subtle #262626) — a ring clearing 3:1 there
+    // clears every darker tone in the set too; each is asserted below.
+    const house_dark = DesignTokens.theme(.{ .color_scheme = .dark }).colors;
+    const geist_dark = DesignTokens.theme(.{ .pack = .geist, .color_scheme = .dark }).colors;
+    const adjacent_tones = [_]Color{
+        house_dark.background, // #0a0a0a
+        house_dark.surface, // #171717
+        house_dark.surface_subtle, // #262626 — the floor's reference
+        geist_dark.background, // #000000 (Geist surface is the same black)
+        geist_dark.surface_subtle, // #1a1a1a
+    };
+    const reference_tone = house_dark.surface_subtle;
+    const cases = [_]Color{
+        // Green: the input clears 3:1 on the background AND the card
+        // surface; desaturation alone dropped to ~2.6:1 on the
+        // background (worse still on the surface) — the floor lifts it
+        // back over the bar on both. Against the muted reference the
+        // input itself sits just under 3:1 (~2.94), so the ring holds
+        // exactly that there — restored, never invented.
+        Color.rgb8(0, 128, 0),
+        // Deep blue: below 3:1 on its own; the ring must not get worse.
+        Color.rgb8(0, 0, 204),
+        // Dark red: below 3:1 on its own AND desaturation costs more —
+        // the floor restores the accent's own contrast, no further.
+        Color.rgb8(139, 0, 0),
+        // The soundboard pink: clears the bar before and after halving.
+        Color.rgb8(223, 38, 112),
+        // Achromatic gray: nothing to desaturate, passes through.
+        Color.rgb8(115, 115, 115),
+    };
+    for (cases) |accent| {
+        // Light passes the accent through untouched, every hue.
+        try std.testing.expectEqualDeep(accent, canvas.accentFocusRing(accent, .light));
+
+        const ring = canvas.accentFocusRing(accent, .dark);
+        // Dark never raises saturation; chromatic accents lose half.
+        const accent_saturation = testHslSaturation(accent);
+        const ring_saturation = testHslSaturation(ring);
+        if (accent_saturation > 0) {
+            try std.testing.expect(ring_saturation < accent_saturation);
+        } else {
+            try std.testing.expectEqualDeep(accent, ring);
+        }
+        // The floor, tone by tone: >= 3:1 (WCAG non-text) against EVERY
+        // adjacent tone the accent itself cleared it on. Flooring
+        // against the lightest tone guarantees the rest: where the
+        // accent cleared 3:1 anywhere, the ring's luminance lands at or
+        // above the accent's, so no darker tone can regress.
+        for (adjacent_tones) |tone| {
+            if (testContrastRatio(accent, tone) >= 3.0) {
+                try std.testing.expect(testContrastRatio(ring, tone) >= 3.0);
+            }
+        }
+        // The escape hatch, stated against the SAME reference the floor
+        // measures on: when the accent never cleared 3:1 there, the
+        // ring still never lands below the accent's own contrast.
+        const accent_contrast = testContrastRatio(accent, reference_tone);
+        const ring_contrast = testContrastRatio(ring, reference_tone);
+        if (accent_contrast >= 3.0) {
+            try std.testing.expect(ring_contrast >= 3.0);
+        } else {
+            try std.testing.expect(ring_contrast >= accent_contrast);
+        }
+    }
+}
+
+/// HSL saturation of a color, for the desaturation assertions.
+fn testHslSaturation(color: Color) f32 {
+    const max = @max(color.r, @max(color.g, color.b));
+    const min = @min(color.r, @min(color.g, color.b));
+    const delta = max - min;
+    if (delta <= 0.0001) return 0;
+    const lightness = (max + min) / 2;
+    return delta / (1 - @abs(2 * lightness - 1));
+}
+
+/// WCAG contrast ratio between two colors, for the floor assertions.
+fn testContrastRatio(a: Color, b: Color) f32 {
+    const la = testRelativeLuminance(a);
+    const lb = testRelativeLuminance(b);
+    return (@max(la, lb) + 0.05) / (@min(la, lb) + 0.05);
+}
+
+fn testRelativeLuminance(color: Color) f32 {
+    return 0.2126 * testSrgbToLinear(color.r) +
+        0.7152 * testSrgbToLinear(color.g) +
+        0.0722 * testSrgbToLinear(color.b);
+}
+
+fn testSrgbToLinear(channel: f32) f32 {
+    if (channel <= 0.04045) return channel / 12.92;
+    return std.math.pow(f32, (channel + 0.055) / 1.055, 2.4);
 }
 
 test "built-in component catalog covers house component set" {
@@ -1575,7 +2677,7 @@ test "built-in component factory applies house composite defaults" {
         try std.testing.expectEqual(widget_kind, component.kind);
         try std.testing.expectEqual(gap, component.layout.gap);
         try std.testing.expectEqual(WidgetCrossAlignment.center, component.layout.cross_alignment);
-        try std.testing.expectEqual(WidgetRole.group, component.semantics.role);
+        try std.testing.expectEqual(if (kind == .radio_group) WidgetRole.radiogroup else WidgetRole.group, component.semantics.role);
     }
 
     // The house TabsList: a muted rounded container hugging its
@@ -1617,7 +2719,12 @@ test "built-in component factory applies house composite defaults" {
         .layout = .{ .gap = 4 },
     });
     try std.testing.expectEqual(@as(f32, 3), custom_tabs.layout.padding.top);
+    try std.testing.expect(custom_tabs.layout.padding_is_kind_default);
     try std.testing.expectEqual(@as(f32, 4), custom_tabs.layout.gap);
+    const explicitly_padded_tabs = builtinComponentWidget(.tabs, .{
+        .layout = .{ .padding = geometry.InsetsF.all(3) },
+    });
+    try std.testing.expect(!explicitly_padded_tabs.layout.padding_is_kind_default);
     const padded_card = builtinComponentWidget(.card, .{
         .layout = .{ .padding = geometry.InsetsF.all(8) },
     });
@@ -1893,6 +3000,85 @@ test "built-in alert renders house surface chrome and text" {
     }
 }
 
+test "destructive alerts tint every channel and compact defaults align chrome with content" {
+    const tokens = DesignTokens{
+        .controls = .{
+            // One shared alert table may state neutral defaults; the
+            // destructive variant still owns its hue.
+            .alert = .{
+                .background = Color.rgb8(12, 18, 24),
+                .foreground = Color.rgb8(235, 240, 245),
+                .border = Color.rgb8(54, 64, 74),
+            },
+        },
+    };
+    const destructive = Widget{
+        .id = 42,
+        .kind = .alert,
+        .frame = geometry.RectF.init(0, 0, 320, 68),
+        .text = "Session expired",
+        .variant = .destructive,
+        .state = .{ .disabled = true },
+        .style = .{ .accent = Color.rgb8(196, 32, 64) },
+    };
+    var destructive_commands: [12]CanvasCommand = undefined;
+    var destructive_builder = Builder.init(&destructive_commands);
+    try emitWidgetTree(&destructive_builder, destructive, tokens);
+    const destructive_hue = destructive.style.accent.?;
+    const destructive_fill = colorWithAlpha(destructive_hue, tokens.states.destructive_wash_alpha * tokens.states.disabled_alpha);
+    const destructive_border = colorWithAlpha(destructive_hue, 0.5 * tokens.states.disabled_alpha);
+    const destructive_ink = colorWithAlpha(destructive_hue, tokens.states.disabled_alpha);
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 1)).?.command) {
+        .fill_rounded_rect => |fill| try expectFillColor(destructive_fill, fill.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 2)).?.command) {
+        .stroke_rect => |stroke| try expectFillColor(destructive_border, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 4)).?.command) {
+        .stroke_path => |stroke| try expectFillColor(destructive_ink, stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (destructive_builder.displayList().findCommandById(widgetPartId(42, 10)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(destructive_ink, text.color),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const description = [_]Widget{.{
+        .id = 44,
+        .kind = .text,
+        .text = "Restart to update.",
+    }};
+    const compact = builtinComponentWidget(.alert, .{
+        .id = 43,
+        .frame = geometry.RectF.init(0, 0, 320, 80),
+        .text = "Update available",
+        .size = .sm,
+        .children = &description,
+    });
+    // Stored kind default and token-resolved chrome share the 14px compact
+    // inset; the 14px multiplicatively scaled icon plus 10px additive
+    // text gap put title and child at x=38. The semantic title gap stays
+    // 4px rather than shrinking with control chrome.
+    try std.testing.expectEqual(@as(f32, 14), compact.layout.padding.top);
+    try std.testing.expect(compact.layout.padding_is_kind_default);
+    var compact_nodes: [2]WidgetLayoutNode = undefined;
+    const compact_layout = try layoutWidgetTree(compact, compact.frame, &compact_nodes);
+    const child = compact_layout.findById(44) orelse return error.TestUnexpectedResult;
+    const text_size = widget_metrics.widgetBodyTextSize(compact, .{});
+    try std.testing.expectApproxEqAbs(@as(f32, 38), child.frame.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 14) + widget_metrics.widgetLineHeight(text_size) + 4, child.frame.y, 0.001);
+
+    var compact_commands: [16]CanvasCommand = undefined;
+    var compact_builder = Builder.init(&compact_commands);
+    try compact_layout.emitDisplayList(&compact_builder, .{});
+    switch (compact_builder.displayList().findCommandById(widgetPartId(43, 10)).?.command) {
+        .draw_text => |text| try std.testing.expectApproxEqAbs(child.frame.x, text.origin.x, 0.001),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "built-in card renders house surface chrome and title" {
     const card = builtinComponentWidget(.card, .{
         .id = 44,
@@ -2127,10 +3313,13 @@ test "built-in modal surfaces render house chrome and semantics" {
     const root = Widget{ .kind = .stack, .children = &.{ backdrop, dialog, drawer, sheet } };
     var nodes: [5]WidgetLayoutNode = undefined;
     const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 920, 240), &nodes);
-    try std.testing.expectEqual(WidgetKind.panel, layout.hitTest(geometry.PointF.init(300, 220)).?.kind);
-    try std.testing.expectEqual(WidgetKind.dialog, layout.hitTest(geometry.PointF.init(12, 12)).?.kind);
-    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(352, 12)).?.kind);
-    try std.testing.expectEqual(WidgetKind.sheet, layout.hitTest(geometry.PointF.init(652, 12)).?.kind);
+    // Modal placement is root-relative through the real layout pass:
+    // dialog centered, drawer full-width at the bottom, sheet full-height
+    // at the right. All three use the modal layer above the backdrop.
+    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(300, 220)).?.kind);
+    try std.testing.expectEqual(WidgetKind.dialog, layout.hitTest(geometry.PointF.init(310, 50)).?.kind);
+    try std.testing.expectEqual(WidgetKind.drawer, layout.hitTest(geometry.PointF.init(12, 100)).?.kind);
+    try std.testing.expectEqual(WidgetKind.sheet, layout.hitTest(geometry.PointF.init(800, 12)).?.kind);
 
     var semantics_buffer: [5]WidgetSemanticsNode = undefined;
     const semantics = try layout.collectSemantics(&semantics_buffer);
@@ -2502,7 +3691,10 @@ test "built-in component primitive widgets render distinct house chrome" {
     try layout.emitDisplayList(&builder, .{});
 
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 9), display_list.commandCount());
+    // Eight live commands: avatar fill/text/stroke, badge fill/text (its
+    // default zero-width edge emits nothing), separator, skeleton, and
+    // spinner. This count deliberately excludes dead rasterizer work.
+    try std.testing.expectEqual(@as(usize, 8), display_list.commandCount());
     try std.testing.expect(display_list.commands[0] == .fill_rounded_rect);
     switch (display_list.commands[1]) {
         .draw_text => |text| try std.testing.expectEqualStrings("NS", text.text),
@@ -2513,16 +3705,16 @@ test "built-in component primitive widgets render distinct house chrome" {
         .fill_rounded_rect => |fill| try expectFillColor(ColorTokens.light().accent, fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[5]) {
+    switch (display_list.commands[4]) {
         .draw_text => |text| try std.testing.expectEqualStrings("Beta", text.text),
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(display_list.commands[6] == .fill_rect);
-    try std.testing.expect(display_list.commands[7] == .fill_rounded_rect);
+    try std.testing.expect(display_list.commands[5] == .fill_rect);
+    try std.testing.expect(display_list.commands[6] == .fill_rounded_rect);
     // The spinner (house arc register): ONE stroked arc in the page
     // ink — no track — with the stroke scaling at 1/12 of the box
     // (28px box -> 2.333px stroke).
-    switch (display_list.commands[8]) {
+    switch (display_list.commands[7]) {
         .stroke_path => |arc| {
             try expectFillColor(ColorTokens.light().text, arc.stroke.fill);
             try std.testing.expectApproxEqAbs(@as(f32, 28.0 * 2.0 / 24.0), arc.stroke.width, 0.001);
@@ -3116,10 +4308,11 @@ test "themed design tokens flow into widget display lists" {
 }
 
 test "widget text at intrinsic width does not wrap under geometry pixel snapping" {
-    // Geometry snapping can shave up to half a device pixel off the frame
-    // that intrinsic sizing measured; the text emitter hands the shaved
-    // quantum back to the wrap budget so an exact-fit label ("Sort")
-    // never breaks into "Sor"/"t". Regression for the snapped-frame wrap
+    // Geometry snapping can shave up to a full device pixel off the frame
+    // that intrinsic sizing measured (each edge rounds independently by
+    // up to half); the text emitter hands the snap quantum back to the
+    // wrap budget so an exact-fit label ("Sort") never breaks into
+    // "Sor"/"t". Regression for the snapped-frame wrap
     // seam surfaced when the estimator became the bundled face's real
     // advance table.
     const scales = [_]f32{ 1, 2 };
@@ -3153,7 +4346,7 @@ test "widget text at intrinsic width does not wrap under geometry pixel snapping
 test "label-exact controls at intrinsic width never elide under geometry pixel snapping" {
     // The elision twin of the wrap seam above: a control sized exactly
     // to its measured label sits at a fractional width, and render-time
-    // geometry snapping can shave up to half a device pixel off that
+    // geometry snapping can shave up to a full device pixel off that
     // frame — past the elision slack, so real glyphs swap for an
     // ellipsis (system monitor's "PID" sort chip painting "PI…").
     // Intrinsic measured-label widths now ceil to the snap grid
@@ -3163,8 +4356,8 @@ test "label-exact controls at intrinsic width never elide under geometry pixel s
     // edge, at both snap scales, across labels whose fractional widths
     // land on both sides of the rounding boundary.
     const kinds = [_]canvas.WidgetKind{
-        .toggle_button, .button,   .toggle, .segmented_control,
-        .menu_item,     .checkbox, .radio,  .switch_control,
+        .toggle_button, .button,   .toggle,    .segmented_control,
+        .menu_item,     .checkbox, .radio,     .switch_control,
         .tooltip,       .badge,    .list_item,
     };
     const labels = [_][]const u8{ "PID", "CPU", "Memory", "Name", "Filter processes", "Quarterly report" };
@@ -3200,6 +4393,308 @@ test "label-exact controls at intrinsic width never elide under geometry pixel s
             try std.testing.expect(seen);
         };
     }
+}
+
+test "a string never elides inside its own measured width under edge snapping" {
+    // The measurement/ellipsize epsilon policy (see `textWrapMaxWidth`):
+    // geometry snapping rounds each frame edge independently, so a frame
+    // sized exactly to its measured text and sitting at a fractional
+    // position can come back up to a FULL device pixel narrower — the
+    // budget hands that whole quantum back, and the elision slack covers
+    // the residual float dust. Sweep fractional origins across the snap
+    // cell for every digit (the TS scaffold's counter, which painted "…"
+    // instead of "2" on Windows at scale 1) plus longer labels, at every
+    // real scale factor.
+    const scales = [_]f32{ 1, 1.25, 1.5, 2 };
+    const labels = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "ticks 7", "Sampling 60 s cadence" };
+    const size: f32 = 14;
+    for (scales) |scale| {
+        const tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
+        for (labels) |label| {
+            const measured = canvas.estimateTextWidthForFont(default_sans_font_id, label, size);
+            var step: usize = 0;
+            while (step < 32) : (step += 1) {
+                const origin = 235 + @as(f32, @floatFromInt(step)) / 32.0;
+                // Snap both edges exactly like the renderer's
+                // `pixelSnapGeometryRect` does.
+                const left = @round(origin * scale) / scale;
+                const right = @round((origin + measured) * scale) / scale;
+                const snapped_width = @max(0, right - left);
+                var lines: [2]TextLine = undefined;
+                const layout = try canvas.layoutTextRun(.{
+                    .id = 1,
+                    .font_id = default_sans_font_id,
+                    .size = size,
+                    .origin = geometry.PointF.init(left, 20),
+                    .color = Color.rgb8(0, 0, 0),
+                    .text = label,
+                }, .{
+                    .max_width = widget_metrics.textWrapMaxWidth(tokens, snapped_width),
+                    .wrap = .none,
+                    .overflow = .ellipsis,
+                }, &lines);
+                try std.testing.expectEqual(@as(usize, 1), layout.lineCount());
+                for (layout.lines) |line| try std.testing.expect(!line.isElided());
+            }
+        }
+    }
+}
+
+test "hug-sized centered text leaf never elides under geometry pixel snapping" {
+    // The widget-level twin of the sweep above, in the exact scaffold
+    // shape that surfaced it: `<row main="center">` centers a hug-sized
+    // digit between two buttons, landing BOTH its frame edges on
+    // fractional thirds — the left edge snaps up, the right edge snaps
+    // down, and the frame loses more than the old half-pixel hand-back.
+    const digits = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+    const scales = [_]f32{ 1, 1.25, 1.5, 2 };
+    for (scales) |scale| {
+        const tokens = DesignTokens{ .pixel_snap = .{ .geometry = true, .text = true, .scale = scale } };
+        for (digits) |digit| {
+            const minus = Widget{ .id = 2, .kind = .button, .text = "-" };
+            const count = Widget{ .id = 3, .kind = .text, .text = digit };
+            const plus = Widget{ .id = 4, .kind = .button, .text = "+" };
+            const children = [_]Widget{ minus, count, plus };
+            const row = Widget{ .id = 1, .kind = .row, .layout = .{
+                .gap = 8,
+                .main_alignment = .center,
+                .cross_alignment = .center,
+            }, .children = &children };
+
+            var nodes: [4]WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTreeWithTokens(row, geometry.RectF.init(16, 56, 448, 164), tokens, &nodes);
+
+            var commands: [16]CanvasCommand = undefined;
+            var builder = Builder.init(&commands);
+            try canvas.emitWidgetLayout(&builder, layout, tokens);
+            var seen = false;
+            for (builder.displayList().commands) |command| switch (command) {
+                .draw_text => |text| {
+                    if (!std.mem.eql(u8, text.text, digit)) continue;
+                    seen = true;
+                    var lines: [2]TextLine = undefined;
+                    const text_layout = try canvas.layoutTextRun(text, text.text_layout.?, &lines);
+                    for (text_layout.lines) |line| try std.testing.expect(!line.isElided());
+                },
+                else => {},
+            };
+            try std.testing.expect(seen);
+        }
+    }
+}
+
+test "window-control clearance trims drag-header content on the cluster's side" {
+    // The engine half of the hidden-titlebar caption fix: when the
+    // runtime stamps the OS window-control cluster into the tokens, a
+    // `window_drag` row lays its content out clear of it — trailing
+    // cluster (Windows caption buttons) trims the content box's end,
+    // leading cluster (macOS traffic lights) its start. Non-drag rows
+    // never move.
+    const spacer = Widget{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 } };
+    const status = Widget{ .id = 3, .kind = .text, .text = "sampling" };
+    const children = [_]Widget{ spacer, status };
+    var row = Widget{ .id = 1, .kind = .row, .layout = .{ .cross_alignment = .center }, .children = &children };
+    row.window_drag = true;
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    // Trailing cluster: content ends at its leading edge.
+    const trailing_tokens = DesignTokens{ .window_controls = geometry.RectF.init(262, 0, 138, 32) };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(row, bounds, trailing_tokens, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.maxX() <= 262 + 0.01);
+
+    // Leading cluster (the macOS mirror): content starts past it.
+    const leading_tokens = DesignTokens{ .window_controls = geometry.RectF.init(0, 0, 78, 32) };
+    const lead_children = [_]Widget{ status, spacer };
+    var lead_row = row;
+    lead_row.children = &lead_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_row, bounds, leading_tokens, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.x >= 78 - 0.01);
+
+    // Unstamped tokens: byte-identical to a plain row.
+    layout = try canvas.layoutWidgetTreeWithTokens(row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expectEqual(@as(f32, 400), layout.findById(3).?.frame.maxX());
+
+    // A non-drag row ignores the stamp entirely.
+    var plain = row;
+    plain.window_drag = false;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain, bounds, trailing_tokens, &nodes);
+    try std.testing.expectEqual(@as(f32, 400), layout.findById(3).?.frame.maxX());
+}
+
+test "window-control collision scan flags readable content only" {
+    // The reservation trigger: text under the cluster inside a drag
+    // header counts; the row itself (its background paints under the
+    // buttons like it does under traffic lights), spacers, and
+    // full-bleed separators never do — and content outside any drag
+    // region is not the header's to fix.
+    const cluster = geometry.RectF.init(262, 0, 138, 32);
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    const spacer = Widget{ .id = 2, .kind = .stack, .layout = .{ .grow = 1 } };
+    const status = Widget{ .id = 3, .kind = .text, .text = "sampling" };
+    const colliding_children = [_]Widget{ spacer, status };
+    var drag_row = Widget{ .id = 1, .kind = .row, .children = &colliding_children };
+    drag_row.window_drag = true;
+
+    var nodes: [6]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+
+    // The same content already clear of the cluster: no trigger.
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, geometry.RectF.init(262, 200, 138, 32), DesignTokens{}));
+
+    // Decoration under the cluster: a full-width separator never
+    // triggers (it is expected to run under the band).
+    const separator = Widget{ .id = 4, .kind = .separator };
+    const decor_children = [_]Widget{ spacer, separator };
+    var decor_row = drag_row;
+    decor_row.children = &decor_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(decor_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+
+    // Content under the cluster OUTSIDE any drag region: not the
+    // header's collision to fix, so no trigger.
+    var plain_row = drag_row;
+    plain_row.window_drag = false;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+}
+
+test "window-control collision scan judges text by its aligned painted bounds" {
+    // The centered-title pattern: a grow text spanning the header row
+    // has a FRAME under the trailing cluster while its inked glyphs sit
+    // well clear of it. Judging the frame would pay the clearance retry,
+    // and the trimmed content box would visibly shift the centered title
+    // — so the scan measures the aligned painted line instead. A
+    // trailing-aligned grow text whose painted END sits under the
+    // cluster still collides (the system-monitor case), the macOS
+    // leading mirror agrees, and multi-line text keeps the conservative
+    // frame test.
+    const cluster = geometry.RectF.init(262, 0, 138, 32);
+    const bounds = geometry.RectF.init(0, 0, 400, 40);
+
+    var title = Widget{ .id = 2, .kind = .text, .text = "Monitor", .layout = .{ .grow = 1 } };
+    title.text_alignment = .center;
+    const centered_children = [_]Widget{title};
+    var drag_row = Widget{ .id = 1, .kind = .row, .children = &centered_children };
+    drag_row.window_drag = true;
+
+    var nodes: [4]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    // The grow frame really does span the cluster; the painted glyphs
+    // do not — no trigger, so the runtime never retries and the
+    // centered title never moves.
+    try std.testing.expect(layout.findById(2).?.frame.maxX() > cluster.x);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+
+    // Trailing-aligned grow text: same frame, painted end under the
+    // cluster — still a collision, and the remedy still converges (the
+    // re-laid text ends at the cluster's leading edge, so the re-scan
+    // of the remedied layout stays quiet).
+    var status = title;
+    status.text_alignment = .end;
+    const trailing_children = [_]Widget{status};
+    var trailing_row = drag_row;
+    trailing_row.children = &trailing_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(trailing_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+    const trailing_tokens = DesignTokens{ .window_controls = cluster };
+    layout = try canvas.layoutWidgetTreeWithTokens(trailing_row, bounds, trailing_tokens, &nodes);
+    try std.testing.expect(layout.findById(2).?.frame.maxX() <= cluster.x + 0.01);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, trailing_tokens));
+
+    // The macOS mirror: a leading cluster collides with leading-aligned
+    // glyphs but not with the same centered title.
+    const leading_cluster = geometry.RectF.init(0, 0, 78, 32);
+    var lead = title;
+    lead.text_alignment = .start;
+    const lead_children = [_]Widget{lead};
+    var lead_row = drag_row;
+    lead_row.children = &lead_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
+    layout = try canvas.layoutWidgetTreeWithTokens(drag_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
+
+    // Multi-line text (an explicit newline) stacks lines with per-line
+    // extents, so the scan keeps the conservative frame test: the same
+    // centered grow leaf triggers once it can break.
+    var wrapped = title;
+    wrapped.text = "Mon\nitor";
+    const wrapped_children = [_]Widget{wrapped};
+    var wrapped_row = drag_row;
+    wrapped_row.children = &wrapped_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(wrapped_row, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+}
+
+test "window-control clearance moves a drag header's anchored children too" {
+    // The collision scan counts every content descendant of the drag
+    // header — anchored floaters included — so the remedy must move
+    // them: a drag header's anchored children resolve against the
+    // cleared anchor rect, not the full frame, or the runtime pays its
+    // one retry and the child stays under the caption buttons. Non-drag
+    // widgets' anchored children never move (menus/popovers anchor
+    // everywhere), stamped tokens or not.
+    const cluster = geometry.RectF.init(262, 0, 138, 32);
+    const bounds = geometry.RectF.init(0, 0, 400, 300);
+    const trailing_tokens = DesignTokens{ .window_controls = cluster };
+
+    // A 24pt-tall header (shorter than the 32pt cluster band) whose ONLY
+    // content is an end-aligned floater dropping just below the header —
+    // still inside the cluster band, and under its buttons.
+    const badge = Widget{ .id = 3, .kind = .text, .text = "recording", .layout = .{ .anchor = .{ .placement = .below, .alignment = .end, .offset = 0 } } };
+    const header_children = [_]Widget{badge};
+    var header = Widget{ .id = 2, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 24), .children = &header_children };
+    header.window_drag = true;
+    const root_children = [_]Widget{header};
+    const root = Widget{ .id = 1, .kind = .column, .children = &root_children };
+
+    // Unstamped: the floater ends at the header's trailing edge, under
+    // the cluster — and the scan fires on it (anchored-only content is
+    // still a collision).
+    var nodes: [6]WidgetLayoutNode = undefined;
+    var layout = try canvas.layoutWidgetTreeWithTokens(root, bounds, DesignTokens{}, &nodes);
+    const naive = layout.findById(3).?.frame;
+    try std.testing.expect(naive.maxX() > cluster.x);
+    try std.testing.expect(!geometry.RectF.intersection(naive.normalized(), cluster).isEmpty());
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, DesignTokens{}));
+
+    // Stamped: the anchor base is trimmed, the floater lands clear of
+    // the cluster, and re-scanning the remedied layout stays quiet —
+    // scan and remedy agree, so the runtime's single retry converges.
+    layout = try canvas.layoutWidgetTreeWithTokens(root, bounds, trailing_tokens, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.maxX() <= cluster.x + 0.01);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, cluster, trailing_tokens));
+
+    // The macOS mirror: a leading cluster pushes a start-aligned floater
+    // past its trailing edge.
+    const leading_cluster = geometry.RectF.init(0, 0, 78, 32);
+    const lead_badge = Widget{ .id = 3, .kind = .text, .text = "recording", .layout = .{ .anchor = .{ .placement = .below, .alignment = .start, .offset = 0 } } };
+    const lead_children = [_]Widget{lead_badge};
+    var lead_header = header;
+    lead_header.children = &lead_children;
+    const lead_root_children = [_]Widget{lead_header};
+    var lead_root = root;
+    lead_root.children = &lead_root_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_root, bounds, DesignTokens{}, &nodes);
+    try std.testing.expect(canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{}));
+    layout = try canvas.layoutWidgetTreeWithTokens(lead_root, bounds, DesignTokens{ .window_controls = leading_cluster }, &nodes);
+    try std.testing.expect(layout.findById(3).?.frame.x >= leading_cluster.maxX() - 0.01);
+    try std.testing.expect(!canvas.windowDragContentUnderWindowControls(layout.nodes, leading_cluster, DesignTokens{ .window_controls = leading_cluster }));
+
+    // A non-drag row's anchored child is byte-identical with the stamp:
+    // anchoring semantics outside declared titlebars never change.
+    var plain_header = header;
+    plain_header.window_drag = false;
+    const plain_root_children = [_]Widget{plain_header};
+    var plain_root = root;
+    plain_root.children = &plain_root_children;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain_root, bounds, DesignTokens{}, &nodes);
+    const unstamped = layout.findById(3).?.frame;
+    layout = try canvas.layoutWidgetTreeWithTokens(plain_root, bounds, trailing_tokens, &nodes);
+    try std.testing.expectEqual(unstamped, layout.findById(3).?.frame);
 }
 
 test "geometry pixel snapping off keeps label-exact intrinsic widths bit-identical" {
@@ -3349,4 +4844,377 @@ test "hairline borders snap to whole device columns with smooth arcs" {
     // Corner pixels carry fractional arc coverage — smooth, not binary.
     const corner = surface.pixelRgba8(5, 4)[3];
     try std.testing.expect(corner > 0 and corner < 255);
+}
+
+test "single-line fields clip and horizontally scroll an overflowing value" {
+    const long_text = "a value far too long for a narrow single-line field to show at once";
+    const field = Widget{
+        .id = 7,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(10, 12, 120, 32),
+        .text = long_text,
+        .text_selection = TextSelection.collapsed(long_text.len),
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Name" },
+        // The retained offset channel: an oversized write clamps to the
+        // farthest the value can scroll, exactly like the textarea's
+        // vertical offset does.
+        .value = 100000,
+    };
+    const max_offset = support.textInputMaxHorizontalScrollOffsetForWidget(field, .{});
+    try std.testing.expect(max_offset > 0);
+    try std.testing.expectEqual(max_offset, support.clampedTextInputHorizontalScrollOffsetForWidget(field, .{}, 100000));
+
+    var zero_offset_field = field;
+    zero_offset_field.value = 0;
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, .{});
+    const display_list = builder.displayList();
+    var zero_commands: [8]CanvasCommand = undefined;
+    var zero_builder = Builder.init(&zero_commands);
+    try emitWidgetTree(&zero_builder, zero_offset_field, .{});
+    const zero_display_list = zero_builder.displayList();
+
+    // Fill, border, offset focus ring, clip, text, caret, pop.
+    try std.testing.expectEqual(@as(usize, 7), display_list.commandCount());
+    const viewport = textInputViewportForWidget(field, .{}).?;
+    switch (display_list.commands[3]) {
+        .push_clip => |clip| {
+            try std.testing.expectEqual(widgetPartId(7, 16), clip.id);
+            try expectRectApprox(viewport, clip.rect);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // The draw-text origin shifts left by exactly the clamped offset.
+    const scrolled_origin = switch (display_list.commands[4]) {
+        .draw_text => |text| text.origin,
+        else => return error.TestUnexpectedResult,
+    };
+    const resting_origin = switch (zero_display_list.commands[4]) {
+        .draw_text => |text| text.origin,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectApproxEqAbs(resting_origin.x - max_offset, scrolled_origin.x, 0.001);
+    try std.testing.expectEqual(resting_origin.y, scrolled_origin.y);
+    // The end-of-value caret rides the same origin, landing inside the
+    // clip instead of past the field's border.
+    switch (display_list.commands[5]) {
+        .fill_rect => |caret| {
+            try std.testing.expect(caret.rect.x >= viewport.x - 0.001);
+            try std.testing.expect(caret.rect.maxX() <= viewport.maxX() + 0.001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(CanvasCommand.pop_clip, display_list.commands[6]);
+}
+
+test "the caret keep-visible offset scrolls to the caret and returns home" {
+    const long_text = "a value far too long for a narrow single-line field to show at once";
+    var field = Widget{
+        .id = 7,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(10, 12, 120, 32),
+        .text = long_text,
+        .text_selection = TextSelection.collapsed(long_text.len),
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Name" },
+    };
+    const max_offset = support.textInputMaxHorizontalScrollOffsetForWidget(field, .{});
+    try std.testing.expect(max_offset > 0);
+
+    // Caret at the end, unscrolled: the recompute scrolls forward far
+    // enough that the caret sits inside the visible span.
+    const end_offset = support.textInputCaretVisibleScrollOffsetForWidget(field, .{}, 0);
+    try std.testing.expect(end_offset > 0);
+    try std.testing.expect(end_offset <= max_offset + 0.001);
+    field.value = end_offset;
+    const viewport = textInputViewportForWidget(field, .{}).?;
+    const end_geometry = textGeometryForWidget(field, .{});
+    const end_caret = end_geometry.caret_bounds.?;
+    try std.testing.expect(end_caret.x >= viewport.x - 0.001);
+    try std.testing.expect(end_caret.maxX() <= viewport.maxX() + 0.001);
+
+    // Home: caret back at byte zero scrolls all the way back — the field
+    // never shows trailing emptiness while text could fill it.
+    field.text_selection = TextSelection.collapsed(0);
+    try std.testing.expectEqual(@as(f32, 0), support.textInputCaretVisibleScrollOffsetForWidget(field, .{}, end_offset));
+
+    // A value that fits never scrolls and never adjusts.
+    var short = field;
+    short.text = "short";
+    short.text_selection = TextSelection.collapsed(5);
+    try std.testing.expectEqual(@as(f32, 0), support.textInputMaxHorizontalScrollOffsetForWidget(short, .{}));
+    try std.testing.expectEqual(@as(f32, 0), support.textInputCaretVisibleScrollOffsetForWidget(short, .{}, 25));
+}
+
+test "scrolled single-line selection rects shift with the text origin" {
+    const long_text = "a value far too long for a narrow single-line field to show at once";
+    const scrolled = Widget{
+        .id = 7,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(10, 12, 120, 32),
+        .text = long_text,
+        .text_selection = .{ .anchor = 2, .focus = 9 },
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Name" },
+        .value = 20,
+    };
+    var resting = scrolled;
+    resting.value = 0;
+
+    var commands: [10]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, scrolled, .{});
+    const display_list = builder.displayList();
+    var resting_commands: [10]CanvasCommand = undefined;
+    var resting_builder = Builder.init(&resting_commands);
+    try emitWidgetTree(&resting_builder, resting, .{});
+    const resting_display_list = resting_builder.displayList();
+
+    // Fill, border, focus ring, clip, selection rect, text, selected
+    // glyphs, pop — the same shape at both offsets.
+    try std.testing.expectEqual(display_list.commandCount(), resting_display_list.commandCount());
+    const scrolled_selection = switch (display_list.commands[4]) {
+        .fill_rect => |rect| rect.rect,
+        else => return error.TestUnexpectedResult,
+    };
+    const resting_selection = switch (resting_display_list.commands[4]) {
+        .fill_rect => |rect| rect.rect,
+        else => return error.TestUnexpectedResult,
+    };
+    const scrolled_text = switch (display_list.commands[5]) {
+        .draw_text => |text| text.origin,
+        else => return error.TestUnexpectedResult,
+    };
+    const resting_text = switch (resting_display_list.commands[5]) {
+        .draw_text => |text| text.origin,
+        else => return error.TestUnexpectedResult,
+    };
+    // Selection geometry and the draw-text origin move together, by
+    // exactly the scroll offset.
+    try std.testing.expectApproxEqAbs(@as(f32, 20), resting_selection.x - scrolled_selection.x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), resting_text.x - scrolled_text.x, 0.001);
+    try std.testing.expectApproxEqAbs(resting_selection.width, scrolled_selection.width, 0.001);
+}
+
+test "short single-line values emit no clip and an unshifted origin" {
+    const field = Widget{
+        .id = 7,
+        .kind = .text_field,
+        .frame = geometry.RectF.init(10, 12, 120, 32),
+        .text = "short",
+        .text_selection = TextSelection.collapsed(5),
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Name" },
+        // A stale offset on a value that fits clamps to zero: fitting
+        // fields render exactly as they did before fields scrolled.
+        .value = 40,
+    };
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, .{});
+    const display_list = builder.displayList();
+    // Fill, border, offset focus ring, text, caret — no clip pair.
+    try std.testing.expectEqual(@as(usize, 5), display_list.commandCount());
+    for (display_list.commands) |command| {
+        try std.testing.expect(command != .push_clip and command != .pop_clip);
+    }
+    var zero = field;
+    zero.value = 0;
+    var zero_commands: [8]CanvasCommand = undefined;
+    var zero_builder = Builder.init(&zero_commands);
+    try emitWidgetTree(&zero_builder, zero, .{});
+    const zero_display_list = zero_builder.displayList();
+    switch (display_list.commands[3]) {
+        .draw_text => |text| {
+            try std.testing.expectEqual(switch (zero_display_list.commands[3]) {
+                .draw_text => |zero_text| zero_text.origin.x,
+                else => return error.TestUnexpectedResult,
+            }, text.origin.x);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a single-line value holding a line break renders one line inside the border" {
+    // The defensive containment layer: edits can never insert a line
+    // break into a single-line field (they sanitize at the derivation
+    // seam), but a MODEL-SET value still can — a Zig core can put one
+    // there today, as can an old journal or a host API write. The field
+    // presents `\n`/`\r` as spaces (one line, byte-for-byte offsets) and
+    // force-clips to its content rect, so the value never paints outside
+    // the rounded border — identically in both render walks.
+    const field = Widget{
+        .id = 7,
+        .kind = .input,
+        .frame = geometry.RectF.init(10, 12, 200, 32),
+        .text = "one\ntwo\r\nthree",
+        .semantics = .{ .label = "Name" },
+    };
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, .{});
+    try expectSingleLinePresentedField(builder.displayList(), field);
+
+    // Layout walk: the compiled and interpreted engines both emit
+    // retained layouts through this walk, so containment pins here too.
+    var nodes: [2]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(field, field.frame, &nodes);
+    var layout_commands: [8]CanvasCommand = undefined;
+    var layout_builder = Builder.init(&layout_commands);
+    try layout.emitDisplayList(&layout_builder, .{});
+    try expectSingleLinePresentedField(layout_builder.displayList(), field);
+
+    // A search field (the other emitter) contains the same value the
+    // same way: presented bytes and a forced clip.
+    var search = field;
+    search.kind = .search_field;
+    var search_commands: [32]CanvasCommand = undefined;
+    var search_builder = Builder.init(&search_commands);
+    try emitWidgetTree(&search_builder, search, .{});
+    const search_list = search_builder.displayList();
+    try std.testing.expect(search_list.findCommandById(widgetPartId(7, 7)) != null);
+    switch (search_list.findCommandById(widgetPartId(7, 9)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("one two  three", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+
+    // A textarea keeps its raw line breaks: it is the one genuinely
+    // multi-line editable kind.
+    var textarea = field;
+    textarea.kind = .textarea;
+    textarea.frame = geometry.RectF.init(10, 12, 200, 120);
+    var area_commands: [8]CanvasCommand = undefined;
+    var area_builder = Builder.init(&area_commands);
+    try emitWidgetTree(&area_builder, textarea, .{});
+    switch (area_builder.displayList().findCommandById(widgetPartId(7, 3)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings("one\ntwo\r\nthree", text.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectSingleLinePresentedField(display_list: DisplayList, field: Widget) !void {
+    // The content-rect clip is FORCED for a value holding a line break,
+    // even though the presented value fits on one line.
+    const viewport = textInputViewportForWidget(field, .{}).?;
+    switch (display_list.findCommandById(widgetPartId(field.id, 16)).?.command) {
+        .push_clip => |clip| try expectRectApprox(viewport, clip.rect),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (display_list.findCommandById(widgetPartId(field.id, 3)).?.command) {
+        .draw_text => |text| {
+            // `\n` and each byte of `\r\n` present as spaces — same
+            // length, so caret/selection offsets address the raw value.
+            try std.testing.expectEqualStrings("one two  three", text.text);
+            // The presented value lays out as exactly ONE line.
+            var lines: [4]TextLine = undefined;
+            const run = try layoutTextRun(text, text.text_layout.?, &lines);
+            try std.testing.expectEqual(@as(usize, 1), run.lines.len);
+            // ... and that line's painted bounds sit inside the field.
+            const bounds = run.lines[0].bounds;
+            try std.testing.expect(bounds.maxY() <= field.frame.maxY() + 0.001);
+            try std.testing.expect(bounds.y >= field.frame.y - 0.001);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "presented single-line values survive later emits into any builder" {
+    // The builder contract (the `allocPathElements` rule): a display
+    // list may be HELD while another builder emits, and one builder may
+    // ACCUMULATE several emit calls — either way every emitted command
+    // stays intact. Presented bytes live in the BUILDER's own text
+    // store, so a later presentation can never overwrite an emitted
+    // draw_text the way a per-emit-reset scratch pool would (both
+    // values here present to the same byte length, so a reset pool
+    // would alias the first list's slice exactly).
+    const first = Widget{
+        .id = 7,
+        .kind = .input,
+        .frame = geometry.RectF.init(10, 12, 200, 32),
+        .text = "one\ntwo",
+    };
+    var second = first;
+    second.id = 8;
+    second.text = "AAA\nBBB";
+
+    // Hold the first builder's list across a second builder's emit.
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, first, .{});
+    var other_commands: [8]CanvasCommand = undefined;
+    var other_builder = Builder.init(&other_commands);
+    try emitWidgetTree(&other_builder, second, .{});
+    try expectPresentedFieldText(builder.displayList(), 7, "one two");
+    try expectPresentedFieldText(other_builder.displayList(), 8, "AAA BBB");
+
+    // Sequential emits accumulated into ONE builder keep both intact.
+    var accumulated_commands: [16]CanvasCommand = undefined;
+    var accumulated = Builder.init(&accumulated_commands);
+    try emitWidgetTree(&accumulated, first, .{});
+    try emitWidgetTree(&accumulated, second, .{});
+    try expectPresentedFieldText(accumulated.displayList(), 7, "one two");
+    try expectPresentedFieldText(accumulated.displayList(), 8, "AAA BBB");
+}
+
+fn expectPresentedFieldText(display_list: DisplayList, id: ObjectId, expected: []const u8) !void {
+    switch (display_list.findCommandById(widgetPartId(id, 3)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualStrings(expected, text.text),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "search fields clip an overflowing value and keep chrome outside the clip" {
+    const long_text = "an overflowing search query that runs past the narrow field";
+    const field = Widget{
+        .id = 9,
+        .kind = .search_field,
+        .frame = geometry.RectF.init(10, 12, 140, 32),
+        .text = long_text,
+        .text_selection = TextSelection.collapsed(long_text.len),
+        .state = .{ .focused = true },
+        .semantics = .{ .label = "Search" },
+        .value = 100000,
+    };
+    try std.testing.expect(support.textInputMaxHorizontalScrollOffsetForWidget(field, .{}) > 0);
+
+    var commands: [24]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, field, .{});
+    const display_list = builder.displayList();
+
+    var clip_index: ?usize = null;
+    var pop_index: ?usize = null;
+    var text_index: ?usize = null;
+    var caret_index: ?usize = null;
+    var clear_transform_index: ?usize = null;
+    for (display_list.commands, 0..) |command, index| {
+        switch (command) {
+            .push_clip => |clip| {
+                try std.testing.expectEqual(widgetPartId(9, 7), clip.id);
+                try expectRectApprox(textInputViewportForWidget(field, .{}).?, clip.rect);
+                clip_index = index;
+            },
+            .pop_clip => pop_index = index,
+            .draw_text => |text| {
+                if (text.id == widgetPartId(9, 9)) text_index = index;
+            },
+            .fill_rect => |caret| {
+                if (caret.id == widgetPartId(9, 11)) caret_index = index;
+            },
+            .transform => {
+                if (clear_transform_index == null and pop_index != null) clear_transform_index = index;
+            },
+            else => {},
+        }
+    }
+    // Text and caret sit inside the clip pair; the trailing clear
+    // affordance draws after the pop, outside it.
+    try std.testing.expect(clip_index.? < text_index.?);
+    try std.testing.expect(text_index.? < caret_index.?);
+    try std.testing.expect(caret_index.? < pop_index.?);
+    try std.testing.expect(pop_index.? < clear_transform_index.?);
 }

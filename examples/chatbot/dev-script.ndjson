@@ -1,0 +1,43 @@
+# The chat client's core-logic loop, headless: replay with
+#   native dev --core --script dev-script.ndjson
+# Msgs dispatch into update; each Gateway SSE line is an ordinary Msg, so
+# deltas and terminals are fed back by hand exactly as the transcript's
+# `cmd fetch ...` lines invite — the same loop the native app runs, with
+# you standing in for the network.
+
+# The API key arrives through the env channel as an ordinary Msg (under
+# the real app the generated wiring dispatches it from the environment
+# at install). The endpoint and openai/gpt-5.6-luna default are fixed in
+# core.ts; nothing dials out under the core host.
+{"kind":"key_set","value":{"$bytes":"example-gateway-key"}}
+
+# Type a message (the composer runs the SDK byte-splice text engine) and
+# send. The transcript shows the streaming fetch command whole: POST, the
+# Gateway endpoint, SSE accept and runtime-built authorization headers,
+# and the JSON body — system prompt first, then history and stream:true.
+{"kind":"draft_edit","edit":{"kind":"insert_text","text":{"$bytes":"Say hi in two words"}}}
+{"kind":"send"}
+
+# Two Gateway deltas grow the pending assistant response immediately. The
+# explicit [DONE] marker and HTTP terminal then commit the whole turn.
+{"kind":"chat_line","line":{"$bytes":"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\\n\"}}]}"}}
+{"kind":"chat_line","line":{"$bytes":"data: {\"choices\":[{\"delta\":{\"content\":\"there!\"}}]}"}}
+{"kind":"chat_line","line":{"$bytes":"data: [DONE]"}}
+{"kind":"chat_done","status":200}
+
+# A second turn grows the history: watch the request body carry both
+# earlier turns before the new question.
+{"kind":"draft_edit","edit":{"kind":"insert_text","text":{"$bytes":"And a follow-up?"}}}
+{"kind":"send"}
+
+# This time the Gateway fails with its own JSON error line — the failed
+# state keeps the history and surfaces error.message as the reason.
+{"kind":"chat_line","line":{"$bytes":"{\"error\":{\"message\":\"model overloaded\",\"type\":\"server_error\"}}"}}
+{"kind":"chat_done","status":500}
+
+# Retry re-sends the SAME conversation (no new turn); a success resolves
+# it into the fourth turn.
+{"kind":"retry"}
+{"kind":"chat_line","line":{"$bytes":"data: {\"choices\":[{\"delta\":{\"content\":\"Certainly.\"}}]}"}}
+{"kind":"chat_line","line":{"$bytes":"data: [DONE]"}}
+{"kind":"chat_done","status":200}

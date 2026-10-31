@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.4.2";
+const version = "0.11.0";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -30,18 +30,26 @@ pub fn main(init: std.process.Init) !void {
         // silently drove a days-old dropbox).
         var stdout_buffer: [128]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
-        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol v{d})\n", .{ version, cli_build_info.build_commit, automation_protocol.version });
+        try stdout_writer.interface.print("native {s} (commit {s}, automation protocol 0x{x:0>16})\n", .{ version, cli_build_info.build_commit, automation_protocol.fingerprint });
         try stdout_writer.interface.flush();
     } else if (std.mem.eql(u8, command, "init")) {
         checkVerbFlags("init", args[2..], .{
-            .usage = "init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
-            .value_flags = &.{ "--frontend", "--framework" },
+            .usage = "init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]",
+            .value_flags = &.{ "--frontend", "--framework", "--template" },
             .bool_flags = &.{"--full"},
         });
         const destination = positionalArg(args[2..]) orelse ".";
         const frontend_str = flagValue(args, "--frontend") catch fail("--frontend requires a value: native, next, vite, react, svelte, vue") orelse "native";
         const frontend = tooling.templates.Frontend.parse(frontend_str) orelse fail("invalid --frontend value: use native (default), next, vite, react, svelte, or vue");
         const shape: tooling.templates.Shape = if (flagBool(args, "--full")) .full else .slim;
+        // Which core the native template writes (ts-core is the default).
+        // The choice leaves no residue: the tree IS the truth, and the
+        // build graph re-detects it on every build.
+        const core: tooling.templates.CoreTemplate = if (flagValue(args, "--template") catch fail("--template requires a value: ts-core (default) or zig-core")) |value|
+            tooling.templates.CoreTemplate.parse(value) orelse fail("invalid --template value: use ts-core (default) or zig-core")
+        else
+            .ts;
+        if (core == .zig and frontend != .native) fail("--template applies to the native frontend (web frontends have no core tier)");
         const app_name, const free_app_name = try initAppName(allocator, init.io, destination);
         defer if (free_app_name) allocator.free(app_name);
         const explicit_framework = try flagValue(args, "--framework");
@@ -61,14 +69,14 @@ pub fn main(init: std.process.Init) !void {
             }
             std.process.exit(1);
         }
-        try tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape });
+        tooling.templates.writeDefaultApp(allocator, init.io, destination, .{ .app_name = app_name, .framework_path = framework_path, .frontend = frontend, .shape = shape, .core = core }) catch |err| return failVerb(err);
         std.debug.print("created Native SDK app at {s} ({s})\n", .{ destination, frontend_str });
         printInitNextSteps(destination, frontend, shape);
     } else if (std.mem.eql(u8, command, "build") or std.mem.eql(u8, command, "test")) {
         const verb: tooling.verbs.Verb = if (std.mem.eql(u8, command, "build")) .build else .@"test";
         checkVerbFlags(command, args[2..], .{
-            .usage = if (verb == .build) "build [dir] [--yes] [-D... zig build flags]" else "test [dir] [--yes] [-D... zig build flags]",
-            .bool_flags = &.{"--yes"},
+            .usage = if (verb == .build) "build [dir] [--yes] [--explain-rebuild] [-D... zig build flags]" else "test [dir] [--yes] [-D... zig build flags]",
+            .bool_flags = if (verb == .build) &.{ "--yes", "--explain-rebuild" } else &.{"--yes"},
             .forwards_build_flags = true,
         });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native build|test [dir] [--yes] [-D... zig build flags]");
@@ -77,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
             .base_env = init.environ_map,
             .assume_yes = verb_args.assume_yes,
             .forwarded_args = verb_args.forwarded,
+            .explain_rebuild = flagBool(args, "--explain-rebuild"),
         }) catch |err| return failVerb(err);
     } else if (std.mem.eql(u8, command, "check")) {
         checkVerbFlags("check", args[2..], .{
@@ -85,7 +94,55 @@ pub fn main(init: std.process.Init) !void {
         });
         const verb_args = parseVerbArgs(allocator, args[2..], &.{}) catch fail("usage: native check [dir] [--strict]");
         try enterAppDir(init.io, verb_args.dir);
-        runCheck(allocator, init.io, flagBool(args, "--strict")) catch |err| return failVerb(err);
+        runCheck(allocator, init.io, init.environ_map, flagBool(args, "--strict")) catch |err| return failVerb(err);
+    } else if (std.mem.eql(u8, command, "db")) {
+        tooling.db.run(allocator, init.io, init.environ_map, args[2..]) catch |err| switch (err) {
+            error.InvalidArguments => fail("usage: native db new-migration <name> | status | reset --yes"),
+            error.InvalidMigrationName => fail("migration name must be 1-64 lowercase letters, digits, spaces, hyphens, or underscores (no leading/trailing separator)"),
+            error.MigrationLimitReached => fail("migration version 9999 is already used"),
+            error.ResetNeedsConfirmation => fail("native db reset deletes this app's engine-owned app.db; rerun as `native db reset --yes`"),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, command, "update")) {
+        tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
+            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
+            error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
+            error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
+            error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
+            error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
+            error.InvalidManifestVersion => fail("the app manifest version must use canonical X.Y.Z numeric components without leading zeroes"),
+            error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
+            error.UpdateKeyMismatch => fail("the private update key does not match the public_key embedded in the app manifest"),
+            error.GeneratedFeedInvalid => fail("the generated update feed failed its own verification; no feed was written"),
+            else => return err,
+        };
+    } else if (std.mem.eql(u8, command, "vendor")) {
+        if (args.len < 3) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse
+            fail("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout");
+        defer allocator.free(framework_root);
+        var package_start: usize = 2;
+        var app_dir: []const u8 = ".";
+        if (!vendorPackageSpec(args[2])) {
+            package_start = 3;
+            app_dir = args[2];
+        }
+        if (package_start >= args.len) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
+        const script = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", "scripts", "vendor_service_packages.mjs" });
+        defer allocator.free(script);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(allocator);
+        try argv.appendSlice(allocator, &.{ "node", script, app_dir });
+        try argv.appendSlice(allocator, args[package_start..]);
+        var child = std.process.spawn(init.io, .{ .argv = argv.items, .stdin = .inherit, .stdout = .inherit, .stderr = .inherit, .environ_map = init.environ_map }) catch
+            fail("native vendor requires Node.js and npm on PATH");
+        const term = try child.wait(init.io);
+        switch (term) {
+            .exited => |code| if (code != 0) std.process.exit(1),
+            else => std.process.exit(1),
+        }
     } else if (std.mem.eql(u8, command, "eject")) {
         // `eject component <name>` is dispatched before the plain build
         // eject so `component` is never mistaken for an app directory.
@@ -124,11 +181,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, command, "markup")) {
         try markup_cli.run(allocator, init.io, args[2..]);
     } else if (std.mem.eql(u8, command, "validate")) {
-        checkVerbFlags("validate", args[2..], .{ .usage = "validate [app.zon]" });
-        const path = if (args.len >= 3) args[2] else "app.zon";
+        checkVerbFlags("validate", args[2..], .{ .usage = "validate [app.json|app.zon]" });
+        const path = if (args.len >= 3) args[2] else tooling.manifest.defaultPath(init.io) orelse "app.json";
         const result = tooling.manifest.validateFile(allocator, init.io, path) catch |err| switch (err) {
             error.FileNotFound => {
-                std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.zon), or pass a path: native validate <path/to/app.zon>\n", .{path});
+                std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.json or app.zon), or pass a manifest path\n", .{path});
                 std.process.exit(1);
             },
             else => return err,
@@ -138,8 +195,8 @@ pub fn main(init: std.process.Init) !void {
         // returned error would bury it under the CLI's own return trace.
         if (!result.ok) std.process.exit(1);
     } else if (std.mem.eql(u8, command, "bundle-assets")) {
-        checkVerbFlags("bundle-assets", args[2..], .{ .usage = "bundle-assets [app.zon] [assets] [output]" });
-        const manifest_path = if (args.len >= 3) args[2] else "app.zon";
+        checkVerbFlags("bundle-assets", args[2..], .{ .usage = "bundle-assets [app.json|app.zon] [assets] [output]" });
+        const manifest_path = if (args.len >= 3) args[2] else tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = try tooling.manifest.readMetadata(allocator, init.io, manifest_path);
         const assets_dir = if (args.len >= 4) args[3] else if (metadata.frontend) |frontend| frontend.dist else "assets";
         const output_dir = if (args.len >= 5) args[4] else "zig-out/assets";
@@ -147,20 +204,21 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--assets", "--web-engine", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
-            .bool_flags = &.{ "--cef-auto-install", "--archive" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--notary-profile", "--optimize" },
+            .bool_flags = &.{ "--cef-auto-install", "--notarize", "--archive", "--update-archive" },
         });
-        const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
+        const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
             error.FileNotFound => {
-                std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.zon), or pass --manifest <path/to/app.zon>\n", .{manifest_path});
+                std.debug.print("error: {s} not found - run this from your app's root (the folder containing app.json or app.zon), or pass --manifest <path>\n", .{manifest_path});
                 std.process.exit(1);
             },
             else => return err,
         };
         const target_name = try flagValue(args, "--target") orelse "macos";
         const target = tooling.package.PackageTarget.parse(target_name) orelse fail("invalid package target");
+        const project_dir = std.fs.path.dirname(manifest_path) orelse ".";
         const web_engine_override = if (try flagValue(args, "--web-engine")) |value|
             tooling.web_engine.Engine.parse(value) orelse fail("invalid web engine")
         else
@@ -170,6 +228,14 @@ pub fn main(init: std.process.Init) !void {
             .cef_dir = try flagValue(args, "--cef-dir"),
             .cef_auto_install = if (flagBool(args, "--cef-auto-install")) true else null,
         });
+        // `--web-layer` beats app.zon's `.webview_layer` the same way
+        // `-Dweb-layer` beats it in the build graph; the standard build
+        // graphs pass their resolved layer decision through this flag so
+        // the package always agrees with the exe it wraps.
+        const web_layer_setting = if (try flagValue(args, "--web-layer")) |value|
+            tooling.manifest.parseWebViewLayerSetting(value) orelse fail("invalid --web-layer value: use auto, include, or exclude")
+        else
+            null;
         const signing_name = try flagValue(args, "--signing") orelse "none";
         const signing = tooling.package.SigningMode.parse(signing_name) orelse fail("invalid signing mode");
         const default_output = switch (target) {
@@ -196,6 +262,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("warning[package.no-binary]: no app binary at zig-out/bin/{s} and no --binary flag - the package will not contain an executable\n" ++
                 "  build the app first (`zig build`) or pass --binary <path>\n", .{metadata.name});
         }
+        const service_binary_path = try resolvePackageServiceBinary(allocator, init.io, args, project_dir, metadata.name, target);
         if (web_engine.engine == .chromium and web_engine.cef_auto_install) {
             try tooling.cef.run(allocator, init.io, init.environ_map, &.{ "install", "--dir", web_engine.cef_dir });
         }
@@ -204,23 +271,87 @@ pub fn main(init: std.process.Init) !void {
             .target = target,
             .optimize = optimize_value,
             .output_path = output_dir,
+            .project_dir = project_dir,
             .binary_path = binary_path,
+            .service_binary_path = service_binary_path,
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,
             .web_engine = web_engine.engine,
+            .web_layer_setting = web_layer_setting,
             .cef_dir = web_engine.cef_dir,
-            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
+            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .profile = try flagValue(args, "--notary-profile") },
             .archive = archive,
+            .notarize = flagBool(args, "--notarize"),
+            .update_archive = flagBool(args, "--update-archive"),
             .env_map = init.environ_map,
         });
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "dev")) {
         checkVerbFlags("dev", args[2..], .{
-            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [--manifest app.zon] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
-            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device" },
-            .bool_flags = &.{"--yes"},
+            .usage = "dev [dir] [--yes] [--target ios|android] [--device name] [--url url] [--command \"npm run dev\"] [--timeout-ms n] [-D... zig build flags]\n       native dev [dir] --core [--script msgs.ndjson] [--watch]\n       native dev [--manifest app.json] --binary path [--url url] [--command \"npm run dev\"] [--timeout-ms n]",
+            .value_flags = &.{ "--url", "--command", "--timeout-ms", "--binary", "--manifest", "--target", "--device", "--script" },
+            .bool_flags = &.{ "--yes", "--core", "--watch" },
             .forwards_build_flags = true,
         });
+        if (flagBool(args, "--core")) {
+            // The TypeScript core-logic loop under node (update/effects on a
+            // virtual host) - not a renderer; plain `native dev` runs the app.
+            const verb_args = parseVerbArgs(allocator, args[2..], &.{"--script"}) catch fail("usage: native dev [dir] --core [--script msgs.ndjson] [--watch]");
+            try enterAppDir(init.io, verb_args.dir);
+            const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse {
+                std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+                std.process.exit(1);
+            };
+            defer allocator.free(framework_root);
+            // The editor surface rides along with the dev loop too (TS
+            // trees only — never leave node_modules in a non-app dir).
+            if (tooling.ts_core.detect(init.io) == .ts) {
+                tooling.ts_core.selfHealEditorPackage(allocator, init.io, framework_root);
+            }
+            const dev_metadata = try tooling.manifest.readMetadata(allocator, init.io, tooling.manifest.defaultPath(init.io) orelse "app.json");
+            const dev_service_packages = try allocator.alloc(tooling.ts_core.ServicePackage, dev_metadata.service_packages.len);
+            defer allocator.free(dev_service_packages);
+            for (dev_metadata.service_packages, 0..) |package_entry, index| dev_service_packages[index] = .{
+                .name = package_entry.name,
+                .version = package_entry.version,
+                .content_hash = package_entry.content_hash,
+            };
+            const dev_window_views = try tooling.ts_core.collectWindowViewLabels(allocator, init.io, ".");
+            defer tooling.ts_core.freeWindowViewLabels(allocator, dev_window_views);
+            var dev_canvas_label: []const u8 = "canvas";
+            var dev_window_width: f32 = 800;
+            var dev_window_height: f32 = 600;
+            outer: for (dev_metadata.shell.windows) |window| {
+                for (window.views) |view| {
+                    if (std.mem.eql(u8, view.kind, "gpu_surface")) {
+                        dev_canvas_label = view.label;
+                        dev_window_width = view.width orelse window.width;
+                        dev_window_height = view.height orelse window.height;
+                        break :outer;
+                    }
+                }
+            }
+            tooling.ts_core.runDevHost(allocator, init.io, framework_root, .{
+                .base_env = init.environ_map,
+                .app_id = dev_metadata.id,
+                .app_name = dev_metadata.name,
+                .canvas_label = dev_canvas_label,
+                .window_width = dev_window_width,
+                .window_height = dev_window_height,
+                .capabilities = dev_metadata.capabilities,
+                .permissions = dev_metadata.permissions,
+                .script = try flagValue(args, "--script"),
+                .watch = flagBool(args, "--watch"),
+                .persist_routes = if (dev_metadata.persist) |persist| .{
+                    .ok = persist.restore.ok,
+                    .none = persist.restore.none,
+                    .err = persist.restore.err,
+                } else null,
+                .service_packages = dev_service_packages,
+                .window_views = dev_window_views,
+            }) catch |err| return failVerb(err);
+            return;
+        }
         if (try flagValue(args, "--target")) |dev_target| {
             // The mobile dev loop: build the embed library for the
             // simulator/emulator, wrap it in the toolkit-owned host,
@@ -251,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
             // Legacy shape (`--binary` provided): the caller already built
             // the shell — e.g. the expanded template's `zig build dev` step —
             // so only run the frontend-server + shell flow. Unchanged.
-            const manifest_path = try flagValue(args, "--manifest") orelse "app.zon";
+            const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
             const metadata = try tooling.manifest.readMetadata(allocator, init.io, manifest_path);
             const command_override = if (try flagValue(args, "--command")) |value| try splitCommand(allocator, value) else null;
             try tooling.dev.run(allocator, init.io, .{
@@ -283,7 +414,7 @@ pub fn main(init: std.process.Init) !void {
         try packageShortcut(allocator, init.io, init.environ_map, args, .linux, "zig-out/package/linux");
     } else if (std.mem.eql(u8, command, "package-ios")) {
         checkPackageShortcutFlags(command, args[2..]);
-        const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
+        const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json");
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
         const binary_path = try flagValue(args, "--binary") orelse try iosPackageLibrary(allocator, init.io, init.environ_map, metadata.name, "ReleaseFast");
         const stats = try tooling.package.createPackage(allocator, init.io, .{
@@ -301,7 +432,7 @@ pub fn main(init: std.process.Init) !void {
         tooling.package.printDiagnostic(stats);
     } else if (std.mem.eql(u8, command, "package-android")) {
         checkPackageShortcutFlags(command, args[2..]);
-        const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse "app.zon");
+        const metadata = try tooling.manifest.readMetadata(allocator, init.io, try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json");
         const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
         const binary_path = try flagValue(args, "--binary") orelse try androidPackageLibrary(allocator, init.io, init.environ_map, metadata.name, "ReleaseFast");
         const stats = try tooling.package.createPackage(allocator, init.io, .{
@@ -336,23 +467,28 @@ fn usage() void {
         \\usage: native <command>
         \\
         \\commands:
-        \\  init [path] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (default: native)
+        \\  init [path] [--template <ts-core|zig-core>] [--frontend <native|next|vite|react|svelte|vue>] [--framework <sdk path>] [--full]   (defaults: native + ts-core)
         \\  dev [dir] [--yes] [-D... zig build flags]      build a Debug binary and run it (markup hot reload)
         \\  dev [dir] --target ios [--device name]         build for the iOS simulator, install + launch, stream the log (experimental)
         \\  dev [dir] --target android [--device name]     build a debug APK, install + launch on an emulator via adb, stream the log (experimental)
-        \\  build [dir] [--yes] [-D... zig build flags]    build a ReleaseFast binary into zig-out/bin/
+        \\  dev [dir] --core [--script msgs.ndjson] [--watch]   run the TypeScript core's logic loop under node (update/effects transcript; not a renderer)
+        \\  build [dir] [--yes] [--explain-rebuild] [-D... zig build flags]
+        \\                                                  build ReleaseFast; explain changed inputs and dirty steps
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
-        \\  check [dir] [--strict]                         validate src/*.native markup and app.zon (uses zig-out/model-contract.zon when fresh)
+        \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.json/app.zon
+        \\  db new-migration <name> | status | reset --yes manage the relational schema and development database
+        \\  update keygen|sign                              generate Ed25519 keys and signed native update feeds
+        \\  vendor [dir] <package@exact-version> [...]     check npm sources into src/services/vendor and pin their hashes in the app manifest
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
         \\  cef install|path|doctor [--dir path] [--version version] [--source prepared|official] [--force]
-        \\  doctor [--strict] [--manifest app.zon] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
-        \\  validate [app.zon]
-        \\  bundle-assets [app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--assets path] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
-        \\  dev [--manifest app.zon] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
-        \\  package-windows [--output path] [--binary path]
-        \\  package-linux [--output path] [--binary path]
+        \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
+        \\  validate [app.json|app.zon]
+        \\  bundle-assets [app.json|app.zon] [assets] [output]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]
+        \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
+        \\  package-windows [--output path] [--binary path] [--service-binary path]
+        \\  package-linux [--output path] [--binary path] [--service-binary path]
         \\  package-ios [--output path] [--binary path]
         \\  package-android [--output path] [--binary path]
         \\  markup check <file.native> [more files...] [--strict] | markup dump <file.native> [--out doc.nsui] | markup lsp
@@ -383,11 +519,11 @@ const VerbSpec = struct {
 };
 
 fn checkPackageShortcutFlags(verb: []const u8, args: []const []const u8) void {
-    var usage_buffer: [128]u8 = undefined;
-    const usage_text = std.fmt.bufPrint(&usage_buffer, "{s} [--output path] [--binary path] [--manifest app.zon] [--assets path]", .{verb}) catch verb;
+    var usage_buffer: [192]u8 = undefined;
+    const usage_text = std.fmt.bufPrint(&usage_buffer, "{s} [--output path] [--binary path] [--service-binary path] [--manifest app.json] [--assets path]", .{verb}) catch verb;
     checkVerbFlags(verb, args, .{
         .usage = usage_text,
-        .value_flags = &.{ "--manifest", "--output", "--binary", "--assets" },
+        .value_flags = &.{ "--manifest", "--output", "--binary", "--service-binary", "--assets" },
     });
 }
 
@@ -421,6 +557,7 @@ fn failVerb(err: anyerror) anyerror!void {
     switch (err) {
         error.MissingManifest,
         error.MissingFramework,
+        error.CrossVolumeFramework,
         error.ZigUnavailable,
         error.DownloadDeclined,
         error.UnsupportedPlatform,
@@ -428,6 +565,15 @@ fn failVerb(err: anyerror) anyerror!void {
         error.ZigBuildFailed,
         error.InvalidManifest,
         error.MarkupCheckFailed,
+        error.BothCores,
+        error.MissingTsCore,
+        error.MissingNode,
+        error.MissingTranspiler,
+        error.BrokenToolchainInstall,
+        error.ToolchainVersionMismatch,
+        error.CoreCheckFailed,
+        error.ViewCheckFailed,
+        error.DevHostFailed,
         error.HostCompileFailed,
         error.SimulatorUnavailable,
         error.SimulatorCommandFailed,
@@ -471,6 +617,9 @@ fn parseVerbArgs(allocator: std.mem.Allocator, args: []const []const u8, value_f
         }
         // Verb-specific boolean flags read by the caller via flagBool.
         if (std.mem.eql(u8, arg, "--strict")) continue;
+        if (std.mem.eql(u8, arg, "--core")) continue;
+        if (std.mem.eql(u8, arg, "--watch")) continue;
+        if (std.mem.eql(u8, arg, "--explain-rebuild")) continue;
         if (std.mem.startsWith(u8, arg, "-D") or std.mem.startsWith(u8, arg, "--release")) {
             try forwarded.append(allocator, arg);
             continue;
@@ -498,17 +647,88 @@ fn enterAppDir(io: std.Io, dir: []const u8) !void {
     };
 }
 
-/// `native check`: validate every markup file under src/ plus app.zon — the
+/// `native check`: validate every markup file under src/ plus the app manifest.
 /// no-build confidence pass (markup vocabulary + manifest schema). With a
 /// fresh model-contract artifact in zig-out (refreshed by `native test`),
 /// the markup pass also verifies
 /// bindings, iterables, message tags, and expression types against the
 /// app's actual Model/Msg, and reports unused model state as warnings
 /// (--strict promotes warnings to failures).
-fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
-    if (!tooling.buildgraph.fileExists(io, "app.zon")) {
-        std.debug.print("no app.zon here — `native check` runs inside an app directory (or pass one: `native check path/to/app`)\n", .{});
+fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, strict: bool) !void {
+    const manifest_path = tooling.manifest.defaultPath(io) orelse {
+        std.debug.print("no app.json or app.zon here — `native check` runs inside an app directory (or pass one: `native check path/to/app`)\n", .{});
         return error.MissingManifest;
+    };
+
+    const manifest_result = try tooling.manifest.validateFile(allocator, io, manifest_path);
+    tooling.manifest.printDiagnostic(manifest_result);
+    if (!manifest_result.ok) return error.InvalidManifest;
+    const metadata = try tooling.manifest.readMetadata(allocator, io, manifest_path);
+
+    // The core tier first: a TypeScript core runs the @native-sdk/core checker
+    // (subset rules + tsc), whose NS diagnostics surface verbatim - the
+    // same teaching UX Zig apps get from `zig build`/`native test`.
+    const core_tree = tooling.ts_core.detect(io);
+    if (core_tree == .both) return tooling.ts_core.failBothCores();
+    const sqlite_enabled = for (metadata.capabilities) |capability| {
+        if (std.mem.eql(u8, capability, "sqlite")) break true;
+    } else false;
+    var ts_framework_root: ?[]const u8 = null;
+    defer if (ts_framework_root) |root| allocator.free(root);
+    if (core_tree == .ts) {
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+            std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+            return error.MissingFramework;
+        };
+        ts_framework_root = framework_root;
+        // Self-heal the editor surface first: node_modules/@native-sdk/core
+        // (the pre-publish copy stock tsc resolves) refreshes whenever it is
+        // missing or version-skewed vs the SDK — one info line, never a
+        // check failure.
+        tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
+        const sqlite_sdk = if (sqlite_enabled)
+            try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root, true)
+        else
+            null;
+        defer if (sqlite_sdk) |path| allocator.free(path);
+        const window_views = try tooling.ts_core.collectWindowViewLabels(allocator, io, ".");
+        defer tooling.ts_core.freeWindowViewLabels(allocator, window_views);
+        const check_service_packages = try allocator.alloc(tooling.ts_core.ServicePackage, metadata.service_packages.len);
+        defer allocator.free(check_service_packages);
+        for (metadata.service_packages, 0..) |package_entry, index| check_service_packages[index] = .{
+            .name = package_entry.name,
+            .version = package_entry.version,
+            .content_hash = package_entry.content_hash,
+        };
+        try tooling.ts_core.checkCore(
+            allocator,
+            io,
+            env_map,
+            framework_root,
+            metadata.capabilities,
+            metadata.permissions,
+            check_service_packages,
+            if (metadata.persist) |persist| persist.version else null,
+            if (metadata.persist) |persist| .{
+                .ok = persist.restore.ok,
+                .none = persist.restore.none,
+                .err = persist.restore.err,
+            } else null,
+            sqlite_sdk,
+            window_views,
+        );
+        try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root, sqlite_sdk);
+    } else if (sqlite_enabled) {
+        // Zig cores use the same SQL files and runtime migration module even
+        // though they call the first-class Effects API rather than generated
+        // TypeScript constructors. Check the chain with real SQLite here too.
+        const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
+            std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
+            return error.MissingFramework;
+        };
+        defer allocator.free(framework_root);
+        const generated = try tooling.ts_core.generateSqliteSurface(allocator, io, env_map, framework_root, false);
+        allocator.free(generated);
     }
 
     var markup_files: std.ArrayList([]const u8) = .empty;
@@ -516,16 +736,35 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, strict: bool) !void {
     try collectMarkupFiles(allocator, io, "src", &markup_files);
     var outcome = markup_cli.CheckOutcome{};
     if (markup_files.items.len > 0) {
-        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items);
+        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items, .{
+            .import_root_for_file = markup_cli.importRootForFile,
+            .typescript_views_checked = core_tree == .ts,
+        });
         if (outcome.failures > 0) return error.MarkupCheckFailed;
     }
+    // A TypeScript core's views compile beside it: check them with the
+    // build's own view compiler against the contract checkCore just wrote,
+    // once every file is structurally sound.
+    if (ts_framework_root) |framework_root| {
+        const views = try tooling.ts_core.checkViews(allocator, io, env_map, framework_root);
+        if (views.errors > 0) return error.MarkupCheckFailed;
+        outcome.warnings += views.warnings;
+    }
 
-    const result = try tooling.manifest.validateFile(allocator, io, "app.zon");
-    tooling.manifest.printDiagnostic(result);
-    if (!result.ok) return error.InvalidManifest;
+    // The build-graph web-layer inference, surfaced where authors look:
+    // whether this app ships the embedded web layer, and why. `check`
+    // takes no engine flag, so the manifest's own engine is the resolved
+    // engine here.
+    if (tooling.manifest.webLayerFromManifest(metadata)) |layer| {
+        std.debug.print("web layer: {s} ({s})\n", .{ if (layer.enabled) "included" else "none", layer.sourceText() });
+    } else |_| {
+        // Contradictions and invalid values were already rejected by the
+        // validation pass above; nothing more to add here.
+    }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
-    std.debug.print("checked {d} markup file{s}{s} and app.zon\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note });
+    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean, views typed against the core)" else "";
+    std.debug.print("checked {d} markup file{s}{s}, {s}{s}\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note, manifest_path, core_note });
     if (strict and outcome.warnings > 0) {
         std.debug.print("{d} warning{s} promoted to errors (--strict)\n", .{ outcome.warnings, if (outcome.warnings == 1) "" else "s" });
         return error.MarkupCheckFailed;
@@ -547,11 +786,11 @@ fn collectMarkupFiles(allocator: std.mem.Allocator, io: std.Io, root_path: []con
 
 /// `native eject`: transfer build ownership to the app exactly once.
 fn runEject(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map) !void {
-    if (!tooling.buildgraph.fileExists(io, "app.zon")) {
-        std.debug.print("no app.zon here — `native eject` runs inside an app directory (or pass one: `native eject path/to/app`)\n", .{});
+    const manifest_path = tooling.manifest.defaultPath(io) orelse {
+        std.debug.print("no app.json or app.zon here — `native eject` runs inside an app directory (or pass one: `native eject path/to/app`)\n", .{});
         return error.MissingManifest;
-    }
-    const metadata = try tooling.manifest.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try tooling.manifest.readMetadata(allocator, io, manifest_path);
     const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
         std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
         return error.MissingFramework;
@@ -561,6 +800,7 @@ fn runEject(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     tooling.buildgraph.eject(allocator, io, ".", .{
         .app_name = metadata.name,
         .framework_root = framework_root,
+        .manifest_name = manifest_path,
     }) catch |err| switch (err) {
         error.AlreadyEjected => {
             std.debug.print("build.zig or build.zig.zon already exists — eject writes the owned build exactly once and never overwrites it\n", .{});
@@ -582,8 +822,8 @@ fn runEject(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
 /// and the did-you-mean live in tooling (`eject_components.zig`); this
 /// wrapper owns the CLI's teaching messages.
 fn runEjectComponent(io: std.Io, name: []const u8) !void {
-    if (!tooling.buildgraph.fileExists(io, "app.zon")) {
-        std.debug.print("no app.zon here — `native eject component` runs inside an app directory (or pass one: `native eject component {s} path/to/app`)\n", .{name});
+    if (tooling.manifest.defaultPath(io) == null) {
+        std.debug.print("no app.json or app.zon here — `native eject component` runs inside an app directory (or pass one: `native eject component {s} path/to/app`)\n", .{name});
         return error.MissingManifest;
     }
     const component = tooling.eject_components.find(name) orelse {
@@ -594,13 +834,29 @@ fn runEjectComponent(io: std.Io, name: []const u8) !void {
         }
         std.process.exit(1);
     };
-    tooling.eject_components.eject(io, ".", component) catch |err| switch (err) {
+    const core = switch (tooling.ts_core.detect(io)) {
+        .ts => tooling.eject_components.ComponentCore.ts,
+        .zig => tooling.eject_components.ComponentCore.zig,
+        .both => return tooling.ts_core.failBothCores(),
+        .neither => {
+            std.debug.print("no app core found — `native eject component` needs src/core.ts or src/main.zig\n", .{});
+            return error.MissingManifest;
+        },
+    };
+    const selection = tooling.eject_components.forCore(component, core) orelse {
+        std.debug.print(
+            "cannot eject {s} into this app's core — no compatible component form is available; compose it in the app's existing authoring tier\n",
+            .{component.name},
+        );
+        std.process.exit(1);
+    };
+    tooling.eject_components.ejectSelection(io, ".", selection) catch |err| switch (err) {
         error.AlreadyEjected => {
-            std.debug.print("already ejected at {s} - delete it to re-eject\n", .{component.path});
+            std.debug.print("already ejected at {s} - delete it to re-eject\n", .{selection.path});
             std.process.exit(1);
         },
         error.WriteFailed => {
-            std.debug.print("cannot write {s} — check the app directory is writable\n", .{component.path});
+            std.debug.print("cannot write {s} — check the app directory is writable\n", .{selection.path});
             std.process.exit(1);
         },
     };
@@ -610,7 +866,7 @@ fn runEjectComponent(io: std.Io, name: []const u8) !void {
         \\library form keeps working wherever you have not migrated. Run
         \\`native check` to validate the app afterwards.
         \\
-    , .{ component.path, component.form });
+    , .{ selection.path, selection.form });
 }
 
 fn initAppName(allocator: std.mem.Allocator, io: std.Io, destination: []const u8) !struct { []const u8, bool } {
@@ -645,6 +901,11 @@ fn iosPackageLibrary(allocator: std.mem.Allocator, io: std.Io, env_map: *std.pro
                 "  build it first (`zig build lib -Dtarget={s}`) or pass --binary <path>; the app must expose a mobile UiApp (`mobileOptions`)\n", .{tooling.ios.LibSlice.device.zigTriple()});
             return null;
         },
+        // Cross-volume SDK: the junction bridge failed, so the generated
+        // host project could not build against the SDK either — a
+        // libraryless project would ship broken. The teaching message is
+        // already on screen; fail the whole package verb without a trace.
+        error.CrossVolumeFramework => std.process.exit(1),
         else => return err,
     };
 }
@@ -665,6 +926,11 @@ fn androidPackageLibrary(allocator: std.mem.Allocator, io: std.Io, env_map: *std
                 "  build it first (`zig build lib -Dtarget={s}`) or pass --binary <path>; the app must expose a mobile UiApp (`mobileOptions`)\n", .{tooling.android.zig_triple});
             return null;
         },
+        // Cross-volume SDK: the junction bridge failed, so the generated
+        // host project could not build against the SDK either — a
+        // libraryless project would ship broken. The teaching message is
+        // already on screen; fail the whole package verb without a trace.
+        error.CrossVolumeFramework => std.process.exit(1),
         else => return err,
     };
 }
@@ -725,17 +991,21 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, arg, "--")) {
             if (std.mem.eql(u8, arg, "--frontend") or
                 std.mem.eql(u8, arg, "--framework") or
+                std.mem.eql(u8, arg, "--template") or
+                std.mem.eql(u8, arg, "--script") or
                 std.mem.eql(u8, arg, "--manifest") or
                 std.mem.eql(u8, arg, "--target") or
                 std.mem.eql(u8, arg, "--output") or
                 std.mem.eql(u8, arg, "--binary") or
+                std.mem.eql(u8, arg, "--service-binary") or
                 std.mem.eql(u8, arg, "--assets") or
                 std.mem.eql(u8, arg, "--web-engine") or
+                std.mem.eql(u8, arg, "--web-layer") or
                 std.mem.eql(u8, arg, "--cef-dir") or
                 std.mem.eql(u8, arg, "--signing") or
                 std.mem.eql(u8, arg, "--identity") or
                 std.mem.eql(u8, arg, "--entitlements") or
-                std.mem.eql(u8, arg, "--team-id") or
+                std.mem.eql(u8, arg, "--notary-profile") or
                 std.mem.eql(u8, arg, "--command") or
                 std.mem.eql(u8, arg, "--url") or
                 std.mem.eql(u8, arg, "--timeout-ms") or
@@ -750,6 +1020,19 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
     return null;
 }
 
+fn vendorPackageSpec(value: []const u8) bool {
+    const at = std.mem.lastIndexOfScalar(u8, value, '@') orelse return false;
+    if (at == 0 or at + 1 == value.len) return false;
+    var parts = std.mem.splitScalar(u8, value[at + 1 ..], '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |byte| if (!std.ascii.isDigit(byte)) return false;
+        count += 1;
+    }
+    return count == 3;
+}
+
 fn splitCommand(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     var parts: std.ArrayList([]const u8) = .empty;
     errdefer parts.deinit(allocator);
@@ -761,13 +1044,17 @@ fn splitCommand(allocator: std.mem.Allocator, value: []const u8) ![]const []cons
 }
 
 fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map, args: []const []const u8, target: tooling.package.PackageTarget, default_output: []const u8) !void {
-    const metadata = try tooling.manifest.readMetadata(allocator, io, try flagValue(args, "--manifest") orelse "app.zon");
+    const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(io) orelse "app.json";
+    const project_dir = std.fs.path.dirname(manifest_path) orelse ".";
+    const metadata = try tooling.manifest.readMetadata(allocator, io, manifest_path);
     const web_engine = try tooling.web_engine.resolve(.{ .web_engine = metadata.web_engine, .cef = metadata.cef }, .{});
     const stats = try tooling.package.createPackage(allocator, io, .{
         .metadata = metadata,
         .target = target,
         .output_path = try flagValue(args, "--output") orelse default_output,
+        .project_dir = project_dir,
         .binary_path = try flagValue(args, "--binary"),
+        .service_binary_path = try resolvePackageServiceBinary(allocator, io, args, project_dir, metadata.name, target),
         .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
         .frontend = metadata.frontend,
         .web_engine = web_engine.engine,
@@ -775,4 +1062,28 @@ fn packageShortcut(allocator: std.mem.Allocator, io: std.Io, env_map: *std.proce
         .env_map = env_map,
     });
     tooling.package.printDiagnostic(stats);
+}
+
+/// One service-host resolution path for the canonical package verb and the
+/// compatibility package-{windows,linux} shortcuts. Explicit input wins;
+/// otherwise a service-bearing source tree discovers the normal build output.
+fn resolvePackageServiceBinary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    args: []const []const u8,
+    project_dir: []const u8,
+    app_name: []const u8,
+    target: tooling.package.PackageTarget,
+) !?[]const u8 {
+    if (try flagValue(args, "--service-binary")) |explicit| return explicit;
+    if (target == .ios or target == .android) return null;
+    if (!try tooling.package.projectHasTypeScriptServices(allocator, io, project_dir)) return null;
+    const discovered = try tooling.package.discoverInstalledServiceBinary(allocator, io, project_dir, app_name, target);
+    if (discovered) |_| {
+        std.debug.print("info[package.service-binary]: using zig-out/bin/{s}_services\n", .{app_name});
+    } else {
+        std.debug.print("warning[package.no-service-binary]: no service host at zig-out/bin/{s}_services and no --service-binary flag - service calls will fail in the package\n" ++
+            "  build the app first (`native build`) or pass --service-binary <path>\n", .{app_name});
+    }
+    return discovered;
 }

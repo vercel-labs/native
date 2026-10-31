@@ -1,3 +1,6 @@
+const gpu_policy = @import("gpu_planning_policy.zig");
+const render_cache = @import("render_cache_policy.zig");
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const render_model = @import("render.zig");
@@ -87,6 +90,9 @@ pub const CanvasFrameProfile = frame_metrics.CanvasFrameProfile;
 pub const canvasFrameProfile = frame_metrics.canvasFrameProfile;
 
 pub const CanvasRenderPass = struct {
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -172,7 +178,13 @@ pub const CanvasRenderPass = struct {
         return self.layer_actions.len;
     }
 
+    pub fn encoderCounts(self: CanvasRenderPass) gpu_policy.EncoderCounts {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner);
+        return .{ .commands = self.encoderCommandCount(), .caches = self.encoderCacheActionCount(), .binds = self.encoderBindPipelineCount(), .draws = self.encoderDrawBatchCount() };
+    }
+
     pub fn encoderCommandCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).commands;
         if (!self.requiresRender()) return 0;
         var count: usize = 2 + self.encoderCacheActionCount() + self.encoderBindPipelineCount() + self.encoderDrawBatchCount();
         if (self.scissorBounds() != null) count += 1;
@@ -180,6 +192,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderCacheActionCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).caches;
         if (!self.requiresRender()) return 0;
         return self.pipeline_actions.len +
             self.path_geometry_actions.len +
@@ -192,6 +205,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderBindPipelineCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).binds;
         if (!self.requiresRender()) return 0;
         var count: usize = 0;
         var bound_pipeline: ?RenderPipelineKind = null;
@@ -205,6 +219,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderDrawBatchCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).draws;
         return if (self.requiresRender()) self.batches.len else 0;
     }
 
@@ -252,15 +267,18 @@ pub const CanvasRenderPass = struct {
 
     pub fn encoderPlan(self: CanvasRenderPass, output: []RenderEncoderCommand) Error!RenderEncoderPlan {
         var planner = RenderEncoderPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacket(self: CanvasRenderPass, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
         var planner = CanvasGpuPacketPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacketSummary(self: CanvasRenderPass) CanvasGpuPacketSummary {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.summary(self, owner);
         if (!self.requiresRender()) return .{};
         var summary = CanvasGpuPacketSummary{
             .load_action = self.loadAction(),
@@ -281,6 +299,9 @@ pub const CanvasRenderPass = struct {
 };
 
 pub const CanvasFrame = struct {
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -341,14 +362,23 @@ pub const CanvasFrame = struct {
     fn diagnosticsWithoutBudgetStatus(self: CanvasFrame) CanvasFrameDiagnostics {
         const render_pass = self.renderPass();
         const gpu_packet_summary = render_pass.gpuPacketSummary();
+        const encoder_counts = render_pass.encoderCounts();
+        return self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts);
+    }
+
+    pub fn budgetStatusFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameBudgetStatus {
+        return self.budget.status(self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts));
+    }
+
+    fn diagnosticsFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameDiagnostics {
         return .{
             .frame_index = self.frame_index,
             .command_count = self.render_plan.commandCount(),
             .batch_count = self.batch_plan.batchCount(),
-            .encoder_command_count = render_pass.encoderCommandCount(),
-            .encoder_cache_action_count = render_pass.encoderCacheActionCount(),
-            .encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount(),
-            .encoder_draw_batch_count = render_pass.encoderDrawBatchCount(),
+            .encoder_command_count = encoder_counts.commands,
+            .encoder_cache_action_count = encoder_counts.caches,
+            .encoder_bind_pipeline_count = encoder_counts.binds,
+            .encoder_draw_batch_count = encoder_counts.draws,
             .pipeline_count = self.pipeline_cache_plan.entryCount(),
             .pipeline_upload_count = self.pipeline_cache_plan.uploadCount(),
             .pipeline_retain_count = self.pipeline_cache_plan.retainCount(),
@@ -416,6 +446,7 @@ pub const CanvasFrame = struct {
 
     pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
         return .{
+            .gpu_plan_policy = self.gpu_plan_policy,
             .frame_index = self.frame_index,
             .timestamp_ns = self.timestamp_ns,
             .surface_size = self.surface_size,
@@ -452,10 +483,20 @@ pub const CanvasFrame = struct {
 };
 
 pub const CanvasFrameOptions = struct {
+    text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale: f32 = 1,
+    /// Renderer-specific read support relative to `Blur.radius`. The
+    /// reference and Windows renderers consume one radius; AppKit's
+    /// three-box Gaussian consumes at most three. Runtime-owned frame
+    /// planning sets this from the active platform.
+    backdrop_blur_sample_extent_multiplier: f32 = 1,
     full_repaint: bool = false,
     budget: CanvasFrameBudget = .{},
     previous_pipeline_cache: []const RenderPipelineCacheEntry = &.{},
@@ -506,14 +547,26 @@ pub const CanvasFrameStorage = struct {
 };
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
-    var render_plan = try next.renderPlan(storage.render_commands);
-    const render_override_dirty_bounds = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
-    render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
-    const batch_plan = try render_plan.batchPlan(storage.render_batches);
+    var cache_workspace = render_cache.Workspace.forFrame(options.render_cache_policy, storage, options, next.commands.len);
+    defer if (cache_workspace) |*workspace| workspace.deinit();
+    const planning_workspace: ?*render_cache.Workspace = if (cache_workspace) |*workspace| workspace else null;
+    const cache_owner: ?*render_cache.Workspace = if (options.render_cache_policy != null) planning_workspace else null;
+    var render_plan = try next.renderPlanWithWorkspace(storage.render_commands, options.render_plan_policy, planning_workspace);
+    const render_override_dirty_bounds = if (options.render_override_policy) |owner| blk: {
+        const result = @import("render_override_policy.zig").applyAndDamage(storage.render_commands[0..render_plan.commandCount()], options.previous_render_overrides, options.render_overrides, &[_]@import("render_override_policy.zig").DamageEntry{}, owner, planning_workspace.?);
+        render_plan.bounds = result.bounds;
+        break :blk result.dirty;
+    } else blk: {
+        const dirty = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
+        render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
+        break :blk dirty;
+    };
+    const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, options.render_plan_policy, planning_workspace);
     const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
         RenderPipelineCachePlan{}
     else
-        try batch_plan.cachePlan(
+        try batch_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_pipeline_cache,
             options.frame_index,
             storage.pipeline_cache_entries,
@@ -522,11 +575,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const path_geometry_plan = if (storage.path_geometries.len == 0)
         RenderPathGeometryPlan{}
     else
-        try render_plan.pathGeometryPlan(storage.path_geometries);
+        try render_plan.pathGeometryPlanWithPolicy(storage.path_geometries, options.render_cache_policy);
     const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
         RenderPathGeometryCachePlan{}
     else
-        try path_geometry_plan.cachePlan(
+        try path_geometry_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_path_geometry_cache,
             options.frame_index,
             storage.path_geometry_cache_entries,
@@ -535,11 +589,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const image_plan = if (storage.images.len == 0)
         RenderImagePlan{}
     else
-        try render_plan.imagePlanWithResources(options.image_resources, storage.images);
+        try render_plan.imagePlanWithResourcesAndPolicy(options.image_resources, storage.images, options.render_cache_policy);
     const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
         RenderImageCachePlan{}
     else
-        try image_plan.cachePlan(
+        try image_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_image_cache,
             options.frame_index,
             storage.image_cache_entries,
@@ -548,18 +603,20 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const layer_plan = if (storage.layers.len == 0)
         RenderLayerPlan{}
     else
-        try render_plan.layerPlan(storage.layers);
+        try render_plan.layerPlanWithPolicy(storage.layers, options.render_cache_policy);
     const layer_cache_plan = if (storage.layer_cache_entries.len == 0 and storage.layer_cache_actions.len == 0)
         RenderLayerCachePlan{}
     else
-        try layer_plan.cachePlan(
+        try layer_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_layer_cache,
             options.frame_index,
             storage.layer_cache_entries,
             storage.layer_cache_actions,
         );
-    const resource_plan = try next.resourcePlan(storage.resources);
-    const resource_cache_plan = try resource_plan.cachePlan(
+    const resource_plan = try next.resourcePlanWithPolicy(storage.resources, options.render_cache_policy);
+    const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
+        cache_owner,
         options.previous_resource_cache,
         options.frame_index,
         storage.resource_cache_entries,
@@ -568,18 +625,20 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const visual_effect_plan = if (storage.visual_effects.len == 0)
         VisualEffectPlan{}
     else
-        try next.visualEffectPlan(storage.visual_effects);
+        try next.visualEffectPlanWithPolicy(storage.visual_effects, options.render_cache_policy);
     const visual_effect_cache_plan = if (storage.visual_effect_cache_entries.len == 0 and storage.visual_effect_cache_actions.len == 0)
         VisualEffectCachePlan{}
     else
-        try visual_effect_plan.cachePlan(
+        try visual_effect_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_visual_effect_cache,
             options.frame_index,
             storage.visual_effect_cache_entries,
             storage.visual_effect_cache_actions,
         );
-    const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
-    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithRetention(
+    const glyph_atlas_plan = try next.glyphAtlasPlanWithPolicy(storage.glyph_atlas_entries, options.text_cache_policy);
+    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
+        options.text_cache_policy,
         options.previous_glyph_atlas_cache,
         options.frame_index,
         options.glyph_atlas_cache_retention_frames,
@@ -590,7 +649,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const text_layout_cache_plan = if (storage.text_layout_cache_entries.len == 0 and storage.text_layout_cache_actions.len == 0)
         TextLayoutCachePlan{}
     else
-        try text_layout_plan.cachePlanWithRetention(
+        try text_layout_plan.cachePlanWithPolicy(
+            options.text_cache_policy,
             options.previous_text_layout_cache,
             options.frame_index,
             options.text_layout_cache_retention_frames,
@@ -598,18 +658,56 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.text_layout_cache_actions,
         );
 
-    const full_repaint = options.full_repaint or previous == null;
+    var full_repaint = options.full_repaint or previous == null;
     var changes: []const DiffChange = storage.changes[0..0];
     var dirty_bounds: ?geometry.RectF = null;
 
-    if (full_repaint) {
+    if (options.render_damage_policy) |owner| {
+        if (!full_repaint) changes = try DisplayList.diff(previous.?, next, storage.changes);
+        var rects: [max_canvas_frame_dirty_rects]geometry.RectF = undefined;
+        const result = @import("render_damage_policy.zig").finalize(.{
+            .full_repaint = full_repaint,
+            .surface_size = options.surface_size,
+            .scale = options.scale,
+            .render_bounds = render_plan.bounds,
+            .override_bounds = render_override_dirty_bounds,
+            .sample_extent_multiplier = options.backdrop_blur_sample_extent_multiplier,
+        }, changes, render_plan.commands, &rects, owner, planning_workspace.?);
+        full_repaint = result.full_repaint;
+        dirty_bounds = result.bounds;
+        if (full_repaint) changes = storage.changes[0..0];
+    } else if (full_repaint) {
         dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
     } else {
         changes = try DisplayList.diff(previous.?, next, storage.changes);
-        dirty_bounds = clippedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.surface_size);
+        // Incremental damage carries a one-device-pixel AA bleed
+        // allowance and lands snapped outward on the device-pixel grid
+        // (see the runtime planner's dirty finalization): the bleed
+        // covers the up-to-a-device-pixel ink past a command's bounds,
+        // and the snap keeps the cull region identical to the cleared
+        // pixels so a fractional dirty edge cannot erase an unchanged
+        // neighbor's boundary-pixel coverage without redrawing it.
+        dirty_bounds = bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1, options.surface_size);
+        if (incrementalDamageIntersectsBackdropBlurWithSampleExtent(
+            render_plan.commands,
+            dirty_bounds,
+            options.backdrop_blur_sample_extent_multiplier,
+        )) {
+            // A backdrop blur reads pixels around its output from the
+            // destination as it existed at this point in draw order.
+            // Retained pixels outside an incremental scissor already
+            // contain the PREVIOUS frame's blur and later commands, so
+            // they cannot supply that pre-blur backdrop. Reconstruct it
+            // by replaying the complete list whenever damage reaches a
+            // blur's resolved read footprint.
+            full_repaint = true;
+            changes = storage.changes[0..0];
+            dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
+        }
     }
 
     return .{
+        .gpu_plan_policy = options.render_cache_policy,
         .frame_index = options.frame_index,
         .timestamp_ns = options.timestamp_ns,
         .surface_size = options.surface_size,
@@ -641,12 +739,186 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     };
 }
 
+/// Whether incremental damage reaches a backdrop blur's resolved read
+/// footprint. Replaying only the dirty output is not sufficient: pixels
+/// outside the scissor hold the previous fully composited frame rather
+/// than the backdrop at the blur command's position in draw order.
+pub fn incrementalDamageIntersectsBackdropBlur(commands: []const RenderCommand, dirty_bounds: ?geometry.RectF) bool {
+    return incrementalDamageIntersectsBackdropBlurWithSampleExtent(commands, dirty_bounds, 1);
+}
+
+/// Backend-aware form of `incrementalDamageIntersectsBackdropBlur`. Values
+/// below one are normalized to the shared one-radius floor; wider renderers
+/// pass their conservative maximum sampling support.
+pub fn incrementalDamageIntersectsBackdropBlurWithSampleExtent(
+    commands: []const RenderCommand,
+    dirty_bounds: ?geometry.RectF,
+    requested_sample_extent_multiplier: f32,
+) bool {
+    const dirty = dirty_bounds orelse return false;
+    const normalized_dirty = dirty.normalized();
+    const sample_extent_multiplier = if (std.math.isFinite(requested_sample_extent_multiplier))
+        @max(1, requested_sample_extent_multiplier)
+    else
+        1;
+    for (commands) |command| {
+        switch (command.command) {
+            .blur => |blur| {
+                if (!(blur.radius > 0) or !(command.opacity > 0)) continue;
+                var output = command.transform.transformRect(blur.rect.normalized());
+                if (command.clip) |clip| output = geometry.RectF.intersection(output, clip.normalized());
+                if (output.isEmpty()) continue;
+
+                // Do not use `command.bounds` here: the render planner
+                // intersects that radius-inflated bound with the output
+                // clip, while a clipped output pixel still samples backdrop
+                // outside the clip. Preserve the established local-radius
+                // footprint for one-radius renderers. Wider renderers operate
+                // on the transformed output with an isotropic device-space
+                // kernel, so scale their support by the transform's largest
+                // axis before inflating that output.
+                const read_footprint = if (sample_extent_multiplier == 1)
+                    command.transform.transformRect(
+                        blur.rect.normalized().inflate(geometry.InsetsF.all(@max(0, blur.radius))),
+                    ).normalized()
+                else extended: {
+                    const transform = command.transform;
+                    const x_scale = @sqrt(transform.a * transform.a + transform.b * transform.b);
+                    const y_scale = @sqrt(transform.c * transform.c + transform.d * transform.d);
+                    const transform_scale = @max(0.0001, @max(x_scale, y_scale));
+                    const sample_extent = @max(0, blur.radius) * transform_scale * sample_extent_multiplier;
+                    break :extended output.normalized().inflate(geometry.InsetsF.all(sample_extent));
+                };
+                if (read_footprint.intersects(normalized_dirty)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {
     var result: ?geometry.RectF = null;
     for (changes) |change| {
         result = unionOptionalBounds(result, change.dirty_bounds);
     }
     return result;
+}
+
+/// Bleed-and-snap for incremental damage, the twin of the runtime's
+/// `bleedAlignedCanvasDirtyBounds` (see that doc comment): whole device
+/// pixels of AA bleed folded in on integer device boundaries, edges
+/// chosen so the STORED rect's f32 round trip lands exactly on them.
+fn bleedAlignedDirtyBounds(bounds: ?geometry.RectF, scale: f32, bleed_pixels: f32, surface_size: geometry.SizeF) ?geometry.RectF {
+    const dirty = bounds orelse return null;
+    const normalized = dirty.normalized();
+    const device = if (std.math.isFinite(scale) and scale > 0) scale else 1;
+    // Surface clipping happens on the integer device boundaries, never
+    // on the finished rect (see the runtime twin's doc comment).
+    const x_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minX() * device) - bleed_pixels,
+        @ceil(normalized.maxX() * device) + bleed_pixels,
+        surface_size.width,
+        device,
+    ) orelse return null;
+    const y_boundaries = surfaceClampedDirtyBoundaries(
+        @floor(normalized.minY() * device) - bleed_pixels,
+        @ceil(normalized.maxY() * device) + bleed_pixels,
+        surface_size.height,
+        device,
+    ) orelse return null;
+    const x_edges = dirtyAxisEdges(x_boundaries.min, x_boundaries.max, device);
+    const y_edges = dirtyAxisEdges(y_boundaries.min, y_boundaries.max, device);
+    if (x_edges.span <= 0 or y_edges.span <= 0) return null;
+    return geometry.RectF.init(x_edges.min, y_edges.min, x_edges.span, y_edges.span);
+}
+
+const DirtyBoundaries = struct { min: f32, max: f32 };
+
+/// Clamp one axis' device boundaries to the surface's device
+/// boundaries (see the runtime twin's doc comment).
+fn surfaceClampedDirtyBoundaries(min_boundary: f32, max_boundary: f32, surface_extent: f32, device: f32) ?DirtyBoundaries {
+    var min_b = min_boundary;
+    var max_b = max_boundary;
+    if (std.math.isFinite(surface_extent) and surface_extent > 0) {
+        const surface_boundary = @ceil(surface_extent * device);
+        if (std.math.isFinite(surface_boundary)) {
+            min_b = std.math.clamp(min_b, 0, surface_boundary);
+            max_b = std.math.clamp(max_b, 0, surface_boundary);
+            if (!(max_b > min_b)) return null;
+        }
+    }
+    return .{ .min = min_b, .max = max_b };
+}
+
+const DirtyAxisEdges = struct { min: f32, span: f32 };
+
+/// One axis of the bleed-aligned damage (see the runtime twin's doc
+/// comment): exact edge walks inside f32's exact-integer range, a
+/// finite non-collapsed superset beyond it.
+fn dirtyAxisEdges(min_boundary: f32, max_boundary: f32, device: f32) DirtyAxisEdges {
+    const walk_limit: f32 = 16_777_216;
+    const walkable = min_boundary >= -walk_limit and min_boundary <= walk_limit and
+        max_boundary >= -walk_limit and max_boundary <= walk_limit;
+    if (!walkable) {
+        const min_edge = nudgedFiniteDirtyEdge(min_boundary / device, -2);
+        const max_edge = nudgedFiniteDirtyEdge(max_boundary / device, 2);
+        var span = @max(0, nudgedFiniteDirtyEdge(max_edge - min_edge, 2));
+        // The reconstructed max edge must stay finite at the f32 range
+        // edge; shave the span until the sum stops overflowing.
+        while (span > 0 and !std.math.isFinite(min_edge + span)) span = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        return .{ .min = min_edge, .span = span };
+    }
+    const min_edge = dirtyEdgeForFloorBoundary(min_boundary, device);
+    return .{ .min = min_edge, .span = dirtySpanForCeilBoundary(min_edge, max_boundary, device) };
+}
+
+/// Finite superset value (see the runtime twin's doc comment): only
+/// NaN and the infinities are replaced, so far-but-representable
+/// content keeps its damage in place.
+fn nudgedFiniteDirtyEdge(value: f32, ulps: i8) f32 {
+    if (std.math.isNan(value)) return 0;
+    const limit = std.math.floatMax(f32);
+    var result = std.math.clamp(value, -limit, limit);
+    var remaining: i8 = if (ulps < 0) -ulps else ulps;
+    const toward: f32 = if (ulps < 0) -std.math.inf(f32) else std.math.inf(f32);
+    while (remaining > 0) : (remaining -= 1) result = std.math.nextAfter(f32, result, toward);
+    return std.math.clamp(result, -limit, limit);
+}
+
+/// Smallest representable coordinate whose product with `device`
+/// reaches `boundary`, judged in f64 — exact for f32 operands and what
+/// retained hosts compute (see the runtime twin's doc comment).
+fn dirtyEdgeForFloorBoundary(boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
+    var edge = boundary / device;
+    while (@as(f64, edge) * d >= b) edge = std.math.nextAfter(f32, edge, -std.math.inf(f32));
+    while (@as(f64, edge) * d < b) edge = std.math.nextAfter(f32, edge, std.math.inf(f32));
+    // The walk can settle on negative zero (a boundary of zero steps
+    // below and back); canonicalize so serialized rects never carry a
+    // signed zero.
+    return if (edge == 0) 0 else edge;
+}
+
+/// Largest span whose reconstructed max edge (`min_edge + span`) keeps
+/// its product with `device` at or under `boundary`, judged in f64 (see
+/// the runtime twin's doc comment); the walk steps the edge value,
+/// never the span.
+fn dirtySpanForCeilBoundary(min_edge: f32, boundary: f32, device: f32) f32 {
+    const b: f64 = boundary;
+    const d: f64 = device;
+    var target = boundary / device;
+    while (@as(f64, target) * d <= b) target = std.math.nextAfter(f32, target, std.math.inf(f32));
+    while (@as(f64, target) * d > b) target = std.math.nextAfter(f32, target, -std.math.inf(f32));
+    if (target <= min_edge) return 0;
+    var span = target - min_edge;
+    while (span > 0 and @as(f64, min_edge) + @as(f64, span) > @as(f64, target)) {
+        const next = std.math.nextAfter(f32, span, -std.math.inf(f32));
+        if (next == span) return 0;
+        span = next;
+    }
+    return if (span <= 0) 0 else span;
 }
 
 fn fullRepaintBounds(surface_size: geometry.SizeF, render_bounds: ?geometry.RectF) ?geometry.RectF {

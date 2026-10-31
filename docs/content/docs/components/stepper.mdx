@@ -1,0 +1,40 @@
+---
+title: "Stepper"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `stepper` to display progress through stages. Its `step` children contain text labels. `active` identifies the current index: earlier stages display a checkmark, later stages remain pending, and an index beyond the last stage marks all stages complete. The model controls `active`; the stepper has no input events. For vertical events, see [timeline](/docs/components/timeline).
+
+<ComponentPreview name="stepper" alt="A stage stepper rendered by the engine" caption="a completed step, the active step, and a pending step" />
+
+## Markup
+
+`active` is required — a number or one `{binding}`. The component is also ejectable as a markup template when you need to own its shape.
+
+```html
+<stepper active="{publish_step}">
+  <step>Draft</step>
+  <step>Review</step>
+  <step>Publish</step>
+</stepper>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.stepper(.{ .active = model.publish_step }, &.{
+    .{ .label = "Draft" },
+    .{ .label = "Review" },
+    .{ .label = "Publish" },
+})
+```
+
+<EjectSection components={["stepper"]} />
+
+## Attributes
+
+<AttrTable element="stepper" attrs={["active", "key", "global-key", "label"]} />

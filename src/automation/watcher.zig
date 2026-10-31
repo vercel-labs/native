@@ -134,7 +134,7 @@ test "watcher requests frames while a command is pending" {
     // Idle queue: give the watcher a few polls; no frame requests. A
     // leftover non-queue file (a retired-v5 writer's `command.txt`)
     // stays invisible — the watcher must not wake the loop for traffic
-    // this protocol version never consumes.
+    // this protocol never consumes.
     var path_buffer: [96]u8 = undefined;
     try cwd.writeFile(std.testing.io, .{
         .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command.txt", .{directory}),

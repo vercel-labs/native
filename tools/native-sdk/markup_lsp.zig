@@ -307,7 +307,13 @@ pub const Server = struct {
                 for (structure_docs) |doc| try writeCompletionItem(&js, doc.name, .keyword, "markup structure tag", doc.doc);
             },
             .attributes => |element_name| {
-                if (std.mem.eql(u8, element_name, "for")) {
+                if (std.mem.eql(u8, element_name, "virtual-window")) {
+                    for (markup_docs.virtual_window_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "virtual-window attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "virtual-list")) {
+                    for (markup_docs.virtual_list_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "virtual-list attribute", doc.doc);
+                    for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
+                    for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "markup event", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "for")) {
                     for (for_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "for attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "if")) {
                     for (if_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "if attribute", doc.doc);
@@ -315,6 +321,8 @@ pub const Server = struct {
                     // else takes no attributes
                 } else if (std.mem.eql(u8, element_name, "markdown")) {
                     for (markdown_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markdown attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "code")) {
+                    for (code_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "code attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "stepper")) {
                     for (stepper_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "stepper attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "step")) {
@@ -338,8 +346,8 @@ pub const Server = struct {
                     for (span_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "span attribute", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "reactions")) {
                     for (reactions_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "reactions attribute", doc.doc);
-                } else if (std.mem.eql(u8, element_name, "avatar")) {
-                    for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar attribute", doc.doc);
+                } else if (std.mem.eql(u8, element_name, "avatar") or std.mem.eql(u8, element_name, "image")) {
+                    for (avatar_attr_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "avatar/image attribute", doc.doc);
                     for (attribute_docs) |doc| try writeCompletionItem(&js, doc.name, .property, "markup attribute", doc.doc);
                     for (event_docs) |doc| try writeCompletionItem(&js, doc.name, .event, "markup event", doc.doc);
                 } else if (std.mem.eql(u8, element_name, "dropdown-menu")) {
@@ -631,7 +639,11 @@ pub fn hoverAt(text: []const u8, offset: usize) ?HoverResult {
     }
     const open = lastTagOpen(text, start) orelse return null;
     if (insideQuotes(text, open, start)) return null;
-    const doc = attributeDoc(word) orelse return null;
+    var element_start = open + 1;
+    if (element_start < text.len and text[element_start] == '/') element_start += 1;
+    var element_end = element_start;
+    while (element_end < text.len and isNameChar(text[element_end])) element_end += 1;
+    const doc = attributeDocForElement(text[element_start..element_end], word) orelse return null;
     return .{ .name = word, .doc = doc };
 }
 
@@ -646,6 +658,7 @@ pub const template_attr_docs = markup_docs.template_attr_docs;
 pub const for_attr_docs = markup_docs.for_attr_docs;
 pub const if_attr_docs = markup_docs.if_attr_docs;
 pub const markdown_attr_docs = markup_docs.markdown_attr_docs;
+pub const code_attr_docs = markup_docs.code_attr_docs;
 pub const stepper_attr_docs = markup_docs.stepper_attr_docs;
 pub const timeline_attr_docs = markup_docs.timeline_attr_docs;
 pub const timeline_item_attr_docs = markup_docs.timeline_item_attr_docs;
@@ -660,6 +673,7 @@ pub const reactions_attr_docs = markup_docs.reactions_attr_docs;
 pub const event_docs = markup_docs.event_docs;
 pub const elementDoc = markup_docs.elementDoc;
 pub const attributeDoc = markup_docs.attributeDoc;
+pub const attributeDocForElement = markup_docs.attributeDocForElement;
 
 // ------------------------------------------------------------------ tests
 
@@ -710,6 +724,10 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
         "\"uri\":\"file:///tmp/app.native\",\"version\":3},\"contentChanges\":[{" ++
         "\"text\":\"<avatar >CT</avatar>\"}]}}";
+    const image_doc =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{" ++
+        "\"uri\":\"file:///tmp/app.native\",\"version\":4},\"contentChanges\":[{" ++
+        "\"text\":\"<image image=\\\"{cover}\\\" />\"}]}}";
 
     var input: std.Io.Writer.Allocating = .init(arena);
     for ([_][]const u8{
@@ -721,7 +739,9 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":2}}}",
         avatar_doc,
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":8}}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"shutdown\"}",
+        image_doc,
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file:///tmp/app.native\"},\"position\":{\"line\":0,\"character\":23}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"shutdown\"}",
         "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}",
     }) |body| {
         const framed = try frame(arena, body);
@@ -746,8 +766,8 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     }
     // initialize response, diagnostics (broken), diagnostics (clean),
     // completion, hover, diagnostics (avatar), avatar completion,
-    // shutdown.
-    try testing.expectEqual(@as(usize, 8), bodies.items.len);
+    // diagnostics (image), image completion, shutdown.
+    try testing.expectEqual(@as(usize, 10), bodies.items.len);
 
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"id\":1") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[0], "\"capabilities\"") != null);
@@ -777,15 +797,20 @@ test "serve: initialize, didOpen with broken markup, publishDiagnostics round tr
     // Hover over `row` returns the element doc.
     try testing.expect(std.mem.indexOf(u8, bodies.items[4], "Flex container") != null);
 
-    // Completion inside `<avatar ` offers the image binding alongside the
-    // generic attributes and events.
+    // Both registered-image elements receive their shared attributes.
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"image\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"source-x\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"label\"") != null);
     try testing.expect(std.mem.indexOf(u8, bodies.items[6], "\"label\":\"on-press\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"image\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"source-x\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"source-height\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"label\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[8], "\"label\":\"on-press\"") != null);
 
     // Shutdown response.
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"id\":5") != null);
-    try testing.expect(std.mem.indexOf(u8, bodies.items[7], "\"result\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[9], "\"id\":6") != null);
+    try testing.expect(std.mem.indexOf(u8, bodies.items[9], "\"result\":null") != null);
 }
 
 test "analyze reports parser and validation findings with positions" {
@@ -829,9 +854,9 @@ test "analyze reports parser and validation findings with positions" {
 
     // avatar image misuse surfaces the validator's teaching messages.
     const literal_image = analyze(arena, "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_message, literal_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_message, literal_image.message);
     const misplaced_image = analyze(arena, "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>").?;
-    try testing.expectEqualStrings(ui_markup.avatar_image_element_message, misplaced_image.message);
+    try testing.expectEqualStrings(ui_markup.image_binding_element_message, misplaced_image.message);
     try testing.expectEqual(@as(?ui_markup.MarkupErrorInfo, null), analyze(arena, "<row><avatar image=\"{user_image}\">CT</avatar></row>"));
 
     // The a11y lint's error half rides analyze (an unnamed control is
@@ -912,11 +937,23 @@ test "hoverAt resolves element and attribute docs" {
     try testing.expectEqualStrings("button", closing.name);
 }
 
+test "hoverAt resolves reused attributes in their element context" {
+    const source = "<markdown source=\"{docs}\"/><code source=\"{snippet}\"/>";
+    const markdown_source = std.mem.indexOf(u8, source, "source").?;
+    const code_open = std.mem.indexOf(u8, source, "<code").?;
+    const code_source = std.mem.indexOfPos(u8, source, code_open, "source").?;
+
+    const markdown_hover = hoverAt(source, markdown_source).?;
+    try testing.expect(std.mem.startsWith(u8, markdown_hover.doc, "markdown:"));
+    const code_hover = hoverAt(source, code_source).?;
+    try testing.expect(std.mem.startsWith(u8, code_hover.doc, "code:"));
+}
+
 test "doc tables cover every known element, attribute, and event" {
     for (ui_markup.known_element_names) |name| {
         try testing.expect(elementDoc(name) != null);
     }
-    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions" }) |name| {
+    for ([_][]const u8{ "for", "if", "else", "template", "use", "import", "slot", "virtual-window", "virtual-list", "markdown", "stepper", "step", "timeline", "timeline-item", "chart", "series", "context-menu", "input-group", "input-group-actions", "span", "reactions", "video", "segmented-control" }) |name| {
         try testing.expect(elementDoc(name) != null);
     }
     for (ui_markup.schema.attrs) |entry| {
@@ -947,5 +984,29 @@ test "doc tables cover every known element, attribute, and event" {
         var buffer: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&buffer, "on-{s}", .{event});
         try testing.expect(attributeDoc(name) != null);
+    }
+}
+
+test "virtual range attributes have contextual hover documentation" {
+    const window = "<virtual-window item-count=\"{loaded}\" extent-estimate=\"rowExtent\">";
+    const count = hoverAt(window, std.mem.indexOf(u8, window, "item-count").? + 2).?;
+    try testing.expectEqualStrings("item-count", count.name);
+    try testing.expect(std.mem.indexOf(u8, count.doc, "available rows") != null);
+    const list = "<virtual-list window=\"range\" each=\"rows\" as=\"row\">";
+    const query = hoverAt(list, std.mem.indexOf(u8, list, "each").? + 1).?;
+    try testing.expect(std.mem.indexOf(u8, query.doc, "complete virtual range") != null);
+    try testing.expect(attributeDocForElement("virtual-window", "foreground") == null);
+}
+
+test "virtual attribute diagnostics report the repeated attribute" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "<virtual-window id=\"rows\" id=\"other\" />",
+        "<virtual-list grow=\"1\" grow=\"2\" />",
+    }) |source| {
+        const info = analyze(arena.allocator(), source).?;
+        try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+        try testing.expect(info.column > 20);
     }
 }

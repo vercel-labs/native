@@ -41,6 +41,10 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -129,6 +133,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (@hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y")) .explicit else .default,
     };
 }
 
@@ -203,7 +208,8 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -243,8 +249,8 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer mac_platform.deinit();
+    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer mac_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -284,8 +290,8 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer linux_platform.deinit();
+    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -325,8 +331,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer windows_platform.deinit();
+    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -390,12 +396,17 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
             if (!window.restore_state) continue;
             if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
                 window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+                window.initial_placement = .restored;
+                if (index == 0) {
+                    app_info.main_window.default_frame = saved.frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
         if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
             app_info.main_window.default_frame = saved.frame;
+            app_info.main_window.initial_placement = .restored;
         }
     }
     return store;

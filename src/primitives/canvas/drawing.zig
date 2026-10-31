@@ -207,6 +207,31 @@ pub const ImageFit = enum {
     cover,
 };
 
+/// The `contain` destination rect: the largest `source_width` x
+/// `source_height`-proportioned rect that fits inside `dst`, centered —
+/// the remainder is the caller's letterbox/pillarbox. Non-positive
+/// source dimensions (an unloaded stream) answer the whole `dst`
+/// unchanged, so callers never divide by zero on unknown geometry.
+pub fn containDestinationRect(dst: geometry.RectF, source_width: f32, source_height: f32) geometry.RectF {
+    const normalized = dst.normalized();
+    if (normalized.isEmpty() or source_width <= 0 or source_height <= 0) return normalized;
+    const source_aspect = source_width / source_height;
+    const dst_aspect = normalized.width / normalized.height;
+    var width = normalized.width;
+    var height = normalized.height;
+    if (dst_aspect > source_aspect) {
+        width = height * source_aspect;
+    } else {
+        height = width / source_aspect;
+    }
+    return geometry.RectF.init(
+        normalized.x + (normalized.width - width) * 0.5,
+        normalized.y + (normalized.height - height) * 0.5,
+        width,
+        height,
+    );
+}
+
 pub const ImageSampling = enum {
     nearest,
     linear,

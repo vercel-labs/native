@@ -1,5 +1,7 @@
 const std = @import("std");
+const geometry = @import("geometry");
 const canvas = @import("root.zig");
+const code_model = @import("code.zig");
 const markup_view = @import("ui_markup_view.zig");
 
 const testing = std.testing;
@@ -26,6 +28,16 @@ pub const Msg = union(enum) {
     toggle: u32,
     set_filter: Filter,
     draft: canvas.TextInputEvent,
+    drag: DragPayload,
+};
+
+pub const DragPayload = struct {
+    sourceId: usize,
+    phase: u8,
+    x: f32,
+    y: f32,
+    viewWidth: f32,
+    viewHeight: f32,
 };
 
 pub const Model = struct {
@@ -202,6 +214,24 @@ test "markup view builds the same tree as the hand-written view" {
         findByKind(hand_tree.root, .status_bar).?.text,
         findByKind(markup_tree.root, .status_bar).?.text,
     );
+}
+
+test "digit-only text attributes stay text while numeric attributes stay numeric" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var view = try InboxMarkup.init(
+        arena,
+        "<column padding=\"8\">\n  <text-field placeholder=\"123\" label=\"456\" />\n</column>",
+    );
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &Model{}));
+    const field = findByKind(tree.root, .text_field).?;
+
+    try testing.expectEqualStrings("123", field.placeholder);
+    try testing.expectEqualStrings("456", field.semantics.label);
+    try testing.expectEqual(@as(f32, 8), tree.root.layout.padding.top);
 }
 
 test "markup keyed rows keep ids across model changes and filters dispatch" {
@@ -407,6 +437,85 @@ test "style token references resolve against tokens at finalize time" {
 
     // Ids are independent of token resolution.
     try testing.expectEqual(light_badge.id, dark_badge.id);
+}
+
+test "markup radius none resolves to square button corners" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<button radius=\"none\" on-press=\"add\">Square</button>");
+    var ui = InboxUi.init(arena);
+    const custom_tokens = canvas.DesignTokens{ .radius = .{ .none = 8 } };
+    const tree = try ui.finalizeWithTokens(try view.build(&ui, &model), custom_tokens);
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    var button = tree.root;
+    button.frame = geometry.RectF.init(0, 0, 120, 36);
+    button.state.focused = true;
+    var commands: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, button, .{});
+    switch (builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().commands[2]) {
+        .stroke_rect => |ring| try testing.expectEqualDeep(canvas.Radius.all(2), ring.radius),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "markup radius none keeps a surface content clip square" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<panel radius=\"none\"><row background=\"accent\" /></panel>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    // Give the child the entire panel frame: this is the full-bleed case
+    // where the content clip, rather than layout padding, owns the corners.
+    var panel = tree.root;
+    panel.frame = geometry.RectF.init(0, 0, 120, 72);
+    panel.layout.clip_content = true;
+    var children = [_]canvas.Widget{panel.children[0]};
+    children[0].frame = panel.frame;
+    panel.children = &children;
+
+    var commands: [8]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, panel, .{});
+
+    var saw_panel_chrome = false;
+    var saw_content_clip = false;
+    var saw_full_bleed_child = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == canvas.widgetPartId(panel.id, 2)) {
+                    try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius);
+                    saw_panel_chrome = true;
+                }
+                if (fill.id == canvas.widgetPartId(children[0].id, 1)) {
+                    try testing.expectEqualDeep(panel.frame, fill.rect);
+                    saw_full_bleed_child = true;
+                }
+            },
+            .push_clip => |clip| if (clip.id == canvas.widgetPartId(panel.id, 9)) {
+                try testing.expectEqualDeep(canvas.Radius.all(0), clip.radius);
+                saw_content_clip = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_panel_chrome);
+    try testing.expect(saw_content_clip);
+    try testing.expect(saw_full_bleed_child);
 }
 
 test "explicit style values win over token references" {
@@ -675,6 +784,42 @@ test "overscroll on scroll stamps the region's edge behavior" {
     try testing.expectEqual(canvas.ScrollOverscroll.none, canvas.widgetScrollPhysics(tree.root.children[1], physics).overscroll);
 }
 
+test "axis and value-x stamp the region's scroll axes and horizontal offset" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<column>\n  <scroll axis=\"horizontal\" value-x=\"120\">\n    <row><text>a</text></row>\n  </scroll>\n  <scroll axis=\"both\">\n    <column><text>b</text></column>\n  </scroll>\n  <scroll>\n    <column><text>c</text></column>\n  </scroll>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const shelf = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.scroll_view, shelf.kind);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, shelf.scroll_axes);
+    try testing.expectEqual(@as(f32, 120), shelf.value_x);
+    try testing.expect(canvas.widgetScrollsAxis(shelf, .horizontal));
+    try testing.expect(!canvas.widgetScrollsAxis(shelf, .vertical));
+    const freeform = tree.root.children[1];
+    try testing.expectEqual(canvas.ScrollAxes.both, freeform.scroll_axes);
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(freeform, .vertical));
+    // The undeclared region keeps the pre-axis default: vertical only.
+    const classic = tree.root.children[2];
+    try testing.expectEqual(canvas.ScrollAxes.vertical, classic.scroll_axes);
+    try testing.expect(!canvas.widgetScrollsAxis(classic, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(classic, .vertical));
+}
+
+test "axis value vocabulary mirrors the live ScrollAxes enum" {
+    // The validator's std-only mirror of the enum's member names; a new
+    // member cannot ship without its markup spelling.
+    const fields = @typeInfo(canvas.ScrollAxes).@"enum".fields;
+    try testing.expectEqual(fields.len, canvas.ui_markup.axis_value_names.len);
+    inline for (fields, 0..) |field, index| {
+        try testing.expectEqualStrings(field.name, canvas.ui_markup.axis_value_names[index]);
+    }
+}
+
 test "overscroll value vocabulary mirrors the live WidgetOverscroll enum" {
     // The validator's std-only mirror of the enum's member names; a new
     // member cannot ship without its markup spelling.
@@ -714,6 +859,84 @@ test "resize-duration and resize-easing on split stamp the layout-tween declarat
     const plain = tree.root.children[1];
     try testing.expectEqual(@as(u32, 0), plain.resize_duration_ms);
     try testing.expectEqual(canvas.Easing.standard, plain.resize_easing);
+}
+
+test "anchor and tooltip-delay on tooltip stamp the hover-intent declaration" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    // An anchored tooltip declaring its own delay, an anchored tooltip
+    // on the token default, and a bare static tooltip that keeps the
+    // classic paints-when-rendered leaf — so existing documents lower
+    // byte-identically.
+    var view = try InboxMarkup.init(arena, "<column>\n  <stack>\n    <text>Bold</text>\n    <tooltip anchor=\"above\" tooltip-delay=\"250\">Bold the selection</tooltip>\n  </stack>\n  <stack>\n    <text>Link</text>\n    <tooltip anchor=\"below\">Insert a link</tooltip>\n  </stack>\n  <tooltip>Copied!</tooltip>\n</column>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const declared = findByText(tree.root, .tooltip, "Bold the selection").?;
+    try testing.expectEqual(@as(i32, 250), declared.tooltip_delay_ms);
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.above, declared.layout.anchor.?.placement);
+
+    const defaulted = findByText(tree.root, .tooltip, "Insert a link").?;
+    try testing.expectEqual(@as(i32, -1), defaulted.tooltip_delay_ms);
+    try testing.expectEqual(canvas.WidgetAnchorPlacement.below, defaulted.layout.anchor.?.placement);
+
+    const static = findByText(tree.root, .tooltip, "Copied!").?;
+    try testing.expectEqual(@as(i32, -1), static.tooltip_delay_ms);
+    try testing.expectEqual(@as(?canvas.WidgetAnchor, null), static.layout.anchor);
+}
+
+test "tooltip-delay past i32 max fails the build instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    // One past maxInt(i32): the option field's own type is the bound,
+    // so the cast that used to trap is now the grid-lines teaching
+    // error. The value parses fine as a 64-bit literal — the failure
+    // must come from the attribute seam, not the expression parser.
+    var overflow_view = try InboxMarkup.init(arena, "<column>\n  <stack>\n    <text>Bold</text>\n    <tooltip anchor=\"above\" tooltip-delay=\"2147483648\">Bold the selection</tooltip>\n  </stack>\n</column>");
+    var overflow_ui = InboxUi.init(arena);
+    try testing.expectError(error.MarkupBuild, overflow_view.build(&overflow_ui, &model));
+    try testing.expectEqualStrings("expected a non-negative whole number", overflow_view.diagnostic.message);
+
+    // Boundary values pass: 0 (the instant-show escape hatch) and the
+    // type's exact max.
+    var boundary_view = try InboxMarkup.init(arena, "<column>\n  <stack>\n    <text>Bold</text>\n    <tooltip anchor=\"above\" tooltip-delay=\"0\">Bold the selection</tooltip>\n  </stack>\n  <stack>\n    <text>Link</text>\n    <tooltip anchor=\"below\" tooltip-delay=\"2147483647\">Insert a link</tooltip>\n  </stack>\n</column>");
+    var boundary_ui = InboxUi.init(arena);
+    const tree = try boundary_ui.finalize(try boundary_view.build(&boundary_ui, &model));
+    try testing.expectEqual(@as(i32, 0), findByText(tree.root, .tooltip, "Bold the selection").?.tooltip_delay_ms);
+    try testing.expectEqual(@as(i32, std.math.maxInt(i32)), findByText(tree.root, .tooltip, "Insert a link").?.tooltip_delay_ms);
+}
+
+test "tooltip-delay model binding past i32 max fails the build instead of trapping" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Bindings deliver i64 model values straight into the same cast
+    // seam the literal path uses, so an out-of-range model value must
+    // produce the same teaching error — per-build, since only the
+    // value (not the document) is wrong.
+    const DelayModel = struct { delay: i64 = 0 };
+    const DelayMarkup = markup_view.MarkupView(DelayModel, Msg);
+    const source = "<column>\n  <stack>\n    <text>Bold</text>\n    <tooltip anchor=\"above\" tooltip-delay=\"{delay}\">Bold the selection</tooltip>\n  </stack>\n</column>";
+
+    var overflow_view = try DelayMarkup.init(arena, source);
+    var overflow_ui = InboxUi.init(arena);
+    const overflow_model = DelayModel{ .delay = @as(i64, std.math.maxInt(i32)) + 1 };
+    try testing.expectError(error.MarkupBuild, overflow_view.build(&overflow_ui, &overflow_model));
+    try testing.expectEqualStrings("expected a non-negative whole number", overflow_view.diagnostic.message);
+
+    // The same document lowers when the model holds an in-range value.
+    var ok_view = try DelayMarkup.init(arena, source);
+    var ok_ui = InboxUi.init(arena);
+    const ok_model = DelayModel{ .delay = 250 };
+    const tree = try ok_ui.finalize(try ok_view.build(&ok_ui, &ok_model));
+    try testing.expectEqual(@as(i32, 250), findByText(tree.root, .tooltip, "Bold the selection").?.tooltip_delay_ms);
 }
 
 test "resize-easing value vocabulary mirrors the live Easing enum" {
@@ -968,11 +1191,56 @@ pub const picker_markup_source =
     \\      <menu-item on-press="toggle:{open_count}">Alpha</menu-item>
     \\    </dropdown-menu>
     \\  </stack>
-    \\  <button on-press="add" on-hold="add">Crumb</button>
+    \\  <button on-press="add" on-double-press="toggle:{open_count}" on-hold="add">Crumb</button>
     \\</column>
 ;
 
-test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
+/// Shared source for the hover-pair parity tests (interpreter here,
+/// compiled engine in ui_markup_compiled_tests.zig): nested hover
+/// listeners on LAYOUT containers — legal everywhere like the press
+/// family, and the binding is what makes them hover-hittable.
+pub const hover_markup_source =
+    \\<column gap="8">
+    \\  <panel padding="8" on-hover-enter="add" on-hover-leave="toggle:{open_count}">
+    \\    <row gap="4" on-hover-enter="add">
+    \\      <text>Peek target</text>
+    \\    </row>
+    \\  </panel>
+    \\</column>
+;
+
+test "markup binds the hover pair and makes listeners hover-hittable, never pressable" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, hover_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const panel = tree.root.children[0];
+    const row = panel.children[0];
+    try testing.expect(panel.hover_msgs);
+    try testing.expect(row.hover_msgs);
+    // Hover listening never implies pressability OR interactive
+    // hit-testing: no press action, no press claim, invisible to the
+    // wash/press hit test — only the hover-containment policy sees it.
+    try testing.expect(!row.semantics.actions.press);
+    try testing.expect(!canvas.widgetClaimsPress(row));
+    try testing.expect(!canvas.widgetIsHitTarget(row));
+    try testing.expect(canvas.widgetIsHoverMsgHitTarget(row));
+
+    // Both edges resolve through the handler table; an element binding
+    // only enter has no leave Msg, and plain children listen for nothing.
+    try testing.expectEqual(Msg.add, tree.msgFor(panel.id, .hover_enter).?);
+    try testing.expectEqual(@as(u32, 0), tree.msgFor(panel.id, .hover_leave).?.toggle);
+    try testing.expectEqual(Msg.add, tree.msgFor(row.id, .hover_enter).?);
+    try testing.expect(tree.msgFor(row.id, .hover_leave) == null);
+    try testing.expect(!row.children[0].hover_msgs);
+}
+
+test "markup anchors dropdown-menus and binds dismiss, hold, and double-press handlers" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -993,6 +1261,9 @@ test "markup anchors dropdown-menus and binds dismiss and hold handlers" {
 
     const crumb = tree.root.children[1];
     try testing.expect(tree.msgFor(crumb.id, .hold) != null);
+    try testing.expectEqual(Msg.add, tree.msgForPointerClick(crumb.id, .up, 1).?);
+    try testing.expectEqual(@as(u32, 0), tree.msgForPointerClick(crumb.id, .up, 2).?.toggle);
+    try testing.expectEqual(Msg.add, tree.msgForPointerClick(crumb.id, .up, 3).?);
     // A hold handler makes the element pressable, like on-press.
     try testing.expect(crumb.semantics.actions.press);
 
@@ -1043,6 +1314,35 @@ pub const context_menu_markup_source =
     \\  </for>
     \\</column>
 ;
+
+pub const drag_context_menu_markup_source =
+    \\<row on-drag="drag:{open_count}" label="Draggable row">
+    \\  <text>Drag me</text>
+    \\  <context-menu>
+    \\    <menu-item on-press="add">Duplicate</menu-item>
+    \\  </context-menu>
+    \\</row>
+;
+
+test "a drag-only layout element can host a context menu" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = testModel();
+
+    var parser = canvas.ui_markup.Parser.init(arena, drag_context_menu_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    var view = try InboxMarkup.init(arena, drag_context_menu_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expect(tree.root.semantics.actions.drag);
+    try testing.expect(canvas.widgetIsHitTarget(tree.root));
+    try testing.expect(canvas.widgetClaimsPress(tree.root));
+    try testing.expectEqual(@as(usize, 1), tree.root.context_menu.len);
+    try testing.expectEqualStrings("Duplicate", tree.root.context_menu[0].label);
+    try testing.expectEqual(Msg.add, tree.msgForContextMenu(tree.root.id, 0).?);
+}
 
 test "markup context-menus lower to declared platform-menu items on their host" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1147,7 +1447,13 @@ test "the registry's attr value classes match the ElementOptions field types" {
         const expected: contract.AttrClass = switch (@typeInfo(FieldType)) {
             .float => .number,
             .int => .whole,
-            .bool, .optional => .truthy,
+            .bool => .truthy,
+            .optional => |optional| switch (@typeInfo(optional.child)) {
+                .bool => .truthy,
+                .float => .number,
+                .@"enum" => .option,
+                else => unreachable,
+            },
             .@"enum" => .option,
             .pointer => .text,
             else => unreachable,
@@ -1243,9 +1549,17 @@ test "the registry's a11y name classes match the engine's control predicates" {
             try testing.expect(canvas.widgetKindHitTarget(kind));
             try testing.expect(canvas.widgetKindClaimsPress(kind));
         }
-        // Image-class elements are announced under the image role.
+        // Image-class elements are announced under the image role:
+        // avatar, the media surface, and the image leaf (pictorial
+        // content whose missing label degrades but never blocks).
         if (entry.a11y_name == .image) {
-            try testing.expectEqual(canvas.WidgetKind.avatar, kind);
+            try testing.expect(kind == .avatar or kind == .media_surface or kind == .image);
+        }
+        // Radio-group is the one named container class: it is not a hit
+        // target, but its label supplies the shared question announced
+        // around the descendant radio choices.
+        if (entry.a11y_name == .radiogroup) {
+            try testing.expectEqual(canvas.WidgetKind.radio_group, kind);
         }
     }
 }
@@ -1302,20 +1616,13 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
     }
 }
 
-/// Widget kinds deliberately NOT expressible in markup v1 — each needs
-/// something the closed grammar cannot carry, so these are written as Zig
-/// view functions instead of forcing a bad markup shape:
-/// - image, icon_button: reference image assets by runtime ImageId,
-///   which markup's literal/binding attribute values cannot express.
-///   (icon IS expressible: the built-in vector set is a closed literal
-///   vocabulary, comptime-validated.)
+/// Widget kinds deliberately NOT expressible as direct markup leaves —
+/// each is either a composite form or awaits a separate admission:
 /// - data_grid: a virtualized data grid needs per-column cell templates
 ///   (arbitrary render callbacks).
 /// - popover, menu_surface: floating surfaces anchored to runtime geometry
 ///   the static tree cannot express (dropdown-menu covers the declarative
 ///   menu case).
-/// - segmented_control: engine kind for shell chrome segments; tabs and
-///   toggle-group cover the component catalog's use cases.
 /// - chart: expressible as the `<chart>` COMPOSITE (series children whose
 ///   values bind model f32 iterables, lowered through `Ui.chart`), so no
 ///   plain element maps to the kind here — like the other composites, the
@@ -1328,8 +1635,23 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   lowered through `Ui.inputGroup`), so no plain element maps to the
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .image, .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
+    .icon_button, .chart, .split_divider, .input_group,
 };
+
+pub const SegmentedModel = struct {
+    mode: u8 = 1,
+};
+pub const SegmentedMsg = union(enum) { choose };
+pub const SegmentedUi = canvas.Ui(SegmentedMsg);
+const SegmentedMarkup = markup_view.MarkupView(SegmentedModel, SegmentedMsg);
+
+pub const segmented_markup_source =
+    \\<column gap="8">
+    \\  <segmented-control selected="{mode == 0}" on-press="choose">List</segmented-control>
+    \\  <segmented-control selected="{mode == 1}" icon="settings" on-press="choose">Grid</segmented-control>
+    \\  <button size="icon" icon="settings" label="Preview" on-press="choose" />
+    \\</column>
+;
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
     for (canvas.ui_markup.known_element_names) |name| {
@@ -1345,6 +1667,32 @@ test "known_element_names covers every markup-expressible widget kind" {
         const excluded = std.mem.indexOfScalar(canvas.WidgetKind, &markup_excluded_widget_kinds, kind) != null;
         try testing.expectEqual(!excluded, kindExpressible(kind));
     }
+}
+
+test "segmented-control and vector icon button build and dispatch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parser = canvas.ui_markup.Parser.init(arena, segmented_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    const model = SegmentedModel{};
+    var view = try SegmentedMarkup.init(arena, segmented_markup_source);
+    var ui = SegmentedUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const list = tree.root.children[0];
+    const grid = tree.root.children[1];
+    const preview = tree.root.children[2];
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, list.kind);
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, grid.kind);
+    try testing.expect(!list.state.selected);
+    try testing.expect(grid.state.selected);
+    try testing.expectEqualStrings("settings", grid.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(list.id, .up).?);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(grid.id, .up).?);
+    try testing.expectEqual(canvas.WidgetKind.button, preview.kind);
+    try testing.expectEqualStrings("settings", preview.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(preview.id, .up).?);
 }
 
 test "every built-in component is expressible in markup" {
@@ -1545,6 +1893,10 @@ pub const doc_body_source =
     \\
     \\Tracked in #12, see https://status.example.com.
     \\
+    \\| State |
+    \\| --- |
+    \\| ![Ready](https://status.example.com/ready.png) Ready |
+    \\
     \\<details>
     \\<summary>Rollout</summary>
     \\
@@ -1558,6 +1910,12 @@ pub const DocModel = struct {
     details_expanded: [2]bool = .{ false, false },
     opened_count: usize = 0,
     issue_base: []const u8 = "ghissue://",
+    images: [1]canvas.markdown.ResolvedImage = .{.{
+        .source = "https://status.example.com/ready.png",
+        .image = 71,
+        .width = 10,
+        .height = 10,
+    }},
 
     /// Arena scalar as a markdown source: composed at view time.
     pub fn banner(model: *const DocModel, arena: std.mem.Allocator) []const u8 {
@@ -1567,7 +1925,7 @@ pub const DocModel = struct {
 
 pub const doc_markup_source =
     \\<column gap="8">
-    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" />
+    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" images="{images}" />
     \\  <markdown source="{banner}" />
     \\</column>
 ;
@@ -1584,6 +1942,7 @@ pub fn handDocView(ui: *DocUi, model: *const DocModel) DocUi.Node {
             .on_details = DocMd.detailsMsg(.toggle_details),
             .details_expanded = &model.details_expanded,
             .issue_link_base = model.issue_base,
+            .images = &model.images,
         }),
         DocMd.view(ui, model.banner(ui.arena), .{}),
     });
@@ -1641,6 +2000,7 @@ test "the markdown element builds the hand-written Md.view tree and dispatches l
     // URLs autolink (trailing punctuation trimmed).
     try testing.expectEqualStrings("ghissue://12", findSpanLink(markup_tree.root, "#12").?);
     try testing.expectEqualStrings("https://status.example.com", findSpanLink(markup_tree.root, "https://status.example.com").?);
+    try testing.expectEqual(@as(canvas.ImageId, 71), findByKind(markup_tree.root, .image).?.image_id);
 
     // Details summary dispatches on-details with the block index; the body
     // is hidden while the caller-owned flag is false.
@@ -1765,6 +2125,151 @@ test "markdown misuse is caught by the model-agnostic validator with positions" 
     try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
 }
 
+// ------------------------------------------------------- code component
+
+pub const CodeMsg = union(enum) {
+    noop,
+    edit: canvas.TextInputEvent,
+};
+
+pub const CodeModel = struct {
+    snippet: []const u8 =
+        \\<Accordion defaultValue={["item-1"]}>
+        \\  <AccordionTrigger>Accessible?</AccordionTrigger>
+        \\</Accordion>
+    ,
+    show_lines: bool = true,
+    wrap_code: bool = false,
+    editable_code: bool = false,
+    added_spec: []const u8 = "2",
+    count: usize = 3,
+};
+
+pub const code_markup_source =
+    \\<code source="{snippet}" language="tsx" editable="{editable_code}" on-input="edit" line-numbers="{show_lines}" added-lines="{added_spec}" removed-lines="3" wrap="{wrap_code}" width="240" label="Example code" />
+;
+
+pub const CodeUi = canvas.Ui(CodeMsg);
+
+pub fn handCodeView(ui: *CodeUi, model: *const CodeModel) CodeUi.Node {
+    return ui.code(.{
+        .language = .html,
+        .editable = model.editable_code,
+        .on_input = CodeUi.inputMsg(.edit),
+        .line_numbers = model.show_lines,
+        .added_lines = &.{2},
+        .removed_lines = &.{3},
+        .wrap = model.wrap_code,
+        .width = 240,
+        .semantics = .{ .label = "Example code" },
+    }, model.snippet);
+}
+
+test "code markup builds the reusable component with opt-in numbers and horizontal scrolling" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = CodeModel{};
+    const CodeMarkup = markup_view.MarkupView(CodeModel, CodeMsg);
+
+    var view = try CodeMarkup.init(arena, code_markup_source);
+    var markup_ui = CodeUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+    var hand_ui = CodeUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handCodeView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+    try testing.expectEqual(canvas.WidgetKind.column, markup_tree.root.kind);
+    try testing.expectEqual(geometry.InsetsF{}, markup_tree.root.layout.padding);
+    try testing.expect(markup_tree.root.style.background == null);
+    try testing.expect(markup_tree.root.style.border == null);
+    try testing.expect(markup_tree.root.style.radius == null);
+    try testing.expectEqual(canvas.ScrollAxes.horizontal, findByKind(markup_tree.root, .scroll_view).?.scroll_axes);
+    const source = findByText(markup_tree.root, .text, model.snippet).?;
+    try testing.expectEqual(@as(u8, 1), source.codeLineNumberDigits());
+    try testing.expectEqual(@as(u128, 1) << 1, source.codeDiffLines().?.added);
+    try testing.expectEqual(@as(u128, 1) << 2, source.codeDiffLines().?.removed);
+    try testing.expectEqualStrings("Example code", markup_tree.root.semantics.label);
+
+    var editable_model = model;
+    editable_model.editable_code = true;
+    var editable_ui = CodeUi.init(arena);
+    const editable_tree = try editable_ui.finalize(try view.build(&editable_ui, &editable_model));
+    try testing.expectEqual(canvas.WidgetKind.textarea, editable_tree.root.kind);
+    try testing.expect(editable_tree.root.runtime_flags.code_editor);
+    try testing.expectEqual(@as(usize, 1), editable_tree.root.spans.len);
+    try testing.expectEqual(code_model.Language.tsx, editable_tree.root.code_language);
+    try testing.expect(editable_tree.root.text_no_wrap);
+    try testing.expect(canvas.widgetScrollsAxis(editable_tree.root, .horizontal));
+    try testing.expect(canvas.widgetScrollsAxis(editable_tree.root, .vertical));
+    try testing.expectEqual(geometry.InsetsF{}, editable_tree.root.layout.padding);
+    try testing.expect(editable_tree.root.style.background == null);
+    try testing.expect(editable_tree.root.style.border == null);
+    try testing.expect(editable_tree.root.style.radius == null);
+    try testing.expect(editable_tree.root.semantics.actions.set_text);
+    const edit = editable_tree.msgForTextEdit(editable_tree.root.id, .{ .insert_text = "x" }).?;
+    try testing.expectEqualStrings("x", edit.edit.insert_text);
+}
+
+test "code markup accepts lexer aliases from the shared language registry" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = CodeModel{};
+    const CodeMarkup = markup_view.MarkupView(CodeModel, CodeMsg);
+    const cases = [_][]const u8{
+        "<code source=\"{snippet}\" language=\"mjs\" />",
+        "<code source=\"{snippet}\" language=\"yaml\" />",
+        "<code source=\"{snippet}\" language=\"yml\" />",
+    };
+
+    for (cases) |source| {
+        var parser = canvas.ui_markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+        var view = try CodeMarkup.init(arena, source);
+        var ui = CodeUi.init(arena);
+        _ = try ui.finalize(try view.build(&ui, &model));
+    }
+}
+
+test "code markup misuse reports the component's closed contract" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = CodeModel{};
+    const CodeMarkup = markup_view.MarkupView(CodeModel, CodeMsg);
+    const cases = [_]struct { source: []const u8, message: []const u8, model_agnostic: bool = true }{
+        .{ .source = "<code language=\"zig\" />", .message = canvas.ui_markup.code_source_message },
+        .{ .source = "<code source=\"literal\" />", .message = canvas.ui_markup.code_source_message },
+        .{ .source = "<code source=\"{count}\" />", .message = canvas.ui_markup.code_source_message, .model_agnostic = false },
+        .{ .source = "<code source=\"{snippet}\" language=\"brainwave\" />", .message = canvas.ui_markup.code_language_message },
+        .{ .source = "<code source=\"{snippet}\" added-lines=\"0\" />", .message = canvas.ui_markup.code_diff_lines_message },
+        .{ .source = "<code source=\"{snippet}\" removed-lines=\"4-2\" />", .message = canvas.ui_markup.code_diff_lines_message },
+        .{ .source = "<code source=\"{snippet}\" removed-lines=\"{count}\" />", .message = canvas.ui_markup.code_diff_lines_message, .model_agnostic = false },
+        .{ .source = "<code source=\"{snippet}\" padding=\"8\" />", .message = canvas.ui_markup.code_attr_message },
+        .{ .source = "<code source=\"{snippet}\">text</code>", .message = canvas.ui_markup.code_children_message },
+    };
+    for (cases) |case| {
+        var view = try CodeMarkup.init(arena, case.source);
+        var ui = CodeUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+
+        if (case.model_agnostic) {
+            var parser = canvas.ui_markup.Parser.init(arena, case.source);
+            const info = canvas.ui_markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings(case.message, info.message);
+        }
+    }
+}
+
 // -------------------------------------------------- component catalog fixture
 
 pub const CatalogRow = struct {
@@ -1841,10 +2346,10 @@ pub const catalog_markup_source =
     \\  </row>
     \\  <row gap="8">
     \\    <input text="{query}" placeholder="Name" autofocus="true" on-input="query_edit" on-submit="submit_query" grow="1" />
-    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" />
+    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" on-press="open_picker" on-submit="submit_query" />
     \\  </row>
-    \\  <radio-group gap="4">
-    \\    <radio checked="{bold}" on-toggle="toggle_bold" label="Bold" />
+    \\  <radio-group gap="4" label="Formatting">
+    \\    <radio checked="{bold}" on-change="toggle_bold" label="Bold" />
     \\  </radio-group>
     \\  <accordion text="Details" selected="{details_open}" on-toggle="toggle_details" padding="8">
     \\    <text>More info</text>
@@ -1971,10 +2476,10 @@ pub fn handCatalogView(ui: *CatalogUi, model: *const CatalogModel) CatalogUi.Nod
         }),
         ui.row(.{ .gap = 8 }, .{
             ui.el(.input, .{ .text = model.query, .placeholder = "Name", .autofocus = true, .on_input = CatalogUi.inputMsg(.query_edit), .on_submit = .submit_query, .grow = 1 }, .{}),
-            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit) }, .{}),
+            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit), .on_press = .open_picker, .on_submit = .submit_query }, .{}),
         }),
-        ui.el(.radio_group, .{ .gap = 4 }, .{
-            ui.el(.radio, .{ .checked = model.bold, .on_toggle = .toggle_bold }, .{}),
+        ui.el(.radio_group, .{ .gap = 4, .semantics = .{ .label = "Formatting" } }, .{
+            ui.el(.radio, .{ .checked = model.bold, .on_change = .toggle_bold }, .{}),
         }),
         ui.el(.accordion, .{ .text = "Details", .selected = model.details_open, .on_toggle = .toggle_details, .padding = 8 }, .{
             ui.text(.{}, "More info"),
@@ -2116,6 +2621,10 @@ test "catalog elements build the hand-written tree and dispatch typed messages" 
     try testing.expectEqualStrings("q", markup_tree.msgForKeyboard(input.id, typed).?.query_edit.insert_text);
     const submit = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
     try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(input.id, submit).?);
+    const combobox = findByKind(markup_tree.root, .combobox).?;
+    try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(combobox.id, submit).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "arrowdown" }).?);
 
     // The whole catalog lays out through the canvas engine.
     var nodes: [256]canvas.WidgetLayoutNode = undefined;
@@ -2289,6 +2798,9 @@ pub const AvatarModel = struct {
     /// `fx.registerImageBytes`.
     user_image: canvas.ImageId = 0,
     user_name: []const u8 = "Casey Torres",
+    /// A signed id field: bindings evaluate as i64, so a negative must
+    /// reach the image seam as a value, never trap in the u64 cast.
+    stale_image: i64 = -1,
 
     /// A pub fn producing an ImageId binds like a field.
     pub fn teammateImage(model: *const AvatarModel) canvas.ImageId {
@@ -2300,6 +2812,14 @@ pub const avatar_markup_source =
     \\<row gap="8" cross="center">
     \\  <avatar image="{user_image}" label="{user_name}">CT</avatar>
     \\  <avatar image="{teammateImage}">NS</avatar>
+    \\</row>
+;
+
+/// A negative model value into avatar's u64 image seam: both engines
+/// must fail the build with the avatar teaching, never trap.
+pub const avatar_negative_markup_source =
+    \\<row>
+    \\  <avatar image="{stale_image}">CT</avatar>
     \\</row>
 ;
 
@@ -2366,22 +2886,531 @@ test "avatar image misuse fails the build with the teaching messages" {
         .{
             // A literal id is not model data.
             .source = "<row>\n  <avatar image=\"7\">CT</avatar>\n</row>",
-            .message = canvas.ui_markup.avatar_image_message,
+            .message = canvas.ui_markup.image_binding_message,
         },
         .{
             // The binding must produce an integer ImageId (user_name is text).
             .source = "<row>\n  <avatar image=\"{user_name}\">CT</avatar>\n</row>",
-            .message = canvas.ui_markup.avatar_image_message,
+            .message = canvas.ui_markup.image_binding_message,
+        },
+        .{
+            // A negative integer can never be a u64 ImageId: the
+            // teaching failure, not an @intCast trap.
+            .source = avatar_negative_markup_source,
+            .message = canvas.ui_markup.image_binding_message,
         },
         .{
             // Scoped to avatar: the other image elements stay Zig views.
             .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>",
-            .message = canvas.ui_markup.avatar_image_element_message,
+            .message = canvas.ui_markup.image_binding_element_message,
         },
     };
     for (cases) |case| {
         var view = try AvatarMarkup.init(arena, case.source);
         var ui = AvatarUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
+}
+
+// -------------------------------------------- media-surface id binding
+
+pub const SurfaceMsg = union(enum) { refresh };
+
+pub const SurfaceModel = struct {
+    preview: u64 = 5,
+    /// A signed id field: bindings evaluate as i64, so a negative must
+    /// reach the surface seam as a value, never trap in the u64 cast.
+    stale_surface: i64 = -3,
+};
+
+pub const surface_markup_source =
+    \\<column>
+    \\  <media-surface surface="{preview}" label="Preview" />
+    \\</column>
+;
+
+/// A negative model value into media-surface's u64 surface seam: both
+/// engines must fail the build with the surface teaching, never trap.
+pub const surface_negative_markup_source =
+    \\<column>
+    \\  <media-surface surface="{stale_surface}" label="Preview" />
+    \\</column>
+;
+
+pub const SurfaceUi = canvas.Ui(SurfaceMsg);
+
+test "the media-surface surface binding resolves the model id; negatives fail the build" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const SurfaceMarkup = markup_view.MarkupView(SurfaceModel, SurfaceMsg);
+    const model = SurfaceModel{};
+
+    // The u64 model id rides options.image into the widget's image_id
+    // (the media surface's surface-id channel).
+    var view = try SurfaceMarkup.init(arena, surface_markup_source);
+    var ui = SurfaceUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const surface = tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 5), surface.image_id);
+
+    // A negative integer can never be a u64 surface id: the teaching
+    // failure, not an @intCast trap.
+    var negative_view = try SurfaceMarkup.init(arena, surface_negative_markup_source);
+    var negative_ui = SurfaceUi.init(arena);
+    try testing.expectError(error.MarkupBuild, negative_view.build(&negative_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.media_surface_surface_message, negative_view.diagnostic.message);
+    try testing.expect(negative_view.diagnostic.line > 0);
+}
+
+// ------------------------------------------------ image leaf id binding
+
+pub const ImageLeafMsg = union(enum) { refresh };
+
+pub const ImageLeafModel = struct {
+    /// Runtime-registered ImageId kept in the model (0 = no image, the
+    /// leaf draws nothing) — the id lands here from `Cmd.imageLoad`'s
+    /// loaded result (or `fx.registerImageBytes` on the Zig tier).
+    cover: canvas.ImageId = 0,
+    /// A signed id field: bindings evaluate as i64, so a negative must
+    /// reach the image seam as a value, never trap in the u64 cast.
+    stale_image: i64 = -2,
+    source_x: f32 = 4,
+    source_width: f32 = 32,
+    invalid_source: []const u8 = "wide",
+
+    /// A pub fn producing an ImageId binds like a field.
+    pub fn thumbnail(model: *const ImageLeafModel) canvas.ImageId {
+        return model.cover + 1;
+    }
+};
+
+pub const image_markup_source =
+    \\<row gap="8">
+    \\  <image image="{cover}" source-x="{source_x}" source-y="8" source-width="{source_width}" source-height="24" width="120" height="80" label="Cover art" />
+    \\  <image image="{thumbnail}" width="48" height="48" label="" />
+    \\</row>
+;
+
+/// A negative model value into the image leaf's u64 id seam: both
+/// engines must fail the build with the image teaching, never trap.
+pub const image_negative_markup_source =
+    \\<row>
+    \\  <image image="{stale_image}" label="Cover art" />
+    \\</row>
+;
+
+pub const ImageLeafUi = canvas.Ui(ImageLeafMsg);
+
+/// The hand-written equivalent of the image markup: `ui.image` with
+/// `ElementOptions.image`, the parity baseline the compiled suite
+/// shares.
+pub fn handImageLeafView(ui: *ImageLeafUi, model: *const ImageLeafModel) ImageLeafUi.Node {
+    return ui.row(.{ .gap = 8 }, .{
+        ui.image(.{ .image = model.cover, .image_src = geometry.RectF.init(model.source_x, 8, model.source_width, 24), .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
+        ui.image(.{ .image = model.thumbnail(), .width = 48, .height = 48, .semantics = .{ .label = "" } }),
+    });
+}
+
+test "the image leaf binds a dynamic ImageId from model fields and fns" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ImageMarkup = markup_view.MarkupView(ImageLeafModel, ImageLeafMsg);
+    const model = ImageLeafModel{ .cover = 42 };
+
+    var view = try ImageMarkup.init(arena, image_markup_source);
+    var markup_ui = ImageLeafUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = ImageLeafUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handImageLeafView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+
+    // The id and source-coordinate bindings land on the widget. The
+    // second image omits a crop and draws the whole registered image.
+    const cover = markup_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
+    try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 32, 24)), cover.image_src);
+    try testing.expectEqualStrings("Cover art", cover.semantics.label);
+    const thumbnail = markup_tree.root.children[1];
+    try testing.expectEqual(@as(canvas.ImageId, 43), thumbnail.image_id);
+    try testing.expectEqual(@as(?geometry.RectF, null), thumbnail.image_src);
+
+    // 0 is the "no image" sentinel: the leaf renders nothing (the
+    // model simply has not loaded the image yet).
+    const empty_model = ImageLeafModel{};
+    var empty_ui = ImageLeafUi.init(arena);
+    const empty_tree = try empty_ui.finalize(try view.build(&empty_ui, &empty_model));
+    try testing.expectEqual(@as(canvas.ImageId, 0), empty_tree.root.children[0].image_id);
+}
+
+test "image leaf misuse fails the build with the teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = ImageLeafModel{};
+    const ImageMarkup = markup_view.MarkupView(ImageLeafModel, ImageLeafMsg);
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            // A literal id is not model data.
+            .source = "<row>\n  <image image=\"7\" label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_binding_message,
+        },
+        .{
+            // A negative integer can never be a u64 ImageId: the
+            // teaching failure, not an @intCast trap.
+            .source = image_negative_markup_source,
+            .message = canvas.ui_markup.image_binding_message,
+        },
+        .{
+            // A leaf like icon: widget layout gives an image no child
+            // slots, so a nested caption would silently vanish - the
+            // build refuses it instead (the compiled engine rejects
+            // the same construct as a compile error).
+            .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>",
+            .message = canvas.ui_markup.image_children_message,
+        },
+        .{
+            // A source rectangle is atomic: omitting one coordinate is
+            // a typo, not an implicit zero/default.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_source_complete_message,
+        },
+        .{
+            // Cropping without an image would be inert (avatar may omit
+            // image normally for its initials fallback).
+            .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>",
+            .message = canvas.ui_markup.image_source_binding_message,
+        },
+        .{
+            // Only registered-image widgets consume source rectangles.
+            .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>",
+            .message = canvas.ui_markup.image_source_element_message,
+        },
+        .{
+            // Runtime model values still pass the numeric conversion
+            // gate; a string cannot become a source coordinate.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"{invalid_source}\" source-y=\"0\" source-width=\"16\" source-height=\"16\" label=\"Art\" />\n</row>",
+            .message = "expected a number",
+        },
+        .{
+            // Markup that skipped validation (hot reload) can reach the
+            // engine without the binding: the leaf could only ever
+            // render nothing, so the build refuses it exactly like the
+            // validator (the compiled engine rejects the same construct
+            // as a compile error).
+            .source = "<row>\n  <image label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_missing_image_message,
+        },
+        .{
+            // The children check reads the ORIGINAL node: a context-menu
+            // child is extracted as host metadata before the content
+            // rules, but the validator rejects it on the raw node - the
+            // build agrees instead of quietly accepting a menu-bearing
+            // leaf the validator refuses (the compiled engine rejects
+            // the same construct as a compile error).
+            .source = "<row>\n  <image image=\"{cover}\" label=\"Art\" on-press=\"refresh\"><context-menu><menu-item on-press=\"refresh\">Reload</menu-item></context-menu></image>\n</row>",
+            .message = canvas.ui_markup.image_children_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try ImageMarkup.init(arena, case.source);
+        var ui = ImageLeafUi.init(arena);
+        try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+        try testing.expectEqualStrings(case.message, view.diagnostic.message);
+        try testing.expect(view.diagnostic.line > 0);
+    }
+}
+
+// ---------------------------------------------- video playback element
+
+pub const VideoElementMsg = union(enum) { refresh };
+
+pub const VideoElementModel = struct {
+    clip: []const u8 = "assets/clips/intro.mp4",
+    count: usize = 3,
+};
+
+pub const video_markup_source =
+    \\<column>
+    \\  <video src="{clip}" controls autoplay loop muted width="320" height="180" label="Trailer"/>
+    \\</column>
+;
+
+pub const video_plain_markup_source =
+    \\<column>
+    \\  <video src="assets/clips/intro.mp4" width="320" height="180" label="Trailer"/>
+    \\</column>
+;
+
+pub const VideoElementUi = canvas.Ui(VideoElementMsg);
+
+/// The hand-written equivalent of the video markup: `ui.video` with the
+/// same options, the parity baseline the compiled suite shares.
+pub fn handVideoElementView(ui: *VideoElementUi, model: *const VideoElementModel) VideoElementUi.Node {
+    return ui.column(.{}, .{
+        ui.video(.{
+            .src = model.clip,
+            .controls = true,
+            .autoplay = true,
+            .loop = true,
+            .muted = true,
+            .width = 320,
+            .height = 180,
+            .label = "Trailer",
+        }),
+    });
+}
+
+/// The first widget in the tree carrying the given video-control verb,
+/// or null: how tests find the house chrome's runtime-consumed controls.
+pub fn findVideoControl(widget: canvas.Widget, verb: canvas.VideoControlVerb) ?canvas.Widget {
+    if (widget.video_control == verb) return widget;
+    for (widget.children) |child| {
+        if (findVideoControl(child, verb)) |found| return found;
+    }
+    return null;
+}
+
+// -------------------------------------------------- terminal element
+
+pub const TerminalElementMsg = union(enum) { term_state: canvas.TerminalState };
+
+pub const TerminalElementModel = struct {
+    shell: u64 = 7,
+    offset: u32 = 4,
+};
+
+pub const terminal_markup_source =
+    \\<column>
+    \\  <terminal pty="{shell}" scrollback="{offset}" grow="1" label="Build shell" on-terminal="term_state"/>
+    \\</column>
+;
+
+pub const TerminalElementUi = canvas.Ui(TerminalElementMsg);
+
+/// The hand-written equivalent of the terminal markup: `ui.terminal`
+/// with the same options, the parity baseline the compiled suite shares.
+pub fn handTerminalElementView(ui: *TerminalElementUi, model: *const TerminalElementModel) TerminalElementUi.Node {
+    return ui.column(.{}, .{
+        ui.terminal(.{
+            .pty = model.shell,
+            .scrollback = model.offset,
+            .grow = 1,
+            .semantics = .{ .label = "Build shell" },
+            .on_terminal = TerminalElementUi.terminalMsg(.term_state),
+        }),
+    });
+}
+
+/// The first widget of the given kind in the tree, or null.
+pub fn findWidgetKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
+    if (widget.kind == kind) return widget;
+    for (widget.children) |child| {
+        if (findWidgetKind(child, kind)) |found| return found;
+    }
+    return null;
+}
+
+test "the terminal element binds its pty key, scrollback echo, and view-state handler" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = TerminalElementModel{};
+    var view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, terminal_markup_source);
+    var ui = TerminalElementUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+
+    const widget = findWidgetKind(tree.root, .terminal) orelse return error.TestExpectedTerminal;
+    try testing.expectEqual(@as(u64, 7), widget.terminal.pty);
+    try testing.expectEqual(@as(u32, 4), widget.terminal.scrollback);
+    // No lookup installed (a bare builder): the widget renders unbound
+    // and the author's label stays the accessible name.
+    try testing.expect(widget.terminal.grid == null);
+    try testing.expectEqualStrings("Build shell", widget.semantics.label);
+
+    // The view-state handler resolves through the tree and carries the
+    // applied state.
+    const msg = tree.msgForTerminal(widget.id, .{ .scrollback = 12, .history = 40, .cols = 80, .rows = 24 }) orelse return error.TestExpectedHandler;
+    try testing.expectEqual(@as(u32, 12), msg.term_state.scrollback);
+    try testing.expectEqual(@as(u32, 40), msg.term_state.history);
+    try testing.expectEqual(@as(u16, 80), msg.term_state.cols);
+    try testing.expectEqual(@as(u16, 24), msg.term_state.rows);
+}
+
+test "the interpreter enforces the terminal leaf shape without the validator" {
+    // Hot reload builds without a validation pass: the build itself must
+    // refuse a pty-less terminal (dead markup) and terminal children (no
+    // child slots), exactly like the image leaf.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = TerminalElementModel{};
+
+    const missing_pty =
+        \\<column>
+        \\  <terminal label="Shell"/>
+        \\</column>
+    ;
+    var missing_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, missing_pty);
+    var missing_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, missing_view.build(&missing_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.terminal_missing_pty_message, missing_view.diagnostic.message);
+
+    const with_child =
+        \\<column>
+        \\  <terminal pty="{shell}" label="Shell"><button>Run</button></terminal>
+        \\</column>
+    ;
+    var child_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, with_child);
+    var child_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, child_view.build(&child_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.terminal_children_message, child_view.diagnostic.message);
+
+    const misplaced_scrollback =
+        \\<column>
+        \\  <panel scrollback="3"/>
+        \\</column>
+    ;
+    var scoped_view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, misplaced_scrollback);
+    var scoped_ui = TerminalElementUi.init(arena);
+    try testing.expectError(error.MarkupBuild, scoped_view.build(&scoped_ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.scrollback_element_message, scoped_view.diagnostic.message);
+}
+
+test "on-terminal requires a bare tag: an authored payload is refused" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The runtime supplies the TerminalState, so `term_state:{offset}`
+    // is dead data — refused with the payload teaching, not silently
+    // discarded.
+    const source =
+        \\<column>
+        \\  <terminal pty="{shell}" label="Shell" on-terminal="term_state:{offset}"/>
+        \\</column>
+    ;
+    var view = try markup_view.MarkupView(TerminalElementModel, TerminalElementMsg).init(arena, source);
+    var ui = TerminalElementUi.init(arena);
+    const model = TerminalElementModel{};
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.on_terminal_payload_message, view.diagnostic.message);
+}
+
+test "the video element lowers to the playback surface with house chrome and records the declaration" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const VideoMarkup = markup_view.MarkupView(VideoElementModel, VideoElementMsg);
+    const model = VideoElementModel{};
+
+    var view = try VideoMarkup.init(arena, video_markup_source);
+    var markup_ui = VideoElementUi.init(arena);
+    const markup_tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    var hand_ui = VideoElementUi.init(arena);
+    const hand_tree = try hand_ui.finalize(handVideoElementView(&hand_ui, &model));
+
+    var markup_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer markup_ids.deinit(testing.allocator);
+    var hand_ids: std.ArrayListUnmanaged(canvas.ObjectId) = .empty;
+    defer hand_ids.deinit(testing.allocator);
+    try collectIds(markup_tree.root, &markup_ids, testing.allocator);
+    try collectIds(hand_tree.root, &hand_ids, testing.allocator);
+    try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
+
+    // With controls the element is a column: the playback surface bound
+    // to the framework-owned playback id, then the transport row whose
+    // controls carry the runtime-consumed verbs.
+    const video_root = markup_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.column, video_root.kind);
+    const surface = video_root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, surface.image_id);
+    try testing.expectEqualStrings("Trailer", surface.semantics.label);
+    const toggle = findVideoControl(markup_tree.root, .toggle) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.button, toggle.kind);
+    // The chrome renders the channel snapshot; outside an app loop the
+    // default state is inactive, so the transport is disabled at the
+    // play glyph.
+    try testing.expect(toggle.state.disabled);
+    try testing.expectEqualStrings("play", toggle.icon);
+    const scrub = findVideoControl(markup_tree.root, .scrub) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(canvas.WidgetKind.slider, scrub.kind);
+    try testing.expect(scrub.state.disabled);
+
+    // The build recorded the declaration for the app loop's reconcile.
+    const declaration = markup_ui.video_declaration orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("assets/clips/intro.mp4", declaration.src);
+    try testing.expect(declaration.controls);
+    try testing.expect(declaration.autoplay);
+    try testing.expect(declaration.loop);
+    try testing.expect(declaration.muted);
+
+    // Without controls the element is the surface itself: no chrome
+    // anywhere in the tree.
+    var plain_view = try VideoMarkup.init(arena, video_plain_markup_source);
+    var plain_ui = VideoElementUi.init(arena);
+    const plain_tree = try plain_ui.finalize(try plain_view.build(&plain_ui, &model));
+    const plain_surface = plain_tree.root.children[0];
+    try testing.expectEqual(canvas.WidgetKind.media_surface, plain_surface.kind);
+    try testing.expectEqual(canvas.video_playback_surface_id, plain_surface.image_id);
+    try testing.expect(findVideoControl(plain_tree.root, .toggle) == null);
+    try testing.expect(findVideoControl(plain_tree.root, .scrub) == null);
+    try testing.expect(plain_ui.video_declaration != null);
+}
+
+test "video misuse fails the build with the teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = VideoElementModel{};
+    const VideoMarkup = markup_view.MarkupView(VideoElementModel, VideoElementMsg);
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{
+            // A leaf like image and icon: nested content would silently
+            // vanish (the compiled engine rejects the same construct as
+            // a compile error).
+            .source = "<row>\n  <video src=\"a.mp4\"><text>Caption</text></video>\n</row>",
+            .message = canvas.ui_markup.video_children_message,
+        },
+        .{
+            // The closed attribute set teaches its vocabulary.
+            .source = "<row>\n  <video src=\"a.mp4\" gap=\"4\"/>\n</row>",
+            .message = canvas.ui_markup.video_attr_message,
+        },
+        .{
+            // A bound src must produce the source STRING (count is a
+            // number).
+            .source = "<row>\n  <video src=\"{count}\"/>\n</row>",
+            .message = canvas.ui_markup.video_src_message,
+        },
+        .{
+            // The flags are video-scoped: anywhere else they would be
+            // silently inert.
+            .source = "<row>\n  <panel controls=\"true\"/>\n</row>",
+            .message = canvas.ui_markup.video_flag_element_message,
+        },
+    };
+    for (cases) |case| {
+        var view = try VideoMarkup.init(arena, case.source);
+        var ui = VideoElementUi.init(arena);
         try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
         try testing.expectEqualStrings(case.message, view.diagnostic.message);
         try testing.expect(view.diagnostic.line > 0);
@@ -2503,6 +3532,7 @@ test "columns off grid and misshapen alignment values fail with teaching message
 pub const Folder = struct {
     id: u32,
     name: []const u8,
+    level: u16 = 1,
     expanded: bool = false,
 
     fn key(folder: *const Folder) canvas.UiKey {
@@ -2531,12 +3561,12 @@ pub const pane_markup_source =
     \\<split value="{sidebar_fraction}" on-resize="sidebar_resized">
     \\  <tree label="Folders">
     \\    <for each="folders" key="id" as="f">
-    \\      <panel role="treeitem" expanded="{f.expanded}" on-press="select_folder:{f.id}" on-toggle="toggle_folder:{f.id}" label="{f.name}">
+    \\      <panel role="treeitem" tree-level="{f.level}" expanded="{f.expanded}" on-press="select_folder:{f.id}" on-change="select_folder:{f.id}" on-toggle="toggle_folder:{f.id}" label="{f.name}">
     \\        <text>{f.name}</text>
     \\      </panel>
     \\    </for>
     \\  </tree>
-    \\  <column min-width="120">
+    \\  <column min-width="120" max-width="720">
     \\    <text>Editor</text>
     \\  </column>
     \\</split>
@@ -2545,7 +3575,7 @@ pub const pane_markup_source =
 pub fn handPaneView(ui: *PaneUi, model: *const PaneModel) PaneUi.Node {
     return ui.split(.{ .value = model.sidebar_fraction, .on_resize = PaneUi.valueMsg(.sidebar_resized) }, .{
         ui.tree(.{ .semantics = .{ .label = "Folders" } }, ui.each(PaneModel.folders[0..], Folder.key, folderRow)),
-        ui.column(.{ .min_width = 120 }, .{
+        ui.column(.{ .min_width = 120, .max_width = 720 }, .{
             ui.text(.{}, "Editor"),
         }),
     });
@@ -2554,7 +3584,9 @@ pub fn handPaneView(ui: *PaneUi, model: *const PaneModel) PaneUi.Node {
 fn folderRow(ui: *PaneUi, folder: *const Folder) PaneUi.Node {
     return ui.panel(.{
         .expanded = folder.expanded,
+        .tree_level = folder.level,
         .on_press = PaneMsg{ .select_folder = folder.id },
+        .on_change = PaneMsg{ .select_folder = folder.id },
         .on_toggle = PaneMsg{ .toggle_folder = folder.id },
         .semantics = .{ .role = .treeitem, .label = folder.name },
     }, .{
@@ -2595,14 +3627,21 @@ test "markup split and tree build the hand-written view with the divider synthes
     // and both the press (selection) and toggle (disclosure) handlers.
     const row = findByKind(markup_tree.root, .panel).?;
     try testing.expectEqual(canvas.WidgetRole.treeitem, row.semantics.role);
+    try testing.expectEqual(@as(u16, 1), row.tree_level);
     try testing.expectEqual(@as(?bool, true), row.state.expanded);
     try testing.expectEqual(@as(u32, 1), markup_tree.msgForPointer(row.id, .up).?.select_folder);
+    try testing.expectEqual(@as(u32, 1), markup_tree.msgForKeyboard(row.id, .{
+        .phase = .key_down,
+        .key = "arrowdown",
+        .focus_moved = true,
+    }).?.select_folder);
     try testing.expectEqual(@as(u32, 1), markup_tree.msgFor(row.id, .toggle).?.toggle_folder);
 
-    // min-width lands as a floor only (no definite max).
+    // The independent responsive bounds land without becoming a
+    // definite width.
     const editor = markup_tree.root.children[2];
     try testing.expectEqual(@as(f32, 120), editor.layout.min_size.width);
-    try testing.expectEqual(@as(f32, 0), editor.layout.max_size.width);
+    try testing.expectEqual(@as(f32, 720), editor.layout.max_size.width);
 }
 
 test "split and tree misuse is validated with teaching messages" {
@@ -3036,6 +4075,64 @@ test "the chart element builds the hand-written Ui.chart tree with series bindin
     try testing.expectEqual(@as(?f32, 2), latency_chart.style.stroke_width);
 }
 
+// ------------------------------------------------------ f64 chart fixture
+
+/// A model shaped the way TRANSPILED TS cores emit theirs: every number
+/// array is `[]const f64` (the subset's one float class). Series bindings
+/// must narrow these into arena f32 copies — without that rule markup
+/// charts would be unreachable from a TS model.
+pub const ChartF64Model = struct {
+    samples: []const f64 = &.{ 0.25, std.math.nan(f64), 0.5, 1 },
+
+    /// Arena-computed f64 series: the emitted shape of an exported TS
+    /// model helper returning `readonly number[]`.
+    pub fn halved(model: *const ChartF64Model, arena: std.mem.Allocator) []const f64 {
+        const out = arena.alloc(f64, model.samples.len) catch return &.{};
+        for (model.samples, out) |sample, *slot| slot.* = sample / 2;
+        return out;
+    }
+};
+
+pub const chart_f64_markup_source =
+    \\<column>
+    \\  <chart width="120" height="32" y-min="0" y-max="1" label="F64 history">
+    \\    <series kind="bar" values="{samples}" />
+    \\    <series kind="area" values="{halved}" />
+    \\  </chart>
+    \\</column>
+;
+
+test "chart series bind f64 iterables (the transpiled-core float class) by narrowing into the arena" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = ChartF64Model{};
+    const ChartMarkup = markup_view.MarkupView(ChartF64Model, ChartMsg);
+    var view = try ChartMarkup.init(arena, chart_f64_markup_source);
+    var markup_ui = ChartUi.init(arena);
+    const tree = try markup_ui.finalize(try view.build(&markup_ui, &model));
+
+    const chart = findByKind(tree.root, .chart).?;
+    try testing.expectEqual(@as(usize, 2), chart.chart.series.len);
+
+    // The field-bound series: exact f32 casts of the f64 samples, NaN
+    // gaps passed through as gaps.
+    const bars = chart.chart.series[0];
+    try testing.expectEqual(@as(usize, 4), bars.values.len);
+    try testing.expectEqual(@as(f32, 0.25), bars.values[0]);
+    try testing.expect(std.math.isNan(bars.values[1]));
+    try testing.expectEqual(@as(f32, 1), bars.values[3]);
+
+    // The arena-fn-bound series narrows the same way.
+    const area = chart.chart.series[1];
+    try testing.expectEqual(canvas.ChartSeriesKind.line, area.kind);
+    try testing.expect(area.fill);
+    try testing.expectEqual(@as(f32, 0.125), area.values[0]);
+    try testing.expect(std.math.isNan(area.values[1]));
+    try testing.expectEqual(@as(f32, 0.5), area.values[3]);
+}
+
 test "chart misuse fails the build with teaching messages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -3131,7 +4228,7 @@ pub const ComposerUi = canvas.Ui(ComposerMsg);
 pub const composer_markup_source =
     \\<column gap="8">
     \\  <input-group label="Message composer" height="120">
-    \\    <textarea text="{draft}" placeholder="Type a message" on-input="edit" label="Message" />
+    \\    <textarea text="{draft}" placeholder="Type a message" submit-on-enter="true" on-input="edit" label="Message" />
     \\    <input-group-actions>
     \\      <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
     \\      <spacer grow="1" />
@@ -3149,6 +4246,7 @@ pub fn handComposerView(ui: *ComposerUi, model: *const ComposerModel) ComposerUi
     const entry = ui.el(.textarea, .{
         .text = model.draft(),
         .placeholder = "Type a message",
+        .submit_on_enter = true,
         .on_input = ComposerUi.inputMsg(.edit),
         .semantics = .{ .label = "Message" },
     }, .{});
@@ -3203,6 +4301,7 @@ test "the input-group element builds the hand-written Ui.inputGroup tree" {
     try testing.expectEqual(canvas.WidgetKind.textarea, entry.kind);
     try testing.expectEqualStrings("hello", entry.text);
     try testing.expectEqualStrings("Type a message", entry.placeholder);
+    try testing.expect(entry.submit_on_enter);
     try testing.expectEqual(@as(f32, 1), entry.layout.grow);
     try testing.expectEqual(@as(u8, 0), entry.style.background.?.a);
     try testing.expectEqual(@as(u8, 0), entry.style.border.?.a);
@@ -3700,10 +4799,380 @@ test "reactions misuse fails the build with the pinned teaching messages" {
 
     // The pill's literal run rides the tofu guard: a codepoint outside
     // the bundled face renders as a tofu box on the reference path, so
-    // the validator teaches vector icons or plain words instead.
+    // the validator teaches the real paths — a registered covering
+    // font behind a binding, a vector icon, or plain words.
     const emoji = "<column>\n  <bubble><text>hi</text><reactions>\u{1F44D}</reactions></bubble>\n</column>";
     var parser = canvas.ui_markup.Parser.init(arena, emoji);
     const document = try parser.parse();
     const info = canvas.ui_markup.validate(document) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(canvas.ui_markup.font_coverage_message, info.message);
+}
+
+// ----------------------------------------------- declared text-input unions
+
+/// The transpiled-core mirror of `canvas.TextInputEvent`: the shape the
+/// @native-sdk/core emitter produces for a core-declared event union. Matched
+/// structurally by `declaredTextInputUnion` — type identity cannot cross
+/// the emission boundary.
+pub const MirrorCaretDirection = enum(u8) { previous = 0, next = 1, previous_word = 2, next_word = 3, start = 4, end = 5 };
+pub const MirrorCaretMove = struct { direction: MirrorCaretDirection, extend: bool };
+pub const MirrorSelection = struct { anchor: i64, focus: i64 };
+pub const MirrorCaretAffinity = enum(u8) { upstream = 0, downstream = 1 };
+pub const MirrorSelectionWithAffinity = struct { anchor: i64, focus: i64, affinity: MirrorCaretAffinity };
+pub const MirrorTextInputEvent = union(enum) {
+    insert_text: []const u8,
+    delete_backward,
+    delete_forward,
+    delete_word_backward,
+    delete_word_forward,
+    delete_to_start,
+    delete_to_line_start,
+    clear,
+    move_caret: MirrorCaretMove,
+    set_selection: MirrorSelection,
+    set_composition: struct { text: []const u8, cursor: ?i64 },
+    commit_composition,
+    cancel_composition,
+};
+
+pub const MirrorModel = struct {
+    draft: []const u8 = "",
+};
+
+pub const MirrorMsg = union(enum) {
+    submit,
+    edit: MirrorTextInputEvent,
+};
+
+test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-misses" {
+    try testing.expect(markup_view.declaredTextInputUnion(MirrorTextInputEvent));
+    // The canvas union itself matches structurally too (usize numerics).
+    try testing.expect(markup_view.declaredTextInputUnion(canvas.TextInputEvent));
+    const MirrorTextInputEventWithAffinity = union(enum) {
+        insert_text: []const u8,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
+        clear,
+        move_caret: MirrorCaretMove,
+        set_selection: MirrorSelectionWithAffinity,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+        cancel_composition,
+    };
+    try testing.expect(markup_view.declaredTextInputUnion(MirrorTextInputEventWithAffinity));
+    // Near-misses stay out: a missing arm, a non-bytes insert payload, a
+    // wrong caret vocabulary.
+    const MissingArm = union(enum) {
+        insert_text: []const u8,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
+        clear,
+        move_caret: MirrorCaretMove,
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(MissingArm));
+    const WrongInsert = union(enum) {
+        insert_text: i64,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
+        clear,
+        move_caret: MirrorCaretMove,
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+        cancel_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(WrongInsert));
+    const WrongDirection = enum { up, down, left, right, home, end_key };
+    const WrongMove = union(enum) {
+        insert_text: []const u8,
+        delete_backward,
+        delete_forward,
+        delete_word_backward,
+        delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
+        clear,
+        move_caret: struct { direction: WrongDirection, extend: bool },
+        set_selection: MirrorSelection,
+        set_composition: struct { text: []const u8, cursor: ?i64 },
+        commit_composition,
+        cancel_composition,
+    };
+    try testing.expect(!markup_view.declaredTextInputUnion(WrongMove));
+    try testing.expect(!markup_view.declaredTextInputUnion(i64));
+}
+
+// ------------------------------------- declared scroll-state + value arms
+
+/// The transpiled-core mirror of `canvas.ScrollState`: the record shape the
+/// @native-sdk/core emitter produces for a core-declared scroll payload —
+/// fields keep their TS names (`viewportExtent`), so the mirror carries the
+/// TS SDK spelling. Matched structurally by `declaredScrollStateRecord` —
+/// type identity cannot cross the emission boundary. Fields class
+/// independently (the number tier): float fields widen exactly, integer
+/// fields round.
+pub const MirrorScrollState = struct {
+    offsetX: f64,
+    offsetY: f64,
+    velocityX: f64,
+    velocityY: f64,
+    viewportExtentX: i64,
+    viewportExtentY: i64,
+    contentExtentX: i64,
+    contentExtentY: i64,
+};
+
+pub const MirrorControlsModel = struct {
+    scroll_top: f64 = 0,
+    seek_fraction: f64 = 0,
+    volume: f64 = 0.5,
+};
+
+pub const MirrorControlsMsg = union(enum) {
+    library_scrolled: MirrorScrollState,
+    scrubbed: f64,
+    set_volume: f32,
+    stepped: i64,
+    nudged,
+};
+
+test "declaredScrollStateRecord accepts the emitted mirror shape and rejects near-misses" {
+    try testing.expect(markup_view.declaredScrollStateRecord(MirrorScrollState));
+    // The canvas struct itself matches structurally too (eight f32 fields).
+    try testing.expect(markup_view.declaredScrollStateRecord(canvas.ScrollState));
+    // A Zig-declared mirror in the canvas spelling stays accepted.
+    try testing.expect(markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64 }));
+    // Near-misses stay out: a missing field, a renamed field, a non-numeric
+    // field, an extra field, a spelling mix.
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_size_y: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: []const u8, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, content_extent_y: f64, extra: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset_x: f64, offset_y: f64, velocity_x: f64, velocity_y: f64, viewport_extent_x: f64, viewport_extent_y: f64, content_extent_x: f64, contentExtentY: f64 }));
+    try testing.expect(!markup_view.declaredScrollStateRecord(i64));
+    // The RETIRED one-axis record is not a scroll-state record anymore -
+    // it classifies as the legacy shape so on-scroll teaches the
+    // per-axis migration by name (either spelling, never a mix).
+    try testing.expect(!markup_view.declaredScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, content_extent: f64 }));
+    try testing.expect(markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewportExtent: i64, contentExtent: i64 }));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(MirrorScrollState));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(canvas.ScrollState));
+    try testing.expect(!markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, contentExtent: f64 }));
+}
+
+test "declaredWidgetDragDropRecord accepts safe live drag fields and rejects unsafe near misses" {
+    try testing.expect(markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: i64,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: []const u8,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: i64,
+        x: u32,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: u1,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+}
+
+test "valueArmClass classifies exactly the value-carrying arm shapes" {
+    try testing.expect(markup_view.valueArmClass(f32) == .identity);
+    try testing.expect(markup_view.valueArmClass(f64) == .float);
+    // Integer arms stay out: the value events deliver a clamped 0..1
+    // fraction, so an integer arm could only ever carry 0 or 1.
+    try testing.expect(markup_view.valueArmClass(i64) == null);
+    try testing.expect(markup_view.valueArmClass(u32) == null);
+    try testing.expect(markup_view.valueArmClass(bool) == null);
+    try testing.expect(markup_view.valueArmClass([]const u8) == null);
+}
+
+test "the interpreter binds on-scroll to a declared mirror record and translates the state" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<scroll value="{scroll_top}" on-scroll="library_scrolled">
+        \\  <text>rows</text>
+        \\</scroll>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const region = findByKind(tree.root, .scroll_view).?;
+    const msg = tree.msgForScroll(region.id, .{
+        .offset_x = 12.5,
+        .offset_y = 41.5,
+        .velocity_x = 1.5,
+        .velocity_y = -3.25,
+        .viewport_extent_x = 320.2,
+        .viewport_extent_y = 480.4,
+        .content_extent_x = 960.7,
+        .content_extent_y = 2000.6,
+    }).?;
+    // Float fields widen exactly; integer-classed fields round to the
+    // nearest whole number.
+    try testing.expectEqual(@as(f64, 12.5), msg.library_scrolled.offsetX);
+    try testing.expectEqual(@as(f64, 41.5), msg.library_scrolled.offsetY);
+    try testing.expectEqual(@as(f64, 1.5), msg.library_scrolled.velocityX);
+    try testing.expectEqual(@as(f64, -3.25), msg.library_scrolled.velocityY);
+    try testing.expectEqual(@as(i64, 320), msg.library_scrolled.viewportExtentX);
+    try testing.expectEqual(@as(i64, 480), msg.library_scrolled.viewportExtentY);
+    try testing.expectEqual(@as(i64, 961), msg.library_scrolled.contentExtentX);
+    try testing.expectEqual(@as(i64, 2001), msg.library_scrolled.contentExtentY);
+}
+
+test "the interpreter binds slider on-change value arms and keeps the void static form" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<column>
+        \\  <slider value="{seek_fraction}" label="Seek" on-change="scrubbed" />
+        \\  <slider value="{volume}" label="Volume" on-change="set_volume" />
+        \\  <slider value="{volume}" label="Nudge" on-change="nudged" />
+        \\</column>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    var sliders: [3]canvas.Widget = undefined;
+    var count: usize = 0;
+    collectByKind(tree.root, .slider, &sliders, &count);
+    try testing.expectEqual(@as(usize, 3), count);
+    // The f64 arm receives the applied fraction widened exactly.
+    try testing.expectEqual(@as(f64, 0.25), tree.msgForChange(sliders[0].id, 0.25).?.scrubbed);
+    // The f32 arm keeps the identity path.
+    try testing.expectEqual(@as(f32, 0.5), tree.msgForChange(sliders[1].id, 0.5).?.set_volume);
+    // A void arm keeps the static "something changed" form.
+    try testing.expectEqual(MirrorControlsMsg.nudged, tree.msgForChange(sliders[2].id, 0.9).?);
+    // An integer arm is not a value target: the bare form stays the
+    // static-message error path ("message requires a payload").
+    var bad_view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<slider value="{volume}" label="Step" on-change="stepped" />
+    );
+    var bad_ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    try testing.expectError(error.MarkupBuild, bad_view.build(&bad_ui, &model));
+    try testing.expectEqualStrings("message requires a payload", bad_view.diagnostic.message);
+}
+
+fn collectByKind(widget: canvas.Widget, kind: canvas.WidgetKind, out: []canvas.Widget, count: *usize) void {
+    if (widget.kind == kind and count.* < out.len) {
+        out[count.*] = widget;
+        count.* += 1;
+    }
+    for (widget.children) |child| collectByKind(child, kind, out, count);
+}
+
+test "the interpreter binds split on-resize to a declared one-number float arm" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena,
+        \\<split value="{seek_fraction}" on-resize="scrubbed">
+        \\  <column><text>left</text></column>
+        \\  <column><text>right</text></column>
+        \\</split>
+    );
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const fraction = tree.msgForResize(tree.root.id, 0.25).?.scrubbed;
+    try testing.expectApproxEqAbs(@as(f64, 0.25), fraction, 0.0000001);
+}
+
+test "on-resize with an integer arm keeps the payload teaching message" {
+    // on-resize stays float-only: an i64 arm is not a fraction target.
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = "<split value=\"0.5\" on-resize=\"stepped\"><column></column><column></column></split>";
+    const model = MirrorControlsModel{};
+    var view = try markup_view.MarkupView(MirrorControlsModel, MirrorControlsMsg).init(arena, source);
+    var ui = canvas.Ui(MirrorControlsMsg).init(arena);
+    try testing.expectError(error.MarkupBuild, view.build(&ui, &model));
+    try testing.expectEqualStrings(canvas.ui_markup.on_resize_payload_message, view.diagnostic.message);
+}
+
+test "the interpreter binds on-input to a declared mirror union and translates every event" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const model = MirrorModel{ .draft = "hi" };
+    var view = try markup_view.MarkupView(MirrorModel, MirrorMsg).init(arena,
+        \\<column>
+        \\  <text-field text="{draft}" label="Draft" on-input="edit" on-submit="submit" />
+        \\</column>
+    );
+    var ui = canvas.Ui(MirrorMsg).init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const field = findByKind(tree.root, .text_field).?;
+
+    // Bytes ride through unchanged.
+    const inserted = tree.msgForTextEdit(field.id, .{ .insert_text = "abc" }).?;
+    try testing.expectEqualStrings("abc", inserted.edit.insert_text);
+    // Void verbs map by tag.
+    try testing.expectEqual(MirrorTextInputEvent.delete_backward, tree.msgForTextEdit(field.id, .delete_backward).?.edit);
+    try testing.expectEqual(MirrorTextInputEvent.delete_to_start, tree.msgForTextEdit(field.id, .delete_to_start).?.edit);
+    try testing.expectEqual(MirrorTextInputEvent.delete_to_line_start, tree.msgForTextEdit(field.id, .delete_to_line_start).?.edit);
+    // Caret moves translate the direction enum by member name.
+    const moved = tree.msgForTextEdit(field.id, .{ .move_caret = .{ .direction = .previous_word, .extend = true } }).?;
+    try testing.expectEqual(MirrorCaretDirection.previous_word, moved.edit.move_caret.direction);
+    try testing.expect(moved.edit.move_caret.extend);
+    // Selections widen into the declared integer fields.
+    const selected = tree.msgForTextEdit(field.id, .{ .set_selection = .{ .anchor = 1, .focus = 4 } }).?;
+    try testing.expectEqual(@as(i64, 1), selected.edit.set_selection.anchor);
+    try testing.expectEqual(@as(i64, 4), selected.edit.set_selection.focus);
+    // Compositions carry text and the optional cursor.
+    const composed = tree.msgForTextEdit(field.id, .{ .set_composition = .{ .text = "é", .cursor = 2 } }).?;
+    try testing.expectEqualStrings("é", composed.edit.set_composition.text);
+    try testing.expectEqual(@as(?i64, 2), composed.edit.set_composition.cursor);
+    const cleared = tree.msgForTextEdit(field.id, .{ .set_composition = .{ .text = "", .cursor = null } }).?;
+    try testing.expectEqual(@as(?i64, null), cleared.edit.set_composition.cursor);
 }

@@ -1,0 +1,118 @@
+<column background="background">
+  <row height="64" padding="18" gap="12" cross="center" background="surface" label="Voice Memos header">
+    <panel width="36" height="36" padding="8" background="accent" radius="lg" label="Voice Memos">
+      <icon name="mic" width="20" height="20" foreground="accent_text" />
+    </panel>
+    <column grow="1" gap="1">
+      <text label="Voice Memos"><span weight="bold" scale="1.2">Voice Memos</span></text>
+      <text size="sm" foreground="text_muted">Private, on-device recordings</text>
+    </column>
+    <badge variant="secondary" icon="check-circle">48 kHz · mono · WAV</badge>
+  </row>
+  <separator />
+
+  <scroll grow="1" label="Voice memo workspace">
+    <column padding="24" gap="22">
+      <panel padding="26" background="surface" radius="xl" border-color="border" label="Recorder">
+        <column gap="16">
+          <row main="center">
+            <tabs label="Recording source">
+              <button icon="mic" selected="{microphoneSelected}" on-press="select_microphone" disabled="{sourceDisabled}">Microphone</button>
+              <button icon="volume" selected="{systemSelected}" on-press="select_system" disabled="{sourceDisabled}">System audio</button>
+            </tabs>
+          </row>
+
+          <column gap="3" cross="center">
+            <text size="sm" foreground="text_muted">{sourceLabel}</text>
+            <text size="display" label="Elapsed recording time"><span weight="bold">{elapsedLabel}</span></text>
+            <row gap="7" cross="center">
+              <icon name="circle-dot" width="14" height="14" foreground="accent" />
+              <text size="sm" foreground="text_muted">{phaseLabel}</text>
+            </row>
+          </column>
+
+          <panel padding="12" background="surface_subtle" radius="lg" label="Live audio waveform">
+            <chart height="82" y-min="0" y-max="1" label="Live input level">
+              <series kind="area" values="{levels}" />
+            </chart>
+          </panel>
+          <progress value="{recordingProgress}" label="Ten second recording limit used" />
+
+          <row main="center">
+            <if test="{canStop}">
+              <button width="272" height="72" size="lg" radius="xl" variant="destructive" icon="pause" on-press="stop_recording" label="Stop and save recording">Stop &amp; save</button>
+            </if>
+            <else>
+              <if test="{microphoneSelected}">
+                <button width="272" height="72" size="lg" radius="xl" variant="primary" icon="mic" on-press="start_recording" disabled="{startDisabled}" label="Start microphone recording">Start recording</button>
+              </if>
+              <else>
+                <button width="272" height="72" size="lg" radius="xl" variant="primary" icon="volume" on-press="start_recording" disabled="{startDisabled}" label="Start system audio recording">Capture system audio</button>
+              </else>
+            </else>
+          </row>
+
+          <row main="center">
+            <text size="sm" foreground="text_muted" label="{statusLine}">{statusLine}</text>
+          </row>
+
+          <if test="{retryVisible}">
+            <panel padding="12" background="surface_subtle" radius="lg" border-color="destructive" label="Save failed">
+              <row gap="10" cross="center">
+                <icon name="alert" width="20" height="20" foreground="destructive" />
+                <column grow="1" gap="2">
+                  <text><span weight="bold">Your recording is still available</span></text>
+                  <text size="sm" foreground="text_muted">The file could not be written. Retry without recording again.</text>
+                </column>
+                <button variant="outline" icon="refresh-cw" on-press="retry_save" label="Retry saving recording">Retry save</button>
+              </row>
+            </panel>
+          </if>
+        </column>
+      </panel>
+
+      <column gap="11">
+        <row gap="9" cross="center">
+          <text label="Saved recordings"><span weight="bold" scale="1.2">Saved recordings</span></text>
+          <badge variant="secondary">{memoCount}</badge>
+          <spacer grow="1" />
+          <badge variant="secondary" icon="check">On device</badge>
+        </row>
+
+        <if test="{memoCount == 0}">
+          <panel height="150" padding="24" background="surface" radius="xl" border-color="border" label="No saved recordings">
+            <column grow="1" main="center" cross="center" gap="7">
+              <icon name="music" width="28" height="28" foreground="text_muted" />
+              <text><span weight="bold">Your recordings will appear here</span></text>
+              <text size="sm" foreground="text_muted">Choose an input, then capture up to ten seconds of lossless audio.</text>
+            </column>
+          </panel>
+        </if>
+        <else>
+          <list label="Saved recordings" role="list">
+            <for each="memos" as="m" key="id">
+              <panel padding="14" background="surface" radius="lg" border-color="border" label="{m.title}" role="listitem">
+                <row gap="13" cross="center">
+                  <panel width="42" height="42" padding="11" background="surface_subtle" radius="lg">
+                    <icon name="music" width="20" height="20" foreground="accent" />
+                  </panel>
+                  <column grow="1" gap="3">
+                    <text label="{m.title}"><span weight="bold">{m.title}</span></text>
+                    <text size="sm" foreground="text_muted">{m.duration} · {m.size} · PCM WAV</text>
+                  </column>
+                  <if test="{activeMemoId == m.id and playing}">
+                    <badge variant="secondary">Playing</badge>
+                    <button size="sm" variant="outline" icon="pause" on-press="stop_playback" label="Stop recording playback">Stop</button>
+                  </if>
+                  <else>
+                    <button size="sm" variant="outline" icon="play" on-press="play_memo:{m.id}" disabled="{playbackDisabled}" label="Play recording">Play</button>
+                  </else>
+                </row>
+              </panel>
+            </for>
+          </list>
+        </else>
+      </column>
+    </column>
+  </scroll>
+</column>

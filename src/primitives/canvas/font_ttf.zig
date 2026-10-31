@@ -9,10 +9,17 @@
 //! shaping, no CFF. The deterministic estimator (`text_metrics.zig`)
 //! derives its advance table from this face's `cmap`/`hmtx`, so layout
 //! measures with exactly the advances these outlines are inked at.
-//! All parsing is bounds-checked against fixed budgets sized from
-//! the bundled face's `maxp` (96 points / 16 contours per simple glyph,
-//! composites well under both), and any glyph beyond the budget fails
-//! with a recoverable error so callers can fall back to block glyphs.
+//! All parsing is bounds-checked against fixed budgets sized from real
+//! production faces' `maxp` tables — CJK included, dense kanji are the
+//! high-water mark (see the budget constants below for the measured
+//! values). `Face.parse` rejects any face whose `maxp` declares maxima
+//! beyond the budgets, so validation stays loud and registration-time:
+//! a face that parses renders every glyph it maps, never a block
+//! fallback. The per-glyph budget checks in the outline walk remain as
+//! defensive backstops for faces whose `maxp` under-declares (hostile
+//! or malformed data), plus one placement form `maxp` cannot describe:
+//! composites positioned by point matching (no real face measured uses
+//! it) still fail per-glyph with a recoverable error.
 //!
 //! The bundled face is embedded at comptime and its table directory is
 //! validated at comptime: a corrupt bundle is a compile error, and the
@@ -32,21 +39,83 @@ pub const Error = error{
     FontGlyphTooComplex,
 } || @import("vector.zig").Error;
 
-pub const max_glyph_points: usize = 128;
-pub const max_glyph_contours: usize = 24;
+/// Outline budgets, sized from measured `maxp` maxima of real production
+/// faces (Google Fonts TrueType builds, July 2026) so dense CJK renders
+/// as outlines, never block fallbacks:
+///
+///   face                     maxPoints  maxContours  compPts  compCtrs  compDepth  compElems
+///   Geist Regular (bundled)      96         16          89        5        3          4
+///   Geist Mono (bundled)        116         16         104       10        1          3
+///   Noto Sans JP                520         84           0        0        0          0
+///   Noto Sans SC                584         84           0        0        0          0
+///   Noto Sans TC                685         87           0        0        0          0
+///   Noto Sans KR                479         61           0        0        0          0
+///   Noto Serif JP               465         40           0        0        0          0
+///   Yuji Mai (brush kanji)      738         22         198        5        1          3
+///
+/// 1024 points / 128 contours cover the densest measured glyph (Yuji
+/// Mai's 738-point brush kanji; Noto Sans TC's 685) with ~1.4x headroom;
+/// the depth/element budgets carry 1.3-2x over the deepest measured
+/// use (the bundled Geist's own accent stacking).
+///
+/// The composite budgets bound a composite glyph's FLATTENED outline
+/// (`maxp.maxCompositePoints`/`maxCompositeContours`: totals across the
+/// whole component tree). They equal the simple budgets deliberately: a
+/// composite flattens through the same path sink and rides the same
+/// per-glyph path capacity as a simple glyph (the reference renderer
+/// sizes its builder as max over both forms), so "densest renderable
+/// glyph" is one answer, not two. Nested components could otherwise
+/// multiply — depth 4 of 8 elements is 8^4 leaves, far past any
+/// capacity — which is why these are gated at parse like the simple
+/// maxima, not left to render-time refusal. Measured worst composite:
+/// 198 points (Yuji Mai), 10 contours (Geist Mono) — 5-12x headroom.
+///
+/// Stack shape: the simple-glyph parse buffers
+/// (`flags`/`xs`/`ys`/`end_points`) total ~9.5 KiB and live in exactly
+/// ONE frame at a time — simple glyphs are leaves, so composite
+/// recursion stacks only the small component-walk frames (depth <= 4),
+/// never these arrays.
+pub const max_glyph_points: usize = 1024;
+pub const max_glyph_contours: usize = 128;
+pub const max_composite_points: usize = max_glyph_points;
+pub const max_composite_contours: usize = max_glyph_contours;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
 
 /// The bundled Geist Regular face (OFL), embedded so the reference
 /// renderer paints real text without any platform font machinery. It
-/// serves the sans font ids (weight/italic span variants included) at
-/// their estimator advances; additional faces can be bundled without
-/// changing callers.
+/// serves regular sans text; the matching medium and bold faces below
+/// preserve the weight chosen by widgets and inline spans.
 pub const geist_regular_bytes: []const u8 = @embedFile("fonts/Geist-Regular.ttf");
 
 /// Comptime-validated view over the bundled face. Using a comptime
 /// constant means table presence and offsets are proven at build time.
 pub const geist_regular = Face.parse(geist_regular_bytes) catch @compileError("bundled Geist-Regular.ttf failed to parse");
+
+pub const geist_medium_bytes: []const u8 = @embedFile("fonts/Geist-Medium.ttf");
+pub const geist_medium = Face.parse(geist_medium_bytes) catch @compileError("bundled Geist-Medium.ttf failed to parse");
+
+pub const geist_bold_bytes: []const u8 = @embedFile("fonts/Geist-Bold.ttf");
+pub const geist_bold = Face.parse(geist_bold_bytes) catch @compileError("bundled Geist-Bold.ttf failed to parse");
+
+pub const bundled_sans_faces = [_]*const Face{ &geist_regular, &geist_medium, &geist_bold };
+
+/// The reserved sans ids share one face selection for layout and drawing.
+/// Italic ids retain their weight using upright outlines until an italic
+/// face is bundled. Unknown ids keep the regular fallback.
+pub fn bundledSansFaceIndex(font_id: u64) usize {
+    const canvas = @import("root.zig");
+    return switch (font_id) {
+        canvas.default_sans_medium_font_id => 1,
+        canvas.default_sans_bold_font_id, canvas.default_sans_bold_italic_font_id => 2,
+        else => 0,
+    };
+}
+
+pub fn bundledFaceForFontId(font_id: u64) *const Face {
+    if (font_id == @import("root.zig").default_mono_font_id) return &geist_mono;
+    return bundled_sans_faces[bundledSansFaceIndex(font_id)];
+}
 
 /// The bundled Geist Mono Regular face (OFL, same family): mono runs
 /// ink real fixed-pitch outlines. Before this face landed, mono font
@@ -116,7 +185,27 @@ pub const Face = struct {
         const units_per_em = try readU16(bytes, head_r.offset + 18);
         if (units_per_em == 0) return error.FontParseFailed;
         const index_to_loc = try readI16(bytes, head_r.offset + 50);
+
+        // `glyf` outlines require the full version-1.0 `maxp` (the 0.5
+        // form carries no outline maxima and belongs to CFF fonts).
+        if (try readU32(bytes, maxp_r.offset) != 0x00010000) return error.FontParseFailed;
         const num_glyphs = try readU16(bytes, maxp_r.offset + 4);
+        // The registration-time glyph-budget gate: a face whose declared
+        // maxima exceed the outline budgets is rejected WHOLE, here,
+        // instead of degrading past-budget glyphs to block fallbacks at
+        // render time (registration validation is loud; render never
+        // is). Parsed faces therefore always outline every glyph they
+        // map — the per-glyph checks below only fire for faces whose
+        // `maxp` under-declares.
+        if (try readU16(bytes, maxp_r.offset + 6) > max_glyph_points or
+            try readU16(bytes, maxp_r.offset + 8) > max_glyph_contours or
+            try readU16(bytes, maxp_r.offset + 10) > max_composite_points or
+            try readU16(bytes, maxp_r.offset + 12) > max_composite_contours or
+            try readU16(bytes, maxp_r.offset + 28) > max_composite_components or
+            try readU16(bytes, maxp_r.offset + 30) > max_composite_depth)
+        {
+            return error.FontGlyphTooComplex;
+        }
         const ascender = try readI16(bytes, hhea_r.offset + 4);
         const descender = try readI16(bytes, hhea_r.offset + 6);
         const num_h_metrics = try readU16(bytes, hhea_r.offset + 34);
@@ -195,6 +284,30 @@ pub const Face = struct {
         return @floatFromInt(value);
     }
 
+    /// The glyph's TrueType bounding box in font units, or null for an
+    /// intentionally empty glyph such as space. The bbox is stored in the
+    /// `glyf` header for both simple and composite glyphs, so this answers
+    /// without replaying the outline into a path builder.
+    pub fn glyphBounds(self: *const Face, glyph: u16) Error!?geometry.RectF {
+        if (glyph >= self.num_glyphs) return error.FontParseFailed;
+        const range = try self.glyphRange(glyph);
+        if (range.len == 0) return null;
+        if (range.len < 10) return error.FontParseFailed;
+        const offset = self.glyf_offset + range.offset;
+        const min_x = try readI16(self.bytes, offset + 2);
+        const min_y = try readI16(self.bytes, offset + 4);
+        const max_x = try readI16(self.bytes, offset + 6);
+        const max_y = try readI16(self.bytes, offset + 8);
+        if (max_x < min_x or max_y < min_y) return error.FontParseFailed;
+        if (max_x == min_x or max_y == min_y) return null;
+        return geometry.RectF.init(
+            @floatFromInt(min_x),
+            @floatFromInt(min_y),
+            @as(f32, @floatFromInt(max_x - min_x)),
+            @as(f32, @floatFromInt(max_y - min_y)),
+        );
+    }
+
     /// Emit the glyph outline through `transform` into `sink`
     /// (`moveTo`/`lineTo`/`quadTo`/`close`). Coordinates handed to the
     /// transform are raw font units (y-up); bake the y-flip and em
@@ -204,6 +317,9 @@ pub const Face = struct {
     }
 
     fn glyphOutlineInner(self: *const Face, glyph: u16, transform: Affine, sink: anytype, depth: usize) Error!void {
+        // Backstop only: `parse` already gated the face's declared
+        // `maxp.maxComponentDepth` against this budget, so for a parsed
+        // face this fires only when the font under-declares its depth.
         if (depth > max_composite_depth) return error.FontGlyphTooComplex;
         if (glyph >= self.num_glyphs) return error.FontParseFailed;
         const range = try self.glyphRange(glyph);
@@ -232,6 +348,10 @@ pub const Face = struct {
     }
 
     fn simpleOutline(self: *const Face, glyph_offset: usize, contour_count: usize, transform: Affine, sink: anytype) Error!void {
+        // Backstop only (here and the point-count check below): `parse`
+        // gated the face's declared `maxp` maxima against these budgets,
+        // so for a parsed face they fire only when the font
+        // under-declares — the buffers below stay safe either way.
         if (contour_count > max_glyph_contours) return error.FontGlyphTooComplex;
         var end_points: [max_glyph_contours]u16 = undefined;
         var cursor = glyph_offset + 10;
@@ -320,8 +440,12 @@ pub const Face = struct {
             const child: u16 = try readU16(self.bytes, cursor + 2);
             cursor += 4;
 
-            // Only XY-offset placement is supported (point matching does
-            // not occur in the bundled face).
+            // Only XY-offset placement is supported. Point matching is
+            // the one per-glyph refusal `maxp` cannot gate at
+            // registration time (no declared field describes it); no
+            // measured production face uses it — the bundled Geist
+            // faces and every CJK face measured for the budgets above
+            // place composites by XY offsets.
             if (flags & 0x0002 == 0) return error.FontGlyphTooComplex;
             var dx: f32 = 0;
             var dy: f32 = 0;
@@ -360,6 +484,8 @@ pub const Face = struct {
 
             if (flags & 0x0020 == 0) return;
         }
+        // Backstop only: `parse` gated `maxp.maxComponentElements`, so
+        // this fires only when the font under-declares.
         return error.FontGlyphTooComplex;
     }
 };
@@ -421,6 +547,60 @@ fn emitContour(transform: Affine, sink: anytype, flags: []const u8, xs: []const 
     try sink.close();
 }
 
+/// A face's `maxp`-declared outline maxima — what the glyph-budget gate
+/// in `Face.parse` compares against the budgets above. Registration
+/// teaching uses this to name a refused face's declared numbers next to
+/// the budgets it exceeds.
+pub const GlyphMaxima = struct {
+    points: u16,
+    contours: u16,
+    /// Flattened totals across a composite glyph's whole component tree
+    /// (`maxp.maxCompositePoints`/`maxCompositeContours`) — the maxima
+    /// the path builder actually receives when a composite renders, so
+    /// the gate must read them alongside the simple maxima or a
+    /// composite-heavy face would pass registration and overflow the
+    /// builder at render time.
+    composite_points: u16,
+    composite_contours: u16,
+    component_elements: u16,
+    component_depth: u16,
+
+    pub fn withinBudgets(self: GlyphMaxima) bool {
+        return self.points <= max_glyph_points and
+            self.contours <= max_glyph_contours and
+            self.composite_points <= max_composite_points and
+            self.composite_contours <= max_composite_contours and
+            self.component_elements <= max_composite_components and
+            self.component_depth <= max_composite_depth;
+    }
+};
+
+/// The declared outline maxima of `bytes`, or null when the file carries
+/// no readable version-1.0 `maxp` table (truncated, CFF-flavored, or not
+/// a font at all). Reads only the table directory and `maxp`, so it
+/// answers for byte blobs `Face.parse` rejects.
+pub fn declaredGlyphMaxima(bytes: []const u8) ?GlyphMaxima {
+    const table_count = readU16(bytes, 4) catch return null;
+    var index: usize = 0;
+    while (index < table_count) : (index += 1) {
+        const record = 12 + index * 16;
+        const tag = readBytes(bytes, record, 4) catch return null;
+        if (!std.mem.eql(u8, tag, "maxp")) continue;
+        const offset = readU32(bytes, record + 8) catch return null;
+        const version = readU32(bytes, offset) catch return null;
+        if (version != 0x00010000) return null;
+        return .{
+            .points = readU16(bytes, offset + 6) catch return null,
+            .contours = readU16(bytes, offset + 8) catch return null,
+            .composite_points = readU16(bytes, offset + 10) catch return null,
+            .composite_contours = readU16(bytes, offset + 12) catch return null,
+            .component_elements = readU16(bytes, offset + 28) catch return null,
+            .component_depth = readU16(bytes, offset + 30) catch return null,
+        };
+    }
+    return null;
+}
+
 /// Why `Face.parse` rejects `bytes`, as a self-contained teaching
 /// sentence for registration-time diagnostics, or null when the bytes
 /// parse cleanly (`parse` is the single authority; this never disagrees
@@ -465,6 +645,21 @@ fn diagnoseParseFailure(bytes: []const u8) []const u8 {
     }
     for (required, 0..) |entry, slot| {
         if (!found[slot]) return entry.teach;
+    }
+    // Declared glyph complexity beyond the outline budgets: the whole
+    // face is refused at parse (registration) time rather than degrading
+    // past-budget glyphs to block fallbacks at render time. Callers that
+    // can format (UiApp's `fonts` teaching) name the face's declared
+    // numbers via `declaredGlyphMaxima`.
+    if (declaredGlyphMaxima(bytes)) |maxima| {
+        if (!maxima.withinBudgets()) {
+            return std.fmt.comptimePrint(
+                "font declares glyph outlines denser than the renderer's budgets ({d} points / {d} contours per simple glyph, {d} points / {d} contours per flattened composite, composites {d} deep of {d} components); past-budget glyphs would render as block fallbacks, so registration refuses the face",
+                .{ max_glyph_points, max_glyph_contours, max_composite_points, max_composite_contours, max_composite_depth, max_composite_components },
+            );
+        }
+    } else {
+        return "'maxp' table is not the version-1.0 form TrueType 'glyf' outlines require (or is truncated), so the font's glyph maxima cannot be validated";
     }
     // Structure looks complete, so the failure is field-level.
     return "font tables are present but malformed: needs a nonzero units-per-em, at least one horizontal metric, and a Unicode format-4 'cmap' subtable";

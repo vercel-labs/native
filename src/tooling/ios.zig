@@ -31,9 +31,12 @@ const toolchain = @import("toolchain.zig");
 /// `ios_host` module (src/platform/ios/files.zig).
 pub const host_source = @import("ios_host").uikit_host_m;
 pub const host_header = @import("ios_host").native_sdk_app_h;
+pub const host_image_fit_header = @import("ios_host").apple_image_fit_h;
 
 pub const host_source_name = "uikit_host.m";
 pub const host_header_name = "native_sdk_app.h";
+pub const host_image_fit_header_name = "apple_image_fit.h";
+const ubsan_runtime_name = "libclang_rt.ubsan_iossim_dynamic.dylib";
 
 pub const deployment_target = "15.0";
 
@@ -54,6 +57,7 @@ pub fn writeHostSources(io: std.Io, dir_path: []const u8) !void {
     defer dir.close(io);
     try dir.writeFile(io, .{ .sub_path = host_source_name, .data = host_source });
     try dir.writeFile(io, .{ .sub_path = host_header_name, .data = host_header });
+    try dir.writeFile(io, .{ .sub_path = host_image_fit_header_name, .data = host_image_fit_header });
 }
 
 /// The iOS bundle identifier for an app.zon `id`: underscores map to
@@ -213,6 +217,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
         build_file = try buildgraph.ensureGeneratedBuild(allocator, io, ".", .{
             .app_name = app_name,
             .framework_root = framework_root,
+            .manifest_name = manifest_tool.defaultPath(io) orelse "app.json",
         });
         try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
@@ -259,15 +264,15 @@ pub const DevOptions = struct {
 /// directory through an Io the desktop runner supplies, and the embed
 /// host supplies neither — edit + rerun is the loop today.
 pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !void {
-    if (!buildgraph.fileExists(io, "app.zon")) {
+    const manifest_path = manifest_tool.defaultPath(io) orelse {
         std.debug.print(
-            \\no app.zon here — `native dev --target ios` runs inside an app directory
+            \\no app.json or app.zon here — `native dev --target ios` runs inside an app directory
             \\(or pass one: `native dev path/to/app --target ios`). Start one with `native init`.
             \\
         , .{});
         return error.MissingManifest;
-    }
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path);
     const bundle_id = try bundleIdAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
 
@@ -303,17 +308,40 @@ pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !vo
     // target (ELF from the Android tier) must fail here with the real
     // cause, not as a confusing linker error.
     embedlib.requireArchiveClass(allocator, io, lib_path, .macho, LibSlice.simulator.zigTriple()) catch return error.HostCompileFailed;
-    try runInherit(io, &.{
-        "xcrun",         "--sdk",        LibSlice.simulator.clangSdk(),
-        "clang",         "-target",      LibSlice.simulator.clangTriple(),
-        "-fobjc-arc",    "-O2",          ".native/ios/host/" ++ host_source_name,
-        lib_path,        "-framework",   "UIKit",
-        "-framework",    "Metal",        "-framework",
-        "QuartzCore",    "-framework",   "Foundation",
-        "-framework",    "CoreGraphics", "-framework",
-        "AVFoundation",  "-framework",   "ImageIO",
-        "-o",            executable_path,
-    }, error.HostCompileFailed);
+    const ubsan_runtime = if (try archiveNeedsUbsan(allocator, io, lib_path)) try simulatorUbsanRuntimePathAlloc(allocator, io) else null;
+    defer if (ubsan_runtime) |path| allocator.free(path);
+    var clang_args: std.ArrayList([]const u8) = .empty;
+    defer clang_args.deinit(allocator);
+    try clang_args.appendSlice(allocator, &.{
+        "xcrun",      "--sdk",   LibSlice.simulator.clangSdk(),
+        "clang",      "-target", LibSlice.simulator.clangTriple(),
+        "-fobjc-arc", "-O2",     ".native/ios/host/" ++ host_source_name,
+        lib_path,
+    });
+    if (ubsan_runtime) |path| {
+        // ScriptC's Debug runtime references Clang UBSan handlers. Link
+        // the runtime directly so the UIKit host itself stays uninstrumented.
+        try clang_args.appendSlice(allocator, &.{ path, "-Wl,-rpath,@executable_path" });
+    }
+    try clang_args.appendSlice(allocator, &.{
+        "-framework", "UIKit",
+        "-framework", "Metal",
+        "-framework", "QuartzCore",
+        "-framework", "Foundation",
+        "-framework", "CoreGraphics",
+        "-framework", "AVFoundation",
+        "-framework", "ImageIO",
+        "-framework", "Security",
+        "-o",         executable_path,
+    });
+    try runInherit(io, clang_args.items, error.HostCompileFailed);
+    if (ubsan_runtime) |path| {
+        const bundled_runtime = try std.fs.path.join(allocator, &.{ bundle_path, ubsan_runtime_name });
+        defer allocator.free(bundled_runtime);
+        const arch = if (builtin.cpu.arch == .x86_64) "x86_64" else "arm64";
+        try runInherit(io, &.{ "xcrun", "lipo", "-thin", arch, path, "-output", bundled_runtime }, error.HostCompileFailed);
+        try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundled_runtime }, error.HostCompileFailed);
+    }
     try runInherit(io, &.{ "codesign", "--force", "--sign", "-", bundle_path }, error.HostCompileFailed);
 
     const device = options.device orelse try pickSimulatorDevice(allocator, io);
@@ -407,6 +435,37 @@ pub fn hasOptimizeFlag(args: []const []const u8) bool {
     return false;
 }
 
+fn archiveNeedsUbsan(allocator: std.mem.Allocator, io: std.Io, lib_path: []const u8) !bool {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "xcrun", "nm", "-u", "-j", lib_path },
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return error.HostCompileFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) {
+        std.debug.print("native dev (ios): could not inspect the embed archive for sanitizer references: {s}\n", .{result.stderr});
+        return error.HostCompileFailed;
+    }
+    return std.mem.indexOf(u8, result.stdout, "___ubsan_handle_") != null;
+}
+
+fn simulatorUbsanRuntimePathAlloc(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "xcrun", "--sdk", "iphonesimulator", "clang", "-print-file-name=" ++ ubsan_runtime_name },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return error.HostCompileFailed;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    const path = std.mem.trim(u8, result.stdout, " \t\r\n");
+    if (result.term != .exited or result.term.exited != 0 or !buildgraph.fileExists(io, path)) {
+        std.debug.print("native dev (ios): Xcode's simulator UBSan runtime ({s}) is unavailable\n", .{ubsan_runtime_name});
+        return error.HostCompileFailed;
+    }
+    return allocator.dupe(u8, path);
+}
+
 /// Spawn with inherited stdio and turn a non-zero exit into `fail_error`
 /// after naming the failed step (never fail in silence).
 fn runInherit(io: std.Io, argv: []const []const u8, fail_error: anyerror) !void {
@@ -497,6 +556,11 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "handleSessionInterruption") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
+    // Tier-4 credentials: generic-password Keychain entries registered
+    // through the shared mobile credential service ABI.
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_app_set_credential_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SecItemCopyMatching") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_credential_service_t") != null);
     // Platform push/pop navigation: the depth projection poll, the REAL
     // interactive pop recognizer, and the completed gesture's exactly-once
     // back-command dispatch.

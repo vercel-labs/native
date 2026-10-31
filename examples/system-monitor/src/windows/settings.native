@@ -1,0 +1,4 @@
+<import src="components/sampling.native"/>
+<column grow="1" padding="20" background="background" label="Settings window">
+  <use template="sampling-setting" />
+</column>

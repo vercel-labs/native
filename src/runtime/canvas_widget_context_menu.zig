@@ -13,10 +13,13 @@
 //!    `ElementOptions.context_menu` (app-declared, Msg-mapped items),
 //! 2. an editable text target: the standard Cut / Copy / Paste /
 //!    Select All menu wired to the existing clipboard actions,
-//! 3. the view's live static-text selection: a Copy-only menu.
-//! The zero-code defaults (2 and 3) are presenter-only: without a native
-//! menu they degrade to the keyboard clipboard paths, never a synthesized
-//! surface (there are no app-declared items to mount).
+//! 3. a terminal target: the standard Copy / Paste menu wired to its
+//!    emulator selection and committed-input channel,
+//! 4. the view's live static-text selection: a Copy-only menu.
+//! The zero-code defaults (2 through 4) are presenter-only: without a
+//! native menu they present no synthesized surface (there are no
+//! app-declared items to mount), while their available keyboard paths
+//! remain unchanged.
 //!
 //! Presentation is asynchronous (macOS `popUpMenuPositioningItem` runs a
 //! nested tracking loop): the platform emits a `context_menu_action`
@@ -27,10 +30,18 @@ const geometry = @import("geometry");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
 const runtime_api = @import("api.zig");
+const canvas_limits = @import("canvas_limits.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 
+const menu_policy = @import("context_menu_policy.zig");
+
 const context_menu_log = std.log.scoped(.zero_context_menu);
+
+const CanvasWidgetContextMenuTextScratch = struct {
+    group_buffer: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8,
+};
+const canvas_widget_context_menu_text_scratch = canvas.lazy_tls.LazyTls(CanvasWidgetContextMenuTextScratch);
 
 /// Reserved item ids of the zero-code default menus.
 pub const default_item_cut: u32 = 1;
@@ -40,12 +51,40 @@ pub const default_item_select_all: u32 = 4;
 
 pub const PendingCanvasWidgetContextMenu = struct {
     window_id: platform.WindowId = 1,
+    /// Per-request generation, minted when the request is armed and
+    /// echoed back by the platform on the action event. Menus can be
+    /// superseded while a dismissal is still in flight (GTK tears the
+    /// old popover down one loop turn after the successor presents), so
+    /// the token must name the REQUEST, not the widget: a stale token's
+    /// event must never resolve — or clear — a successor's pending
+    /// request, even when both menus target the same widget.
     token: u64 = 0,
+    /// The widget the menu was presented for (selections dispatch
+    /// against it; the token above no longer doubles as its id).
+    target_id: canvas.ObjectId = 0,
     kind: Kind = .app,
+    /// The presented view's label, copied into the request so a
+    /// superseded menu's dismissal notice can still name its canvas —
+    /// the view may be gone (window closed) by the time the request
+    /// resolves, and per-canvas menu state in a raw app needs the
+    /// correlation.
+    view_label_storage: [platform.max_view_label_bytes]u8 = undefined,
+    view_label_len: usize = 0,
+
+    pub fn viewLabel(self: *const PendingCanvasWidgetContextMenu) []const u8 {
+        return self.view_label_storage[0..self.view_label_len];
+    }
+
+    pub fn setViewLabel(self: *PendingCanvasWidgetContextMenu, label: []const u8) void {
+        const len = @min(label.len, self.view_label_storage.len);
+        @memcpy(self.view_label_storage[0..len], label[0..len]);
+        self.view_label_len = len;
+    }
 
     pub const Kind = enum {
         app,
         edit_text,
+        terminal,
         static_copy,
     };
 };
@@ -106,58 +145,160 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                             .separator = item.separator,
                         };
                     }
-                    if (try showMenu(self, index, .{
+                    switch (try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
-                        .token = widget.id,
+                        .target_id = widget.id,
                         .kind = .app,
-                    }, point, items[0..count])) return;
+                    }, point, items[0..count])) {
+                        .shown => |shown| {
+                            // Presentation is asynchronous on GTK (and the
+                            // snapshot is harmless where the presenter blocks):
+                            // tell the app WHAT is on the glass, keyed by the
+                            // request's token, so the eventual selection
+                            // resolves against the shown items' dispatch
+                            // payloads — never a tree that rebuilt (reordering
+                            // or re-mapping items) while the menu was open.
+                            // The event's fields come from the returned request
+                            // itself, never `self.views[index]` re-read here:
+                            // `showMenu` ran the superseded menu's dismissal
+                            // notice — arbitrary app code that may have closed
+                            // views and compacted their indices.
+                            try self.dispatchEvent(app, .{ .canvas_widget_context_menu_shown = .{
+                                .window_id = shown.window_id,
+                                .view_label = shown.viewLabel(),
+                                .target_id = widget.id,
+                                .token = shown.token,
+                                .item_count = count,
+                            } });
+                            return;
+                        },
+                        // The dismissal notice's app code presented a
+                        // successor that replaced this request (the
+                        // successor already announced itself), or closed
+                        // the presenting view outright: announce NOTHING
+                        // here — and never the anchored fallback, which
+                        // would mount a surface under the successor's
+                        // native menu or on a view that no longer exists.
+                        .superseded, .view_closed => return,
+                        .refused => {},
+                    }
                 }
                 try self.dispatchEvent(app, .{ .canvas_widget_context_menu_request = .{
                     .window_id = input_event.window_id,
                     .view_label = self.views[index].label,
                     .target_id = widget.id,
+                    .point = point,
                 } });
                 return;
             }
 
-            // 2. Editable text target: the standard edit menu, wired to
-            // the existing clipboard actions. Focus the field first so
-            // paste lands where the user clicked (macOS behavior).
+            if (self.context_menu_policy) |policy| {
+                var facts = menu_policy.Facts{ .flags = if (has_presenter) 16 else 0 };
+                facts.selected = self.views[index].canvas_widget_selected_text_id;
+                if (pointer_event.target) |target| {
+                    const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node_index].widget;
+                    facts.target = target.id;
+                    facts.flags |= 1 | (if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind)) @as(u32, 2) else 0) |
+                        (if (widget.state.disabled) @as(u32, 4) else 0) | (if (widget.kind == .terminal) @as(u32, 8) else 0);
+                    const clipboard = canvas.widgetTextClipboardState(widget);
+                    facts.flags |= (if (clipboard.selection != null) @as(u32, 32) else 0) | (if (clipboard.select_all) @as(u32, 64) else 0);
+                    if (widget.terminal.grid) |grid| facts.flags |= (if (grid.selection_active) @as(u32, 128) else 0) |
+                        (if (widget.terminal.pty != 0 and grid.running) @as(u32, 256) else 0);
+                    if (self.views[index].canvasWidgetNodeIndexById(facts.selected)) |selected| {
+                        facts.flags |= 1024;
+                        facts.selected_group = self.views[index].widget_layout_nodes[selected].widget.static_text_group_id;
+                        facts.target_group = widget.static_text_group_id;
+                    }
+                }
+                const plan = menu_policy.presentation(policy, facts);
+                switch (plan.kind) {
+                    .none => return,
+                    .hold => try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                        .window_id = input_event.window_id,
+                        .view_label = self.views[index].label,
+                        .press_target = pointer_event.press_target,
+                    } }),
+                    .edit_text, .terminal, .static_copy => {
+                        if (plan.kind != .static_copy) try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
+                        _ = try showMenu(self, app, index, .{
+                            .window_id = input_event.window_id,
+                            .target_id = facts.target,
+                            .kind = switch (plan.kind) {
+                                .edit_text => .edit_text,
+                                .terminal => .terminal,
+                                .static_copy => .static_copy,
+                                else => unreachable,
+                            },
+                        }, point, plan.items[0..plan.count]);
+                    },
+                }
+                return;
+            }
+
+            // 2/3. Editable text and terminal targets: standard menus
+            // wired to the existing clipboard and committed-input
+            // paths. Focus the target first so paste lands where the
+            // user clicked (macOS behavior).
             if (pointer_event.target) |target| {
                 const node_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse return;
                 const widget = self.views[index].widget_layout_nodes[node_index].widget;
                 if (canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled) {
                     if (!has_presenter) return;
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
-                    const has_selection = if (canvas.widgetTextSelectionRange(widget)) |range| !range.isCollapsed(widget.text.len) else false;
+                    const clipboard = canvas.widgetTextClipboardState(widget);
+                    const has_selection = clipboard.selection != null;
                     items[0] = .{ .id = default_item_cut, .label = "Cut", .enabled = has_selection };
                     items[1] = .{ .id = default_item_copy, .label = "Copy", .enabled = has_selection };
                     items[2] = .{ .id = default_item_paste, .label = "Paste" };
                     items[3] = .{ .separator = true };
-                    items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = widget.text.len > 0 };
-                    _ = try showMenu(self, index, .{
+                    items[4] = .{ .id = default_item_select_all, .label = "Select All", .enabled = clipboard.select_all };
+                    _ = try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
-                        .token = target.id,
+                        .target_id = target.id,
                         .kind = .edit_text,
                     }, point, items[0..5]);
                     return;
                 }
 
-                // 3. Static text with a live selection: Copy only.
+                if (widget.kind == .terminal and !widget.state.disabled) {
+                    if (!has_presenter) return;
+                    try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event);
+                    const has_selection = if (widget.terminal.grid) |grid| grid.selection_active else false;
+                    const can_paste = if (widget.terminal.grid) |grid| widget.terminal.pty != 0 and grid.running else false;
+                    items[0] = .{ .id = default_item_copy, .label = "Copy", .enabled = has_selection };
+                    items[1] = .{ .id = default_item_paste, .label = "Paste", .enabled = can_paste };
+                    _ = try showMenu(self, app, index, .{
+                        .window_id = input_event.window_id,
+                        .target_id = target.id,
+                        .kind = .terminal,
+                    }, point, items[0..2]);
+                    return;
+                }
+
+                // 4. Static text with a live selection: Copy only.
                 const selected_id = self.views[index].canvas_widget_selected_text_id;
-                if (selected_id != 0 and selected_id == target.id) {
+                const selected_group_target = if (selected_id != 0 and selected_id != target.id) blk: {
+                    const selected_index = self.views[index].canvasWidgetNodeIndexById(selected_id) orelse break :blk false;
+                    const target_index = self.views[index].canvasWidgetNodeIndexById(target.id) orelse break :blk false;
+                    const selected_widget = self.views[index].widget_layout_nodes[selected_index].widget;
+                    const target_widget = self.views[index].widget_layout_nodes[target_index].widget;
+                    break :blk selected_widget.static_text_group_id != 0 and
+                        selected_widget.static_text_group_id == target_widget.static_text_group_id;
+                } else false;
+                if (selected_id != 0 and (selected_id == target.id or selected_group_target)) {
                     if (!has_presenter) return;
                     items[0] = .{ .id = default_item_copy, .label = "Copy" };
-                    _ = try showMenu(self, index, .{
+                    _ = try showMenu(self, app, index, .{
                         .window_id = input_event.window_id,
-                        .token = target.id,
+                        .target_id = target.id,
                         .kind = .static_copy,
                     }, point, items[0..1]);
                     return;
                 }
             }
 
-            // 4. No menu anywhere on the route: the press-and-hold
+            // 5. No menu anywhere on the route: the press-and-hold
             // alternative. Deliver the context press so `UiApp` can
             // dispatch the press target's `on_hold` Msg.
             try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
@@ -167,11 +308,77 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             } });
         }
 
-        /// Returns whether the platform accepted the presentation; a
-        /// refusal is not fatal (app-declared menus fall back to the
-        /// anchored canvas surface, the zero-code defaults degrade to
-        /// their keyboard paths).
-        fn showMenu(self: *Runtime, view_index: usize, pending: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!bool {
+        /// A NEW presentation or dispatch replaced the pending request.
+        /// An app menu's pending has state beyond the runtime's gate —
+        /// UiApp holds a token-keyed snapshot and a pinned build
+        /// generation for it, and a raw app may track per-canvas menu
+        /// state — and the superseded token can never arrive (the gate
+        /// would swallow it), so tell the app the old menu is gone,
+        /// named by the view it was presented on. This runs for EVERY
+        /// superseding kind: app over app, a default edit/copy menu
+        /// over an app menu, and the automation verb's direct dispatch.
+        /// Call it AFTER committing the replacement pending: the notice
+        /// dispatch is fallible, and the runtime's bookkeeping must
+        /// already match the menu the platform accepted.
+        pub fn notifySupersededPending(self: *Runtime, app: runtime_api.App(Runtime), superseded: ?PendingCanvasWidgetContextMenu) anyerror!void {
+            if (self.context_menu_policy) |policy| {
+                if (menu_policy.notice(policy, if (superseded) |old| policyKind(old.kind) else null)) {
+                    const pending = superseded.?;
+                    try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                        .window_id = pending.window_id,
+                        .view_label = pending.viewLabel(),
+                        .token = pending.token,
+                    } });
+                }
+                return;
+            }
+            const pending = superseded orelse return;
+            if (pending.kind != .app) return;
+            try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                .window_id = pending.window_id,
+                .view_label = pending.viewLabel(),
+                .token = pending.token,
+            } });
+        }
+
+        const ShowMenuOutcome = union(enum) {
+            /// The platform accepted and the request is still the
+            /// pending truth: announce it
+            /// (`canvas_widget_context_menu_shown`).
+            shown: PendingCanvasWidgetContextMenu,
+            /// The platform refused — not fatal (app-declared menus
+            /// fall back to the anchored canvas surface, the zero-code
+            /// defaults degrade to their keyboard paths). The old
+            /// pending (and its popover, if any) is still the truth.
+            refused,
+            /// The platform accepted, but the superseded menu's
+            /// dismissal notice synchronously presented a SUCCESSOR
+            /// that replaced this request. The successor is the truth
+            /// and already announced itself: announcing this request
+            /// late would overwrite the successor's snapshot with a
+            /// menu whose token the action gate no longer accepts,
+            /// stranding the successor on live-tree resolution and the
+            /// stale pin unreleased.
+            superseded,
+            /// The platform accepted, but the superseded menu's
+            /// dismissal notice CLOSED the presenting view. The request
+            /// can never resolve (its action would clear the token and
+            /// silently drop on the view lookup — or never arrive at
+            /// all if the window died with it), so it is disarmed here:
+            /// announce nothing, mount nothing.
+            view_closed,
+        };
+
+        /// Present `request` natively. Callers must describe the
+        /// presented menu from the returned `.shown` request, not from
+        /// `self.views[view_index]`: the superseded menu's dismissal
+        /// notice below runs arbitrary app code that may close views
+        /// and compact their indices — or present a successor menu
+        /// (see `ShowMenuOutcome.superseded`).
+        fn showMenu(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, request: PendingCanvasWidgetContextMenu, point: geometry.PointF, items: []const platform.ContextMenuItem) anyerror!ShowMenuOutcome {
+            var pending = request;
+            pending.token = nextContextMenuToken(self);
+            pending.setViewLabel(self.views[view_index].label);
             self.options.platform.services.showContextMenu(.{
                 .window_id = pending.window_id,
                 .view_label = self.views[view_index].label,
@@ -182,10 +389,39 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 if (err != error.UnsupportedService) {
                     context_menu_log.warn("context menu presentation failed: {s}", .{@errorName(err)});
                 }
-                return false;
+                // Presentation refused: nothing superseded — the old
+                // pending (and its popover, if any) is still the truth.
+                return .refused;
             };
+            // The platform accepted: commit the replacement BEFORE the
+            // fallible superseded-notice dispatch, so the runtime's
+            // expected token always matches the menu on the glass.
+            const superseded = self.canvas_widget_context_menu_pending;
             self.canvas_widget_context_menu_pending = pending;
-            return true;
+            try notifySupersededPending(self, app, superseded);
+            if (self.context_menu_policy) |policy| {
+                const current = if (self.canvas_widget_context_menu_pending) |value| value.token else null;
+                // A successor must be admitted before asking about the view:
+                // dismissal callbacks may replace requests and compact views.
+                if (menu_policy.continuation(policy, pending.token, current, true) == .superseded) return .superseded;
+                switch (menu_policy.continuation(policy, pending.token, current, runtimeFindViewIndex(self, pending.window_id, pending.viewLabel()) != null)) {
+                    .superseded => return .superseded,
+                    .view_closed => {
+                        self.canvas_widget_context_menu_pending = null;
+                        return .view_closed;
+                    },
+                    .shown => return .{ .shown = pending },
+                }
+            }
+            const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == pending.token else false;
+            if (!still_armed) return .superseded;
+            // Still armed, but the notice may have closed the view the
+            // menu presented on: disarm the unresolvable request.
+            if (runtimeFindViewIndex(self, pending.window_id, pending.viewLabel()) == null) {
+                self.canvas_widget_context_menu_pending = null;
+                return .view_closed;
+            }
+            return .{ .shown = pending };
         }
 
         /// The platform reported the menu outcome: resolve the pending
@@ -194,26 +430,91 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// table); the default menus perform the clipboard action
         /// directly through the same paths the keyboard shortcuts use.
         pub fn dispatchContextMenuAction(self: *Runtime, app: runtime_api.App(Runtime), event: platform.ContextMenuActionEvent) anyerror!void {
+            if (self.context_menu_policy) |policy| {
+                const maybe = self.canvas_widget_context_menu_pending;
+                const admission = menu_policy.admission(policy, if (maybe) |v| policyKind(v.kind) else null, if (maybe) |v| v.window_id else 0, if (maybe) |v| v.token else 0, event);
+                if (admission == .ignore) return;
+                const pending = maybe.?;
+                self.canvas_widget_context_menu_pending = null;
+                switch (admission) {
+                    .ignore => unreachable,
+                    .clear => return,
+                    .dismiss => {
+                        try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                            .window_id = event.window_id,
+                            .view_label = event.view_label,
+                            .token = pending.token,
+                        } });
+                        return;
+                    },
+                    .lookup => {},
+                }
+                const index = runtimeFindViewIndex(self, event.window_id, event.view_label) orelse return;
+                try executeAction(self, app, index, pending, event, menu_policy.action(policy, policyKind(pending.kind), event.item_id));
+                return;
+            }
             const pending = self.canvas_widget_context_menu_pending orelse return;
-            self.canvas_widget_context_menu_pending = null;
+            // Token gate BEFORE the clear: an event carrying a stale
+            // token belongs to a superseded request (its deferred
+            // dismissal outlived a re-click's replacement menu) and is
+            // swallowed — it must never clear, let alone resolve, the
+            // successor's pending request. Windows cannot produce a
+            // stale event (TrackPopupMenu blocks the loop thread and
+            // emits inline from the moved-out request, so a second
+            // request never dispatches mid-menu); macOS cannot either
+            // (each presentation block captures its own token and
+            // popUpMenuPositioningItem's nested tracking loop blocks
+            // the main queue); GTK popovers are asynchronous and CAN.
             if (pending.window_id != event.window_id or pending.token != event.token) return;
-            if (event.item_id == 0) return; // dismissed
+            self.canvas_widget_context_menu_pending = null;
+            if (event.item_id == 0) {
+                // Dismissed without a selection. App menus tell the app:
+                // UiApp disarms the token's presented-items snapshot and
+                // releases the build storage pinned under it.
+                if (pending.kind == .app) {
+                    try self.dispatchEvent(app, .{ .canvas_widget_context_menu_dismissed = .{
+                        .window_id = event.window_id,
+                        .view_label = event.view_label,
+                        .token = pending.token,
+                    } });
+                }
+                return;
+            }
             const index = runtimeFindViewIndex(self, event.window_id, event.view_label) orelse return;
 
             switch (pending.kind) {
-                .app => try self.dispatchEvent(app, .{ .canvas_widget_context_menu = .{
-                    .window_id = event.window_id,
-                    .view_label = self.views[index].label,
-                    .target_id = pending.token,
-                    .item_index = event.item_id - 1,
-                } }),
-                .edit_text => try applyDefaultEditAction(self, app, index, pending.token, event.item_id),
+                .app => try self.dispatchEvent(app, .{
+                    .canvas_widget_context_menu = .{
+                        .window_id = event.window_id,
+                        .view_label = self.views[index].label,
+                        .target_id = pending.target_id,
+                        .item_index = event.item_id - 1,
+                        // The shown snapshot's key: UiApp resolves the
+                        // selection from what was presented under this token.
+                        .token = pending.token,
+                    },
+                }),
+                .edit_text => try applyDefaultEditAction(self, app, index, pending.target_id, event.item_id),
+                .terminal => try applyDefaultTerminalAction(self, app, index, pending.target_id, event.item_id),
                 .static_copy => {
                     if (event.item_id != default_item_copy) return;
-                    const text = self.views[index].canvasWidgetCopyText() orelse return;
+                    const group_buffer = &canvas_widget_context_menu_text_scratch.get().group_buffer;
+                    const text = self.views[index].canvasWidgetCopyText(group_buffer) orelse return;
                     self.writeClipboard(text) catch return;
                 },
             }
+        }
+
+        /// Mint the next per-request correlation token. Never zero, so a
+        /// zero-token event can never match an armed request.
+        pub fn nextContextMenuToken(self: *Runtime) u64 {
+            if (self.context_menu_policy) |policy| {
+                self.canvas_widget_context_menu_token = menu_policy.nextToken(policy, self.canvas_widget_context_menu_token);
+                return self.canvas_widget_context_menu_token;
+            }
+            self.canvas_widget_context_menu_token +%= 1;
+            if (self.canvas_widget_context_menu_token == 0) self.canvas_widget_context_menu_token = 1;
+            return self.canvas_widget_context_menu_token;
         }
 
         fn applyDefaultEditAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {
@@ -257,6 +558,133 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             }
         }
 
+        fn applyDefaultTerminalAction(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, target_id: canvas.ObjectId, item_id: u32) anyerror!void {
+            const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return;
+            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            if (widget.kind != .terminal or widget.state.disabled) return;
+
+            switch (item_id) {
+                default_item_copy => {
+                    const grid = widget.terminal.grid orelse return;
+                    if (!grid.selection_active) return;
+                    self.writeClipboard(grid.selection_text) catch return;
+                },
+                default_item_paste => {
+                    if (widget.terminal.pty == 0) return;
+                    const grid = widget.terminal.grid orelse return;
+                    // The native menu resolves asynchronously on GTK:
+                    // a session that was live when the menu opened may
+                    // have exited before Paste is chosen. Revalidate at
+                    // action time so dead-session input cannot fall
+                    // through to UiApp's app-level `on_text` seam.
+                    if (!grid.running) return;
+                    var paste_buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
+                    const text = self.readClipboard(&paste_buffer) catch return;
+                    if (text.len == 0) return;
+                    // Terminals deliberately stay outside the TextBuffer
+                    // editor pipeline. Mark this committed payload as a
+                    // PASTE so UiApp routes it through the emulator's
+                    // dedicated paste encoder, not the ordinary typing
+                    // path: bracketed-paste framing, newline conversion,
+                    // and unsafe-control stripping are all provenance-
+                    // sensitive terminal behavior.
+                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
+                        .window_id = self.views[view_index].window_id,
+                        .view_label = self.views[view_index].label,
+                        .keyboard = .{
+                            .phase = .text_input,
+                            .focused_id = target_id,
+                            .text = text,
+                            .edit = .{ .insert_text = text },
+                        },
+                        .terminal_paste = true,
+                        .standalone = true,
+                    } });
+                },
+                else => {},
+            }
+        }
+
+        fn policyKind(kind: PendingCanvasWidgetContextMenu.Kind) menu_policy.Kind {
+            return switch (kind) {
+                .app => .app,
+                .edit_text => .edit_text,
+                .terminal => .terminal,
+                .static_copy => .static_copy,
+            };
+        }
+
+        fn executeAction(self: *Runtime, app: runtime_api.App(Runtime), index: usize, pending: PendingCanvasWidgetContextMenu, event: platform.ContextMenuActionEvent, action: menu_policy.Action) anyerror!void {
+            switch (action) {
+                .none => {},
+                .app => try self.dispatchEvent(app, .{ .canvas_widget_context_menu = .{
+                    .window_id = event.window_id,
+                    .view_label = self.views[index].label,
+                    .target_id = pending.target_id,
+                    .item_index = event.item_id - 1,
+                    .token = pending.token,
+                } }),
+                .copy => {
+                    const text = editableSelectionText(self, index, pending.target_id) orelse return;
+                    self.writeClipboard(text) catch return;
+                },
+                .cut => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    const text = editableSelectionText(self, index, pending.target_id) orelse return;
+                    self.writeClipboard(text) catch return;
+                    keyboard.keyboard.edit = .{ .insert_text = "" };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .paste => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return;
+                    var buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
+                    const text = self.readClipboard(&buffer) catch return;
+                    if (text.len == 0) return;
+                    const clamp = canvas_widget_runtime.clampCanvasWidgetPasteText(widget, self.views[index].widget_text_len, text);
+                    keyboard.keyboard.edit_truncated = clamp.truncated;
+                    if (clamp.text.len == 0) return;
+                    keyboard.keyboard.edit = .{ .insert_text = clamp.text };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .select_all => {
+                    var keyboard = editKeyboardEvent(self, index, pending.target_id) orelse return;
+                    keyboard.keyboard.key = "a";
+                    keyboard.keyboard.modifiers = .{ .super = true };
+                    try applyEditKeyboardEvent(self, app, keyboard);
+                },
+                .terminal_copy, .terminal_paste => {
+                    const node = self.views[index].canvasWidgetNodeIndexById(pending.target_id) orelse return;
+                    const widget = self.views[index].widget_layout_nodes[node].widget;
+                    if (widget.kind != .terminal or widget.state.disabled) return;
+                    const grid = widget.terminal.grid orelse return;
+                    if (action == .terminal_copy) {
+                        if (!grid.selection_active) return;
+                        self.writeClipboard(grid.selection_text) catch return;
+                    } else {
+                        if (widget.terminal.pty == 0 or !grid.running) return;
+                        var buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
+                        const text = self.readClipboard(&buffer) catch return;
+                        if (text.len == 0) return;
+                        try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
+                            .window_id = self.views[index].window_id,
+                            .view_label = self.views[index].label,
+                            .keyboard = .{ .phase = .text_input, .focused_id = pending.target_id, .text = text, .edit = .{ .insert_text = text } },
+                            .terminal_paste = true,
+                            .standalone = true,
+                        } });
+                    }
+                },
+                .static_copy => {
+                    const buffer = &canvas_widget_context_menu_text_scratch.get().group_buffer;
+                    const text = self.views[index].canvasWidgetCopyText(buffer) orelse return;
+                    self.writeClipboard(text) catch return;
+                },
+            }
+        }
+
         /// A synthesized key-down keyboard event addressed at the editable
         /// widget, shaped like the routed events the clipboard shortcuts
         /// stamp their edits onto.
@@ -274,22 +702,26 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// the event to the app — the same two motions keyboard-driven
         /// edits perform, so runtime widget and app model stay in sync.
         fn applyEditKeyboardEvent(self: *Runtime, app: runtime_api.App(Runtime), keyboard_event: runtime_api.CanvasWidgetKeyboardEvent) anyerror!void {
-            try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, keyboard_event);
-            try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
+            var event = keyboard_event;
+            // No gpu-surface input cycle wraps a context-menu edit: mark
+            // it standalone so the ui-app hover drain runs at its tail.
+            event.standalone = true;
+            try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, &event);
+            try self.dispatchEvent(app, .{ .canvas_widget_keyboard = event });
         }
 
         fn editableSelectionText(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) ?[]const u8 {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target_id) orelse return null;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
-            const range = canvas.widgetTextSelectionRange(widget) orelse return null;
-            if (range.isCollapsed(widget.text.len)) return null;
+            const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
         }
 
         /// The deepest node on the pointer route carrying an app-declared
         /// context menu.
         fn deepestContextMenuRouteNode(self: *const Runtime, view_index: usize, route: []const canvas.WidgetEventRouteEntry) ?usize {
+            if (self.context_menu_policy) |policy| return menu_policy.route(policy, self.views[view_index].widget_layout_nodes[0..self.views[view_index].widget_layout_node_count], route);
             var result: ?usize = null;
             var result_depth: usize = 0;
             for (route) |entry| {

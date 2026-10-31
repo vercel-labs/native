@@ -14,7 +14,6 @@
                 .title = "Native SDK Habits",
                 .width = 720,
                 .height = 520,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset_tall",
                 .views = .{

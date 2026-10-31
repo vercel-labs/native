@@ -15,7 +15,11 @@
 # before exiting; Wait-Done below is the belt-and-braces check that the
 # whole queue drained.
 
-$script:RepoRoot = "$env:USERPROFILE\repo"
+$script:RepoRoot = if ($env:NATIVE_SDK_TRUTH_REPO) {
+    [IO.Path]::GetFullPath($env:NATIVE_SDK_TRUTH_REPO)
+} else {
+    "$env:USERPROFILE\repo"
+}
 $script:CLI = "$RepoRoot\zig-out\bin\native.exe"
 $script:OutRoot = "$env:TEMP\native-truth-out"
 $script:Apps = @("calculator", "notes", "soundboard", "markdown-viewer", "system-monitor", "gpu-dashboard", "deck", "feed", "kanban", "ui-inbox")

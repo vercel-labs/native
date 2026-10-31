@@ -120,16 +120,20 @@ static void destroyChildWebViewsForWindow(Host *host, uint64_t window_id) {
 
 extern "C" {
 
-Host *native_sdk_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+Host *native_sdk_gtk_create(const char *app_name, size_t app_name_len, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)bundle_id;
     (void)bundle_id_len;
     (void)icon_path;
     (void)icon_path_len;
     (void)restore_frame;
+    (void)initial_placement;
+    (void)restore_policy;
     (void)resizable;
     (void)titlebar_style;
     (void)min_width;
     (void)min_height;
+    (void)show_policy;
+    (void)window_flags;
     Host *host = new Host();
     host->app_name = slice(app_name, app_name_len);
     host->window_title = slice(window_title, window_title_len);
@@ -250,12 +254,16 @@ void native_sdk_gtk_set_shortcuts(Host *host, const char *const *ids, const size
     (void)count;
 }
 
-int native_sdk_gtk_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height) {
+int native_sdk_gtk_create_window(Host *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     (void)restore_frame;
+    (void)initial_placement;
+    (void)restore_policy;
     (void)resizable;
     (void)titlebar_style;
     (void)min_width;
     (void)min_height;
+    (void)show_policy;
+    (void)window_flags;
     if (!host || host->windows.find(window_id) != host->windows.end()) return 0;
     Window window;
     window.id = window_id;
@@ -484,7 +492,7 @@ int native_sdk_gtk_reveal_path(Host *host, const char *path, size_t path_len) {
     return 0;
 }
 
-int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len) {
+int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title_len, const char *subtitle, size_t subtitle_len, const char *body, size_t body_len, const char *notification_id, size_t notification_id_len, const char *action_label, size_t action_label_len, const char *action_command, size_t action_command_len) {
     (void)host;
     (void)title;
     (void)title_len;
@@ -492,6 +500,12 @@ int native_sdk_gtk_show_notification(Host *host, const char *title, size_t title
     (void)subtitle_len;
     (void)body;
     (void)body_len;
+    (void)notification_id;
+    (void)notification_id_len;
+    (void)action_label;
+    (void)action_label_len;
+    (void)action_command;
+    (void)action_command_len;
     return 0;
 }
 
@@ -531,7 +545,7 @@ size_t native_sdk_gtk_get_credential(Host *host, const char *service, size_t ser
     (void)account_len;
     (void)buffer;
     (void)buffer_len;
-    return 0;
+    return SIZE_MAX - 1;
 }
 
 int native_sdk_gtk_delete_credential(Host *host, const char *service, size_t service_len, const char *account, size_t account_len) {

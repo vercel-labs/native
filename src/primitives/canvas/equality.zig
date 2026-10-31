@@ -244,6 +244,14 @@ pub fn sizesEqual(a: geometry.SizeF, b: geometry.SizeF) bool {
     return a.width == b.width and a.height == b.height;
 }
 
+pub fn optionalSizesEqual(a: ?geometry.SizeF, b: ?geometry.SizeF) bool {
+    if (a) |left| {
+        if (b) |right| return sizesEqual(left, right);
+        return false;
+    }
+    return b == null;
+}
+
 pub fn insetsEqual(a: geometry.InsetsF, b: geometry.InsetsF) bool {
     return a.top == b.top and
         a.right == b.right and
@@ -297,7 +305,9 @@ pub fn optionalF32Equal(a: ?f32, b: ?f32) bool {
 
 pub fn optionalTextSelectionsEqual(a: ?TextSelection, b: ?TextSelection) bool {
     if (a) |left| {
-        if (b) |right| return left.anchor == right.anchor and left.focus == right.focus;
+        if (b) |right| return left.anchor == right.anchor and
+            left.focus == right.focus and
+            left.affinity == right.affinity;
         return false;
     }
     return b == null;

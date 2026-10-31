@@ -45,17 +45,15 @@ pub const Server = struct {
         defer writer.deinit();
         try snapshot.writeText(input_value, &writer.writer);
         var path_buffer: [256]u8 = undefined;
-        try writePath(self.io, self.path("snapshot.txt", &path_buffer), writer.written());
+        try writePathAtomic(self.io, self.path("snapshot.txt", &path_buffer), writer.written());
         var a11y_writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, snapshot_initial_capacity);
         defer a11y_writer.deinit();
         try snapshot.writeA11yText(input_value, &a11y_writer.writer);
-        try writePath(self.io, self.path("accessibility.txt", &path_buffer), a11y_writer.written());
+        try writePathAtomic(self.io, self.path("accessibility.txt", &path_buffer), a11y_writer.written());
         var windows_writer = try std.Io.Writer.Allocating.initCapacity(std.heap.page_allocator, windows_initial_capacity);
         defer windows_writer.deinit();
-        for (input_value.windows) |window| {
-            try windows_writer.writer.print("window @w{d} \"{s}\" focused={any}\n", .{ window.id, window.title, window.focused });
-        }
-        try writePath(self.io, self.path("windows.txt", &path_buffer), windows_writer.written());
+        try snapshot.writeWindowsText(input_value, &windows_writer.writer);
+        try writePathAtomic(self.io, self.path("windows.txt", &path_buffer), windows_writer.written());
     }
 
     pub fn publishBridgeResponse(self: Server, response: []const u8) !void {
@@ -204,6 +202,15 @@ fn writePath(io: std.Io, path: []const u8, bytes: []const u8) !void {
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
+/// Readers may hold a snapshot open while the next frame is published.
+/// Replace the completed file so those readers keep their original bytes.
+fn writePathAtomic(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+    defer file.deinit(io);
+    try file.file.writePositionalAll(io, bytes, 0);
+    try file.replace(io);
+}
+
 fn readPath(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -282,6 +289,50 @@ test "server publishes large retained widget snapshots" {
     const a11y = try readPath(std.testing.io, server.path("accessibility.txt", &path_buffer), &buffer);
     try std.testing.expect(a11y.len > 4 * 1024);
     try std.testing.expect(std.mem.indexOf(u8, a11y, "@w1/components-canvas#1079 role=textbox") != null);
+}
+
+test "server snapshot readers retain a complete version across publication" {
+    const directory = ".zig-cache/test-webview-automation-snapshot-replacement";
+    try resetTestDirectory(std.testing.io, directory);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, directory) catch {};
+
+    const server = Server.init(std.testing.io, directory, "Test");
+    const old_windows = [_]snapshot.Window{.{
+        .title = "Previous snapshot " ** 1024,
+        .bounds = geometry.RectF.init(0, 0, 720, 520),
+    }};
+    const new_windows = [_]snapshot.Window{.{
+        .title = "Replacement snapshot",
+        .bounds = geometry.RectF.init(0, 0, 640, 480),
+    }};
+    const replacement: snapshot.Input = .{ .windows = &new_windows };
+
+    inline for (.{ "snapshot.txt", "accessibility.txt", "windows.txt" }, 0..) |name, index| {
+        try server.publish(.{ .windows = &old_windows });
+        var path_buffer: [256]u8 = undefined;
+        const file_path = server.path(name, &path_buffer);
+        var previous_buffer: [32 * 1024]u8 = undefined;
+        const previous = try readPath(std.testing.io, file_path, &previous_buffer);
+        var reader = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
+        defer reader.close(std.testing.io);
+
+        try server.publish(replacement);
+        var held_buffer: [32 * 1024]u8 = undefined;
+        const held = held_buffer[0..try reader.readPositionalAll(std.testing.io, &held_buffer, 0)];
+        try std.testing.expectEqualStrings(previous, held);
+
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        switch (index) {
+            0 => try snapshot.writeText(replacement, &expected.writer),
+            1 => try snapshot.writeA11yText(replacement, &expected.writer),
+            2 => try snapshot.writeWindowsText(replacement, &expected.writer),
+            else => unreachable,
+        }
+        var current_buffer: [32 * 1024]u8 = undefined;
+        const current = try readPath(std.testing.io, file_path, &current_buffer);
+        try std.testing.expectEqualStrings(expected.written(), current);
+    }
 }
 
 test "server writes screenshot artifacts atomically" {
@@ -448,7 +499,7 @@ test "server reports pending commands without consuming them" {
 
     // An empty dropbox is idle, and so is one holding only non-queue
     // files — response artifacts and, pointedly, a retired-v5 writer's
-    // `command.txt` slot, which this protocol version must never consume
+    // `command.txt` slot, which this protocol must never consume
     // (acking it would tell that stale CLI its command dispatched).
     try std.testing.expect(!server.hasPendingCommand());
     try writePath(std.testing.io, server.path("command.txt", &path_buffer), "widget-click canvas 7\n");

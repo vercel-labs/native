@@ -30,16 +30,33 @@
 #                                                 test-examples-mobile; hello/
 #                                                 webview/browser run their
 #                                                 in-dir `zig build test`)
-#   docs/**                                     -> docs `pnpm check`
+#   docs/**, apps/schema/**                     -> docs `pnpm check`
+#   docs/**, skills/**, skill-data/**,
+#   packages/core/**                            -> service-surface tooling tests:
+#                                                 manifest diff categorization,
+#                                                 generated compile-surface
+#                                                 freshness, and hand-written
+#                                                 SC-code/stale compiler-version
+#                                                 claim checks (requires
+#                                                 `npm ci --include=dev` in
+#                                                 packages/core, like the
+#                                                 service suites)
+#   **/src/services/**, service seam runtime,
+#   compiler, corewire, fixture, or skill paths -> real compiled service-host
+#                                                 success/error/crash/timeout/
+#                                                 replay battery + focused
+#                                                 frontend/contract tests
 #   anything else (README, .github, packages,
-#   scripts, skills, changelog.d, ...)          -> root suites only
-# A docs-ONLY diff runs only the docs check. The docs check is path-gated
-# in both tiers: it never runs unless docs/ changed (or --all in full).
+#   scripts, skills, release docs, ...)         -> root suites only
+# A docs-ONLY diff runs the docs and service-surface checks. The docs check
+# is path-gated in both tiers: it never runs unless docs/ changed (or --all
+# in full).
 #
-# full — root test + validate, every example suite (frontends, native incl.
+# full — root test + validate, the service-surface claim check, every
+# example suite (frontends, native incl.
 # canvas-preview, mobile), the Chromium host link check (cef-host-link),
 # the macOS automation smokes (gpu-surface,
-# gpu-dashboard, gpu-components, canvas-preview, writeback; skipped off-macOS), a
+# gpu-dashboard, gpu-components, menu-bar, canvas-preview, writeback; skipped off-macOS), a
 # markup check over every example markup file, and the docs check if docs/ changed
 # vs base-ref or --all was passed. --perf additionally runs the percentile
 # GPU perf check (test-gpu-dashboard-perf; macOS only, slow, load-sensitive —
@@ -59,6 +76,20 @@
 # ratchet. macOS-only because the budgets are calibrated on Apple Silicon.
 # Set NATIVE_SDK_SKIP_BENCH_CHECK=1 to skip it on a box that is too busy
 # even for the generous budgets.
+#
+# cross-e2e — the cross-target execution lane (scripts/cross-e2e.sh):
+# cross-builds the TS-core/service batteries and app fixtures for
+# x86_64-windows-gnu and x86_64-linux-musl, then executes the batteries
+# on the Windows box (ssh windows-dev) and in a Linux container. Opt-in
+# with NATIVE_SDK_CROSS=1 in either tier — it needs those machines —
+# and skipped otherwise.
+#
+# mobile-e2e — the mobile execution lane (scripts/mobile-e2e.sh): builds
+# the TS mobile battery and app fixtures for aarch64-ios-simulator and
+# aarch64-linux-android, then executes the battery on a booted iPhone
+# simulator (xcrun simctl) and a headless arm64 emulator (adb). Opt-in
+# with NATIVE_SDK_MOBILE=1 in either tier — it needs Xcode's simulator
+# runtime and the Android SDK/NDK — and skipped otherwise.
 #
 # Deliberately NOT `set -e`: every step runs even after a failure so the
 # summary shows the whole picture; the exit code is non-zero if any step
@@ -102,6 +133,8 @@ framework_changed=false
 macos_platform_changed=false
 docs_changed=false
 meta_changed=false
+service_seam_changed=false
+surface_claims_changed=false
 affected_examples=""   # space-separated example dir names
 mobile_affected=false
 
@@ -129,6 +162,8 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
     docs/*) docs_changed=true ;;
+    apps/schema/*) docs_changed=true; meta_changed=true ;;
+    packages/core/*) meta_changed=true ;;
     src/platform/macos/*) framework_changed=true; macos_platform_changed=true ;;
     src/*|build.zig|build.zig.zon|build/*|tools/*|tests/*|assets/*) framework_changed=true ;;
     examples/*/*)
@@ -140,6 +175,14 @@ while IFS= read -r file; do
       esac
       ;;
     *) meta_changed=true ;;
+  esac
+  case "$file" in
+    */src/services/*|src/runtime/service_host.zig|src/runtime/service_pool.zig|src/app_runner/ts_core_main.zig|tests/ts-services/*|tools/corewire/*|packages/core/src/checker.ts|packages/core/src/cli.ts|packages/core/src/diagnostics.ts|packages/core/src/frontend.ts|packages/core/src/modules.ts|packages/core/src/service_contract.ts|packages/core/src/typed_ast.ts|packages/core/scripts/compiler_typecheck.mjs|packages/core/scripts/stage_external_services.mjs|packages/core/scripts/run_external_service_compiler.mjs|skill-data/ts-services/*|packages/native-sdk/*service_host*|build.zig|build/app.zig|build/corewire.zig)
+      service_seam_changed=true
+      ;;
+  esac
+  case "$file" in
+    docs/*|skills/*|skill-data/*|packages/core/*) surface_claims_changed=true ;;
   esac
 done <<EOF_FILES
 $changed_files
@@ -203,6 +246,22 @@ run_bench_check_step() { # runs (or explains skipping) the render-benchmark ratc
     skip_step "bench-check" "NATIVE_SDK_SKIP_BENCH_CHECK set"
   else
     run_step "bench-check" bench_check
+  fi
+}
+
+run_cross_e2e_step() { # the opt-in cross-target execution lane
+  if [ "${NATIVE_SDK_CROSS:-}" = "1" ]; then
+    run_step "cross-e2e" scripts/cross-e2e.sh
+  else
+    skip_step "cross-e2e" "opt-in: set NATIVE_SDK_CROSS=1 (needs the windows-dev box and Docker)"
+  fi
+}
+
+run_mobile_e2e_step() { # the opt-in mobile execution lane
+  if [ "${NATIVE_SDK_MOBILE:-}" = "1" ]; then
+    run_step "mobile-e2e" scripts/mobile-e2e.sh
+  else
+    skip_step "mobile-e2e" "opt-in: set NATIVE_SDK_MOBILE=1 (needs Xcode's simulator runtime and the Android SDK/NDK)"
   fi
 }
 
@@ -272,6 +331,20 @@ if [ "$tier" = "fast" ]; then
     $mobile_affected && run_step "examples-mobile" zig build test-examples-mobile
   fi
 
+  if $service_seam_changed; then
+    run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
+    run_step "ts-services-e2e" zig build test-ts-services-e2e
+  else
+    skip_step "ts-services-frontend" "service seam paths unchanged vs $base_ref"
+    skip_step "ts-services-e2e" "service seam paths unchanged vs $base_ref"
+  fi
+
+  if $surface_claims_changed; then
+    run_step "surface-claims" node --test packages/core/test/surface_tools.test.ts
+  else
+    skip_step "surface-claims" "docs/skills/skill-data/packages-core unchanged vs $base_ref"
+  fi
+
   if $macos_platform_changed; then
     cef_host_step
   else
@@ -283,9 +356,15 @@ if [ "$tier" = "fast" ]; then
   else
     skip_step "docs-check" "docs/ unchanged vs $base_ref"
   fi
+
+  run_cross_e2e_step
+  run_mobile_e2e_step
 else # full
   run_step "zig-test" zig build test
   run_step "zig-validate" zig build validate
+  run_step "ts-services-frontend" node --test packages/core/test/services.test.ts
+  run_step "ts-services-e2e" zig build test-ts-services-e2e
+  run_step "surface-claims" node --test packages/core/test/surface_tools.test.ts
   run_step "examples-frontends" zig build test-examples-frontends
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile
@@ -298,6 +377,7 @@ else # full
     run_step "smoke-gpu-components" zig build test-gpu-components-smoke
     run_step "smoke-webview" zig build test-webview-smoke
     run_step "smoke-native-shell" zig build test-native-shell-smoke
+    run_step "smoke-menu-bar" zig build test-menu-bar-smoke
     run_step "smoke-canvas-preview" zig build test-canvas-preview-smoke
     run_step "smoke-writeback" zig build test-writeback-smoke
   else
@@ -306,6 +386,7 @@ else # full
     skip_step "smoke-gpu-components" "macOS only"
     skip_step "smoke-webview" "macOS only"
     skip_step "smoke-native-shell" "macOS only"
+    skip_step "smoke-menu-bar" "macOS only"
     skip_step "smoke-canvas-preview" "macOS only"
     skip_step "smoke-writeback" "macOS only"
   fi
@@ -336,6 +417,9 @@ else # full
   else
     skip_step "docs-check" "docs/ unchanged vs $base_ref (pass --all to force)"
   fi
+
+  run_cross_e2e_step
+  run_mobile_e2e_step
 fi
 
 # ---- summary --------------------------------------------------------------

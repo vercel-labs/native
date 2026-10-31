@@ -2,13 +2,15 @@
 
 // Verify every version stamped by sync-version.js matches
 // packages/native-sdk/package.json: the CLI source, the per-platform
-// binary packages, and the optionalDependencies pins. Also verify each
+// binary packages, the bundled @native-sdk/core (manifest + lockfile,
+// the version every TS scaffold, example and test app pin follows), and the
+// optionalDependencies pins. Also verify each
 // platform package's repository.url and homepage match the main package,
 // because npm validates repository.url against publish provenance and a
 // repository rename that only updates the main package fails the publish.
 // CI runs this before publish so a half-bumped release cannot ship.
 
-import { readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -68,6 +70,104 @@ for (const [name, pin] of Object.entries(packageJson.optionalDependencies ?? {})
   if (pin !== expectedVersion) {
     console.error(`Version mismatch: optionalDependencies["${name}"]=${pin}, expected ${expectedVersion}`);
     errors++;
+  }
+}
+
+const cliLock = JSON.parse(readFileSync(join(projectRoot, 'package-lock.json'), 'utf-8'));
+if (cliLock.version !== expectedVersion || cliLock.packages?.['']?.version !== expectedVersion) {
+  console.error(`Version mismatch: packages/native-sdk/package-lock.json=${cliLock.version}/${cliLock.packages?.['']?.version}, expected ${expectedVersion}`);
+  errors++;
+}
+const lockedPins = cliLock.packages?.['']?.optionalDependencies ?? {};
+const expectedPins = packageJson.optionalDependencies ?? {};
+for (const name of new Set([...Object.keys(lockedPins), ...Object.keys(expectedPins)])) {
+  if (lockedPins[name] !== expectedPins[name]) {
+    console.error(`Pin mismatch: packages/native-sdk/package-lock.json optionalDependencies["${name}"]=${lockedPins[name]}, expected ${expectedPins[name]}`);
+    errors++;
+  }
+  const resolved = cliLock.packages?.[`node_modules/${name}`];
+  if (resolved && resolved.version !== expectedVersion) {
+    console.error(`Version mismatch: packages/native-sdk/package-lock.json resolves ${name} ${resolved.version}, expected ${expectedVersion}`);
+    errors++;
+  }
+}
+
+// The bundled @native-sdk/core rides the release version (manifest and
+// lockfile own-package fields), and the committed TS examples and test apps pin it
+// exactly — half-bumped, a published CLI would scaffold pins npm cannot
+// resolve to the matching @native-sdk/core release.
+const coreJson = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package.json'), 'utf-8'));
+if (coreJson.version !== expectedVersion) {
+  console.error(`Version mismatch: packages/core/package.json=${coreJson.version}, expected ${expectedVersion}`);
+  errors++;
+}
+// npm validates repository.url against publish provenance for
+// @native-sdk/core exactly as it does for the platform packages — a
+// missing or renamed URL fails the publish, so pin it to the main package.
+if (coreJson.repository?.url !== packageJson.repository?.url) {
+  console.error(`Repository mismatch: packages/core/package.json repository.url is ${coreJson.repository?.url}, expected ${packageJson.repository?.url} from package.json`);
+  errors++;
+}
+if (coreJson.homepage !== packageJson.homepage) {
+  console.error(`Homepage mismatch: packages/core/package.json homepage is ${coreJson.homepage}, expected ${packageJson.homepage} from package.json`);
+  errors++;
+}
+// The CLI carries the frontend's TypeScript compiler as a REGULAR
+// dependency via the @typescript/old ALIAS (npm:typescript@X.Y.Z): npm
+// installs it in the same transaction as @native-sdk/cli, so the bundled
+// packages/core resolves it through node's ancestor node_modules walk
+// with no install step at verb time (offline, read-only-prefix, and
+// production-config safe). Both manifests must pin the alias in the
+// exact `npm:typescript@X.Y.Z` form — a range after the @ would let a
+// fresh CLI install resolve a different version than the one
+// packages/core develops against; toolchain drift must be a deliberate
+// event (bump both manifests and the lockfile together).
+const aliasPinShape = /^npm:typescript@\d+\.\d+\.\d+$/;
+const coreAliasPin = coreJson.devDependencies?.['@typescript/old'];
+const cliAliasPin = packageJson.dependencies?.['@typescript/old'];
+if (!coreAliasPin) {
+  console.error('packages/core/package.json is missing the @typescript/old devDependency (the exact npm:typescript alias pin for the frontend compiler)');
+  errors++;
+} else if (!aliasPinShape.test(coreAliasPin)) {
+  console.error(`packages/core/package.json devDependencies["@typescript/old"]=${coreAliasPin} is not an exact npm:typescript@X.Y.Z alias pin (ranges after the @ let consumer installs drift)`);
+  errors++;
+}
+if (cliAliasPin !== coreAliasPin) {
+  console.error(`Pin mismatch: package.json dependencies["@typescript/old"]=${cliAliasPin}, expected ${coreAliasPin} from packages/core devDependencies`);
+  errors++;
+}
+// Both installation entry points must select the same verified release.
+const coreCompilerPin = coreJson.nativeToolchain?.scriptc;
+const cliCompilerPin = packageJson.nativeToolchain?.scriptc;
+const toolchain = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'scripts', 'scriptc-toolchain.json'), 'utf-8'));
+if (!/^\d+\.\d+\.\d+$/.test(coreCompilerPin ?? '') || cliCompilerPin !== coreCompilerPin || toolchain.version !== coreCompilerPin) {
+  console.error('scriptc release pins must agree across both packages and the toolchain manifest');
+  errors++;
+}
+for (const pkg of [coreJson, packageJson]) {
+  if (pkg.dependencies?.scriptc || pkg.dependencies?.['@scriptc/compiler'] || pkg.devDependencies?.['@scriptc/compiler']) {
+    console.error('scriptc is installed from the release manifest; remove npm compiler dependencies');
+    errors++;
+  }
+}
+const coreLock = JSON.parse(readFileSync(join(repoRoot, 'packages', 'core', 'package-lock.json'), 'utf-8'));
+if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !== expectedVersion) {
+  console.error(`Version mismatch: packages/core/package-lock.json=${coreLock.version}/${coreLock.packages?.['']?.version}, expected ${expectedVersion}`);
+  errors++;
+}
+for (const directory of ['examples', 'tests']) {
+  for (const entry of readdirSync(join(repoRoot, directory), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const examplePath = join(repoRoot, directory, entry.name, 'package.json');
+    if (!existsSync(examplePath)) continue;
+    const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
+    if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
+    const example = `${directory}/${entry.name}`;
+    const pin = exampleJson.dependencies?.['@native-sdk/core'];
+    if (pin !== expectedVersion) {
+      console.error(`Version mismatch: ${example}/package.json pins @native-sdk/core ${pin}, expected ${expectedVersion}`);
+      errors++;
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 # Native SDK Examples
 
-Most examples here are zero-config apps: `app.zon` + `src/` (+ `assets/`) and nothing else. The `native` CLI owns their build — run any of them straight from its directory:
+Most examples here are zero-config apps: `app.json` or `app.zon` + `src/` (+ `assets/`) and nothing else. The `native` CLI owns their build — run any of them straight from its directory:
 
 ```sh
 native dev     # build and run with hot reload
@@ -8,24 +8,39 @@ native test    # run the app's test suite
 native build   # produce a ReleaseFast binary in zig-out/bin/
 ```
 
-(In this repository the CLI is `zig-out/bin/native`, built by `zig build` at the root.) A handful of examples own a `build.zig` because they genuinely outgrow the generated graph — each one's build file opens with the reason.
+(In this repository the CLI is `zig-out/bin/native`, built by `zig build` at the root.) A handful of examples own a `build.zig` because they outgrow the generated graph — each one's build file opens with the reason.
 
-## Zero-config apps (native-rendered)
+## Start here: TypeScript + Native markup
+
+TypeScript is the primary app-authoring language. A new `native init my_app` project has `src/core.ts`, `src/app.native`, and `app.json`; the core compiles ahead of time to native code, so no JS runtime ships in the app. These examples are the clearest substantial references for that path:
 
 | Example | Shows |
 | --- | --- |
-| `habits` | The smallest markup app: one `.native` view, a plain-form Model/Msg/update. |
+| `chatbot` | Multi-module TypeScript core, text editing, streaming `Cmd.fetch`, environment messages, and deterministic replay. |
+| `service-feed-reader` | The complete services loop: `Cmd.fetch`, a parsing service reached through the generated `@native-sdk/services` client, shared record shapes, and recorded replay without the service. |
+| `relational-notes` | Append-only SQLite migrations, build-time checked SQL, generated typed transactions and page decoders, FTS5, and live queries. |
+| `gpu-components` | Isolated interactive Native UI specimens, disclosure trees, anchored menus, and controlled component state. |
+| `habits` | Small habit tracker: stable row keys, streaks, active filtering, chrome geometry, and recorded replay. |
+| `kanban` | Keyed boards, drag interactions, avatars, controlled scrolling, and file drops. |
+| `menu-bar` | Status-item lifecycle, native menus, window hiding and reopening, and typed commands. |
+| `soundboard` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
+| `typography` | Model-derived design tokens, styled paragraphs, alignment, and bundled fonts. |
+| `system-monitor` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
+
+Soundboard and System Monitor use the canonical unsuffixed folders. Their TypeScript cores and Native markup replace the earlier duplicate Zig implementations. New TypeScript apps need no language suffix.
+
+## Earlier native-rendered showcase apps (Zig cores)
+
+| Example | Shows |
+| --- | --- |
 | `calculator` | A complete small app: markup keypad, text-field keyboard path, chrome shortcuts, theming. |
 | `notes` | Persistence through the effects channel: debounced writes, restore on boot, dialogs, search. |
-| `kanban` | Builder-view boards with drag interactions. |
 | `feed` | Windowed 100k-row list virtualization with runtime-owned scrolling. |
-| `soundboard` | Album grid with decoded cover art, context menus, timers, and a custom theme. |
 | `deck` | Two model-declared windows and a dense track ledger. |
 | `markdown-viewer` | Real file I/O through effects, hidden-inset titlebar retrofit, preview + editor. |
-| `system-monitor` | Live process sampling, confirmation dialogs, a settings window. |
+| `code-editor` | Platform folder picker, bounded filesystem tree, and syntax-highlighted source editor. |
 | `gpu-surface` | A Metal-backed GPU surface composed beside native controls and WebView content. |
 | `gpu-dashboard` | Native chrome, a GPU surface, and a retained canvas display list. |
-| `gpu-components` | The retained GPU widget controls in one native-first component lab. |
 | `canvas-preview` | Canvas + WebView in one window, panes snapped to canvas anchors, a status item. |
 | `effects-probe` | The effect system live: spawn/fetch/file effects, cancellation, worker wakes. |
 
@@ -46,4 +61,4 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 
 `mobile-shell`, `ios`, and `android` are mobile host projects (Xcode/Gradle shells plus shared `app.zon` metadata) rather than desktop app directories.
 
-Start with `habits` for the native-rendered markup path, or `hello` for the WebView path. Move to `webview` when you need native commands or WebView policy, `capabilities` for guarded OS services, the GPU trio when you want custom-rendered or retained-canvas panes, and a frontend example when building a real web frontend.
+Start with `native init` for a small TypeScript + Native markup app, then use `chatbot`, `gpu-components`, `soundboard`, or `system-monitor` according to the feature you need. Use `habits` for a small TypeScript app, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and `gpu-surface` or `gpu-dashboard` for custom-rendered or retained-canvas panes.

@@ -2,8 +2,20 @@ const std = @import("std");
 const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const app_manifest = @import("app_manifest_zon");
+const built_relational_migrations = @import("relational_migrations");
+const window_placement = @import("window_placement.zig");
+const manifest_commands = if (@hasField(@TypeOf(app_manifest), "commands")) app_manifest.commands else .{};
 const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
+const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
 const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
+
+fn manifestImagePixelBudget() usize {
+    if (comptime !@hasField(@TypeOf(app_manifest), "images")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    if (comptime !@hasField(@TypeOf(app_manifest.images), "max_image_pixel_bytes")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    return app_manifest.images.max_image_pixel_bytes;
+}
+
+pub const app_assets = @import("app_assets.zig");
 
 pub const StdoutTraceSink = struct {
     pub fn sink(self: *StdoutTraceSink) native_sdk.trace.Sink {
@@ -46,12 +58,28 @@ pub const RunOptions = struct {
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
+    restore_policy: native_sdk.WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: native_sdk.WindowInitialPlacement = .default,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
     security: native_sdk.SecurityPolicy = .{},
-    menus: []const native_sdk.Menu = &.{},
+    commands: ?[]const native_sdk.Command = null,
+    menus: ?[]const native_sdk.Menu = null,
     shortcuts: ?[]const native_sdk.Shortcut = null,
+    /// Filled by `runWithOptions` from the manifest capability. App entry
+    /// points do not set this themselves; the field only carries the owned
+    /// binding uniformly into each platform's runtime options.
+    record_store: ?native_sdk.RecordStoreBinding = null,
+    relational_store: ?native_sdk.RelationalStoreBinding = null,
+    credentials_enabled: bool = false,
+    file_access: ?native_sdk.FileAccessBinding = null,
+    /// Migration/testing switch. Shipping defaults to the final enforced
+    /// posture; set false for the preceding warn-only behavior.
+    file_access_enforce: bool = true,
+    /// Explicit compatibility capability for an app's former data identity.
+    legacy_data_directory: bool = false,
+    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
         var info: native_sdk.AppInfo = .{
@@ -64,15 +92,26 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
+            .declares_tray = manifestDeclaresTrayCapability(),
+            .dock_visible = manifestDockVisible(),
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
+            .update_feed_url = manifestUpdateString("feed_url"),
+            .update_public_key = manifestUpdateString("public_key"),
+            .update_check_on_start = manifestUpdateCheckOnStart(),
             .main_window = .{
                 .id = 1,
                 .label = "main",
                 .title = self.window_title,
                 .default_frame = self.default_frame,
                 .restore_state = self.restore_state,
+                .restore_policy = self.restore_policy,
+                .initial_placement = self.initial_placement,
             },
         };
         const windows = manifestWindowOptions(buffers);
@@ -88,20 +127,115 @@ pub const RunOptions = struct {
             // a canvas-first startup window is created ordered-out and
             // shown after its first canvas frame presents, so launch
             // never flashes a blank window.
+            info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.resizable = manifestShellStartupResizable();
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
             info.main_window.show = manifestShellStartupShowMode();
+            info.main_window.transparent = manifestShellStartupBool("transparent", false);
+            info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
+            info.main_window.click_through = manifestShellStartupBool("click_through", false);
+            info.main_window.activate_on_show = manifestShellStartupBool("activate_on_show", true);
+            info.main_window.allows_fullscreen = manifestShellStartupBool("allows_fullscreen", true);
             // Min-size floors ride the create call like the titlebar:
             // the scene re-applies size/title later, but the window's
             // enforced floor is host state from the first frame on.
             info.main_window.min_width = manifestShellStartupMinSize("min_width");
             info.main_window.min_height = manifestShellStartupMinSize("min_height");
+            // Close handling is host window state like the titlebar:
+            // the manifest's declaration rides the host create.
+            info.main_window.close_policy = manifestShellStartupClosePolicy();
         }
         return info;
     }
 
     fn resolvedShortcuts(self: RunOptions, storage: *ShortcutStorage) []const native_sdk.Shortcut {
         return self.shortcuts orelse storage.fromManifest();
+    }
+
+    fn resolvedCommands(self: RunOptions, storage: *CommandStorage) []const native_sdk.Command {
+        return self.commands orelse storage.fromManifest();
+    }
+
+    fn resolvedMenus(self: RunOptions, storage: *MenuStorage) []const native_sdk.Menu {
+        return self.menus orelse storage.fromManifest();
+    }
+};
+
+fn manifestUpdateString(comptime field: []const u8) []const u8 {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return "";
+    const updates = app_manifest.updates;
+    if (comptime !@hasField(@TypeOf(updates), field)) return "";
+    const value = @field(updates, field);
+    return switch (@typeInfo(@TypeOf(value))) {
+        .optional => value orelse "",
+        else => value,
+    };
+}
+
+fn manifestUpdateCheckOnStart() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
+    if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
+    return app_manifest.updates.check_on_start;
+}
+
+const CommandStorage = struct {
+    commands: [native_sdk.app_manifest.max_commands]native_sdk.Command = undefined,
+
+    fn fromManifest(self: *CommandStorage) []const native_sdk.Command {
+        comptime {
+            if (manifest_commands.len > native_sdk.app_manifest.max_commands) {
+                @compileError("app.zon defines too many commands");
+            }
+        }
+
+        inline for (manifest_commands, 0..) |command, index| {
+            self.commands[index] = .{
+                .id = command.id,
+                .title = if (@hasField(@TypeOf(command), "title")) command.title else "",
+                .enabled = if (@hasField(@TypeOf(command), "enabled")) command.enabled else true,
+                .checked = if (@hasField(@TypeOf(command), "checked")) command.checked else false,
+            };
+        }
+        return self.commands[0..manifest_commands.len];
+    }
+};
+
+const MenuStorage = struct {
+    menus: [native_sdk.platform.max_menus]native_sdk.Menu = undefined,
+    items: [native_sdk.platform.max_menu_items]native_sdk.MenuItem = undefined,
+
+    fn fromManifest(self: *MenuStorage) []const native_sdk.Menu {
+        comptime {
+            if (manifest_menus.len > native_sdk.platform.max_menus) {
+                @compileError("app.zon defines too many menus");
+            }
+            var item_count: usize = 0;
+            for (manifest_menus) |menu| {
+                const items = if (@hasField(@TypeOf(menu), "items")) menu.items else .{};
+                item_count += items.len;
+            }
+            if (item_count > native_sdk.platform.max_menu_items) {
+                @compileError("app.zon defines too many menu items");
+            }
+        }
+
+        var item_index: usize = 0;
+        inline for (manifest_menus, 0..) |menu, menu_index| {
+            const items = if (@hasField(@TypeOf(menu), "items")) menu.items else .{};
+            const first_item = item_index;
+            inline for (items) |item| {
+                self.items[item_index] = menuItem(item);
+                item_index += 1;
+            }
+            self.menus[menu_index] = .{
+                .title = menu.title,
+                .items = self.items[first_item..item_index],
+            };
+        }
+        return self.menus[0..manifest_menus.len];
     }
 };
 
@@ -153,9 +287,17 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (windowHasExplicitOrigin(window)) .explicit else .default,
         .titlebar = windowTitlebarStyle(window),
+        .show = if (windowBool(window, "initially_hidden", false)) .hidden else .immediate,
+        .transparent = windowBool(window, "transparent", false),
+        .always_on_top = windowBool(window, "always_on_top", false),
+        .click_through = windowBool(window, "click_through", false),
+        .activate_on_show = windowBool(window, "activate_on_show", true),
+        .allows_fullscreen = windowBool(window, "allows_fullscreen", true),
         .min_width = windowMinSize(window, "min_width"),
         .min_height = windowMinSize(window, "min_height"),
+        .close_policy = windowClosePolicy(window),
     };
 }
 
@@ -202,6 +344,28 @@ fn manifestShellStartupResizable() bool {
     return windowBool(shell.windows[0], "resizable", true);
 }
 
+/// One creation-time boolean from app.zon's first shell window. Overlay
+/// presentation must reach the host before the startup window is shown;
+/// applying it after scene load would allow a focus/opaque flash.
+fn manifestShellStartupBool(comptime field: []const u8, comptime default_value: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return default_value;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return default_value;
+    if (comptime shell.windows.len == 0) return default_value;
+    return windowBool(shell.windows[0], field, default_value);
+}
+
+/// The startup window's close policy for scene-first apps: app.zon's
+/// `.shell.windows[0].close_policy`. Like the titlebar, close handling
+/// is host window state fixed at create time.
+fn manifestShellStartupClosePolicy() native_sdk.WindowClosePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return .quit;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return .quit;
+    if (comptime shell.windows.len == 0) return .quit;
+    return windowClosePolicy(shell.windows[0]);
+}
+
 /// The startup window's content min-size floor for scene-first apps:
 /// app.zon's `.shell.windows[0].min_width`/`.min_height` (0 = none).
 fn manifestShellStartupMinSize(comptime field: []const u8) f32 {
@@ -222,6 +386,7 @@ fn manifestShellStartupShowMode() native_sdk.WindowShowMode {
     if (comptime !@hasField(@TypeOf(shell), "windows")) return .immediate;
     if (comptime shell.windows.len == 0) return .immediate;
     const window = shell.windows[0];
+    if (comptime windowBool(window, "initially_hidden", false)) return .hidden;
     if (comptime !@hasField(@TypeOf(window), "views")) return .immediate;
     inline for (window.views) |view| {
         if (comptime @hasField(@TypeOf(view), "kind")) {
@@ -254,17 +419,78 @@ pub fn manifestThemePack() native_sdk.canvas.ThemePack {
         @compileError("unknown app.zon theme \"" ++ name ++ "\" — expected one of: house, geist");
 }
 
-/// Whether app.zon declares web content: the `webview` capability or a
-/// `frontend` block. Hosts build honest default menus from this — web
-/// items like Reload only exist when a webview can answer them, so
-/// canvas-only apps never ship dead menu items.
-fn manifestHasWebContent() bool {
-    if (comptime @hasField(@TypeOf(app_manifest), "frontend")) return true;
-    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
-    inline for (app_manifest.capabilities) |capability| {
-        if (comptime std.mem.eql(u8, capability, "webview")) return true;
+/// The manifest's ONE-accent brand override (`theme_accent = "#df2670"`),
+/// resolved at comptime so a malformed value is a build error naming the
+/// field — never a silent fallback. Absent means the pack's own accent.
+/// Apps hand this to their `UiApp` options' `theme_accent` field; the
+/// runtime layers `canvas.accentOverrides` over the resolved pack (and
+/// skips it under high contrast — accessibility beats brand).
+pub fn manifestThemeAccent() ?native_sdk.canvas.Color {
+    if (comptime !@hasField(@TypeOf(app_manifest), "theme_accent")) return null;
+    const value: []const u8 = app_manifest.theme_accent;
+    return comptime parseHexColor(value) orelse
+        @compileError("invalid app.zon theme_accent \"" ++ value ++ "\" — expected a #rrggbb hex color");
+}
+
+fn parseHexColor(comptime value: []const u8) ?native_sdk.canvas.Color {
+    comptime {
+        if (value.len != 7 or value[0] != '#') return null;
+        var channels: [3]u8 = undefined;
+        for (&channels, 0..) |*channel, index| {
+            channel.* = std.fmt.parseInt(u8, value[1 + index * 2 .. 3 + index * 2], 16) catch return null;
+        }
+        return native_sdk.canvas.Color.rgb8(channels[0], channels[1], channels[2]);
     }
-    return false;
+}
+
+/// Whether app.zon declares web content — the shared declare-to-use
+/// contract (`native_sdk.app_manifest.web_layer`) over the comptime
+/// manifest import: a `.frontend` block, the `"webview"` capability, a
+/// `.shell` webview view, or `.web_engine = "chromium"`. Hosts build
+/// honest default menus from this — web items like Reload only exist
+/// when a webview can answer them, so canvas-only apps never ship dead
+/// menu items.
+fn manifestHasWebContent() bool {
+    return manifestWebDeclaration() != null;
+}
+
+/// The first web declaration visible in app.zon, evaluated at comptime.
+/// The engine input here is the MANIFEST engine: the runner never sees
+/// the `-Dweb-engine` flag, so an engine resolved to Chromium by flag
+/// alone is out of this boundary's reach — the standard build graph
+/// (build/app.zig), which does see the flag, owns that configure-time
+/// error. See the contract's module doc for the full ownership split.
+fn manifestWebDeclaration() ?native_sdk.app_manifest.web_layer.Declaration {
+    const engine: native_sdk.app_manifest.WebEngine = comptime blk: {
+        if (!@hasField(@TypeOf(app_manifest), "web_engine")) break :blk .system;
+        break :blk native_sdk.app_manifest.web_layer.parseWebEngine(app_manifest.web_engine) orelse .system;
+    };
+    return comptime native_sdk.app_manifest.web_layer.webDeclaration(app_manifest, engine);
+}
+
+/// Whether this build ships the embedded web layer. The standard build
+/// graph (build/app.zig) infers it from app.zon and passes it through
+/// build options; an options module from an older hand-rolled build.zig
+/// that predates the option keeps the layer — over-inclusion is safe.
+fn webLayerEnabled() bool {
+    if (comptime !@hasDecl(build_options, "web_layer")) return true;
+    return build_options.web_layer;
+}
+
+// The runner-side half of the reject-conflicts contract: a build that
+// excludes the web layer while app.zon declares web use must fail at
+// compile time here too, so a hand-rolled build graph that bypasses the
+// standard configure-time error still cannot ship an app whose declared
+// webviews would fail at runtime. The guard covers every declaration
+// visible in the manifest; only a Chromium engine resolved from the
+// `-Dweb-engine` flag is invisible here, and that conflict is already a
+// configure-time error in the graph that resolved the flag.
+comptime {
+    if (!webLayerEnabled()) {
+        if (manifestWebDeclaration()) |declaration| {
+            @compileError("this build excludes the web layer (-Dweb-layer=exclude or a custom build graph) but app.zon declares web use (" ++ declaration.text() ++ "); remove the exclude or drop the web declaration");
+        }
+    }
 }
 
 fn windowLabel(comptime window: anytype, comptime index: usize) []const u8 {
@@ -295,6 +521,148 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     @compileError("unknown app.zon window restore_policy");
+}
+
+fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+}
+
+/// The host creates the first scene window before the scene loads, so its
+/// authored frame must ride AppInfo with the other creation-time options.
+/// Omitted fields preserve RunOptions' direct-SDK fallback independently.
+fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geometry.RectF {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    return native_sdk.geometry.RectF.init(
+        windowFloatFallback(window, "x", fallback.x),
+        windowFloatFallback(window, "y", fallback.y),
+        windowFloatFallback(window, "width", fallback.width),
+        windowFloatFallback(window, "height", fallback.height),
+    );
+}
+
+fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
+    if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    return fallback;
+}
+
+fn manifestShellStartupRestoreState(fallback: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime @hasField(@TypeOf(window), "restore_state")) return window.restore_state;
+    return fallback;
+}
+
+fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    const declared: ?native_sdk.WindowRestorePolicy = if (comptime @hasField(@TypeOf(window), "restore_policy")) windowRestorePolicy(window) else null;
+    return window_placement.applyShellRestorePolicy(fallback, declared);
+}
+
+fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    return window_placement.applyShellInitialPlacement(fallback, windowHasExplicitOrigin(shell.windows[0]));
+}
+
+/// What the window's close affordance does, from app.zon. `.hide` is
+/// validated against the TARGET platform at comptime: a host with no
+/// affordance to bring a hidden window back (GTK has no status item;
+/// windows without a declared tray, since hiding removes the taskbar
+/// entry and windows has no dock) refuses the declaration here, at
+/// build time, instead of stranding a hidden window at runtime.
+fn windowClosePolicy(comptime window: anytype) native_sdk.WindowClosePolicy {
+    if (comptime !@hasField(@TypeOf(window), "close_policy")) return .quit;
+    const value = window.close_policy;
+    if (comptime std.mem.eql(u8, value, "quit")) return .quit;
+    if (comptime std.mem.eql(u8, value, "hide")) {
+        if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
+            @compileError("app.zon window close_policy \"hide\" is not supported on linux: the GTK host has no status item (tray), so nothing could bring the hidden window back - declare \"quit\" (the default), or scope the .hide declaration to macos/windows builds");
+        }
+        if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
+            if (comptime !manifestDeclaresTrayCapability()) {
+                @compileError("app.zon window close_policy \"hide\" on windows requires the \"tray\" capability: hiding removes the taskbar entry and windows has no dock-reopen path, so only a status item (tray) could bring the hidden window back - add \"tray\" to .capabilities and install a status item, or declare \"quit\" (the default); macos needs no capability because the dock reopen path always exists");
+            }
+        }
+        return .hide;
+    }
+    @compileError("unknown app.zon window close_policy - supported values: \"quit\" (close really closes; the default) and \"hide\" (the menu-bar-app shape: close hides the window and the app keeps running)");
+}
+
+/// Whether app.zon declares the "tray" capability — the status item
+/// `.hide` leans on where the OS has no built-in re-show affordance.
+/// Evaluated at comptime over the manifest import, like the web scan.
+fn manifestDeclaresTrayCapability() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "tray")) return true;
+    }
+    return false;
+}
+
+/// Initial Dock/app-switcher presence. The validation is repeated at
+/// comptime so a custom/ejected build cannot bypass the same safety
+/// rule as `native validate` and strand an accessory app with no tray.
+fn manifestDockVisible() bool {
+    const visible = if (comptime @hasField(@TypeOf(app_manifest), "dock_visible")) app_manifest.dock_visible else true;
+    if (comptime !visible and !manifestDeclaresTrayCapability()) {
+        @compileError("app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)");
+    }
+    return visible;
+}
+
+/// Whether app.zon declares the Tier-2 record store. This is comptime so
+/// apps without the capability never analyze the SQLite open/deinit path.
+fn manifestDeclaresStore() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "store")) return true;
+    }
+    return false;
+}
+
+fn manifestDeclaresSqlite() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "sqlite")) return true;
+    }
+    return false;
+}
+
+fn manifestDeclaresCredentials() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "capabilities")) return false;
+    inline for (app_manifest.capabilities) |capability| {
+        const name: []const u8 = capability;
+        if (comptime std.mem.eql(u8, name, "credentials")) return true;
+    }
+    return false;
+}
+
+fn menuItem(comptime item: anytype) native_sdk.MenuItem {
+    return .{
+        .label = if (@hasField(@TypeOf(item), "label")) item.label else "",
+        .command = if (@hasField(@TypeOf(item), "command")) item.command else "",
+        .key = if (@hasField(@TypeOf(item), "key")) item.key else "",
+        .modifiers = shortcutModifiers(item),
+        .separator = if (@hasField(@TypeOf(item), "separator")) item.separator else false,
+        .enabled = if (@hasField(@TypeOf(item), "enabled")) item.enabled else true,
+        .checked = if (@hasField(@TypeOf(item), "checked")) item.checked else false,
+    };
 }
 
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
@@ -328,14 +696,92 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY")) |journal_path| {
         return runSessionReplay(app, options, init, journal_path);
     }
+    const RecordStoreType = if (comptime manifestDeclaresStore()) native_sdk.RecordStore else void;
+    var record_store_value: RecordStoreType = undefined;
+    var record_store_open = false;
+    var resolved_options = options;
+    resolved_options.credentials_enabled = manifestDeclaresCredentials();
+    var file_root_buffers: [6][1024]u8 = undefined;
+    var file_roots: [7][]const u8 = undefined;
+    var legacy_data_buffer: [1024]u8 = undefined;
+    const resolved_file_dirs = native_sdk.app_dirs.resolve(
+        .{ .name = options.bundle_id },
+        native_sdk.app_dirs.currentPlatform(),
+        native_sdk.debug.envFromMap(init.environ_map),
+        native_sdk.app_dirs.Buffers.fromArray(1024, &file_root_buffers),
+    ) catch null;
+    var file_root_count: usize = 0;
+    if (resolved_file_dirs) |dirs| {
+        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+        file_root_count = 6;
+    }
+    if (options.legacy_data_directory) {
+        if (native_sdk.app_dirs.resolveOne(
+            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
+            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
+        )) |directory| {
+            file_roots[file_root_count] = directory;
+            file_root_count += 1;
+        } else |_| {}
+    }
+    // Fail closed if app-dir resolution is unavailable: a filesystem grant
+    // still opens arbitrary paths, while an ungranted app gets no accidental
+    // unrestricted fallback merely because HOME/XDG data was malformed.
+    resolved_options.file_access = .{
+        .roots = file_roots[0..file_root_count],
+        .permitted = native_sdk.security.hasPermission(options.security.permissions, native_sdk.security.permission_filesystem),
+        .enforce = options.file_access_enforce,
+    };
+    if (comptime manifestDeclaresStore()) {
+        var data_dir_buffer: [512]u8 = undefined;
+        const app_data_dir = native_sdk.app_dirs.resolveOne(
+            .{ .name = options.bundle_id },
+            native_sdk.app_dirs.currentPlatform(),
+            native_sdk.debug.envFromMap(init.environ_map),
+            .data,
+            &data_dir_buffer,
+        ) catch return error.StoreDataDirUnavailable;
+        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
+        record_store_value = try native_sdk.RecordStore.open(std.heap.page_allocator, app_data_dir);
+        record_store_open = true;
+        resolved_options.record_store = record_store_value.binding();
+    }
+    defer if (comptime manifestDeclaresStore()) {
+        if (record_store_open) record_store_value.deinit();
+    };
+    const RelationalStoreType = if (comptime manifestDeclaresSqlite()) native_sdk.RelationalStore else void;
+    var relational_store_value: RelationalStoreType = undefined;
+    var relational_store_open = false;
+    if (comptime manifestDeclaresSqlite()) {
+        var data_dir_buffer: [512]u8 = undefined;
+        const app_data_dir = native_sdk.app_dirs.resolveOne(
+            .{ .name = options.bundle_id },
+            native_sdk.app_dirs.currentPlatform(),
+            native_sdk.debug.envFromMap(init.environ_map),
+            .data,
+            &data_dir_buffer,
+        ) catch return error.SqliteDataDirUnavailable;
+        try std.Io.Dir.cwd().createDirPath(init.io, app_data_dir);
+        const open_result = try native_sdk.RelationalStore.openMigrated(std.heap.page_allocator, app_data_dir, options.relational_migrations);
+        switch (open_result.outcome) {
+            .ok => relational_store_value = open_result.database.?,
+            .migrate_failed => return error.SqliteMigrationFailed,
+            .version_unknown => return error.SqliteVersionUnknown,
+        }
+        relational_store_open = true;
+        resolved_options.relational_store = relational_store_value.binding();
+    }
+    defer if (comptime manifestDeclaresSqlite()) {
+        if (relational_store_open) relational_store_value.deinit();
+    };
     if (comptime std.mem.eql(u8, build_options.platform, "macos")) {
-        try runMacos(app, options, init);
+        try runMacos(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "linux")) {
-        try runLinux(app, options, init);
+        try runLinux(app, resolved_options, init);
     } else if (comptime std.mem.eql(u8, build_options.platform, "windows")) {
-        try runWindows(app, options, init);
+        try runWindows(app, resolved_options, init);
     } else {
-        try runNull(app, options, init);
+        try runNull(app, resolved_options, init);
     }
 }
 
@@ -343,8 +789,13 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `NullPlatform.createWithOptions`/`destroy`).
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -363,23 +814,39 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
+        .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -395,9 +862,13 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
-    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer mac_platform.deinit();
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `MacPlatform.createWithOptions`/`destroy`).
+    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer mac_platform.destroy();
     native_sdk.runtime.launch_timing.lap("host_ready");
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
@@ -417,23 +888,39 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
+        .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -447,9 +934,13 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
-    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer linux_platform.deinit();
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `LinuxPlatform.createWithOptions`/`destroy`).
+    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -468,23 +959,39 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
+        .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -497,9 +1004,13 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
-    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer windows_platform.deinit();
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `WindowsPlatform.createWithOptions`/`destroy`).
+    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -518,23 +1029,39 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
+    defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
+        .record_store = options.record_store,
+        .relational_store = options.relational_store,
+        .credentials_enabled = options.credentials_enabled,
+        .file_access = options.file_access,
         .environ = init.minimal.environ,
         .session_recorder = session_recorder,
     });
@@ -564,11 +1091,27 @@ const SessionRecordContext = struct {
     }
 };
 
+/// The blob directory beside a session journal: `blobs/` in the
+/// journal's directory — large effect payloads (an image load's source
+/// bytes) live there content-addressed, referenced from journal
+/// records by hash + length (see session_blobs.zig).
+fn sessionBlobStore(io: std.Io, journal_path: []const u8, policy: ?*const fn ([]const u8, []u8) usize) ?*native_sdk.runtime.SessionBlobDirStore {
+    var dir_buffer: [1024]u8 = undefined;
+    const parent = std.fs.path.dirname(journal_path) orelse ".";
+    const blob_dir = std.fmt.bufPrint(&dir_buffer, "{s}/blobs", .{parent}) catch return null;
+    const store = std.heap.page_allocator.create(native_sdk.runtime.SessionBlobDirStore) catch return null;
+    store.* = native_sdk.runtime.SessionBlobDirStore.initWithPolicy(io, blob_dir, policy) catch {
+        std.heap.page_allocator.destroy(store);
+        return null;
+    };
+    return store;
+}
+
 /// `NATIVE_SDK_SESSION_RECORD=<path>`: create the journal file and a
 /// recorder that streams the session into it from the very first
 /// dispatched event (init determinism needs init-time effect results).
 /// Failures disable recording loudly and never block the app.
-fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*native_sdk.runtime.SessionRecorder {
+fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo, policy: ?*const fn ([]const u8, []u8) usize, blob_policy: ?*const fn ([]const u8, []u8) usize) ?*native_sdk.runtime.SessionRecorder {
     const path = init.environ_map.get("NATIVE_SDK_SESSION_RECORD") orelse return null;
     const file = std.Io.Dir.cwd().createFile(init.io, path, .{ .truncate = true }) catch |err| {
         std.debug.print("session recording disabled: cannot create {s}: {s}\n", .{ path, @errorName(err) });
@@ -578,6 +1121,8 @@ fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*
     context.* = .{ .io = init.io, .file = file };
     const recorder = std.heap.page_allocator.create(native_sdk.runtime.SessionRecorder) catch return null;
     recorder.* = native_sdk.runtime.SessionRecorder.init(context.sink());
+    recorder.recording_policy = policy;
+    if (sessionBlobStore(init.io, path, blob_policy)) |store| recorder.blob_sink = store.sink();
     recorder.begin(native_sdk.runtime.sessionHeaderNow(
         native_sdk.runtime.sessionPlatformName(),
         app_info.app_name,
@@ -618,7 +1163,12 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
 
     var buffers: StateBuffers = undefined;
     const app_info = options.appInfo(&buffers);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    // Heap wrapper, latch-gated free: worker threads hold this address
+    // as the channel wake context and an abandoned wake call may
+    // dereference it after this frame unwinds (see
+    // `NullPlatform.createWithOptions`/`destroy`).
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     null_platform.gpu_surfaces = true;
     var replay_platform = null_platform.platform();
     // Same-platform replay must mirror the RECORDING host's rendering
@@ -632,29 +1182,55 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         native_sdk.platform.macos.installHeadlessTextServices(&replay_platform.services);
         null_platform.gpu_surface_scroll_drivers = true;
     }
+    // Replayed image loads decode too: successful `.image` records feed
+    // their journaled blob-store bytes back through decode+register, so
+    // the codec must be the recording host's own or every replayed load
+    // (and every replayed screenshot with an image in it) drops its
+    // pixels. Journaled bytes stay the only input — the codec is a pure
+    // bytes-to-pixels call and the network stays absent.
+    native_sdk.platform.installHeadlessImageCodec(build_options.platform, null_platform, &replay_platform.services);
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
     defer std.heap.page_allocator.destroy(runtime);
+    // Fonts registered at startup and media-surface texture buffers
+    // adopted during the run are heap-owned by the runtime; return them
+    // (and disarm the producer wake bindings) before the runtime
+    // storage itself goes.
+    defer runtime.deinit();
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only
     // the journal and restores nothing.
     native_sdk.Runtime.initAt(runtime, .{
         .platform = replay_platform,
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
+        .web_layer = webLayerEnabled(),
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
+        .shortcuts = shortcuts,
     });
 
     const verify = if (init.environ_map.get("NATIVE_SDK_SESSION_VERIFY")) |value|
         !std.mem.eql(u8, value, "0")
     else
         true;
-    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{ .verify = verify }) catch |err| {
+    const blob_store = sessionBlobStore(init.io, journal_path, app.blob_policy);
+    const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{
+        .verify = verify,
+        .blobs = if (blob_store) |store| store.source() else null,
+    }) catch |err| {
         switch (err) {
             error.JournalBadMagic,
-            error.JournalUnsupportedVersion,
+            error.JournalFormatMismatch,
             error.JournalTruncated,
             error.JournalCorrupt,
             error.JournalRecordOverBudget,
@@ -712,6 +1288,104 @@ fn webEngine() native_sdk.WebEngine {
     return .system;
 }
 
+test "RunOptions resolves manifest commands menus and shortcuts" {
+    const options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+    };
+    var info_buffers: StateBuffers = .{};
+    const app_info = options.appInfo(&info_buffers);
+    try std.testing.expectEqualStrings("https://example.com/native-update.json", app_info.update_feed_url);
+    try std.testing.expectEqualStrings("11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=", app_info.update_public_key);
+    try std.testing.expect(app_info.update_check_on_start);
+
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
+    try std.testing.expectEqual(@as(usize, 2), commands.len);
+    try std.testing.expectEqualStrings("app.refresh", commands[0].id);
+    try std.testing.expectEqualStrings("Refresh", commands[0].title);
+    try std.testing.expect(!commands[0].enabled);
+    try std.testing.expect(commands[0].checked);
+    try std.testing.expectEqualStrings("app.defaults", commands[1].id);
+    try std.testing.expectEqualStrings("", commands[1].title);
+    try std.testing.expect(commands[1].enabled);
+    try std.testing.expect(!commands[1].checked);
+
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    try std.testing.expectEqual(@as(usize, 2), menus.len);
+    try std.testing.expectEqualStrings("View", menus[0].title);
+    try std.testing.expectEqual(@as(usize, 3), menus[0].items.len);
+    try std.testing.expectEqualStrings("Refresh", menus[0].items[0].label);
+    try std.testing.expectEqualStrings("app.refresh", menus[0].items[0].command);
+    try std.testing.expectEqualStrings("r", menus[0].items[0].key);
+    try std.testing.expect(menus[0].items[0].modifiers.option);
+    try std.testing.expect(menus[0].items[0].modifiers.shift);
+    try std.testing.expect(!menus[0].items[0].enabled);
+    try std.testing.expect(menus[0].items[0].checked);
+    try std.testing.expect(menus[0].items[1].separator);
+    try std.testing.expectEqualStrings("Defaults", menus[0].items[2].label);
+    try std.testing.expect(menus[0].items[2].enabled);
+    try std.testing.expect(!menus[0].items[2].checked);
+    try std.testing.expectEqualStrings("Help", menus[1].title);
+    try std.testing.expectEqual(@as(usize, 0), menus[1].items.len);
+
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    try std.testing.expectEqual(@as(usize, 1), shortcuts.len);
+    try std.testing.expectEqualStrings("app.refresh", shortcuts[0].id);
+    try std.testing.expectEqualStrings("r", shortcuts[0].key);
+    try std.testing.expect(shortcuts[0].modifiers.primary);
+}
+
+test "RunOptions explicit command menu and shortcut slices override manifest values" {
+    const override_commands = [_]native_sdk.Command{
+        .{ .id = "override.command", .title = "Override Command" },
+    };
+    const override_items = [_]native_sdk.MenuItem{
+        .{ .label = "Override Item", .command = "override.command" },
+    };
+    const override_menus = [_]native_sdk.Menu{
+        .{ .title = "Override Menu", .items = &override_items },
+    };
+    const override_shortcuts = [_]native_sdk.Shortcut{
+        .{ .id = "override.command", .key = "o", .modifiers = .{ .primary = true } },
+    };
+    const options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+        .commands = &override_commands,
+        .menus = &override_menus,
+        .shortcuts = &override_shortcuts,
+    };
+
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
+    try std.testing.expectEqual(@as(usize, 1), commands.len);
+    try std.testing.expectEqualStrings("override.command", commands[0].id);
+
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    try std.testing.expectEqual(@as(usize, 1), menus.len);
+    try std.testing.expectEqualStrings("Override Menu", menus[0].title);
+
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    try std.testing.expectEqual(@as(usize, 1), shortcuts.len);
+    try std.testing.expectEqualStrings("override.command", shortcuts[0].id);
+
+    const empty_options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+        .commands = &.{},
+        .menus = &.{},
+        .shortcuts = &.{},
+    };
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedCommands(&command_storage).len);
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedMenus(&menu_storage).len);
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedShortcuts(&shortcut_storage).len);
+}
+
 const StateBuffers = struct {
     state_dir: [1024]u8 = undefined,
     file_path: [1200]u8 = undefined,
@@ -726,15 +1400,25 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         const restored_windows = buffers.restored_windows[0..app_info.windows.len];
         for (restored_windows, 0..) |*window, index| {
             if (!window.restore_state) continue;
-            if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
-                window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+            if (window_placement.applySavedWindow(window, store.loadWindow(window.label, &buffers.read) catch null)) {
+                if (index == 0) {
+                    app_info.main_window.default_frame = window.default_frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
-        if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
-            app_info.main_window.default_frame = saved.frame;
-        }
+        _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
     }
     return store;
+}
+
+test "runner inspection capability follows the app build mode and explicit override" {
+    var buffers: StateBuffers = .{};
+    const info = (RunOptions{ .app_name = "inspection-test", .bundle_id = "dev.native_sdk.inspection_test" }).appInfo(&buffers);
+    if (comptime @hasDecl(build_options, "webview_inspection_expected")) {
+        try std.testing.expectEqual(build_options.webview_inspection_expected, info.webview_inspection);
+    }
+    // Direct embedding stays default-deny, including inside Debug builds.
+    try std.testing.expect(!(native_sdk.AppInfo{}).webview_inspection);
 }

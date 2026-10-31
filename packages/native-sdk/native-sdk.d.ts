@@ -25,12 +25,20 @@ export interface NativeSdkWindowInfo {
   title: string;
   open: boolean;
   focused: boolean;
+  /** Alive but hidden by `close_policy = "hide"` — still open, not focused, invisible until re-shown. */
+  hidden: boolean;
   x: number;
   y: number;
   width: number;
   height: number;
   scale: number;
 }
+
+export type NativeSdkWindowTitlebarStyle =
+  | "standard"
+  | "hidden_inset"
+  | "hidden_inset_tall"
+  | "chromeless";
 
 export interface NativeSdkCreateWindowOptions {
   label?: string;
@@ -40,6 +48,16 @@ export interface NativeSdkCreateWindowOptions {
   x?: number;
   y?: number;
   restoreState?: boolean;
+  /** Native titlebar treatment. Transparent Windows windows require "chromeless". */
+  titlebar?: NativeSdkWindowTitlebarStyle;
+  /** Make the top-level window alpha-capable. */
+  transparent?: boolean;
+  /** Keep the window above ordinary application windows. */
+  alwaysOnTop?: boolean;
+  /** Pass all pointer input through to the window underneath. */
+  clickThrough?: boolean;
+  /** Set false to show without activating the app or taking focus. */
+  activateOnShow?: boolean;
   url?: string;
 }
 
@@ -160,7 +178,10 @@ export type NativeSdkViewKind =
   | "progress_indicator"
   | "progressIndicator";
 
-export type NativeSdkGpuSurfaceBackend = "none" | "metal";
+/** Concrete backend reported by GPU surface view and frame state. */
+export type NativeSdkGpuSurfaceBackend = "none" | "metal" | "direct2d" | "software";
+/** Portable backend request accepted when creating a GPU surface. */
+export type NativeSdkGpuSurfaceBackendRequest = "metal" | "software";
 export type NativeSdkGpuSurfacePixelFormat = "none" | "bgra8_unorm";
 export type NativeSdkGpuSurfacePresentMode = "none" | "timer";
 export type NativeSdkGpuSurfaceAlphaMode = "none" | "opaque" | "premultiplied";
@@ -195,6 +216,7 @@ export interface NativeSdkViewInfo {
   gpuFrame: number;
   gpuTimestampNs: number;
   gpuFrameIntervalNs: number;
+  gpuInputCount: number;
   gpuInputTimestampNs: number;
   gpuInputLatencyNs: number;
   gpuInputLatencyBudgetNs: number;
@@ -205,6 +227,7 @@ export interface NativeSdkViewInfo {
   gpuFirstFrameLatencyBudgetExceededCount: number;
   gpuFirstFrameLatencyBudgetOk: boolean;
   gpuNonblank: boolean;
+  gpuOccluded: boolean;
   gpuSampleColor: number;
   gpuBackend: NativeSdkGpuSurfaceBackend;
   gpuPixelFormat: NativeSdkGpuSurfacePixelFormat;
@@ -309,8 +332,8 @@ export interface NativeSdkCreateNativeViewOptions extends NativeSdkCreateViewBas
   kind: NativeSdkNativeViewKind;
   frame?: NativeSdkRect;
   url?: never;
-  /** Only valid for gpu_surface views. Defaults to the first supported backend. */
-  gpuBackend?: NativeSdkGpuSurfaceBackend;
+  /** Only valid for gpu_surface views. Omit to use the first supported backend. */
+  gpuBackend?: NativeSdkGpuSurfaceBackendRequest;
   /** Only valid for gpu_surface views. */
   gpuPixelFormat?: NativeSdkGpuSurfacePixelFormat;
   /** Only valid for gpu_surface views. */
@@ -419,7 +442,27 @@ export type NativeSdkPlatformFeature =
   | "app_activation_events"
   | "appActivationEvents"
   | "gpu_surfaces"
-  | "gpuSurfaces";
+  | "gpuSurfaces"
+  | "gpu_surface_scroll_drivers"
+  | "gpuSurfaceScrollDrivers"
+  | "context_menus"
+  | "contextMenus"
+  | "view_surface_adoption"
+  | "viewSurfaceAdoption"
+  | "audio_playback"
+  | "audioPlayback"
+  | "audio_streaming"
+  | "audioStreaming"
+  | "audio_spectrum"
+  | "audioSpectrum"
+  | "microphone_capture"
+  | "microphoneCapture"
+  | "system_audio_capture"
+  | "systemAudioCapture"
+  | "window_hide_on_close"
+  | "windowHideOnClose"
+  | "video_playback"
+  | "videoPlayback";
 
 export type NativeSdkPlatformFeatureSelector =
   | { feature: NativeSdkPlatformFeature; name?: never }
@@ -430,6 +473,8 @@ export interface NativeSdkCommandEvent {
   source: NativeSdkCommandSource;
   windowId: number;
   viewLabel: string;
+  /** Native status-item id for tray-sourced commands, otherwise 0. */
+  statusItemId: number;
   /** Native tray item id for tray-sourced commands, otherwise 0. */
   trayItemId: number;
 }
@@ -506,9 +551,15 @@ export interface NativeSdkRecentDocumentOptions {
 }
 
 export interface NativeSdkNotificationOptions {
+  /** Stable replacement/deduplication identifier. */
+  id?: string;
   title: string;
   subtitle?: string;
   body?: string;
+  /** Paired with actionCommand; both must be present or both omitted. */
+  actionLabel?: string;
+  /** Normal application command dispatched when the user activates the action. */
+  actionCommand?: string;
 }
 
 export interface NativeSdkClipboardReadOptions {

@@ -224,6 +224,7 @@ const DesignTokens = support.DesignTokens;
 const WidgetKind = support.WidgetKind;
 const WidgetCursor = support.WidgetCursor;
 const WidgetState = support.WidgetState;
+const WidgetLayoutMotion = support.WidgetLayoutMotion;
 const WidgetRenderState = support.WidgetRenderState;
 const WidgetMainAlignment = support.WidgetMainAlignment;
 const WidgetCrossAlignment = support.WidgetCrossAlignment;
@@ -443,6 +444,41 @@ test "widget layout diff tracks added removed and layout changes by id" {
     try expectRect(geometry.RectF.init(10, 50, 100, 20), invalidations[2].dirty_bounds);
 }
 
+test "widget layout diff marks a stream-size-only change paint dirty" {
+    // The LOADED report changes only `stream_size` on the video's media
+    // surface — same frame, same image id — but the rendering flips
+    // from a full-frame draw to bars plus a fitted quad, so the diff
+    // must invalidate or retained-pixel consumers keep the stale paint.
+    const previous_widget = Widget{
+        .id = 2,
+        .kind = .media_surface,
+        .frame = geometry.RectF.init(10, 10, 100, 40),
+        .image_id = 5,
+        .image_fit = .contain,
+    };
+    var next_widget = previous_widget;
+    next_widget.stream_size = .{ .width = 640, .height = 360 };
+
+    var previous_nodes: [1]WidgetLayoutNode = undefined;
+    var next_nodes: [1]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(previous_widget, geometry.RectF.init(0, 0, 180, 100), &previous_nodes);
+    const next = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &next_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, next, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expectEqual(WidgetInvalidationKind.changed, invalidations[0].kind);
+    try std.testing.expect(invalidations[0].paint_dirty);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+
+    // And identical stream sizes stay quiet: no phantom repaints per
+    // rebuild while a video plays.
+    var same_nodes: [1]WidgetLayoutNode = undefined;
+    const same = try layoutWidgetTree(next_widget, geometry.RectF.init(0, 0, 180, 100), &same_nodes);
+    const quiet = try WidgetLayoutTree.diff(next, same, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 0), quiet.len);
+}
+
 test "widget layout diff includes paint overdraw in dirty bounds" {
     const panel_child = [_]Widget{.{
         .id = 2,
@@ -569,6 +605,121 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 2 }, .{ .focused_id = 2 }) == null);
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 99 }, .{ .focused_id = 100 }) == null);
+    try expectRect(
+        geometry.RectF.init(0, 0, 160, 140),
+        layout.renderStateDirtyBounds(.{}, .{ .drag_preview_id = 2, .drag_preview_offset = geometry.OffsetF.init(80, 4) }),
+    );
+}
+
+test "quiet logical menu focus paints and dirties the active row without an outline" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 12, 120, 32),
+            .text = "Duplicate",
+        },
+        .{
+            .id = 3,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 52, 120, 32),
+            .text = "Rename",
+        },
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 100), &nodes);
+
+    // A pointer-opened menu keeps focus-visible quiet, but ArrowDown
+    // still establishes a logical active row. That row needs the menu
+    // wash so the movement is perceptible, without acquiring the focus
+    // outline reserved for keyboard traversal between controls.
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .focused_id = 2 });
+    var duplicate_wash = false;
+    var rename_wash = false;
+    var duplicate_outline = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| {
+            if (fill.id == widgetPartId(2, 1)) duplicate_wash = true;
+            if (fill.id == widgetPartId(3, 1)) rename_wash = true;
+        },
+        .stroke_rect => |stroke| {
+            if (stroke.id == widgetPartId(2, 2)) duplicate_outline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(duplicate_wash);
+    try std.testing.expect(!rename_wash);
+    try std.testing.expect(!duplicate_outline);
+
+    // Moving to the next row changes pixels on both the old and new
+    // rows; retained rendering must invalidate the complete union.
+    const duplicate_frame = layout.findById(2).?.frame;
+    const rename_frame = layout.findById(3).?.frame;
+    const dirty = layout.renderStateDirtyBounds(
+        .{ .focused_id = 2 },
+        .{ .focused_id = 3 },
+    ).?;
+    try std.testing.expect(dirty.x <= @min(duplicate_frame.x, rename_frame.x));
+    try std.testing.expect(dirty.y <= @min(duplicate_frame.y, rename_frame.y));
+    try std.testing.expect(dirty.maxX() >= @max(duplicate_frame.maxX(), rename_frame.maxX()));
+    try std.testing.expect(dirty.maxY() >= @max(duplicate_frame.maxY(), rename_frame.maxY()));
+}
+
+test "widget render state dirty bounds tracks terminal logical focus" {
+    const rows = [_]canvas.TerminalRow{.{ .cells = &.{} }};
+    var grid = canvas.TerminalGrid{
+        .rows = &rows,
+        .background = Color.rgb8(0, 0, 0),
+        .foreground = Color.rgb8(255, 255, 255),
+        .cursor_color = Color.rgb8(255, 255, 255),
+        .selection_color = Color.rgb8(0, 128, 255),
+        .cursor = .{ .x = 0, .y = 0 },
+    };
+    const terminal = Widget{
+        .id = 9,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 12, 200, 100),
+        .terminal = .{ .pty = 1, .grid = &grid },
+    };
+    var nodes: [1]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(terminal, terminal.frame, &nodes);
+
+    // Logical focus changes the live cursor from outline to fill even
+    // when focus-visible stays quiet, so the terminal frame is dirty.
+    try expectRect(
+        terminal.frame,
+        layout.renderStateDirtyBounds(.{}, .{ .focused_id = terminal.id }),
+    );
+    try expectRect(
+        terminal.frame,
+        layout.renderStateDirtyBounds(
+            .{ .focused_id = terminal.id },
+            .{ .keyboard_active = false, .focused_id = terminal.id },
+        ),
+    );
+
+    // A static/baked focused state is the source of truth when neither
+    // render state carries a focus id. The keyboard gate still hollows
+    // that cursor, so the no-id path must report its frame dirty too.
+    var baked_terminal = terminal;
+    baked_terminal.state.focused = true;
+    var baked_nodes: [1]WidgetLayoutNode = undefined;
+    const baked_layout = try layoutWidgetTree(baked_terminal, baked_terminal.frame, &baked_nodes);
+    try expectRect(
+        baked_terminal.frame,
+        baked_layout.renderStateDirtyBounds(.{}, .{ .keyboard_active = false }),
+    );
+
+    // An ended cursor is hollow in both states: logical focus no longer
+    // changes pixels, so no damage is reported.
+    grid.running = false;
+    try std.testing.expect(layout.renderStateDirtyBounds(.{}, .{ .focused_id = terminal.id }) == null);
+    try std.testing.expect(layout.renderStateDirtyBounds(
+        .{ .focused_id = terminal.id },
+        .{ .keyboard_active = false, .focused_id = terminal.id },
+    ) == null);
 }
 
 test "widget render state dirty bounds uses custom focus stroke tokens" {
@@ -1262,6 +1413,57 @@ test "widget tree emits panel button text and progress commands" {
     }
 }
 
+test "stack row and column backgrounds paint in tree and layout emission" {
+    const kinds = [_]WidgetKind{ .stack, .row, .column };
+    const frame = geometry.RectF.init(10, 12, 140, 72);
+    const background = Color.rgb8(18, 52, 86);
+
+    for (kinds, 0..) |kind, index| {
+        const id: ObjectId = @intCast(index + 1);
+        const widget = Widget{
+            .id = id,
+            .kind = kind,
+            .frame = frame,
+            .style = .{
+                .background = background,
+                .radius = 7,
+            },
+        };
+
+        var tree_commands: [1]CanvasCommand = undefined;
+        var tree_builder = Builder.init(&tree_commands);
+        try emitWidgetTree(&tree_builder, widget, .{});
+        const tree_display_list = tree_builder.displayList();
+        try std.testing.expectEqual(@as(usize, 1), tree_display_list.commandCount());
+        switch (tree_display_list.commands[0]) {
+            .fill_rounded_rect => |fill| {
+                try std.testing.expectEqual(widgetPartId(id, 1), fill.id);
+                try expectRect(frame, fill.rect);
+                try std.testing.expectEqualDeep(Radius.all(7), fill.radius);
+                try expectFillColor(background, fill.fill);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+
+        var nodes: [1]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(widget, frame, &nodes);
+        var layout_commands: [1]CanvasCommand = undefined;
+        var layout_builder = Builder.init(&layout_commands);
+        try emitWidgetLayout(&layout_builder, layout, .{});
+        const layout_display_list = layout_builder.displayList();
+        try std.testing.expectEqual(@as(usize, 1), layout_display_list.commandCount());
+        switch (layout_display_list.commands[0]) {
+            .fill_rounded_rect => |fill| {
+                try std.testing.expectEqual(widgetPartId(id, 1), fill.id);
+                try expectRect(frame, fill.rect);
+                try std.testing.expectEqualDeep(Radius.all(7), fill.radius);
+                try expectFillColor(background, fill.fill);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
 test "widget tree emits backdrop blur before widget content" {
     const children = [_]Widget{.{
         .id = 2,
@@ -1548,11 +1750,13 @@ test "widget emitter applies button variants" {
     try emitWidgetTree(&builder, .{ .id = 23, .kind = .button, .frame = geometry.RectF.init(0, 120, 120, 32), .text = "Ghost", .variant = .ghost }, tokens);
     try emitWidgetTree(&builder, .{ .id = 24, .kind = .button, .frame = geometry.RectF.init(0, 160, 120, 32), .text = "Delete", .variant = .destructive }, tokens);
 
-    // Every variant is FLAT (no shadow command): 5 x (fill + border +
-    // label). Destructive is the quiet red chip — the destructive hue
-    // as a 10% wash under destructive-red text, borderless.
+    // Every variant is FLAT (no shadow command): primary, secondary, and
+    // outline each emit fill + border + label; borderless ghost and
+    // destructive each emit only fill + label. Destructive is the quiet
+    // red chip — the destructive hue as a 10% wash under destructive-red
+    // text. No dead zero-width stroke commands enter the list.
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 15), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
@@ -1573,19 +1777,13 @@ test "widget emitter applies button variants" {
         .fill_rounded_rect => |fill| try expectFillColor(transparentColor(), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[12]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(23, 2)) == null);
+    switch (display_list.commands[11]) {
         .fill_rounded_rect => |fill| try expectFillColor(colorWithAlpha(tokens.colors.destructive, 0.10), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[14]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(24, 2)) == null);
+    switch (display_list.commands[12]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.destructive, text.color),
         else => return error.TestUnexpectedResult,
     }
@@ -1956,6 +2154,50 @@ test "widget emitter applies selection and range control tokens" {
         .fill_rounded_rect => |fill| try expectFillColor(Color.rgb8(40, 80, 120), fill.fill),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "slider at value zero emits no filled range" {
+    // The same zero guard the progress bar wears: a width-zero pill still
+    // owns anti-aliased edge coverage, so an idle transport slider
+    // (value 0, disabled) painted a one-pixel filled sliver at the rail's
+    // start. Zero range must paint NOTHING — rail, thumb, and hairline
+    // only.
+    const tokens: DesignTokens = .{};
+
+    var commands: [8]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try emitWidgetTree(&builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0,
+        .state = .{ .disabled = true },
+    }, tokens);
+    const idle = builder.displayList();
+    for (idle.commands[0..idle.commandCount()]) |command| {
+        try std.testing.expect(command.objectId() != widgetPartId(70, 2));
+    }
+
+    // A nonzero value keeps the filled range exactly as before.
+    var active_commands: [8]CanvasCommand = undefined;
+    var active_builder = Builder.init(&active_commands);
+    try emitWidgetTree(&active_builder, .{
+        .id = 70,
+        .kind = .slider,
+        .frame = geometry.RectF.init(0, 0, 160, 32),
+        .value = 0.25,
+    }, tokens);
+    const active = active_builder.displayList();
+    try std.testing.expectEqual(@as(usize, 1 + idle.commandCount()), active.commandCount());
+    var saw_range = false;
+    for (active.commands[0..active.commandCount()]) |command| {
+        if (command.objectId() == widgetPartId(70, 2)) {
+            saw_range = true;
+            try std.testing.expect(command == .fill_rounded_rect);
+            try std.testing.expectEqual(@as(f32, 160 * 0.25), command.fill_rounded_rect.rect.width);
+        }
+    }
+    try std.testing.expect(saw_range);
 }
 
 test "widget emitter applies radio control tokens" {
@@ -2439,6 +2681,250 @@ test "widget layout emission can render runtime focus state" {
     try std.testing.expect(!saw_stale_focus);
 }
 
+test "widget layout emission paints the opaque dragged item with distinct ids" {
+    const item_children = [_]Widget{.{
+        .id = 3,
+        .kind = .text,
+        .text = "Drag me",
+    }};
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+        .children = &item_children,
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{
+        .drag_preview_id = 2,
+        .drag_preview_origin = geometry.PointF.init(32, 25),
+        .drag_preview_offset = geometry.OffsetF.init(48, 7),
+    });
+    const display_list = builder.displayList();
+
+    var saw_preview_opacity = false;
+    var saw_preview_translation = false;
+    var saw_preview_inverse = false;
+    for (display_list.commands) |command| switch (command) {
+        .push_opacity => |opacity| saw_preview_opacity = saw_preview_opacity or opacity == 0.82,
+        .transform => |transform| {
+            saw_preview_translation = saw_preview_translation or affinesEqual(transform, Affine.translate(68, 16));
+            saw_preview_inverse = saw_preview_inverse or affinesEqual(transform, Affine.translate(-68, -16));
+        },
+        else => {},
+    };
+    try std.testing.expect(!saw_preview_opacity);
+    try std.testing.expect(saw_preview_translation);
+    try std.testing.expect(saw_preview_inverse);
+
+    // Diff validation rejects duplicate object ids. The source and its
+    // preview therefore occupy independent retained-command namespaces.
+    var changes: [16]DiffChange = undefined;
+    const added = try DisplayList.diff(.{}, display_list, &changes);
+    try std.testing.expect(added.len > 0);
+}
+
+test "floating drag preview preserves its ancestor transform stack" {
+    const card_children = [_]Widget{.{
+        .id = 4,
+        .kind = .text,
+        .text = "Scaled card",
+    }};
+    const transformed_children = [_]Widget{.{
+        .id = 3,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+        .children = &card_children,
+    }};
+    const ancestor_transform = Affine.translate(24, 11).multiply(Affine.scale(1.25, 0.8));
+    const root_children = [_]Widget{.{
+        .id = 2,
+        .kind = .column,
+        .frame = geometry.RectF.init(0, 0, 180, 90),
+        .transform = ancestor_transform,
+        .children = &transformed_children,
+    }};
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &root_children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+
+    var commands: [24]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{
+        .drag_preview_id = 3,
+        .drag_preview_origin = geometry.PointF.init(nodes[2].frame.x, nodes[2].frame.y),
+        .drag_preview_offset = geometry.OffsetF.init(38, 7),
+    });
+
+    // The ordinary transformed container contributes one pair. The hoisted
+    // preview must contribute a second pair around its copied subtree; the
+    // previous window-level emission only carried the pointer translation.
+    const inverse = ancestor_transform.inverse().?;
+    var ancestor_count: usize = 0;
+    var inverse_count: usize = 0;
+    for (builder.displayList().commands) |command| switch (command) {
+        .transform => |transform| {
+            if (affinesEqual(transform, ancestor_transform)) ancestor_count += 1;
+            if (affinesEqual(transform, inverse)) inverse_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), ancestor_count);
+    try std.testing.expectEqual(@as(usize, 2), inverse_count);
+}
+
+test "widget layout emission applies presentation motion to a keyed draggable" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 2,
+        .offset = geometry.OffsetF.init(0, 9),
+    }};
+
+    var commands: [12]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var saw_motion = false;
+    var saw_motion_inverse = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .transform => |transform| {
+            saw_motion = saw_motion or affinesEqual(transform, Affine.translate(0, 9));
+            saw_motion_inverse = saw_motion_inverse or affinesEqual(transform, Affine.translate(0, -9));
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_motion);
+    try std.testing.expect(saw_motion_inverse);
+}
+
+test "drag landing layout motion escapes its scroll lane clip" {
+    const cards = [_]Widget{.{
+        .id = 3,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+    }};
+    const columns = [_]Widget{.{
+        .id = 2,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(10, 10, 140, 80),
+        .children = &cards,
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &columns }, geometry.RectF.init(0, 0, 320, 140), &nodes);
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 3,
+        .offset = geometry.OffsetF.init(180, 0),
+        .escape_ancestor_clips = true,
+    }};
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var clip_depth: usize = 0;
+    var saw_landing_motion = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .push_clip => clip_depth += 1,
+        .pop_clip => clip_depth -= 1,
+        .transform => |transform| {
+            if (!affinesEqual(transform, Affine.translate(180, 0))) continue;
+            saw_landing_motion = true;
+            try std.testing.expectEqual(@as(usize, 0), clip_depth);
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_landing_motion);
+}
+
+test "rich text remains visible in floating drag and landing passes" {
+    const source = "Lifted rich text";
+    const spans = [_]canvas.TextSpan{.{ .text = source }};
+    const root_frame = geometry.RectF.init(0, 0, 320, 140);
+    const scroll_frame = geometry.RectF.init(10, 10, 140, 60);
+    const card_frame = geometry.RectF.init(12, 80, 120, 36);
+    const text_frame = geometry.RectF.init(18, 86, 108, 24);
+    const nodes = [_]WidgetLayoutNode{
+        .{
+            .widget = .{ .id = 1, .kind = .panel, .frame = root_frame },
+            .frame = root_frame,
+            .depth = 0,
+        },
+        .{
+            .widget = .{ .id = 2, .kind = .scroll_view, .frame = scroll_frame },
+            .frame = scroll_frame,
+            .depth = 1,
+            .parent_index = 0,
+        },
+        .{
+            .widget = .{
+                .id = 3,
+                .kind = .row,
+                .frame = card_frame,
+                .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+            },
+            .frame = card_frame,
+            .depth = 2,
+            .parent_index = 1,
+        },
+        .{
+            .widget = .{
+                .id = 4,
+                .kind = .text,
+                .frame = text_frame,
+                .text = source,
+                .spans = &spans,
+            },
+            .frame = text_frame,
+            .depth = 3,
+            .parent_index = 2,
+        },
+    };
+    const layout = WidgetLayoutTree{ .nodes = &nodes };
+
+    var preview_commands: [64]CanvasCommand = undefined;
+    var preview_builder = Builder.init(&preview_commands);
+    try layout.emitDisplayListWithState(&preview_builder, .{}, .{
+        .drag_preview_id = 3,
+        .drag_preview_origin = geometry.PointF.init(card_frame.x, card_frame.y),
+        .drag_preview_offset = geometry.OffsetF.init(0, -60),
+    });
+
+    var preview_has_text = false;
+    for (preview_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |draw| preview_has_text = preview_has_text or std.mem.eql(u8, source, draw.text),
+        else => {},
+    };
+    try std.testing.expect(preview_has_text);
+
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 3,
+        .offset = geometry.OffsetF.init(0, -60),
+        .escape_ancestor_clips = true,
+    }};
+    var landing_commands: [64]CanvasCommand = undefined;
+    var landing_builder = Builder.init(&landing_commands);
+    try layout.emitDisplayListWithState(&landing_builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var landing_has_text = false;
+    for (landing_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |draw| landing_has_text = landing_has_text or std.mem.eql(u8, source, draw.text),
+        else => {},
+    };
+    try std.testing.expect(landing_has_text);
+}
+
 test "input-group wears the focus ring for its focused descendant" {
     const tokens = DesignTokens{};
     const group_children = [_]Widget{
@@ -2882,6 +3368,65 @@ test "hover target resolves composite row children to the row" {
     const caption_hover = layout.hoverTargetForHit(layout.hitTest(caption_frame.center())).?;
     try std.testing.expectEqual(@as(ObjectId, 8), caption_hover.id);
     try std.testing.expectEqual(WidgetCursor.arrow, layout.cursorForHit(caption_hover));
+}
+
+test "hover msg chain collects nested listeners outermost first" {
+    // A hover-listening card wrapping a hover-listening row: the chain
+    // for a hit inside the row carries BOTH, card first (the DOM's
+    // mouseenter order), because containment is per listener — the
+    // pointer moving onto the row never left the card. The card is a
+    // plain column (no hit-target kind), so the listener flag alone is
+    // what makes it resolvable; a disabled listener stands down like it
+    // does for presses.
+    const label = Widget{ .id = 6, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Row label" };
+    const row = Widget{ .id = 5, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 40), .hover_msgs = true, .children = &.{label} };
+    const plain = Widget{ .id = 4, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Plain" };
+    const card = Widget{ .id = 3, .kind = .column, .frame = geometry.RectF.init(0, 0, 0, 0), .layout = .{ .gap = 8, .padding = geometry.InsetsF.all(10) }, .hover_msgs = true, .children = &.{ plain, row } };
+    const disabled_label = Widget{ .id = 7, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Disabled" };
+    const disabled = Widget{ .id = 8, .kind = .row, .frame = geometry.RectF.init(0, 0, 0, 30), .hover_msgs = true, .state = .{ .disabled = true }, .children = &.{disabled_label} };
+    const bystander = Widget{ .id = 9, .kind = .text, .frame = geometry.RectF.init(0, 0, 100, 20), .text = "Bystander" };
+
+    var nodes: [10]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .column, .layout = .{ .gap = 12 }, .children = &.{ card, disabled, bystander } }, geometry.RectF.init(0, 0, 320, 260), &nodes);
+
+    var chain: [8]ObjectId = undefined;
+
+    // Inside the row: both listeners, outermost first.
+    const label_frame = layout.findById(6).?.frame.normalized();
+    const in_row = layout.hoverMsgChainForHit(layout.hitTestHover(label_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, in_row);
+
+    // Over the card's own content outside the row: the card alone.
+    const plain_frame = layout.findById(4).?.frame.normalized();
+    const in_card = layout.hoverMsgChainForHit(layout.hitTestHover(plain_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{3}, in_card);
+
+    // A disabled listener never joins a chain (the hit test skips it,
+    // and the walk predicate refuses it either way).
+    const disabled_frame = layout.findById(8).?.frame.normalized();
+    const over_disabled = layout.hoverMsgChainForHit(layout.hitTestHover(disabled_frame.center()), &chain);
+    try std.testing.expectEqualSlices(ObjectId, &.{}, over_disabled);
+
+    // A hit with no listening ancestor — and the null hit — both yield
+    // the empty chain.
+    const bystander_frame = layout.findById(9).?.frame.normalized();
+    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(layout.hitTestHover(bystander_frame.center()), &chain));
+    try std.testing.expectEqualSlices(ObjectId, &.{}, layout.hoverMsgChainForHit(null, &chain));
+
+    // Listening keeps presses falling through: the row claims no press,
+    // so a click inside it lands on nothing (dead space) — hover-msgs
+    // flips where hover attributes, never where clicks land.
+    const press = layout.hitTestHover(label_frame.center()).?;
+    try std.testing.expect(canvas.widgetPressTargetForHit(layout, press) == null);
+
+    // And the INTERACTIVE hit test never sees hover-only listeners at
+    // all: the raw hit over the row's plain area resolves exactly as it
+    // would without the bindings (nothing here — layout containers),
+    // so no wash can ever appear where none appeared before.
+    const row_frame = layout.findById(5).?.frame.normalized();
+    const wash_probe = geometry.PointF.init(row_frame.maxX() - 2, row_frame.center().y);
+    try std.testing.expect(layout.hitTest(wash_probe) == null);
+    try std.testing.expectEqualSlices(ObjectId, &.{ 3, 5 }, layout.hoverMsgChainForHit(layout.hitTestHover(wash_probe), &chain));
 }
 
 test "widget emitter renders list item and segmented control states" {

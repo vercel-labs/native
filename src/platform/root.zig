@@ -26,17 +26,30 @@ pub const max_recent_document_path_bytes = types.max_recent_document_path_bytes;
 pub const max_notification_title_bytes = types.max_notification_title_bytes;
 pub const max_notification_subtitle_bytes = types.max_notification_subtitle_bytes;
 pub const max_notification_body_bytes = types.max_notification_body_bytes;
+pub const max_notification_id_bytes = types.max_notification_id_bytes;
+pub const max_notification_action_label_bytes = types.max_notification_action_label_bytes;
+pub const max_notification_action_command_bytes = types.max_notification_action_command_bytes;
 pub const max_clipboard_mime_type_bytes = types.max_clipboard_mime_type_bytes;
 pub const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 pub const max_credential_service_bytes = types.max_credential_service_bytes;
 pub const max_credential_account_bytes = types.max_credential_account_bytes;
 pub const max_credential_secret_bytes = types.max_credential_secret_bytes;
+pub const max_local_time_text_bytes = types.max_local_time_text_bytes;
+pub const max_update_feed_url_bytes = types.max_update_feed_url_bytes;
+pub const max_update_public_key_bytes = types.max_update_public_key_bytes;
+pub const update_check_command = types.update_check_command;
+pub const max_status_items = types.max_status_items;
 pub const max_tray_items = types.max_tray_items;
 pub const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 pub const max_tray_title_bytes = types.max_tray_title_bytes;
 pub const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
 pub const max_tray_item_label_bytes = types.max_tray_item_label_bytes;
 pub const max_tray_item_command_bytes = types.max_tray_item_command_bytes;
+pub const max_tray_item_detail_bytes = types.max_tray_item_detail_bytes;
+pub const max_tray_segment_options = types.max_tray_segment_options;
+pub const max_tray_segment_label_bytes = types.max_tray_segment_label_bytes;
+pub const max_tray_chart_values = types.max_tray_chart_values;
+pub const max_tray_chart_text_bytes = types.max_tray_chart_text_bytes;
 pub const max_drop_paths_bytes = types.max_drop_paths_bytes;
 pub const max_drop_paths = types.max_drop_paths;
 pub const max_window_event_name_bytes = types.max_window_event_name_bytes;
@@ -60,7 +73,9 @@ pub const max_widget_accessibility_nodes = types.max_widget_accessibility_nodes;
 pub const max_gpu_surface_packet_json_bytes = types.max_gpu_surface_packet_json_bytes;
 pub const max_gpu_surface_packet_binary_bytes = types.max_gpu_surface_packet_binary_bytes;
 pub const max_gpu_present_fallback_detail_bytes = types.max_gpu_present_fallback_detail_bytes;
+pub const max_decoded_image_dimension = types.max_decoded_image_dimension;
 pub const max_gpu_surface_image_pixel_bytes = types.max_gpu_surface_image_pixel_bytes;
+pub const max_gpu_surface_media_image_pixel_bytes = types.max_gpu_surface_media_image_pixel_bytes;
 pub const max_gpu_surface_font_bytes = types.max_gpu_surface_font_bytes;
 pub const ShortcutModifiers = types.ShortcutModifiers;
 pub const Shortcut = types.Shortcut;
@@ -71,12 +86,16 @@ pub const validateShortcut = types.validateShortcut;
 pub const validateMenus = types.validateMenus;
 pub const validateMenuItem = types.validateMenuItem;
 pub const isValidShortcutKey = types.isValidShortcutKey;
+pub const isValidShortcutBinding = types.isValidShortcutBinding;
 pub const WindowRestorePolicy = types.WindowRestorePolicy;
+pub const WindowInitialPlacement = types.WindowInitialPlacement;
 pub const WindowTitlebarStyle = types.WindowTitlebarStyle;
 pub const WindowChrome = types.WindowChrome;
 pub const FormFactor = types.FormFactor;
 pub const WindowDragRegion = types.WindowDragRegion;
 pub const WindowShowMode = types.WindowShowMode;
+pub const WindowClosePolicy = types.WindowClosePolicy;
+pub const LaunchAtLoginStatus = types.LaunchAtLoginStatus;
 pub const WindowOptions = types.WindowOptions;
 pub const WindowState = types.WindowState;
 pub const WindowInfo = types.WindowInfo;
@@ -102,6 +121,7 @@ pub const ViewInfo = types.ViewInfo;
 pub const AppInfo = types.AppInfo;
 pub const Surface = types.Surface;
 pub const BridgeMessage = types.BridgeMessage;
+pub const ViewFocusEvent = types.ViewFocusEvent;
 pub const max_dialog_path_bytes = types.max_dialog_path_bytes;
 pub const max_dialog_paths_bytes = types.max_dialog_paths_bytes;
 pub const max_dialog_title_bytes = types.max_dialog_title_bytes;
@@ -117,30 +137,63 @@ pub const MessageDialogStyle = types.MessageDialogStyle;
 pub const MessageDialogResult = types.MessageDialogResult;
 pub const MessageDialogOptions = types.MessageDialogOptions;
 pub const NotificationOptions = types.NotificationOptions;
+pub const NotificationCommandEvent = types.NotificationCommandEvent;
 pub const CredentialKey = types.CredentialKey;
 pub const Credential = types.Credential;
+pub const LocalTimeStyle = types.LocalTimeStyle;
+pub const StatusItemId = types.StatusItemId;
+pub const primary_status_item_id = types.primary_status_item_id;
 pub const TrayItemId = types.TrayItemId;
 pub const TrayOptions = types.TrayOptions;
+pub const TrayShell = types.TrayShell;
+pub const trayShell = types.trayShell;
+pub const TrayTone = types.TrayTone;
+pub const TrayPresentation = types.TrayPresentation;
+pub const TrayFontWeight = types.TrayFontWeight;
 pub const TrayMenuItem = types.TrayMenuItem;
+pub const TrayItemRole = types.TrayItemRole;
+pub const TraySegmentOption = types.TraySegmentOption;
+pub const TraySegmentedRow = types.TraySegmentedRow;
+pub const TrayMetricRow = types.TrayMetricRow;
+pub const TrayChartRow = types.TrayChartRow;
 pub const NativeCommandEvent = types.NativeCommandEvent;
 pub const MenuCommandEvent = types.MenuCommandEvent;
+pub const TrayCommandEvent = types.TrayCommandEvent;
+pub const TrayActionEvent = types.TrayActionEvent;
 pub const reserved_timer_id_base = types.reserved_timer_id_base;
 pub const press_hold_timer_id = types.press_hold_timer_id;
 pub const TimerEvent = types.TimerEvent;
 pub const AudioEvent = types.AudioEvent;
 pub const AudioEventKind = types.AudioEventKind;
 pub const AudioLoadResolution = types.AudioLoadResolution;
+pub const AudioCaptureSource = types.AudioCaptureSource;
+pub const AudioCaptureFormat = types.AudioCaptureFormat;
+pub const AudioCaptureEventKind = types.AudioCaptureEventKind;
+pub const AudioCaptureEvent = types.AudioCaptureEvent;
+pub const AudioCapturePushResult = types.AudioCapturePushResult;
+pub const AudioCaptureSink = types.AudioCaptureSink;
+pub const max_audio_capture_pcm_bytes = types.max_audio_capture_pcm_bytes;
 pub const max_audio_path_bytes = types.max_audio_path_bytes;
 pub const audio_spectrum_band_count = types.audio_spectrum_band_count;
 pub const audio_spectrum_floor_db = types.audio_spectrum_floor_db;
+pub const VideoEvent = types.VideoEvent;
+pub const VideoEventKind = types.VideoEventKind;
+pub const VideoFrameSink = types.VideoFrameSink;
+pub const max_video_path_bytes = types.max_video_path_bytes;
 pub const FileDropEvent = types.FileDropEvent;
 pub const GpuFrame = types.GpuFrame;
 pub const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
 pub const GpuSurfaceResizeEvent = types.GpuSurfaceResizeEvent;
 pub const GpuSurfaceInputKind = types.GpuSurfaceInputKind;
 pub const GpuSurfaceInputEvent = types.GpuSurfaceInputEvent;
+pub const touch_pointer_id_bit = types.touch_pointer_id_bit;
+pub const PinchPhase = types.PinchPhase;
+pub const PinchEvent = types.PinchEvent;
+pub const WheelEvent = types.WheelEvent;
 pub const max_gpu_surface_scroll_drivers = types.max_gpu_surface_scroll_drivers;
+pub const max_gpu_surface_scroll_occluders = types.max_gpu_surface_scroll_occluders;
 pub const GpuSurfaceScrollDriver = types.GpuSurfaceScrollDriver;
+pub const GpuSurfaceScrollOccluder = types.GpuSurfaceScrollOccluder;
 pub const GpuSurfaceScrollDriverEvent = types.GpuSurfaceScrollDriverEvent;
 pub const max_context_menu_items = types.max_context_menu_items;
 pub const ContextMenuItem = types.ContextMenuItem;
@@ -158,8 +211,10 @@ pub const WidgetAccessibilityNode = types.WidgetAccessibilityNode;
 pub const WidgetAccessibilitySnapshot = types.WidgetAccessibilitySnapshot;
 pub const WidgetAccessibilityActionKind = types.WidgetAccessibilityActionKind;
 pub const WidgetAccessibilityActionEvent = types.WidgetAccessibilityActionEvent;
+pub const WidgetContextMenuActionEvent = types.WidgetContextMenuActionEvent;
 pub const ClipboardData = types.ClipboardData;
 pub const ColorScheme = types.ColorScheme;
+pub const WindowColorScheme = types.WindowColorScheme;
 pub const Appearance = types.Appearance;
 pub const Event = types.Event;
 pub const splitDropPaths = types.splitDropPaths;
@@ -174,6 +229,38 @@ pub const NullTimer = null_backend.NullTimer;
 pub const macos = @import("macos/root.zig");
 pub const linux = @import("linux/root.zig");
 pub const windows = @import("windows/root.zig");
+
+/// Install the host image codec for a headless session replay over the
+/// null platform. Replay decode serves JOURNALED bytes only — the
+/// network and the filesystem stay absent — but those bytes must decode
+/// through the SAME codec the recording host used, or replayed loads
+/// drop their pixels and replayed screenshots lose images. Every
+/// desktop host's codec is a context-free bytes-to-pixels call
+/// (CGImageSource / gdk-pixbuf / WIC), so a headless replay serves it
+/// with no window and no run loop. `platform_name` is the build's
+/// platform selection (the app runner's `build_options.platform`,
+/// comptime — arms for other platforms are never analyzed, so the
+/// codec-less test tier links without the host shims). A build with no
+/// host codec ("null") falls back to the null platform's strict
+/// test-PNG decoder — honest but narrow: only the canvas PNG writer's
+/// subset decodes there, and any other recorded format drops its pixels
+/// with the replay diagnostic while the Msg stream still replays
+/// verbatim.
+pub fn installHeadlessImageCodec(
+    comptime platform_name: []const u8,
+    headless_host: *NullPlatform,
+    services: *PlatformServices,
+) void {
+    if (comptime std.mem.eql(u8, platform_name, "macos")) {
+        macos.installHeadlessImageCodec(services);
+    } else if (comptime std.mem.eql(u8, platform_name, "linux")) {
+        linux.installHeadlessImageCodec(services);
+    } else if (comptime std.mem.eql(u8, platform_name, "windows")) {
+        windows.installHeadlessImageCodec(services);
+    } else {
+        headless_host.image_decode = true;
+    }
+}
 
 test {
     std.testing.refAllDecls(@This());

@@ -44,6 +44,10 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -58,6 +62,11 @@ pub const RunOptions = struct {
         if (windows.len > 0) {
             info.main_window = windows[0];
             info.windows = windows;
+        } else {
+            info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
         }
         return info;
     }
@@ -138,6 +147,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (@hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y")) .explicit else .default,
     };
 }
 
@@ -169,6 +179,57 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     @compileError("unknown app.zon window restore_policy");
+}
+
+fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+}
+
+fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geometry.RectF {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    return native_sdk.geometry.RectF.init(
+        windowFloatFallback(window, "x", fallback.x),
+        windowFloatFallback(window, "y", fallback.y),
+        windowFloatFallback(window, "width", fallback.width),
+        windowFloatFallback(window, "height", fallback.height),
+    );
+}
+
+fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
+    if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    return fallback;
+}
+
+fn manifestShellStartupRestoreState(fallback: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime @hasField(@TypeOf(window), "restore_state")) return window.restore_state;
+    return fallback;
+}
+
+fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime !@hasField(@TypeOf(window), "restore_policy")) return fallback;
+    return windowRestorePolicy(window);
+}
+
+fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback;
 }
 
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
@@ -212,7 +273,8 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var null_platform = native_sdk.NullPlatform.initWithOptions(.{}, webEngine(), app_info);
+    const null_platform = try native_sdk.NullPlatform.createWithOptions(.{}, webEngine(), app_info);
+    defer null_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -254,8 +316,8 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var mac_platform = try native_sdk.platform.macos.MacPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer mac_platform.deinit();
+    const mac_platform = try native_sdk.platform.macos.MacPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer mac_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -297,8 +359,8 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var linux_platform = try native_sdk.platform.linux.LinuxPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer linux_platform.deinit();
+    const linux_platform = try native_sdk.platform.linux.LinuxPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer linux_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -340,8 +402,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    var windows_platform = try native_sdk.platform.windows.WindowsPlatform.initWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
-    defer windows_platform.deinit();
+    const windows_platform = try native_sdk.platform.windows.WindowsPlatform.createWithOptions(native_sdk.geometry.SizeF.init(720, 480), webEngine(), app_info);
+    defer windows_platform.destroy();
     var trace_sink = StdoutTraceSink{};
     var log_buffers: native_sdk.debug.LogPathBuffers = .{};
     const log_setup = native_sdk.debug.setupLogging(init.io, init.environ_map, app_info.bundle_id, &log_buffers) catch null;
@@ -407,12 +469,17 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
             if (!window.restore_state) continue;
             if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
                 window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+                window.initial_placement = .restored;
+                if (index == 0) {
+                    app_info.main_window.default_frame = saved.frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
         if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
             app_info.main_window.default_frame = saved.frame;
+            app_info.main_window.initial_placement = .restored;
         }
     }
     return store;

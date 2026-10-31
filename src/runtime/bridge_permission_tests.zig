@@ -320,22 +320,43 @@ test "runtime validates native OS actions before platform dispatch" {
 
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .items = &.{.{ .label = "" }} }));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .label = "" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .presentation = .{ .width = -1 } }));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createTray(.{ .presentation = .{ .icon_opacity = 1.1 } }));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Readout", .command = "app.bad", .role = .info }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Command", .detail = "not allowed" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "No command", .key = "q" }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Bad key", .command = "app.bad-key", .key = "not-a-key", .modifiers = .{ .command = true } }}));
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .id = 7, .label = "Unsafe key", .command = "app.unsafe-key", .key = "q" }}));
     try harness.runtime.createTray(.{
         .icon_path = "/tmp/tray.png",
         .tooltip = "native-sdk",
+        .presentation = .{ .title = "LIVE", .width = 62, .tone = .warning, .icon_opacity = 0.5, .monospaced = true },
+        .activation_command = "app.refresh",
+        .alternate_activation_command = "app.mode",
+        .open_command = "app.opened",
         .items = &.{
-            .{ .id = 1, .label = "Open" },
+            .{ .id = 1, .label = "Open", .detail = "ready", .role = .info },
             .{ .separator = true },
-            .{ .id = 2, .label = "Quit", .enabled = false },
+            .{ .id = 2, .label = "Quit", .command = "app.quit", .enabled = false, .detail = "warning", .role = .agent, .key = "q", .modifiers = .{ .command = true } },
         },
     });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
     try std.testing.expectEqualStrings("/tmp/tray.png", harness.null_platform.lastTrayIconPath());
     try std.testing.expectEqualStrings("native-sdk", harness.null_platform.lastTrayTooltip());
+    try std.testing.expectEqualStrings("LIVE", harness.null_platform.lastTrayTitle());
+    try std.testing.expectEqualStrings("app.refresh", harness.null_platform.lastTrayActivationCommand());
+    try std.testing.expectEqualStrings("app.mode", harness.null_platform.lastTrayAlternateActivationCommand());
+    try std.testing.expectEqualStrings("app.opened", harness.null_platform.lastTrayOpenCommand());
+    try std.testing.expectEqual(platform.TrayTone.warning, harness.null_platform.lastTrayPresentation().tone);
+    try std.testing.expectEqual(@as(f32, 62), harness.null_platform.lastTrayPresentation().width);
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.trayItems().len);
     try std.testing.expectEqualStrings("Open", harness.null_platform.trayItems()[0].label);
     try std.testing.expect(harness.null_platform.trayItems()[1].separator);
     try std.testing.expect(!harness.null_platform.trayItems()[2].enabled);
+    try std.testing.expectEqual(platform.TrayItemRole.agent, harness.null_platform.trayItems()[2].role);
+    try std.testing.expectEqualStrings("warning", harness.null_platform.trayItems()[2].detail);
+    try std.testing.expectEqualStrings("q", harness.null_platform.trayItems()[2].key);
+    try std.testing.expect(harness.null_platform.trayItems()[2].modifiers.command);
     try harness.runtime.updateTrayMenu(&.{.{ .id = 3, .label = "Settings" }});
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.trayUpdateCount());
     try std.testing.expectEqualStrings("Settings", harness.null_platform.trayItems()[0].label);
@@ -356,10 +377,11 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, denied.null_platform.lastBridgeResponse(), "OS API is not permitted") != null);
     try std.testing.expect(std.mem.indexOf(u8, denied.null_platform.lastBridgeResponse(), "\"permission_denied\"") != null);
 
-    const grants = [_][]const u8{ security.permission_network, security.permission_filesystem, security.permission_notifications };
+    const grants = [_][]const u8{ security.permission_network, security.permission_filesystem, security.permission_notifications, security.permission_command };
     const network_permission = [_][]const u8{security.permission_network};
     const filesystem_permission = [_][]const u8{security.permission_filesystem};
     const notifications_permission = [_][]const u8{security.permission_notifications};
+    const command_permission = [_][]const u8{security.permission_command};
     const origins = [_][]const u8{"zero://inline"};
     const policies = [_]bridge.CommandPolicy{
         .{ .name = "native-sdk.os.openUrl", .permissions = &network_permission, .origins = &origins },
@@ -367,6 +389,14 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
         .{ .name = "native-sdk.os.revealPath", .permissions = &filesystem_permission, .origins = &origins },
         .{ .name = "native-sdk.os.addRecentDocument", .permissions = &filesystem_permission, .origins = &origins },
         .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = &filesystem_permission, .origins = &origins },
+    };
+    const action_policies = [_]bridge.CommandPolicy{
+        .{ .name = "native-sdk.os.openUrl", .permissions = &network_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.showNotification", .permissions = &notifications_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.revealPath", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.addRecentDocument", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.os.clearRecentDocuments", .permissions = &filesystem_permission, .origins = &origins },
+        .{ .name = "native-sdk.command.invoke", .permissions = &command_permission, .origins = &origins },
     };
     const allowed_urls = [_][]const u8{"https://example.com/*"};
 
@@ -386,6 +416,31 @@ test "runtime gates built-in OS bridge commands through explicit policy" {
     try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
     try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
     try std.testing.expectEqualStrings("Build finished", allowed.null_platform.lastNotificationTitle());
+
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"action-denied\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"actionLabel\":\"Open\",\"actionCommand\":\"build.open\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "Notification actions require command invoke permission") != null);
+    try std.testing.expectEqual(@as(usize, 1), allowed.null_platform.notificationCount());
+
+    allowed.runtime.options.builtin_bridge = .{ .enabled = true, .commands = &action_policies };
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"action-allowed\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":\"build\",\"title\":\"Build finished\",\"actionLabel\":\"Open\",\"actionCommand\":\"build.open\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"ok\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), allowed.null_platform.notificationCount());
+    try std.testing.expectEqualStrings("build", allowed.null_platform.lastNotificationId());
+    try std.testing.expectEqualStrings("Open", allowed.null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("build.open", allowed.null_platform.lastNotificationActionCommand());
+
+    try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
+        .bytes = "{\"id\":\"invalid-notification\",\"command\":\"native-sdk.os.showNotification\",\"payload\":{\"id\":42,\"title\":\"Build finished\"}}",
+        .origin = "zero://inline",
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, allowed.null_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), allowed.null_platform.notificationCount());
 
     try allowed.runtime.dispatchPlatformEvent(app, .{ .bridge_message = .{
         .bytes = "{\"id\":\"open\",\"command\":\"native-sdk.os.openUrl\",\"payload\":{\"url\":\"https://example.com/docs\"}}",

@@ -1,0 +1,1961 @@
+// Subset checker tests: one violation in -> the teaching rule's ID out.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { checkOnly, ruleIds, check, checkFiles } from "./helpers.ts";
+
+const core = `
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "tick":
+      return { count: model.count + 1 };
+  }
+}
+`;
+
+test("clean core passes the checker", () => {
+  assert.deepEqual(ruleIds(checkOnly(core)), []);
+});
+
+test("NS1069 keeps every Cmd.store factory in capability lockstep", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("v") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.store.set("doc/1", model.bytes, { key: "put", ok: "wrote", err: "failed" }),
+      Cmd.store.get("doc/1", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.store.delete("doc/1", { key: "del", ok: "wrote", err: "failed" }),
+      Cmd.store.scan("doc/", { limit: 10 }, { key: "scan", ok: "loaded", err: "failed" }),
+      Cmd.store.setMany([["doc/2", model.bytes]], { key: "many", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["store"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1069"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1069").length, 5);
+  const unused = check(core, { capabilities: ["store"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1069").length, 1);
+});
+
+test("NS1070 keeps every Cmd.db factory in capability lockstep", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.db.query("SELECT ?", [1], { key: "q", page: "page", done: "done", err: "failed" }),
+      Cmd.db.exec([["CREATE TABLE note(id INTEGER)", []]], { key: "x", ok: "wrote", err: "failed" }),
+    ])];
+    case "page":
+    case "done":
+    case "wrote":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["sqlite"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1070"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1070").length, 2);
+  const unused = check(core, { capabilities: ["sqlite"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1070").length, 1);
+
+  const quit = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "quit" };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) { case "quit": return [model, Cmd.quitApp()]; }
+}
+`);
+  assert.equal(quit.warnings.some((d) => d.id === "NS1070"), false);
+});
+
+test("NS1071/NS1072 keep core credentials behind capability and permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly token: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly token: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { token: asciiBytes("secret") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.credentials.set("api-token", model.token, { key: "set", ok: "wrote", err: "failed" }),
+      Cmd.credentials.get("api-token", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.credentials.delete("api-token", { key: "delete", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1071"), false);
+
+  const missingPermission = check(source, { capabilities: ["credentials"] });
+  assert.equal(missingPermission.ok, false);
+  assert.equal(missingPermission.diagnostics.filter((d) => d.id === "NS1072").length, 3);
+
+  const missingCapability = check(source, { permissions: ["credentials"] });
+  assert.equal(missingCapability.ok, true);
+  assert.equal(missingCapability.warnings.filter((d) => d.id === "NS1071").length, 3);
+
+  const unused = check(core, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
+});
+
+test("NS1073 reserves the core credential request namespace for typed factories", () => {
+  const result = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: new Uint8Array(0) }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.request("core.credentials.get", model.bytes, { ok: "loaded", err: "failed" })];
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.filter((d) => d.id === "NS1073").length, 1);
+  assert.equal(result.warnings.some((d) => d.id === "NS1071"), false);
+});
+
+test("NS1074 catches certainly-external literal file paths without filesystem permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
+  | { readonly kind: "done"; readonly total: number }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("x") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.readFile(asciiBytes("/tmp/input"), { ok: "loaded", err: "failed" }),
+      Cmd.writeFile(asciiBytes("../output"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.appendFile(asciiBytes("logs/local"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.statFile(asciiBytes("C:\\\\Users\\\\outside"), { ok: "stat", err: "failed" }),
+      Cmd.deleteFile(asciiBytes("/tmp/obsolete"), { ok: "wrote", err: "failed" }),
+      Cmd.readFileStream(asciiBytes("safe/import"), { chunk: "loaded", done: "done", err: "failed" }),
+      Cmd.writeFileStream("sink", asciiBytes("/tmp/export"), { ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "stat":
+    case "done":
+    case "failed": return model;
+  }
+}
+`;
+  const denied = check(source);
+  assert.equal(denied.diagnostics.filter((d) => d.id === "NS1074").length, 5);
+  const granted = check(source, { permissions: ["filesystem"] });
+  assert.equal(granted.diagnostics.some((d) => d.id === "NS1074"), false);
+});
+
+test("NS1033 validates app.zon persistence restore routes against Msg", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "save" }
+  | { readonly kind: "restored" }
+  | { readonly kind: "fresh_boot" }
+  | { readonly kind: "restore_failed"; readonly reason: Uint8Array }
+  | { readonly kind: "wrong_ok"; readonly reason: Uint8Array }
+  | { readonly kind: "wrong_err" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "save": return [model, Cmd.persist()];
+    case "restored":
+    case "fresh_boot":
+    case "restore_failed":
+    case "wrong_ok":
+    case "wrong_err": return model;
+  }
+}
+`;
+  const options = {
+    capabilities: ["persist"],
+    persistRoutes: { ok: "restored", none: "fresh_boot", err: "restore_failed" },
+  } as const;
+  assert.equal(check(source, options).ok, true);
+
+  const missing = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, none: "typo" },
+  });
+  assert.equal(missing.ok, false);
+  assert.ok(missing.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("names no Msg arm")));
+
+  const wrongOk = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, ok: "wrong_ok" },
+  });
+  assert.equal(wrongOk.ok, false);
+  assert.ok(wrongOk.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("wrong Msg payload")));
+
+  const wrongErr = check(source, {
+    ...options,
+    persistRoutes: { ...options.persistRoutes, err: "wrong_err" },
+  });
+  assert.equal(wrongErr.ok, false);
+  assert.ok(wrongErr.diagnostics.some((d) => d.id === "NS1033" && d.message.includes("wrong Msg payload")));
+});
+
+test("NS1038 reserves generated contract metadata names", () => {
+  const moduleName = checkOnly(`${core}\nexport const type_origins = 1;`);
+  assert.ok(ruleIds(moduleName).includes("NS1038"), `got ${ruleIds(moduleName)}`);
+  assert.ok(moduleName.diagnostics.some((d) => d.message.includes("type-origin metadata")), JSON.stringify(moduleName.diagnostics));
+
+  const unionMember = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "payload_members"; readonly value: number }
+  | { readonly kind: "tick" };
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "payload_members": return { count: msg.value };
+    case "tick": return model;
+  }
+}
+`);
+  assert.ok(ruleIds(unionMember).includes("NS1038"), `got ${ruleIds(unionMember)}`);
+  assert.ok(unionMember.diagnostics.some((d) => d.message.includes("single-payload metadata")), JSON.stringify(unionMember.diagnostics));
+});
+
+test("NS1001 mutating array methods", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Model { readonly items: readonly number[]; }
+export function update(model: Model): Model {
+  (model.items as number[]).push(1);
+  return model;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1001"), `got ${ids}`);
+});
+
+test("NS1002 async and await", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export async function update(x: number): Promise<number> {
+  return await Promise.resolve(x);
+}
+`),
+  );
+  assert.ok(ids.includes("NS1002"), `got ${ids}`);
+});
+
+test("NS1003 functions stored in the model", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Model { readonly onTick: () => void; }
+export function update(model: Model): Model { return model; }
+`),
+  );
+  assert.ok(ids.includes("NS1003"), `got ${ids}`);
+});
+
+test("NS1004 string length, indexing, charCodeAt, relational", () => {
+  for (const expr of ["s.length", "s[0]", "s.charCodeAt(0)", 's < "z" ? 1 : 2']) {
+    const ids = ruleIds(checkOnly(`export function f(s: string): number { return ${expr} as number; }`));
+    assert.ok(ids.includes("NS1004"), `${expr}: got ${ids}`);
+  }
+});
+
+test("NS1004 relational comparison on string-literal union values", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export type Rank = "bronze" | "silver" | "gold";
+export function before(a: Rank, b: Rank): boolean { return a < b; }
+`),
+  );
+  assert.ok(ids.includes("NS1004"), `got ${ids}`);
+});
+
+test("NS1004 fires on a hand-rolled ascii bridge (the SDK intrinsic replaced structural recognition)", () => {
+  const result = checkOnly(`
+export function asciiBytes(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+`);
+  const ids = ruleIds(result);
+  assert.deepEqual(ids, ["NS1004"]);
+  const d = result.diagnostics[0];
+  assert.ok(d.message.includes("asciiBytes"), "the fix names the SDK intrinsic");
+  assert.ok(d.message.includes("@native-sdk/core"), "the fix names where it comes from");
+});
+
+test("the SDK asciiBytes intrinsic passes the checker", () => {
+  const ids = ruleIds(
+    checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export function greeting(): Uint8Array { return asciiBytes("hello"); }
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1064 rejects Unicode in asciiBytes and points to utf8Bytes", () => {
+  const direct = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export function label(): Uint8Array { return asciiBytes("Loading…"); }
+`);
+  assert.deepEqual(ruleIds(direct), ["NS1064"]);
+  assert.ok(direct.diagnostics[0]?.message.includes("U+2026"));
+  assert.ok(direct.diagnostics[0]?.message.includes("utf8Bytes"));
+
+  const renamedTemplate = checkOnly(`
+import { asciiBytes as bytes } from "@native-sdk/core";
+export function label(n: number): Uint8Array { return bytes(\`Today · \${n}\`); }
+`);
+  assert.deepEqual(ruleIds(renamedTemplate), ["NS1064"]);
+});
+
+test("NS1064 inspects rendered template values, not literals used only by conditions", () => {
+  const comparisonOnly = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export type Kind = "café" | "tea";
+export interface Model { readonly kind: Kind; readonly count: number; }
+export function label(model: Model): Uint8Array {
+  return asciiBytes(\`\${model.kind === "café" ? model.count : 0}\`);
+}
+`);
+  assert.deepEqual(ruleIds(comparisonOnly), []);
+
+  const renderedUnion = checkOnly(`
+import { asciiBytes } from "@native-sdk/core";
+export type Kind = "café" | "tea";
+export interface Model { readonly kind: Kind; }
+export function label(model: Model): Uint8Array { return asciiBytes(\`kind: \${model.kind}\`); }
+`);
+  assert.deepEqual(ruleIds(renderedUnion), ["NS1064"]);
+  assert.ok(renderedUnion.diagnostics[0]?.message.includes("U+00E9"));
+});
+
+test("the SDK utf8Bytes intrinsic accepts Unicode literals and templates", () => {
+  const ids = ruleIds(
+    checkOnly(`
+import { utf8Bytes } from "@native-sdk/core";
+export function label(n: number): Uint8Array { return utf8Bytes(\`Today · \${n}… 😀\`); }
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1005 ambient time and randomness", () => {
+  for (const expr of ["Math.random()", "Date.now()"]) {
+    const ids = ruleIds(checkOnly(`export function f(): number { return ${expr}; }`));
+    assert.ok(ids.includes("NS1005"), `${expr}: got ${ids}`);
+  }
+});
+
+test("NS1006 class expressions and `this` outside members", () => {
+  const ids = ruleIds(checkOnly(`export const C = class { id: number = 1; };`));
+  assert.ok(ids.includes("NS1006"), `got ${ids}`);
+  const ids2 = ruleIds(checkOnly(`export function f(): number { return (this as { n: number }).n; }`));
+  assert.ok(ids2.includes("NS1006"), `got ${ids2}`);
+});
+
+test("data classes pass the checker; the banned tail teaches by name", () => {
+  const ok = checkOnly(`
+export class Counter {
+  count: number = 0;
+  bump(): void { this.count += 1; }
+}
+export function f(): number { const c = new Counter(); c.bump(); return c.count; }
+`);
+  assert.deepEqual(ruleIds(ok), []);
+  const ids = ruleIds(checkOnly(`
+class A { n: number = 0; }
+export class B extends A { get twice(): number { return 2; } static s: number = 1; }
+`));
+  assert.ok(ids.includes("NS1055"), `extends: got ${ids}`);
+  assert.ok(ids.includes("NS1056"), `accessor/static: got ${ids}`);
+});
+
+test("R20 exceptions: try/catch/throw pass the checker; the discipline rules teach", () => {
+  const ok = checkOnly(`
+export type Failure = { readonly kind: "negative" } | { readonly kind: "bad" };
+export function f(x: number): number {
+  try {
+    if (x < 0) throw { kind: "negative" } as Failure;
+  } catch (e) {
+    const err = e as Failure;
+    return err.kind === "negative" ? 0 : 1;
+  }
+  return x;
+}
+`);
+  assert.deepEqual(ruleIds(ok), []);
+  // NS1057: `new Error` has no native shape.
+  const ids = ruleIds(checkOnly(`export function f(): number { throw new Error("x"); }`));
+  assert.ok(ids.includes("NS1057"), `got ${ids}`);
+  // NS1057: two distinct thrown shapes.
+  const ids2 = ruleIds(
+    checkOnly(`
+export function f(x: number): number {
+  if (x < 0) throw 1;
+  if (x > 10) throw true;
+  return x;
+}
+`),
+  );
+  assert.ok(ids2.includes("NS1057"), `got ${ids2}`);
+  // NS1057: a directly-used catch binding.
+  const ids3 = ruleIds(
+    checkOnly(`
+export function f(): number {
+  try { return 1; } catch (e) { return e === null ? 0 : 2; }
+}
+`),
+  );
+  assert.ok(ids3.includes("NS1057"), `got ${ids3}`);
+  // NS1058: control flow out of finally.
+  const ids4 = ruleIds(
+    checkOnly(`export function f(): number { try { return 1; } finally { return 0; } }`),
+  );
+  assert.ok(ids4.includes("NS1058"), `got ${ids4}`);
+  // ...while a break WITHIN a loop inside finally is that loop's own.
+  const ids5 = ruleIds(
+    checkOnly(`
+export function f(): number {
+  let n = 0;
+  try { n = 1; } finally {
+    for (let i = 0; i < 3; i++) { if (i === 1) break; n += 1; }
+  }
+  return n;
+}
+`),
+  );
+  assert.deepEqual(ids5, []);
+});
+
+test("NS1008 non-erasable syntax (enum)", () => {
+  const ids = ruleIds(checkOnly(`export enum Filter { All, Active }`));
+  assert.ok(ids.includes("NS1008"), `got ${ids}`);
+});
+
+test("NS1009 for/in", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function f(o: { readonly a: number }): number {
+  let n = 0;
+  for (const k in o) n += 1;
+  return n;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1009"), `got ${ids}`);
+});
+
+test("NS1010 module-level let", () => {
+  const ids = ruleIds(checkOnly(`let counter = 0;\nexport function f(): number { return counter; }`));
+  assert.ok(ids.includes("NS1010"), `got ${ids}`);
+});
+
+test("NS1011 object-keyed Map", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Key { readonly id: number; }
+export function f(): number {
+  const m = new Map<Key, number>();
+  return m.size;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1011"), `got ${ids}`);
+});
+
+test("NS1011 bare new Map() and new Set() teach the id-keyed-array idiom", () => {
+  for (const expr of ["new Map()", "new Map<number, number>()", "new Set()"]) {
+    const result = checkOnly(`export function f(): number { const m = ${expr}; return m.size; }`);
+    const ids = ruleIds(result);
+    assert.ok(ids.includes("NS1011"), `${expr}: got ${ids}`);
+    const d = result.diagnostics.find((x) => x.id === "NS1011");
+    assert.ok(d && d.message.includes("id-keyed array"), `${expr}: teaches the idiom`);
+  }
+});
+
+test("NS1012 delete", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function f(o: { a?: number }): void {
+  delete o.a;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1012"), `got ${ids}`);
+});
+
+test("NS1013 eval and dynamic import", () => {
+  const ids = ruleIds(checkOnly(`export function f(): void { eval("1"); }`));
+  assert.ok(ids.includes("NS1013"), `got ${ids}`);
+});
+
+test("NS1035 runtime npm import (module boundary rules live in the graph resolver)", () => {
+  const result = check(`import x from "some-npm-package";\nexport const y = x;`);
+  assert.equal(result.ok, false);
+  const d = result.diagnostics.find((x) => x.id === "NS1035");
+  assert.ok(d, `got ${result.diagnostics.map((x) => x.id)}`);
+  assert.ok(d.title.includes("npm packages"), "teaches the npm rule");
+});
+
+test("type-only npm imports are allowed by the graph resolver", () => {
+  // The type-only edge erases at the boundary: no NS103x code fires (the
+  // unresolvable package then surfaces as an ordinary tsc error).
+  const result = check(`import type { X } from "some-npm-package";\nexport const y = 1;`);
+  assert.equal(result.diagnostics.length, 0, `got ${result.diagnostics.map((x) => x.id)}`);
+});
+
+test("NS1037 a relative import must name a real .ts file", () => {
+  const result = check(`import { helper } from "./helper_mod";\nexport const y = helper;`);
+  assert.equal(result.ok, false);
+  const d = result.diagnostics.find((x) => x.id === "NS1037");
+  assert.ok(d, `got ${result.diagnostics.map((x) => x.id)}`);
+  assert.ok(d.message.includes("extension") || d.message.includes("names no"), "teaches the real-filename rule");
+});
+
+test("NS1018 string concatenation with +", () => {
+  for (const src of [
+    `export function f(s: string): string { return "hi " + s; }`,
+    `export function f(s: string, n: number): string { return s + n; }`,
+    `export function f(s: string): string { let t = s; t += "!"; return t; }`,
+  ]) {
+    const ids = ruleIds(checkOnly(src));
+    assert.ok(ids.includes("NS1018"), `${src}: got ${ids}`);
+  }
+});
+
+test("numeric + does not trip the concatenation rule", () => {
+  const ids = ruleIds(checkOnly(`export function f(a: number, b: number): number { return a + b; }`));
+  assert.ok(!ids.includes("NS1018"), `got ${ids}`);
+});
+
+test("NS1019 parameter default values", () => {
+  const ids = ruleIds(
+    checkOnly(`
+function step(n: number, by: number = 1): number { return n + by; }
+export function f(n: number): number { return step(n); }
+`),
+  );
+  assert.ok(ids.includes("NS1019"), `got ${ids}`);
+});
+
+test("NS1021 null test on an optional chain", () => {
+  for (const expr of ["model.inner?.x === null", "model.inner?.x !== null", "undefined === model.inner?.x"]) {
+    const ids = ruleIds(
+      checkOnly(`
+export interface Inner { readonly x: number | null; }
+export interface Model { readonly inner: Inner | null; }
+export function f(model: Model): boolean { return ${expr}; }
+`),
+    );
+    assert.ok(ids.includes("NS1021"), `${expr}: got ${ids}`);
+  }
+});
+
+test("?? and value comparisons on optional chains stay checker-clean", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Inner { readonly x: number; }
+export interface Model { readonly inner: Inner | null; }
+export function f(model: Model): number { return model.inner?.x ?? 0; }
+export function g(model: Model): boolean { return model.inner?.x === 5; }
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+const cmdCore = (update: string) => `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "tick"; readonly at: number };
+${update}
+`;
+
+test("Cmd in update's return path passes the checker", () => {
+  const ids = ruleIds(
+    checkOnly(
+      cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add": return [{ count: model.count + 1 }, Cmd.batch([Cmd.persist(), Cmd.now("tick")])];
+    case "tick": return { count: msg.at };
+  }
+}
+`),
+    ),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1017 Cmd stored in a local", () => {
+  const ids = ruleIds(
+    checkOnly(
+      cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  const cmd = Cmd.persist();
+  switch (msg.kind) {
+    case "add": return [model, cmd];
+    case "tick": return model;
+  }
+}
+`),
+    ),
+  );
+  assert.ok(ids.includes("NS1017"), `got ${ids}`);
+});
+
+test("Cmd.batch consumes returned array maps without escaping commands", () => {
+  const returned = `return [model, Cmd.batch([1, 2].map(at => Cmd.batch([at > 0 ? Cmd.persist() : Cmd.none])))];`;
+  assert.deepEqual(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${returned} }
+`))), []);
+  for (const body of [
+    `const commands = [1, 2].map(at => Cmd.persist()); return [model, Cmd.batch(commands)];`,
+    `const make = () => Cmd.persist(); return [model, Cmd.batch([1, 2].map(make))];`,
+    `return [model, Cmd.batch([1, 2].filter(at => Cmd.persist()))];`,
+    `return [[1, 2].map(at => Cmd.persist())[0], Cmd.none];`,
+    `const consume = { map: (fn: (at: number) => Cmd<Msg>): Cmd<Msg>[] => [] }; return [model, Cmd.batch(consume.map(at => Cmd.persist()))];`,
+  ]) {
+    assert.ok(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${body} }
+`))).includes("NS1017"), body);
+  }
+});
+
+test("NS1017 Cmd built in a helper", () => {
+  const ids = ruleIds(
+    checkOnly(
+      cmdCore(`
+function saveCmd(): Cmd<Msg> {
+  return Cmd.persist();
+}
+export function update(model: Model, msg: Msg): Model { return model; }
+`),
+    ),
+  );
+  assert.ok(ids.includes("NS1017"), `got ${ids}`);
+});
+
+test("NS1017 Cmd stored in the model", () => {
+  const ids = ruleIds(
+    checkOnly(`
+import { Cmd } from "@native-sdk/core";
+export type Msg = { readonly kind: "add" } | { readonly kind: "noop" };
+export interface Model { readonly pending: Cmd<Msg>; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`),
+  );
+  assert.ok(ids.includes("NS1017"), `got ${ids}`);
+});
+
+test("NS1017 Cmd in the model slot of the returned tuple", () => {
+  const ids = ruleIds(
+    checkOnly(
+      cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add": return [[model, Cmd.persist()][0], Cmd.none];
+    case "tick": return model;
+  }
+}
+`),
+    ),
+  );
+  assert.ok(ids.includes("NS1017"), `got ${ids}`);
+});
+
+test("Cmd in initialModel's boot pair passes the checker (the init command)", () => {
+  const ids = ruleIds(
+    checkOnly(
+      cmdCore(`
+export function initialModel(): [Model, Cmd<Msg>] {
+  return [{ count: 0 }, Cmd.now("tick")];
+}
+export function update(model: Model, msg: Msg): Model { return model; }
+`),
+    ),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("Sub in subscriptions' return path passes the checker", () => {
+  const ids = ruleIds(
+    checkOnly(`
+import { Sub } from "@native-sdk/core";
+export interface Model { readonly running: boolean; }
+export type Msg = { readonly kind: "toggle" } | { readonly kind: "tick"; readonly at: number };
+export function update(model: Model, msg: Msg): Model { return model; }
+export function subscriptions(model: Model): Sub<Msg> {
+  return model.running ? Sub.timer("tick", 100, "tick") : Sub.none;
+}
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1025 Sub built anywhere else", () => {
+  const result = checkOnly(`
+import { Sub } from "@native-sdk/core";
+export interface Model { readonly running: boolean; }
+export type Msg = { readonly kind: "toggle" } | { readonly kind: "tick"; readonly at: number };
+export function update(model: Model, msg: Msg): Model { return model; }
+function timers(model: Model): Sub<Msg> {
+  return Sub.timer("tick", 100, "tick");
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1025");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("subscriptions"), "names the home");
+  assert.ok(d.message.toLowerCase().includes("replay"), "says why");
+});
+
+test("diagnostics carry rule, fix, and why", () => {
+  const result = checkOnly(`export function f(): number { return Math.random(); }`);
+  const d = result.diagnostics.find((x) => x.id === "NS1005");
+  assert.ok(d);
+  assert.ok(d.title.length > 0, "has a rule title");
+  assert.ok(d.message.includes("Cmd."), "shows the idiomatic rewrite");
+  assert.ok(d.message.toLowerCase().includes("replay"), "says why");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
+  assert.ok(!d.message.includes("deliberately deferred"), "guarantee rules carry no deferral clause");
+});
+
+test("every rule carries a class and the deferred set is exact", async () => {
+  const { rules } = await import("../src/diagnostics.ts");
+  const deferred = Object.values(rules)
+    .filter((r) => r.class === "deferred")
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(deferred, ["NS1011", "NS1019", "NS1040", "NS1042", "NS1044"]);
+  for (const r of Object.values(rules)) {
+    assert.ok(r.class === "guarantee" || r.class === "deferred", `${r.id} has a class`);
+  }
+});
+
+test("deferred rules teach the deferral, not impossibility", () => {
+  const result = checkOnly(`export function f(): number { const m = new Map<number, number>(); return m.size; }`);
+  const d = result.diagnostics.find((x) => x.id === "NS1011");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("deliberately deferred"), "names the class");
+  assert.ok(d.message.includes("id-keyed array"), "still teaches the core idiom first");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
+});
+
+test("NS1022 in-place sort teaches the toSorted rewrite", () => {
+  const result = checkOnly(`
+export function ordered(xs: number[]): number[] {
+  xs.sort((a, b) => a - b);
+  return xs;
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1022");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes(".toSorted"), "names the copying rewrite");
+});
+
+test("NS1022 fires on sort even where the base looks readonly", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Model { readonly xs: readonly number[]; }
+export function f(model: Model): readonly number[] {
+  (model.xs as number[]).sort((a, b) => a - b);
+  return model.xs;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1022"), `got ${ids}`);
+});
+
+test("NS1023 boolean comparator is taught beneath tsc's own signature error", () => {
+  // tsc's toSorted signature already rejects a boolean comparator (TS2345
+  // gates the pipeline first); the checker rule is the teaching layer, and
+  // the emitter re-derives it.
+  const result = checkOnly(`
+export function ordered(xs: readonly number[]): readonly number[] {
+  return xs.toSorted((a, b) => a > b);
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1023");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("a - b"), "names the sign-returning fix");
+});
+
+test("push on a local builder array is the emitter's to shape, not NS1001", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function collect(xs: readonly number[]): readonly number[] {
+  const out: number[] = [];
+  for (const x of xs) {
+    if (x > 0) out.push(x);
+  }
+  return out;
+}
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1001 still fires for push on a parameter array", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function grow(xs: number[], x: number): number[] {
+  xs.push(x);
+  return xs;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1001"), `got ${ids}`);
+});
+
+test("local mutation: the full owned method set passes the checker clean", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function work(xs: readonly number[]): readonly number[] {
+  const copy = xs.slice();
+  copy.push(1);
+  copy.pop();
+  copy.shift();
+  copy.unshift(0);
+  copy.splice(1, 1, 9);
+  copy.reverse();
+  copy.fill(0, 0, 1);
+  copy.sort((a, b) => a - b);
+  copy[0] = 5;
+  return copy;
+}
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("NS1051 mutation after the array was passed to a call, with the escape named", () => {
+  const result = checkOnly(`
+function probe(xs: number[]): number { return xs.length; }
+export function f(): number {
+  const out: number[] = [1];
+  const t = probe(out);
+  out.push(2);
+  return t;
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1051");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("was passed to a call"), d.message);
+  assert.ok(/line \d/.test(d.message), "names the escape line");
+});
+
+test("NS1051 mutation after storing the array into a record", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export interface Pair { readonly xs: readonly number[]; }
+export function f(): Pair {
+  const out: number[] = [1];
+  const pair: Pair = { xs: out };
+  out.pop();
+  return pair;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1051"), `got ${ids}`);
+});
+
+test("NS1051 aliasing ends the original binding's ownership", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function f(): number {
+  const a: number[] = [1];
+  const b = a;
+  a.push(2);
+  return b.length;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1051"), `got ${ids}`);
+});
+
+test("an early-exit return is terminal, not an escape (mutation after it stays legal)", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export function padded(xs: readonly number[], min: number): readonly number[] {
+  const work = xs.slice();
+  if (work.length >= min) return work;
+  while (work.length < min) work.push(0);
+  return work;
+}
+`),
+  );
+  assert.deepEqual(ids, []);
+});
+
+test("an escape inside a loop gates mutations anywhere in that loop", () => {
+  const ids = ruleIds(
+    checkOnly(`
+function probe(xs: number[]): number { return xs.length; }
+export function f(n: number): number {
+  const out: number[] = [];
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    out.push(i);
+    t += probe(out);
+  }
+  return t;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1051"), `got ${ids}`);
+});
+
+test("NS1001 mutating the alias of an owned array (the alias owns nothing)", () => {
+  const result = checkOnly(`
+export function f(): number {
+  const a: number[] = [1];
+  const b = a;
+  b.push(2);
+  return a.length;
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1001");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("aliases"), d.message);
+});
+
+test("NS1001 mutating a module-level table", () => {
+  const ids = ruleIds(
+    checkOnly(`
+const TABLE: number[] = [1, 2];
+export function f(): number {
+  TABLE.push(3);
+  return TABLE.length;
+}
+`),
+  );
+  assert.ok(ids.includes("NS1001"), `got ${ids}`);
+});
+
+test("NS1001 indexed writes through parameters and NS1051 after an escape", () => {
+  const paramWrite = ruleIds(
+    checkOnly(`
+export function f(xs: number[]): number {
+  xs[0] = 1;
+  return xs[0];
+}
+`),
+  );
+  assert.ok(paramWrite.includes("NS1001"), `got ${paramWrite}`);
+  const escapedWrite = ruleIds(
+    checkOnly(`
+function probe(xs: number[]): number { return xs.length; }
+export function f(): number {
+  const out: number[] = [1];
+  const t = probe(out);
+  out[0] = 2;
+  return t;
+}
+`),
+  );
+  assert.ok(escapedWrite.includes("NS1051"), `got ${escapedWrite}`);
+});
+
+test("NS1022 keeps teaching on shared sorts and now names the local-copy idiom", () => {
+  const result = checkOnly(`
+export function ordered(xs: number[]): number[] {
+  xs.sort((a, b) => a - b);
+  return xs;
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1022");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("copy.sort"), "names the slice-copy idiom");
+  assert.ok(d.message.includes(".toSorted"), "keeps the copying rewrite");
+});
+
+test("NS1023 fires on an in-place sort's boolean comparator too", () => {
+  const result = checkOnly(`
+export function ordered(xs: readonly number[]): readonly number[] {
+  const copy = xs.slice();
+  copy.sort((a, b) => a > b);
+  return copy;
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1023");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("a - b"), "names the sign-returning fix");
+});
+
+test("NS1024 string model fields are taught at the declaration, not first use", () => {
+  const result = checkOnly(`
+export interface Model { readonly title: string; readonly n: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { title: "x", n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "a": return model; case "b": return model; }
+}
+export function read(model: Model): boolean { return model.title === "x"; }
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1024");
+  assert.ok(d, `expected NS1024, got ${ruleIds(result)}`);
+  // The declaration sits on line 2 (the interface); first use is far below.
+  assert.equal(d.line, 2);
+  assert.ok(d.message.includes("`title`"), d.message);
+  assert.ok(d.message.includes("Uint8Array"), d.message);
+});
+
+test("NS1024 does not fire for literal-union tag fields or Msg payload strings", () => {
+  const ids = ruleIds(
+    checkOnly(`
+export type Filter = "all" | "done";
+export interface Model { readonly filter: Filter; }
+export type Msg = { readonly kind: "run"; readonly name: string } | { readonly kind: "stop" };
+export function initialModel(): Model { return { filter: "all" }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "run": return model; case "stop": return model; }
+}
+`),
+  );
+  assert.ok(!ids.includes("NS1024"), `got ${ids}`);
+});
+
+test("NS1031 an exported helper colliding with a model field's emitted name is taught", () => {
+  const result = checkOnly(`
+interface Totals { readonly doneCount: number; }
+export interface Model { readonly totals: Totals; readonly doneCount: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { totals: { doneCount: 0 }, doneCount: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "a": return model; case "b": return model; }
+}
+export function doneCount(model: Model): number { return model.totals.doneCount; }
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1031");
+  assert.ok(d, `expected NS1031, got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("doneCount"), d.message);
+});
+
+test("NS1031 does not fire across casings: names emit verbatim, so doneCount and done_count coexist", () => {
+  const result = checkOnly(`
+export interface Model { readonly done_count: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { done_count: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "a": return model; case "b": return model; }
+}
+export function doneCount(model: Model): number { return model.done_count; }
+`);
+  assert.ok(!ruleIds(result).includes("NS1031"), `got ${ruleIds(result)}`);
+});
+
+test("NS1032 viewUnbound entries must name the model surface", () => {
+  const result = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "add" } | { readonly kind: "tick"; readonly at: number };
+export const viewUnbound = ["count", "tick", "nope"] as const;
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "add": return model; case "tick": return model; }
+}
+`);
+  const d = result.diagnostics.find((x) => x.id === "NS1032");
+  assert.ok(d, `expected NS1032, got ${ruleIds(result)}`);
+  assert.ok(d.message.includes('"nope"'), d.message);
+  // The two valid entries alone are clean.
+  const clean = check(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "add" } | { readonly kind: "tick"; readonly at: number };
+export const viewUnbound = ["count", "tick"] as const;
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "add": return model; case "tick": return model; }
+}
+`);
+  assert.ok(!ruleIds(clean).includes("NS1032"), `got ${ruleIds(clean)}`);
+});
+
+test("NS1033 themePack is an exact model-derived built-in pack helper", () => {
+  const clean = checkOnly(`
+export type ThemePack = "house" | "geist";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "house" } | { readonly kind: "geist" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(model: Model): ThemePack { return model.theme; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "house": return { theme: "house" }; case "geist": return { theme: "geist" }; }
+}
+`);
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const wrongPack = checkOnly(`
+export type ThemePack = "house" | "solarized";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(model: Model): ThemePack { return model.theme; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongPack).includes("NS1033"), `got ${ruleIds(wrongPack)}`);
+
+  const wrongShape = checkOnly(`
+export type ThemePack = "house" | "geist";
+export interface Model { readonly theme: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { theme: "house" }; }
+export function themePack(): ThemePack { return "house"; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+});
+
+test("NS1033 themeState is the exact model-derived appearance record and excludes themePack", () => {
+  const clean = check(`
+import { type ThemeState } from "@native-sdk/core/events";
+export type Scheme = "light" | "dark" | "system";
+export interface Model { readonly scheme: Scheme; readonly branded: boolean; }
+export type Msg = { readonly kind: "toggle" } | { readonly kind: "noop" };
+export function initialModel(): Model { return { scheme: "system", branded: false }; }
+export function themeState(model: Model): ThemeState {
+  return model.branded
+    ? { pack: "geist", colorScheme: model.scheme, accent: "#df2670" }
+    : { colorScheme: model.scheme };
+}
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const lookalike = checkOnly(`
+export type ThemeState = {
+  readonly pack?: "house" | "geist";
+  readonly colorScheme?: "light" | "dark" | "system";
+  readonly accent?: string;
+};
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(model: Model): ThemeState { return {}; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(lookalike).includes("NS1033"), `got ${ruleIds(lookalike)}`);
+
+  const wrongRecord = checkOnly(`
+export interface WrongThemeState { readonly pack: "house" | "geist"; readonly accent: Uint8Array; }
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(model: Model): WrongThemeState { return { pack: "house", accent: new Uint8Array(0) }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongRecord).includes("NS1033"), `got ${ruleIds(wrongRecord)}`);
+
+  const wrongShape = checkOnly(`
+import { type ThemeState } from "@native-sdk/core/events";
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(): ThemeState { return {}; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+
+  const both = checkOnly(`
+import { type ThemeState } from "@native-sdk/core/events";
+export type ThemePack = "house" | "geist";
+export interface Model { readonly pack: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { pack: "house" }; }
+export function themePack(model: Model): ThemePack { return model.pack; }
+export function themeState(model: Model): ThemeState { return { pack: model.pack }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(both).includes("NS1033"), `got ${ruleIds(both)}`);
+});
+
+test("NS1033 validates migrate hooks exported through an export list", () => {
+  const valid = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: Uint8Array, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(!ruleIds(valid).includes("NS1033"), `got ${ruleIds(valid)}`);
+
+  const malformed = checkOnly(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function migrate(snapshot: string, fromVersion: number): Model { return { count: fromVersion }; }
+export { migrate };
+`);
+  assert.ok(ruleIds(malformed).includes("NS1033"), `got ${ruleIds(malformed)}`);
+});
+
+test("NS1033 statusItem is the exact model-derived presentation and menu helper", () => {
+  const clean = check(`
+import { asciiBytes } from "@native-sdk/core";
+import { type StatusItemState } from "@native-sdk/core/events";
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return { playing: !model.playing }; }
+export function statusItem(model: Model): StatusItemState {
+  return {
+    iconPath: asciiBytes("assets/tray.svg"),
+    tooltip: asciiBytes("Player"),
+    activationCommand: asciiBytes("refresh"),
+    alternateActivationCommand: asciiBytes("toggle"),
+    openCommand: asciiBytes("refresh"),
+    presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
+    items: [
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, metric: { primaryText: asciiBytes("2,494 requests"), secondaryText: asciiBytes("Today"), accessibilityLabel: asciiBytes("2,494 requests today") } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: true, detail: asciiBytes(""), role: "segmented", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, segmented: { options: [{ id: 11, label: asciiBytes("On"), command: asciiBytes("enable"), selected: model.playing, enabled: true }] } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "chart", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, chart: { values: [0.25, 0.5, 1], minValue: 0, maxValue: 1, leadingCaption: asciiBytes("Load"), trailingSummary: asciiBytes("50%"), accessibilityLabel: asciiBytes("Load history, 50 percent") } },
+      { id: 1, label: asciiBytes(model.playing ? "Pause" : "Play"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes("configured"), role: "agent", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
+    ],
+  };
+}
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const wrongShape = checkOnly(`
+export interface StatusItemMenuItem { readonly id: number; readonly label: Uint8Array; readonly command: Uint8Array; readonly separator: boolean; }
+export interface StatusItemState { readonly title: Uint8Array; readonly items: readonly StatusItemMenuItem[]; }
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(model: Model): StatusItemState { throw { kind: "unreachable" }; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+
+  const wrongHelper = checkOnly(`
+export interface StatusItemState { readonly title: Uint8Array; readonly items: readonly Uint8Array[]; }
+export interface Model { readonly playing: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { playing: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(): StatusItemState { throw { kind: "unreachable" }; }
+`);
+  assert.ok(ruleIds(wrongHelper).includes("NS1033"), `got ${ruleIds(wrongHelper)}`);
+});
+
+test("NS1033 statusItems is the canonical independent-item collection", () => {
+  const clean = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const exportList = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+export { statusItems };
+`);
+  assert.equal(exportList.ok, true, exportList.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(exportList).includes("NS1033"), `got ${ruleIds(exportList)}`);
+
+  const wrongNestedShape = checkOnly(`
+export interface BadPresentation { readonly title: Uint8Array; }
+export interface BadItem { readonly id: number; }
+export interface StatusItemDescriptor {
+  readonly id: number;
+  readonly visible: boolean;
+  readonly iconPath: Uint8Array;
+  readonly tooltip: Uint8Array;
+  readonly activationCommand: Uint8Array;
+  readonly alternateActivationCommand: Uint8Array;
+  readonly openCommand: Uint8Array;
+  readonly presentation: BadPresentation;
+  readonly items: readonly BadItem[];
+}
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(wrongNestedShape).includes("NS1033"), `got ${ruleIds(wrongNestedShape)}`);
+
+  const mutuallyExclusive = checkOnly(`
+import { type StatusItemDescriptor, type StatusItemState } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(model: Model): StatusItemState { throw { kind: "unreachable" }; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(mutuallyExclusive).includes("NS1033"), `got ${ruleIds(mutuallyExclusive)}`);
+});
+
+test("NS1033 windows is the canonical model-declared secondary-window collection", () => {
+  const cleanSource = `
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), restorePolicy: "center_on_primary", titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
+}
+`;
+  const clean = check(cleanSource, { windowViews: ["settings"] });
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const missingView = check(cleanSource, { windowViews: [] });
+  assert.equal(missingView.ok, false);
+  assert.match(missingView.diagnostics.map((d) => d.message).join("\n"), /src\/windows\/settings\.native/);
+
+  const mismatchedView = check(cleanSource, { windowViews: ["preferences"] });
+  assert.equal(mismatchedView.ok, false);
+  assert.match(mismatchedView.diagnostics.map((d) => d.message).join("\n"), /src\/windows\/settings\.native/);
+
+  const tooLongLabel = "a".repeat(65);
+  const oversized = check(cleanSource.replaceAll("settings", tooLongLabel), { windowViews: [tooLongLabel] });
+  assert.equal(oversized.ok, false);
+  assert.match(oversized.diagnostics.map((d) => d.message).join("\n"), /at most 64 ASCII bytes/);
+
+  const missingCommandMapper = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    onCloseCommand: asciiBytes("settings.closed"),
+  })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(missingCommandMapper.ok, false);
+  assert.match(missingCommandMapper.diagnostics.map((d) => d.message).join("\n"), /requires `commandMsg/);
+
+  const hiddenWithoutMapper = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  return model.settingsOpen ? [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    closePolicy: "hide",
+    onCloseCommand: asciiBytes("unused.while.hidden"),
+  })] : [];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(hiddenWithoutMapper.ok, true, hiddenWithoutMapper.diagnostics.map((d) => d.message).join("\n"));
+
+  const rootTypeReexport = check(`
+import { asciiBytes, windowDescriptor, type WindowDescriptor } from "@native-sdk/core";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(rootTypeReexport.ok, false);
+  assert.match(rootTypeReexport.typeErrors.join("\n"), /WindowDescriptor/);
+
+  const dynamicLabel = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("settings") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({ label: model.label, canvasLabel: asciiBytes("settings-canvas") })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(dynamicLabel.ok, false);
+  assert.match(dynamicLabel.diagnostics.map((d) => d.message).join("\n"), /static `asciiBytes/);
+
+  const spreadSpec = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const common = { canvasLabel: asciiBytes("settings-canvas") };
+  return [windowDescriptor({ label: asciiBytes("settings"), ...common })];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(spreadSpec.ok, false);
+  assert.match(spreadSpec.diagnostics.map((d) => d.message).join("\n"), /cannot spread fields after its literal label/);
+
+  const overwrittenLabel = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const base = windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+  return [{ ...base, label: model.label }];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(overwrittenLabel.ok, false);
+  assert.match(overwrittenLabel.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
+  const helperOverwrite = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function unsafeWindow(model: Model): WindowDescriptor {
+  const base = windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+  return { ...base, label: model.label };
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [unsafeWindow(model)];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(helperOverwrite.ok, false);
+  assert.match(helperOverwrite.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
+  const unrelatedConstructor = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; readonly label: Uint8Array; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false, label: asciiBytes("missing") }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function unusedWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [{ ...unusedWindow(), label: model.label }];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(unrelatedConstructor.ok, false);
+  assert.match(unrelatedConstructor.diagnostics.map((d) => d.message).join("\n"), /flow directly from `windowDescriptor/);
+
+  const factored = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function settingsWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [settingsWindow()];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(factored.ok, true, factored.diagnostics.map((d) => d.message).join("\n"));
+
+  const constAlias = check(`
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  const common = { canvasLabel: asciiBytes("settings-canvas") };
+  const window = windowDescriptor({
+    ...common,
+    label: asciiBytes("settings"),
+  });
+  return [window];
+}
+`, { windowViews: ["settings"] });
+  assert.equal(constAlias.ok, true, constAlias.diagnostics.map((d) => d.message).join("\n"));
+
+  const namespaced = checkFiles({
+    "core.ts": `
+import * as shell from "./windows.ts";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [shell.settingsWindow()];
+}
+`,
+    "windows.ts": `
+import { asciiBytes, windowDescriptor } from "@native-sdk/core";
+import { type WindowDescriptor } from "@native-sdk/core/events";
+export function settingsWindow(): WindowDescriptor {
+  return windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas") });
+}
+`,
+  }, { windowViews: ["settings"] });
+  assert.equal(namespaced.ok, true, namespaced.diagnostics.map((d) => d.message).join("\n"));
+
+  const wrong = checkOnly(`
+export interface BadWindow { readonly label: Uint8Array; readonly closePolicy: boolean; }
+export interface Model { readonly settingsOpen: boolean; }
+export type Msg = { readonly kind: "open" } | { readonly kind: "closed" };
+export function initialModel(): Model { return { settingsOpen: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function windows(model: Model): readonly BadWindow[] { return []; }
+`);
+  assert.ok(ruleIds(wrong).includes("NS1033"), `got ${ruleIds(wrong)}`);
+});
+
+test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {
+  // The model root is reference storage by contract.
+  const root = checkOnly(`
+export type Model = { readonly n: number };
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(root).includes("NS1061"), `got ${ruleIds(root)}`);
+
+  // A model-kept alias with a heap-backed field would dangle across
+  // frames — through an optional wrapper all the same.
+  const heap = checkOnly(`
+export type Cache = { readonly data: Uint8Array };
+export interface Model { readonly cache: Cache | null; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { cache: null }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(heap).includes("NS1061"), `got ${ruleIds(heap)}`);
+
+  // Model arrays carry reference-stored records.
+  const arr = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly points: readonly Pos[]; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { points: [] }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(arr).includes("NS1061"), `got ${ruleIds(arr)}`);
+
+  // Identity comparison over a value record compares nothing the
+  // storage carries.
+  const eq = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos; readonly n: number; }
+export type Msg = { readonly kind: "moved"; readonly pos: Pos } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: { x: 0 }, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "moved") {
+    return { pos: msg.pos, n: model.pos === msg.pos ? 1 : 0 };
+  }
+  return model;
+}
+`);
+  assert.ok(ruleIds(eq).includes("NS1061"), `got ${ruleIds(eq)}`);
+
+  // A self-reference has no finite by-value layout.
+  const cyclic = checkOnly(`
+export type Link = { readonly next: Link | null };
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "a"; readonly link: Link } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(cyclic).includes("NS1061"), `got ${ruleIds(cyclic)}`);
+
+  // The scalar shapes value storage exists for stay clean: a scalar
+  // alias kept by the model directly, and a heap-carrying alias that
+  // never enters the model tree.
+  const clean = checkOnly(`
+export type Pos = { readonly x: number; readonly y: number };
+export type Note = { readonly text: Uint8Array };
+export interface Model { readonly pos: Pos; readonly n: number; }
+export type Msg = { readonly kind: "noted"; readonly note: Note } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: { x: 1, y: 2 }, n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(!ruleIds(clean).includes("NS1061"), `got ${ruleIds(clean)}`);
+});
+
+test("NS1062: the entry roots keep their contract shapes", () => {
+  // A plain object alias (or an interface) named Msg has no dispatch
+  // path; a tagged singleton named Model has no commit path.
+  const structMsg = checkOnly(`
+export type Msg = { readonly value: number };
+export interface Model { readonly n: number; }
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(structMsg).includes("NS1062"), `got ${ruleIds(structMsg)}`);
+
+  const interfaceMsg = checkOnly(`
+export interface Msg { readonly value: number; }
+export interface Model { readonly n: number; }
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(interfaceMsg).includes("NS1062"), `got ${ruleIds(interfaceMsg)}`);
+
+  const unionModel = checkOnly(`
+export type Model = { readonly kind: "ready"; readonly count: number };
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { kind: "ready", count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(unionModel).includes("NS1062"), `got ${ruleIds(unionModel)}`);
+});
+
+test("NS1061: by-value recursion through a singleton union and wrapped identity comparison refuse", () => {
+  const unionCycle = checkOnly(`
+export type Link = { readonly kind: "link"; readonly next: Link | null };
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "a"; readonly link: Link } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(unionCycle).includes("NS1061"), `got ${ruleIds(unionCycle)}`);
+
+  const nullableEq = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos | null; readonly n: number; }
+export type Msg = { readonly kind: "moved"; readonly pos: Pos | null } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: null, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "moved") {
+    return { pos: msg.pos, n: model.pos === msg.pos ? 1 : 0 };
+  }
+  return model;
+}
+`);
+  assert.ok(ruleIds(nullableEq).includes("NS1061"), `got ${ruleIds(nullableEq)}`);
+
+  // An array breaks the cycle by indirection: a tree over a kids list
+  // stays clean.
+  const treeOverArray = checkOnly(`
+export type Tree = { readonly kind: "node"; readonly label: number } | { readonly kind: "branch"; readonly kids: readonly Tree[] };
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "a"; readonly tree: Tree } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(!ruleIds(treeOverArray).includes("NS1061"), `got ${ruleIds(treeOverArray)}`);
+});
+
+test("NS1061/NS1062: presence checks pass; optional arm payloads and class roots refuse", () => {
+  // A nullable presence check compares the option, not the record.
+  const presence = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos | null; readonly n: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: null, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (model.pos !== null) {
+    return { pos: model.pos, n: model.pos.x };
+  }
+  return model;
+}
+`);
+  assert.ok(!ruleIds(presence).includes("NS1061"), `got ${ruleIds(presence)}`);
+
+  // An optional payload property has no native slot: the shape is not a
+  // kind-tagged union, so the Msg root refuses with the teaching.
+  const optionalArm = checkOnly(`
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "set"; readonly value?: number } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(optionalArm).includes("NS1062"), `got ${ruleIds(optionalArm)}`);
+
+  // A class named Msg is a struct, never a tagged union.
+  const classMsg = checkOnly(`
+export interface Model { readonly n: number; }
+export class Msg {
+  value: number = 0;
+  constructor(value: number) { this.value = value; }
+}
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(classMsg).includes("NS1062"), `got ${ruleIds(classMsg)}`);
+});
+
+test("NS1061: an assertion-erased operand cannot slip identity comparison", () => {
+  const asserted = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos; readonly n: number; }
+export type Msg = { readonly kind: "moved"; readonly pos: Pos } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: { x: 0 }, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "moved") {
+    return { pos: msg.pos, n: model.pos === (msg.pos as { readonly x: number }) ? 1 : 0 };
+  }
+  return model;
+}
+`);
+  assert.ok(ruleIds(asserted).includes("NS1061"), `got ${ruleIds(asserted)}`);
+});
+
+test("NS1061/NS1001/NS1014/NS1032: round-trip edges of the value-record and unbound surfaces", () => {
+  // Both operands asserted: assertions erase at emission, so the guard
+  // types the peeled expressions.
+  const bothAsserted = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos; readonly n: number; }
+export type Msg = { readonly kind: "moved"; readonly pos: Pos } | { readonly kind: "b" };
+export function initialModel(): Model { return { pos: { x: 0 }, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "moved") {
+    return { pos: msg.pos, n: (model.pos as { readonly x: number }) === (msg.pos as { readonly x: number }) ? 1 : 0 };
+  }
+  return model;
+}
+`);
+  assert.ok(ruleIds(bothAsserted).includes("NS1061"), `got ${ruleIds(bothAsserted)}`);
+
+  // Record fields have no in-place write: mutation through a mutable
+  // property refuses with the reconstruction teaching.
+  const paramWrite = checkOnly(`
+export type Pos = { x: number };
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "a"; readonly pos: Pos } | { readonly kind: "b" };
+function bump(p: Pos): number { p.x++; return p.x; }
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "a") { return { n: bump({ x: 1 }) }; }
+  return model;
+}
+`);
+  assert.ok(ruleIds(paramWrite).includes("NS1001"), `got ${ruleIds(paramWrite)}`);
+
+  // An unexported reserved const in an imported module is inert
+  // configuration and refuses like the exported form.
+  const imported = checkFiles({
+    "core.ts": `
+import { other } from "./lists.ts";
+export interface Model { readonly n: number; readonly hidden: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: other, hidden: 1 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`,
+    "lists.ts": `const modelUnbound = ["hidden"] as const;\nexport const other = modelUnbound.length;\n`,
+  });
+  assert.equal(imported.ok, false);
+  assert.ok(imported.diagnostics.some((d) => d.id === "NS1014"), JSON.stringify(imported.diagnostics));
+
+  // An unresolvable viewUnbound entry refuses at check time — the
+  // opt-out lint stays honest for state only update logic touches.
+  const unresolvable = check(`
+export interface Model { readonly n: number; readonly hidden: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
+export const viewUnbound = ["hidden", "nope"] as const;
+export function initialModel(): Model { return { n: 0, hidden: 1 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.equal(unresolvable.ok, false);
+  assert.ok(unresolvable.diagnostics.some((d) => d.id === "NS1032"), JSON.stringify(unresolvable.diagnostics));
+
+  // Entries resolve by side: a msg-arm spelling lands on the msg list.
+  const split = check(
+    `
+export interface Model { readonly n: number; readonly hidden: number; }
+export type Msg = { readonly kind: "a" } | { readonly kind: "probe"; readonly value: number };
+export const viewUnbound = ["hidden", "probe"] as const;
+export function initialModel(): Model { return { n: 0, hidden: 1 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`,
+    { contractEntry: "core.ts" },
+  );
+  assert.equal(split.ok, true);
+  assert.ok(split.contract!.includes('"model_unbound": ["hidden"]'), split.contract!);
+  assert.ok(split.contract!.includes('"unbound": ["probe"]'), split.contract!);
+});
+
+test("NS1061: generic and literal-asserted identity stop; enum-kind records stay structs", () => {
+  // Identity through a generic instantiation used to stop at emission
+  // (the removed TS-to-Zig emitter re-derived NS1061 during
+  // monomorphization); the frontend accepts the generic form now — the
+  // external core compiler carries the real JS reference-identity
+  // semantics — while the direct form below still teaches at check.
+  const generic = check(`
+export type Pos = { readonly x: number };
+export interface Model { readonly pos: Pos; readonly n: number; }
+export type Msg = { readonly kind: "moved"; readonly pos: Pos } | { readonly kind: "b" };
+function same<T>(a: T, b: T): boolean { return a === b; }
+export function initialModel(): Model { return { pos: { x: 0 }, n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  if (msg.kind === "moved") {
+    return { pos: msg.pos, n: same(model.pos, msg.pos) ? 1 : 0 };
+  }
+  return model;
+}
+`);
+  assert.equal(generic.ok, true);
+
+  // An assertion may be what NAMES the record: both views are read, so
+  // literal-asserted operands refuse at check time.
+  const asserted = checkOnly(`
+export type Pos = { readonly x: number };
+export interface Model { readonly n: number; }
+export type Msg = { readonly kind: "a"; readonly pos: Pos } | { readonly kind: "b" };
+export function initialModel(): Model { return { n: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  return { n: ({ x: 1 } as Pos) === ({ x: 1 } as Pos) ? 1 : 0 };
+}
+`);
+  assert.ok(ruleIds(asserted).includes("NS1061"), `got ${ruleIds(asserted)}`);
+});
+
+test("model token overrides require the complete SDK register and remain entry-owned", () => {
+  const result = check(`
+import type { ThemeDesignTokenOverrides } from "@native-sdk/core/theme";
+export interface Model { readonly dark: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { dark: false }; }
+export function update(model: Model, msg: Msg): Model { return { dark: !model.dark }; }
+export function tokenOverrides(model: Model): ThemeDesignTokenOverrides {
+  return { typography: { display_size: 36, mono_font_id: 64 }, radius: { sm: 7 },
+    colors: { accent: { r: 0.1, g: 0.2, b: model.dark ? 0.9 : 0.5, a: 1 } },
+    controls: { button_primary: { radius: 10, stroke_width: 1 } }, pixel_snap: { geometry: true, text: true } };
+}
+`, { contractEntry: "core.ts" });
+  assert.equal(result.ok, true, result.diagnostics.map(d => d.message).join("\n"));
+  const contract = JSON.parse(result.contract!);
+  const register = contract.types.structs.find((record: { name: string }) => record.name === "ThemeDesignTokenOverrides");
+  assert.equal(register.fields.length, 15);
+  assert.ok(register.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const colors = contract.types.structs.find((record: { name: string }) => record.name === "ThemeColorTokenOverrides");
+  const typography = contract.types.structs.find((record: { name: string }) => record.name === "ThemeTypographyTokenOverrides");
+  assert.ok(typography.fields.every((field: { type: { inner: { kind: string } } }) => field.type.inner.kind !== "i64"));
+  assert.equal(colors.fields.length, 28);
+  assert.ok(colors.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const wrong = checkOnly(`
+export interface Model { readonly value: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { value: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export type PartialTokens = { readonly radius?: number };
+export function tokenOverrides(model: Model): PartialTokens { return {}; }
+`);
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+});
+
+
+test("NS1033 webPanes requires the complete model-derived pane descriptor", () => {
+  const source = `
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+export interface Model { readonly docs: boolean; }
+export type Msg = { readonly kind: "show" } | { readonly kind: "hide" };
+export function initialModel(): Model { return { docs: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: null, url: asciiBytes("zero://app"), x: 0.125, y: 0, width: 400, height: 300, reloadToken: 0 }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly WebViewPane[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("webPanes(model: Model)", "webPanes(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
+});
+
+test("NS1033 layoutTweens requires the complete Model-derived declaration", () => {
+  const source = `
+import type { LayoutTween } from "@native-sdk/core/events";
+export interface Model { readonly closed: boolean; }
+export type Msg = { readonly kind: "close" } | { readonly kind: "open" };
+export function initialModel(): Model { return { closed: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function layoutTweens(model: Model): readonly LayoutTween[] {
+  return [{ label: null, index: 0, to: model.closed ? 0.06 : 0.35, durationMs: 180, easing: "standard" }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly LayoutTween[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("layoutTweens(model: Model)", "layoutTweens(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
+});

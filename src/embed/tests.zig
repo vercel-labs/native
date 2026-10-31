@@ -29,6 +29,7 @@ const mobileWidgetActions = conversions.mobileWidgetActions;
 const mobileWidgetActionKindFromInt = conversions.mobileWidgetActionKindFromInt;
 const native_sdk_app_create = c_api.native_sdk_app_create;
 const native_sdk_app_destroy = c_api.native_sdk_app_destroy;
+const native_sdk_app_destroy_with_status = c_api.native_sdk_app_destroy_with_status;
 const native_sdk_app_start = c_api.native_sdk_app_start;
 const native_sdk_app_activate = c_api.native_sdk_app_activate;
 const native_sdk_app_deactivate = c_api.native_sdk_app_deactivate;
@@ -77,6 +78,204 @@ test "embedded app starts and loads source" {
 
     try embedded.start();
     try @import("std").testing.expectEqualStrings("<p>Embedded</p>", null_platform.loaded_source.?.bytes);
+}
+
+test "embedded app deinit returns registered font bytes across create-destroy cycles" {
+    // A direct embedder that creates and destroys apps in one process:
+    // every cycle registers a face (font bytes are the embedded
+    // runtime's only heap ownership) and tears down through the public
+    // `deinit` — the lifecycle end the doc comment promises. The
+    // leak-checking test allocator behind the `Options.allocator` seam
+    // fails this test if any cycle strands the storage, which is
+    // exactly what a stop()-only teardown did.
+    var cycle: usize = 0;
+    while (cycle < 3) : (cycle += 1) {
+        var null_platform = platform.NullPlatform.init(.{});
+        var state: u8 = 0;
+        const embedded = try std.testing.allocator.create(EmbeddedApp);
+        defer std.testing.allocator.destroy(embedded);
+        embedded.initInPlace(.{
+            .context = &state,
+            .name = "embedded-font-cycle",
+            .source = platform.WebViewSource.html("<p>Fonts</p>"),
+        }, null_platform.platform());
+        defer embedded.deinit();
+        // Ownership is frozen at init (`Runtime.owned_allocator`;
+        // mutating `options.allocator` retargets nothing), so the test
+        // re-freezes the field itself — equivalent to constructing with
+        // the leak-checked allocator, safe while nothing is owned yet.
+        embedded.runtime.owned_allocator = std.testing.allocator;
+
+        try embedded.start();
+        try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+        try std.testing.expectEqual(@as(usize, 1), embedded.runtime.registeredCanvasFontCount());
+        try embedded.stop();
+
+        // Deinit returns BOTH sides of the registration: the Zig-side
+        // bytes (the leak-checking allocator above) and the host-side
+        // registration — the runtime must call the platform's
+        // font-unregister seam per registered id, the call a macOS host
+        // answers by dropping its CoreText descriptor and caches. The
+        // null platform records that call; the deferred second deinit
+        // stays the idempotence backstop.
+        embedded.deinit();
+        try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+        try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), null_platform.gpu_surface_font_unregister_id);
+        // The null platform's register seam is off by default, so the
+        // runtime captured ownership token 0 (nothing installed
+        // host-side) and the teardown call must carry exactly that.
+        try std.testing.expectEqual(@as(u64, 0), null_platform.gpu_surface_font_unregister_token);
+    }
+}
+
+test "embedded app deinit leaves a newer runtime's re-registration of the same font id intact" {
+    // Host font state is per-process while font ids are only permanent
+    // per-runtime, so two live runtimes can pass the same id through one
+    // host: the later registration wins (the documented lifecycle), and
+    // the OLDER runtime's deinit must return only its own already-
+    // replaced registration — never the newer runtime's live face,
+    // which that runtime's engine still holds and draws through. The
+    // null platform's host-font mirror models the stateful host (the
+    // shape of macOS's descriptor and token tables): one instance
+    // stands in for the process, both runtimes register through it, and
+    // the per-registration ownership token is what the unregister guard
+    // matches. An id-keyed removal is exactly the regression this test
+    // catches — it would empty the mirror at A's deinit and fail the
+    // survives assertion below.
+    var host_platform = platform.NullPlatform.init(.{});
+    host_platform.gpu_surface_font_registrations = true;
+    var state_a: u8 = 0;
+    var state_b: u8 = 0;
+    const embedded_a = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded_a);
+    const embedded_b = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded_b);
+    embedded_a.initInPlace(.{
+        .context = &state_a,
+        .name = "embedded-font-owner-a",
+        .source = platform.WebViewSource.html("<p>A</p>"),
+    }, host_platform.platform());
+    defer embedded_a.deinit();
+    embedded_b.initInPlace(.{
+        .context = &state_b,
+        .name = "embedded-font-owner-b",
+        .source = platform.WebViewSource.html("<p>B</p>"),
+    }, host_platform.platform());
+    defer embedded_b.deinit();
+    embedded_a.runtime.owned_allocator = std.testing.allocator;
+    embedded_b.runtime.owned_allocator = std.testing.allocator;
+
+    // A registers first, B re-registers the same id: last wins, each
+    // runtime captured its own never-repeating ownership token.
+    try embedded_a.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    const token_a = embedded_a.runtime.canvas_font_entries[0].host_registration_token;
+    try embedded_b.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    const token_b = embedded_b.runtime.canvas_font_entries[0].host_registration_token;
+    try std.testing.expect(token_a != 0);
+    try std.testing.expect(token_b != 0);
+    try std.testing.expect(token_a != token_b);
+    const live = host_platform.gpuSurfaceFont(canvas.min_registered_font_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(token_b, live.token);
+
+    // A's deinit presents its stale token: recorded and accepted (the
+    // registration it owned is already gone), and provably removing
+    // nothing — B's registration is still the one the host resolves.
+    embedded_a.deinit();
+    try std.testing.expectEqual(@as(usize, 1), host_platform.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), host_platform.gpu_surface_font_unregister_id);
+    try std.testing.expectEqual(token_a, host_platform.gpu_surface_font_unregister_token);
+    const survivor = host_platform.gpuSurfaceFont(canvas.min_registered_font_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(token_b, survivor.token);
+
+    // B's deinit presents the live token and the host state comes out —
+    // the guard blocks the wrong owner, not teardown itself.
+    embedded_b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), host_platform.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(token_b, host_platform.gpu_surface_font_unregister_token);
+    try std.testing.expect(host_platform.gpuSurfaceFont(canvas.min_registered_font_id) == null);
+}
+
+test "embedded app deinit is idempotent" {
+    var null_platform = platform.NullPlatform.init(.{});
+    var state: u8 = 0;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
+    embedded.initInPlace(.{
+        .context = &state,
+        .name = "embedded-deinit-twice",
+        .source = platform.WebViewSource.html("<p>Fonts</p>"),
+    }, null_platform.platform());
+    embedded.runtime.owned_allocator = std.testing.allocator;
+    try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+
+    // The documented idiom is `defer embedded.deinit()`, which must
+    // compose with an explicit early teardown: the second call is a
+    // no-op, never a double free — and never a double host unregister
+    // (the first deinit already returned the host-side registration).
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), embedded.runtime.registeredCanvasFontCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), null_platform.gpu_surface_font_unregister_count);
+}
+
+test "embedded app deinit returns the font registration to the platform that received it" {
+    // `Runtime.options` is public and mutable, and embedders genuinely
+    // swap the platform on a live runtime (tests in this repo do it
+    // constantly). The host-side registration must still come back to
+    // the host that RECEIVED it: each font entry captures its
+    // unregistration owner at registration time (the allocator-identity
+    // freeze, applied to the host seam), so a swap between registration
+    // and teardown retargets nothing. A deinit reading the live options
+    // instead would unregister against the swapped-in platform — the
+    // wrong host, or a null seam — and strand the original host's
+    // descriptor and caches for the process lifetime.
+    var platform_a = platform.NullPlatform.init(.{});
+    var platform_b = platform.NullPlatform.init(.{});
+    var state: u8 = 0;
+    const embedded = try std.testing.allocator.create(EmbeddedApp);
+    defer std.testing.allocator.destroy(embedded);
+    embedded.initInPlace(.{
+        .context = &state,
+        .name = "embedded-font-platform-swap",
+        .source = platform.WebViewSource.html("<p>Fonts</p>"),
+    }, platform_a.platform());
+    embedded.runtime.owned_allocator = std.testing.allocator;
+    try embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+
+    // The swap under test: platform B holds the option by teardown time,
+    // but it never saw the registration.
+    embedded.runtime.options.platform = platform_b.platform();
+    embedded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), platform_a.gpu_surface_font_unregister_count);
+    try std.testing.expectEqual(@as(u64, canvas.min_registered_font_id), platform_a.gpu_surface_font_unregister_id);
+    try std.testing.expectEqual(@as(usize, 0), platform_b.gpu_surface_font_unregister_count);
+}
+
+test "mobile C ABI destroy returns registered font bytes through the embedded deinit" {
+    const app = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    errdefer native_sdk_app_destroy(app);
+
+    const self = mobileApp(app).?;
+    self.embedded.runtime.owned_allocator = std.testing.allocator;
+    try self.embedded.runtime.registerCanvasFont(canvas.min_registered_font_id, canvas.font_ttf.geist_mono_bytes);
+    try std.testing.expectEqual(@as(usize, 1), self.embedded.runtime.registeredCanvasFontCount());
+
+    // `native_sdk_app_destroy` is the shim's whole teardown: it routes
+    // through `EmbeddedApp.deinit` (one lifecycle owner), so the
+    // leak-checked font bytes must come back here.
+    native_sdk_app_destroy(app);
+}
+
+test "mobile C ABI destroy status reports whether callback context must survive" {
+    const normal = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(c_int, 0), native_sdk_app_destroy_with_status(normal));
+
+    const preserved = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    mobileApp(preserved).?.null_platform.channel_wake_abandoned.store(true, .seq_cst);
+    // The host is deliberately process-lived after this call, exactly like a
+    // real detached callback's context. Do not touch or destroy it again.
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_destroy_with_status(preserved));
 }
 
 test "mobile C ABI can load packaged asset source" {
@@ -452,6 +651,12 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
             .layout = .{ .gap = 2 },
             .children = &grid_rows,
         },
+        .{
+            .id = 14,
+            .kind = .radio_group,
+            .frame = geometry.RectF.init(12, 148, 120, 28),
+            .semantics = .{ .label = "Density" },
+        },
     };
     var nodes: [16]canvas.WidgetLayoutNode = undefined;
     const layout = try canvas.layoutWidgetTree(.{
@@ -462,7 +667,7 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     }, geometry.RectF.init(0, 0, 320, 180), &nodes);
     _ = try self.embedded.runtime.setCanvasWidgetLayout(1, mobile_gpu_surface_label, layout);
 
-    try std.testing.expectEqual(@as(usize, 13), native_sdk_app_widget_semantics_count(app));
+    try std.testing.expectEqual(@as(usize, 14), native_sdk_app_widget_semantics_count(app));
 
     var root_node: MobileWidgetSemantics = .{};
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_semantics_at(app, 0, &root_node));
@@ -537,6 +742,10 @@ test "mobile C ABI exposes GPU widget accessibility semantics" {
     try std.testing.expectEqual(@as(isize, 1), status_cell.grid_row_count);
     try std.testing.expectEqual(@as(isize, 2), status_cell.grid_column_count);
     try std.testing.expect((status_cell.actions & @intFromEnum(MobileWidgetAction.select)) != 0);
+
+    const radio_group_node = try mobileWidgetSemanticsByIdForTest(app, 14);
+    try std.testing.expectEqual(@intFromEnum(MobileWidgetRole.radiogroup), radio_group_node.role);
+    try std.testing.expectEqualStrings("Density", radio_group_node.label.?[0..radio_group_node.label_len]);
 
     var text_geometry: MobileWidgetTextGeometry = .{};
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_text_geometry(app, 3, &text_geometry));
@@ -746,7 +955,9 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
         .text_len = drag_delta.len,
     };
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_action(app, &action));
-    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_drag, self.last_input_kind);
+    // Drag automation is a complete gesture: the movement is followed by
+    // the release that lets markup `on-drag` handlers commit the drop.
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_up, self.last_input_kind);
     try std.testing.expectApproxEqAbs(@as(f32, 276), self.last_touch_x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 74), self.last_touch_y, 0.001);
 
@@ -781,6 +992,9 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
 // render pixels, touch that mutates the model, and IME text that lands in a
 // textbox — with NullPlatform standing in for the (M2) real surface.
 
+var mobile_service_data_root: [types.max_mobile_asset_root_bytes]u8 = undefined;
+var mobile_service_data_root_len: usize = 0;
+
 const MobileCounterDef = struct {
     pub const Model = struct {
         count: u32 = 0,
@@ -808,6 +1022,11 @@ const MobileCounterDef = struct {
         };
     }
 
+    pub fn serviceDataRoot(root: []const u8) void {
+        @memcpy(mobile_service_data_root[0..root.len], root);
+        mobile_service_data_root_len = root.len;
+    }
+
     fn update(model: *Model, msg: Msg) void {
         switch (msg) {
             .increment => model.count += 1,
@@ -830,6 +1049,137 @@ const MobileCounterDef = struct {
 
 const MobileCounterHost = ui_host.UiAppHost(MobileCounterDef);
 const MobileCounterApi = c_api.MobileCApi(MobileCounterHost);
+const MobileStoreHost = ui_host.UiAppHostWithRecordStore(MobileCounterDef, true);
+const MobileStoreApi = c_api.MobileCApi(MobileStoreHost);
+const MobileRelationalHost = ui_host.UiAppHostWithStorage(MobileCounterDef, false, true, &.{});
+const MobileRelationalApi = c_api.MobileCApi(MobileRelationalHost);
+const MobileBothStorageHost = ui_host.UiAppHostWithStorage(MobileCounterDef, true, true, &.{});
+const MobileBothStorageApi = c_api.MobileCApi(MobileBothStorageHost);
+const MobileCredentialHost = ui_host.UiAppHostWithStorageAndCredentials(
+    MobileCounterDef,
+    false,
+    false,
+    &.{},
+    true,
+    true,
+    false,
+    "dev.native-sdk.mobile-credentials",
+);
+const MobileCredentialApi = c_api.MobileCApi(MobileCredentialHost);
+
+const MobileCredentialRecorder = struct {
+    secret: [64]u8 = undefined,
+    secret_len: usize = 0,
+    present: bool = false,
+};
+
+fn mobileCredentialRecorder(context: ?*anyopaque) *MobileCredentialRecorder {
+    return @ptrCast(@alignCast(context.?));
+}
+
+fn mobileCredentialSet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    secret: ?[*]const u8,
+    secret_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (secret_len > recorder.secret.len) return -5;
+    if (secret_len > 0) @memcpy(recorder.secret[0..secret_len], secret.?[0..secret_len]);
+    recorder.secret_len = secret_len;
+    recorder.present = true;
+    return 1;
+}
+
+fn mobileCredentialGet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    output: ?[*]u8,
+    output_len: usize,
+) callconv(.c) i64 {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return -1;
+    if (recorder.secret_len > output_len) return -4;
+    if (recorder.secret_len > 0) @memcpy(output.?[0..recorder.secret_len], recorder.secret[0..recorder.secret_len]);
+    return @intCast(recorder.secret_len);
+}
+
+fn mobileCredentialDelete(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return 0;
+    recorder.present = false;
+    recorder.secret_len = 0;
+    return 1;
+}
+
+test "mobile credential service uses app identity and preserves misses" {
+    const app = MobileCredentialApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCredentialApi.native_sdk_app_destroy(app);
+    const self: *MobileCredentialHost = @ptrCast(@alignCast(app));
+
+    try std.testing.expect(self.embedded.runtime.options.credentials_enabled);
+    try std.testing.expectEqualStrings(
+        "dev.native-sdk.mobile-credentials",
+        self.embedded.runtime.options.platform.app_info.bundle_id,
+    );
+    try std.testing.expect(self.embedded.runtime.options.platform.services.set_credential_fn == null);
+
+    var recorder = MobileCredentialRecorder{};
+    const service: types.MobileCredentialService = .{
+        .set = mobileCredentialSet,
+        .get = mobileCredentialGet,
+        .delete = mobileCredentialDelete,
+    };
+    try std.testing.expectEqual(
+        @as(c_int, 1),
+        MobileCredentialApi.native_sdk_app_set_credential_service(app, &service, &recorder),
+    );
+
+    const services = self.embedded.runtime.options.platform.services;
+    try services.setCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+        .secret = "secret-bytes",
+    });
+    var output: [64]u8 = undefined;
+    const secret = try services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output);
+    try std.testing.expectEqualStrings("secret-bytes", secret);
+    try services.deleteCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    });
+    try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output));
+}
 
 fn expectNoUiHostError(app: ?*anyopaque) !void {
     try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.native_sdk_app_last_error_name(app)));
@@ -861,6 +1211,96 @@ fn tapMobileWidget(app: ?*anyopaque, node: MobileWidgetSemantics) !void {
     try expectNoUiHostError(app);
     MobileCounterApi.native_sdk_app_touch(app, 1, 1, x, y, 0);
     try expectNoUiHostError(app);
+}
+
+test "mobile store capability requires and binds the OS app-data root before start" {
+    const app = MobileStoreApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileStoreApi.native_sdk_app_destroy(app);
+    const self: *MobileStoreHost = @ptrCast(@alignCast(app));
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("StoreDataDirUnavailable", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-store", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileStoreApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+    try std.testing.expectEqual(@as(usize, 6), self.embedded.runtime.options.file_access.?.roots.len);
+    for (self.embedded.runtime.options.file_access.?.roots) |root| {
+        try std.testing.expectEqualStrings(path, root);
+    }
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileStoreApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileStoreApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.record_store_binding != null);
+    MobileStoreApi.native_sdk_app_stop(app);
+}
+
+test "mobile host passes the complete maximum-length data root to app wiring" {
+    const app = MobileCounterApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCounterApi.native_sdk_app_destroy(app);
+
+    var root: [types.max_mobile_asset_root_bytes]u8 = @splat('a');
+    root[0] = '.';
+    mobile_service_data_root_len = 0;
+    try std.testing.expectEqual(
+        @as(c_int, 1),
+        MobileCounterApi.native_sdk_app_set_data_root(app, &root, root.len),
+    );
+    try std.testing.expectEqual(root.len, mobile_service_data_root_len);
+    try std.testing.expectEqualSlices(u8, &root, mobile_service_data_root[0..mobile_service_data_root_len]);
+}
+
+test "mobile relational capability opens app.db from the OS app-data root" {
+    const app = MobileRelationalApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileRelationalApi.native_sdk_app_destroy(app);
+    const self: *MobileRelationalHost = @ptrCast(@alignCast(app));
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("SqliteDataDirUnavailable", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-relational", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileRelationalApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileRelationalApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileRelationalApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.relational_store_binding != null);
+    MobileRelationalApi.native_sdk_app_stop(app);
+}
+
+test "mobile host binds record and relational databases together" {
+    const app = MobileBothStorageApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileBothStorageApi.native_sdk_app_destroy(app);
+    const self: *MobileBothStorageHost = @ptrCast(@alignCast(app));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-both-storage", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileBothStorageApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
 }
 
 test "mobile C ABI drives a user UiApp canvas scene end to end" {
@@ -1836,6 +2276,7 @@ fn recorderImageDecode(
     bytes_len: usize,
     pixels: ?[*]u8,
     pixels_len: usize,
+    max_pixels: usize,
     out_width: ?*usize,
     out_height: ?*usize,
 ) callconv(.c) c_int {
@@ -1843,6 +2284,7 @@ fn recorderImageDecode(
     recorder.decode_count += 1;
     recorder.last_bytes_len = conversions.copyInputText(&recorder.last_bytes, if (bytes) |value| value[0..bytes_len] else "");
     recorder.last_pixels_len = pixels_len;
+    _ = max_pixels;
     if (recorder.result != 1) return recorder.result;
     out_width.?.* = recorder.width;
     out_height.?.* = recorder.height;

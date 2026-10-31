@@ -67,8 +67,9 @@ fn stressUpdate(model: *StressModel, msg: StressMsg) void {
 }
 
 // Static payload storage: tests are single-threaded and the view only
-// reads these.
-var text_payload: [96 * 1024]u8 = undefined;
+// reads these. Size it from the live retained-text edge so raising that
+// budget cannot make this test fixture fail before the runtime does.
+var text_payload: [canvas_limits.max_canvas_widget_text_bytes_per_view]u8 = undefined;
 var chart_values: [256]f32 = undefined;
 var chart_low: [256]f32 = undefined;
 

@@ -253,6 +253,93 @@ test "runtime dispatches menu command events" {
     try std.testing.expectEqual(@as(platform.WindowId, 1), app_state.last_window_id);
 }
 
+test "runtime falls back to the app when the native update service is unavailable" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "update-command", .source = platform.WebViewSource.html("<p>Update</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command) self.command_count += 1;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    try harness.runtime.dispatchCommand(app_state.app(), .{ .name = platform.update_check_command, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+}
+
+test "runtime reserves the native update command when the platform handles it" {
+    const UpdateService = struct {
+        var check_count: u32 = 0;
+
+        fn check(context: ?*anyopaque, user_initiated: bool) anyerror!void {
+            _ = context;
+            try std.testing.expect(user_initiated);
+            check_count += 1;
+        }
+    };
+    const TestApp = struct {
+        command_count: u32 = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "update-command", .source = platform.WebViewSource.html("<p>Update</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event_value == .command) self.command_count += 1;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    UpdateService.check_count = 0;
+    harness.runtime.options.platform.services.check_for_updates_fn = UpdateService.check;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    try harness.runtime.dispatchCommand(app_state.app(), .{ .name = platform.update_check_command, .source = .menu });
+    try std.testing.expectEqual(@as(u32, 1), UpdateService.check_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.command_count);
+}
+
+test "automation snapshot exposes configured app menus" {
+    const items = [_]platform.MenuItem{
+        .{ .label = "Refresh", .command = "app.refresh" },
+        .{ .label = "Disabled", .command = "app.disabled", .enabled = false },
+        .{ .separator = true },
+    };
+    const menus = [_]platform.Menu{
+        .{ .title = "View", .items = &items },
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.menus = &menus;
+    const snapshot = harness.runtime.automationSnapshot("Menus");
+    try std.testing.expectEqual(@as(usize, 1), snapshot.menus.len);
+    try std.testing.expectEqualStrings("View", snapshot.menus[0].title);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.menus[0].items.len);
+    try std.testing.expectEqualStrings("app.refresh", snapshot.menus[0].items[0].command);
+    try std.testing.expect(!snapshot.menus[0].items[1].enabled);
+    try std.testing.expect(snapshot.menus[0].items[2].separator);
+
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try automation.snapshot.writeText(snapshot, &writer);
+    const text = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "app-menu title=\"View\" items=3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item label=\"Refresh\" command=\"app.refresh\" enabled=true checked=false key=\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  app-menu-item separator\n") != null);
+}
+
 test "runtime dispatches tray item commands" {
     const TestApp = struct {
         command_count: u32 = 0,
@@ -289,13 +376,13 @@ test "runtime dispatches tray item commands" {
         .{ .id = 8, .label = "Legacy" },
     } });
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 7 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 7 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
     try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
     try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
     try std.testing.expectEqual(@as(platform.TrayItemId, 7), app_state.last_tray_item_id);
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 8 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 8 } });
     try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
     try std.testing.expectEqualStrings("tray.action", app_state.last_name);
     try std.testing.expectEqual(@as(platform.TrayItemId, 8), app_state.last_tray_item_id);
@@ -305,6 +392,90 @@ test "runtime dispatches tray item commands" {
         .{ .id = 9, .label = "Two" },
     }));
     try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.updateTrayMenu(&.{.{ .label = "Missing id", .command = "app.missing-id" }}));
+}
+
+test "runtime dispatches named tray lifecycle commands with tray source" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+        last_name: []const u8 = "",
+        last_source: CommandSource = .runtime,
+        last_window_id: platform.WindowId = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "tray-lifecycle-command", .source = platform.WebViewSource.html("<p>Tray</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .command => |command| {
+                    self.command_count += 1;
+                    self.last_name = command.name;
+                    self.last_source = command.source;
+                    self.last_window_id = command.window_id;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_command = .{
+        .name = "app.refresh",
+        .window_id = 3,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
+    try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
+    try std.testing.expectEqual(@as(platform.WindowId, 3), app_state.last_window_id);
+}
+
+test "runtime dispatches notification actions through the normal command path" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+        last_name: []const u8 = "",
+        last_source: CommandSource = .runtime,
+        last_window_id: platform.WindowId = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "notification-command", .source = platform.WebViewSource.html("<p>Notification</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .command => |command| {
+                    self.command_count += 1;
+                    self.last_name = command.name;
+                    self.last_source = command.source;
+                    self.last_window_id = command.window_id;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .notification_command = .{
+        .name = "build.open",
+        .window_id = 4,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    try std.testing.expectEqualStrings("build.open", app_state.last_name);
+    try std.testing.expectEqual(CommandSource.notification, app_state.last_source);
+    try std.testing.expectEqual(@as(platform.WindowId, 4), app_state.last_window_id);
 }
 
 test "runtime dispatches file drop events to app and window bridge" {

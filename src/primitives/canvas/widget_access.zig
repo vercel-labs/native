@@ -34,7 +34,10 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
     if (state.disabled) return .arrow;
     return switch (kind) {
-        .input, .text_field, .search_field, .combobox, .textarea => .text,
+        // The terminal joins the editable-text register: a click
+        // focuses the session's input, and the I-beam advertises it —
+        // the platform terminals' own convention.
+        .input, .text_field, .search_field, .combobox, .textarea, .terminal => .text,
         .resizable, .split_divider => .resize_horizontal,
         else => .arrow,
     };
@@ -70,19 +73,20 @@ pub fn isDragSource(widget: Widget) bool {
 /// `canvasWidgetRuntimeHitTarget`, both markup engines, and (via a name
 /// list kept in sync by a test in ui_markup_view_tests.zig) the markup
 /// validator all derive from it. The widget-level predicate is
-/// `isHitTarget`: a bound press/toggle handler (stamped into
+/// `isHitTarget`: a bound press/toggle/drag handler (stamped into
 /// `semantics.actions` by the builder and both markup engines) makes ANY
-/// widget a hit target, so `on_press` on a row/stack/icon works.
+/// widget a hit target, so `on_press` or `on_drag` on a row/stack/icon
+/// works across the element's whole frame.
 pub fn widgetKindHitTarget(kind: WidgetKind) bool {
     return switch (kind) {
-        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group => false,
-        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .split_divider => true,
+        .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group, .media_surface => false,
+        .scroll_view, .accordion, .alert, .bubble, .card, .dialog, .drawer, .sheet, .resizable, .panel, .popover, .menu_surface, .dropdown_menu, .text, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .split_divider, .terminal => true,
     };
 }
 
 pub fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
-    if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.press or widget.semantics.actions.toggle or widget.semantics.actions.drag) return true;
     if (widget.window_drag) return true;
     // A chart with hover details opted in is hoverable (the runtime
     // tracks the pointer over it to snap the detail card to the nearest
@@ -91,6 +95,25 @@ pub fn isHitTarget(widget: Widget) bool {
     // only where hover attributes, not where clicks land.
     if (widget.kind == .chart) return widget.chart.hover_details;
     return widgetKindHitTarget(widget.kind);
+}
+
+/// The hover-Msg CONTAINMENT predicate: everything the interactive hit
+/// test sees, plus hover-Msg listeners. Deliberately a separate policy
+/// from `isHitTarget` — a hover-only listener must be resolvable for
+/// enter/leave containment while remaining INVISIBLE to the interactive
+/// pipeline (wash, cursor, press routing, text selection), so binding
+/// hover changes nothing about where washes paint or clicks land, even
+/// for overlapping siblings.
+pub fn isHoverMsgHitTarget(widget: Widget) bool {
+    return isHitTarget(widget) or widgetListensForHoverMsgs(widget);
+}
+
+/// Whether this widget's bound hover-enter/hover-leave Msgs are LIVE:
+/// the containment walk (`widgetHoverMsgChainFromNode`) collects only
+/// these. Disabled widgets stand down exactly like they do for presses
+/// (the hit test skips them too).
+pub fn widgetListensForHoverMsgs(widget: Widget) bool {
+    return widget.id != 0 and !widget.state.disabled and widget.hover_msgs;
 }
 
 /// Whether this widget is a live window-drag surface: a press landing
@@ -140,6 +163,10 @@ pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
         .popover,
         .menu_surface,
         .dropdown_menu,
+        // A click in the terminal focuses the session's input, exactly
+        // like a click in a text field places the caret — it must never
+        // activate the row or card around it.
+        .terminal,
         => true,
         else => false,
     };
@@ -147,15 +174,15 @@ pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
 
 /// Whether a press gesture stops at this widget instead of falling
 /// through to the nearest claiming ancestor: an interactive kind
-/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle
-/// handler (`on_press`/`on_toggle` stamp `semantics.actions`, and
+/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle/drag
+/// handler (`on_press`/`on_toggle`/`on_drag` stamp `semantics.actions`, and
 /// engine-owned `command` dispatch only exists on kinds already claiming).
 /// Disabled widgets never claim — the hit test skips them too, so a press
 /// on a disabled control keeps today's behavior of landing on whatever is
 /// around it.
 pub fn widgetClaimsPress(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
-    if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.press or widget.semantics.actions.toggle or widget.semantics.actions.drag) return true;
     return widgetKindClaimsPress(widget.kind);
 }
 

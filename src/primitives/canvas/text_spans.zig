@@ -18,7 +18,8 @@
 //! measurement seam carries the same font id, what is measured always
 //! matches what is drawn.
 //!
-//! Everything here is allocation-free and deterministic. Capacity overflow
+//! The native reference is allocation-free; compiled plans use copied transport
+//! buffers. Both are deterministic. Capacity overflow
 //! never fails: layout truncates (dropping trailing runs) and reports it
 //! via `TextSpanLayout.truncated`.
 
@@ -27,8 +28,10 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const token_model = @import("tokens.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
+const measured_cache_policy = @import("text_measurement_policy.zig");
 const text_metrics = @import("text_metrics.zig");
 const text_interaction = @import("text_interaction.zig");
+const query_policy = @import("text_span_query_policy.zig");
 
 const FontId = canvas.FontId;
 const Color = @import("drawing.zig").Color;
@@ -41,8 +44,11 @@ const TextAlign = @import("text_layout_types.zig").TextAlign;
 /// `max_text_span_lines_per_paragraph` lines. Overflow truncates
 /// deterministically instead of failing.
 pub const max_text_spans_per_paragraph: usize = 32;
-pub const max_text_span_runs_per_paragraph: usize = 128;
-pub const max_text_span_lines_per_paragraph: usize = 64;
+pub const max_text_span_lines_per_paragraph: usize = 128;
+// A maximally split highlighted paragraph can add one run at every span
+// boundary in addition to one run per visual line.
+pub const max_text_span_runs_per_paragraph: usize =
+    max_text_span_lines_per_paragraph + max_text_spans_per_paragraph;
 
 pub const TextSpanWeight = enum {
     regular,
@@ -75,6 +81,8 @@ pub const TextSpan = struct {
     /// backgrounds never affect measurement or layout (#86, intra-line
     /// diff emphasis).
     background: ?TextSpanColor = null,
+    /// Visual underline decoration. Independent from `link`: clickable
+    /// spans remain undecorated unless this is true.
     underline: bool = false,
     strikethrough: bool = false,
     /// Relative size multiplier against the paragraph base size; 0 means
@@ -101,6 +109,9 @@ pub const TextSpanLayoutOptions = struct {
     /// Injected measurement; null falls back to the deterministic
     /// estimator (golden-stable).
     measure: ?*const text_metrics.TextMeasureProvider = null,
+    /// Portable paragraph owner; native supplies font measurements only.
+    paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
 };
 
 /// One laid-out segment: a contiguous slice of one span on one line.
@@ -143,9 +154,7 @@ pub fn textSpanFontId(span: TextSpan, typography: token_model.TypographyTokens) 
 }
 
 pub fn textSpanColorValue(colors: token_model.ColorTokens, ref: TextSpanColor) Color {
-    return switch (ref) {
-        inline else => |tag| @field(colors, @tagName(tag)),
-    };
+    return token_model.colorTokenValue(colors, ref);
 }
 
 pub fn textSpanScale(span: TextSpan) f32 {
@@ -170,24 +179,35 @@ pub fn textSpanLineHeight(spans: []const TextSpan, options: TextSpanLayoutOption
     return options.size * textSpansMaxScale(spans) * 1.25;
 }
 
-/// Single-line (unwrapped) advance of the whole paragraph: the intrinsic
-/// width seam for widget sizing. Measures per-span with the span's font.
+/// Widest logical-line advance of an unwrapped paragraph: the intrinsic
+/// width seam for widget sizing. Measures per-span with the span's font
+/// while carrying each line across span boundaries.
 pub fn textSpansIntrinsicWidth(spans: []const TextSpan, options: TextSpanLayoutOptions) f32 {
+    if (options.paragraph_policy != null) return compiledParagraph(spans, options, 0, &.{}, true).size.width;
     var width: f32 = 0;
+    var max_width: f32 = 0;
     for (spans, 0..) |span, index| {
         if (index >= max_text_spans_per_paragraph) break;
         var start: usize = 0;
         var cursor: usize = 0;
         while (cursor < span.text.len) {
-            if (span.text[cursor] == '\n') {
+            if (span.text[cursor] == '\r') {
+                // CR is presentation-free. In CRLF source the following
+                // LF owns the hard break; a bare CR remains selectable and
+                // copyable without painting a fallback control glyph.
                 width += measureSpanSlice(span, span.text[start..cursor], options);
+                start = cursor + 1;
+            } else if (span.text[cursor] == '\n') {
+                width += measureSpanSlice(span, span.text[start..cursor], options);
+                max_width = @max(max_width, width);
+                width = 0;
                 start = cursor + 1;
             }
             cursor += 1;
         }
         width += measureSpanSlice(span, span.text[start..], options);
     }
-    return width;
+    return @max(max_width, width);
 }
 
 /// Wrapped paragraph height at `max_width`: the vertical-extent seam the
@@ -198,7 +218,23 @@ pub fn textSpansWrappedHeight(spans: []const TextSpan, options: TextSpanLayoutOp
     return layout.size.height;
 }
 
-fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions) f32 {
+pub fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions) f32 {
+    if (slice.len == 0) return 0;
+    const first_cr = std.mem.indexOfScalar(u8, slice, '\r') orelse
+        return measureSpanSliceExact(span, slice, options);
+    var width: f32 = 0;
+    var start: usize = 0;
+    var cr: ?usize = first_cr;
+    while (cr) |index| {
+        width += measureSpanSliceExact(span, slice[start..index], options);
+        start = index + 1;
+        cr = std.mem.indexOfScalarPos(u8, slice, start, '\r');
+    }
+    width += measureSpanSliceExact(span, slice[start..], options);
+    return width;
+}
+
+fn measureSpanSliceExact(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions) f32 {
     if (slice.len == 0) return 0;
     const font_id = textSpanFontId(span, options.typography);
     const size = textSpanSize(span, options.size);
@@ -216,7 +252,7 @@ fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOp
         for (advances) |advance| width += advance;
         return width;
     }
-    return text_metrics.measureTextWidthForFont(options.measure, font_id, slice, size);
+    return text_metrics.measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy orelse options.paragraph_policy, font_id, slice, size);
 }
 
 /// The batched advances of `slice` within its span, or null when the
@@ -224,7 +260,7 @@ fn measureSpanSlice(span: TextSpan, slice: []const u8, options: TextSpanLayoutOp
 /// `slice` does not alias `span.text` (hand-built spans). The slice
 /// aliases threadlocal cache storage: consumed immediately by the one
 /// caller above.
-fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions, font_id: FontId, size: f32) ?[]const f32 {
+pub fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLayoutOptions, font_id: FontId, size: f32) ?[]const f32 {
     const provider = options.measure orelse return null;
     if (provider.measure_advances_fn == null) return null;
     const base = @intFromPtr(span.text.ptr);
@@ -232,14 +268,371 @@ fn spanSliceAdvances(span: TextSpan, slice: []const u8, options: TextSpanLayoutO
     if (start < base) return null;
     const offset = start - base;
     if (offset + slice.len > span.text.len) return null;
-    const advances = text_measure_cache.textRunAdvances(provider, font_id, size, span.text) orelse return null;
+    const advances = text_measure_cache.textRunAdvancesWithPolicy(provider, options.paragraph_policy, font_id, size, span.text) orelse return null;
     return advances[offset..][0..slice.len];
+}
+
+pub const TextSpanRunVisibleSlice = struct {
+    text: []const u8,
+    /// Horizontal offset from the original run origin.
+    x: f32 = 0,
+};
+
+fn textSpanRunPrefixWidth(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    end: usize,
+) f32 {
+    return measureSpanSlice(span, run.text[0..@min(end, run.text.len)], options);
+}
+
+/// First scalar boundary whose measured prefix reaches `target_x`.
+/// The logarithmic search keeps long runs outside the batched-advance
+/// scratch bound from turning viewport cropping into a quadratic prefix
+/// walk.
+fn textSpanRunBoundaryForX(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    target_x: f32,
+) usize {
+    if (target_x <= 0) return 0;
+    if (target_x >= run.width) return run.text.len;
+
+    var low: usize = 0;
+    var high = run.text.len;
+    while (text_interaction.nextTextOffset(run.text, low) < high) {
+        var middle = text_interaction.snapTextOffset(
+            run.text,
+            low + (high - low) / 2,
+        );
+        if (middle <= low) middle = text_interaction.nextTextOffset(run.text, low);
+        if (middle >= high) middle = text_interaction.previousTextOffset(run.text, high);
+        if (middle <= low or middle >= high) break;
+        if (textSpanRunPrefixWidth(span, run, options, middle) < target_x) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    return high;
+}
+
+fn textSpanRunScalarAdvance(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    start: usize,
+) f32 {
+    const end = text_interaction.nextTextOffset(run.text, start);
+    return @max(
+        0,
+        textSpanRunPrefixWidth(span, run, options, end) -
+            textSpanRunPrefixWidth(span, run, options, start),
+    );
+}
+
+fn textSpanRunPreviousClusterStart(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    start: usize,
+) usize {
+    var cursor = start;
+    while (cursor > 0) {
+        const previous = text_interaction.previousTextOffset(run.text, cursor);
+        if (textSpanRunScalarAdvance(span, run, options, previous) > 0) return previous;
+        cursor = previous;
+    }
+    return start;
+}
+
+fn textSpanRunGuardEnd(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    start: usize,
+) usize {
+    var cursor = start;
+    var found_guard = false;
+    while (cursor < run.text.len) {
+        if (textSpanRunScalarAdvance(span, run, options, cursor) > 0) {
+            if (found_guard) return cursor;
+            found_guard = true;
+        }
+        cursor = text_interaction.nextTextOffset(run.text, cursor);
+    }
+    return run.text.len;
+}
+
+fn unbatchedTextSpanRunVisibleSlice(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    min_x: f32,
+    max_x: f32,
+) ?TextSpanRunVisibleSlice {
+    const first_boundary = textSpanRunBoundaryForX(span, run, options, @max(0, min_x));
+    if (first_boundary == run.text.len and min_x >= run.width) return null;
+    const visible_start = text_interaction.previousTextOffset(run.text, first_boundary);
+    const first = textSpanRunPreviousClusterStart(span, run, options, visible_start);
+    const last_boundary = textSpanRunBoundaryForX(span, run, options, max_x);
+    const last = textSpanRunGuardEnd(span, run, options, last_boundary);
+    if (first >= last) return null;
+    return .{
+        .text = run.text[first..last],
+        .x = textSpanRunPrefixWidth(span, run, options, first),
+    };
+}
+
+/// Return the measured portion of `run` needed to cover the horizontal
+/// interval `[min_x, max_x]`, plus one shaped cluster of guard ink on each
+/// side. Batched providers supply their exact per-cluster advances; the
+/// unbatched seam uses a logarithmic contextual-prefix search. A provider
+/// may represent a multi-codepoint cluster by placing its advance on the
+/// first scalar and zero on the rest, so cut points are chosen only at the
+/// next positive-advance cluster start.
+pub fn textSpanRunVisibleSlice(
+    span: TextSpan,
+    run: TextSpanRun,
+    options: TextSpanLayoutOptions,
+    min_x: f32,
+    max_x: f32,
+) ?TextSpanRunVisibleSlice {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 0, .clip_span = span, .clip_run = run, .min_x = min_x, .max_x = max_x });
+        return if (result.present) .{ .text = run.text[result.first..result.last], .x = result.x } else null;
+    }
+    if (run.text.len == 0) return null;
+    if (!std.math.isFinite(min_x) or
+        !std.math.isFinite(max_x) or
+        min_x <= 0 and max_x >= run.width)
+    {
+        return .{ .text = run.text };
+    }
+
+    const measured_advances = spanSliceAdvances(span, run.text, options, run.font_id, run.size);
+    if (measured_advances == null) {
+        return unbatchedTextSpanRunVisibleSlice(span, run, options, min_x, max_x);
+    }
+    var cursor: usize = 0;
+    var x: f32 = 0;
+    var previous_cluster_start: ?usize = null;
+    var previous_cluster_x: f32 = 0;
+    var first: usize = 0;
+    var first_x: f32 = 0;
+    var found_first = false;
+    var right_guard_seen = false;
+
+    while (cursor < run.text.len) {
+        const next = text_interaction.nextTextOffset(run.text, cursor);
+        var advance: f32 = 0;
+        for (measured_advances.?[cursor..next]) |value| advance += value;
+        advance = @max(0, advance);
+
+        if (std.math.isFinite(advance) and advance > 0) {
+            if (!found_first and x + advance > @max(0, min_x)) {
+                if (previous_cluster_start) |start| {
+                    first = start;
+                    first_x = previous_cluster_x;
+                } else {
+                    first = cursor;
+                    first_x = x;
+                }
+                found_first = true;
+            }
+
+            if (found_first and x >= max_x) {
+                if (right_guard_seen) {
+                    if (first >= cursor) return null;
+                    return .{
+                        .text = run.text[first..cursor],
+                        .x = first_x,
+                    };
+                }
+                right_guard_seen = true;
+            }
+
+            previous_cluster_start = cursor;
+            previous_cluster_x = x;
+        }
+        x += advance;
+        cursor = next;
+    }
+
+    if (!found_first) {
+        // A zero-width run cannot be cropped meaningfully; retain it so a
+        // platform shaper still receives the original cluster sequence.
+        if (x <= 0) return .{ .text = run.text };
+        return null;
+    }
+    return .{
+        .text = run.text[first..],
+        .x = first_x,
+    };
+}
+
+fn paragraphWord(bytes: []const u8, at: usize) u32 {
+    return std.mem.readInt(u32, bytes[at..][0..4], .little);
+}
+fn paragraphPut(bytes: []u8, at: usize, value: usize) void {
+    std.mem.writeInt(u32, bytes[at..][0..4], std.math.cast(u32, value) orelse @panic("paragraph wire range"), .little);
+}
+fn paragraphFloat(bytes: []const u8, at: usize) f32 {
+    return @bitCast(paragraphWord(bytes, at));
+}
+fn paragraphSetFloat(bytes: []u8, at: usize, value: f32) void {
+    std.mem.writeInt(u32, bytes[at..][0..4], @bitCast(value), .little);
+}
+fn paragraphRange(bytes: []const u8, span: usize, start: usize, end: usize) bool {
+    return span < @min(paragraphWord(bytes, 8), max_text_spans_per_paragraph) and start <= end and end <= paragraphWord(bytes, 196 + span * 32);
+}
+fn paragraphCursor(bytes: []const u8, span: usize, offset: usize) bool {
+    const count = @min(paragraphWord(bytes, 8), max_text_spans_per_paragraph);
+    return span <= count and (if (span == count) offset == 0 else offset <= paragraphWord(bytes, 196 + span * 32));
+}
+/// Validate copied output before invoking any capability or rebasing a run.
+fn paragraphResultValid(request: []const u8, result: []const u8) bool {
+    const count = paragraphWord(request, 8);
+    const capacity = paragraphWord(request, 12);
+    const first = paragraphWord(request, 16);
+    const pieces = 192 + @as(usize, count) * 32;
+    const runs = pieces + 512;
+    const data = paragraphWord(request, 20);
+    if (result.len != request.len or result[6] != 0 or result[7] < 1 or result[7] > 2 or
+        !std.mem.eql(u8, result[0..6], request[0..6]) or !std.mem.eql(u8, result[8..36], request[8..36]) or
+        !std.mem.eql(u8, result[192..pieces], request[192..pieces]) or !std.mem.eql(u8, result[data..], request[data..])) return false;
+    for (result[172..184]) |byte| if (byte != 0) return false;
+    const run_count = paragraphWord(result, 56);
+    const piece_count = paragraphWord(result, 96);
+    const line = paragraphWord(result, 52);
+    if (run_count > capacity or paragraphWord(result, 60) > run_count or piece_count > 32 or paragraphWord(result, 112) > piece_count or
+        paragraphWord(result, 72) > 1 or paragraphWord(result, 76) > 1 or line > result.len or
+        !paragraphCursor(result, paragraphWord(result, 44), paragraphWord(result, 48)) or
+        !paragraphCursor(result, paragraphWord(result, 100), paragraphWord(result, 104)) or
+        !paragraphCursor(result, paragraphWord(result, 152), paragraphWord(result, 156)) or paragraphWord(result, 160) > paragraphWord(result, 156)) return false;
+    if (paragraphWord(result, 84) != paragraphWord(result, 88) and !paragraphRange(result, paragraphWord(result, 80), paragraphWord(result, 84), paragraphWord(result, 88))) return false;
+    for (0..piece_count) |n| {
+        const at = pieces + n * 16;
+        if (!paragraphRange(result, paragraphWord(result, at), paragraphWord(result, at + 4), paragraphWord(result, at + 8))) return false;
+    }
+    var previous_line: usize = first;
+    for (0..run_count) |n| {
+        const at = runs + n * 32;
+        const start = paragraphWord(result, at + 4);
+        const length = paragraphWord(result, at + 8);
+        const run_line = paragraphWord(result, at + 12);
+        if (length == 0 or !paragraphRange(result, paragraphWord(result, at), start, @as(usize, start) + length) or
+            run_line < previous_line or run_line > line or @as(u64, run_line) >= @as(u64, first) + 128 or paragraphWord(result, at + 28) != 0) return false;
+        previous_line = run_line;
+    }
+    if (result[7] == 2) return paragraphWord(result, 40) == 0 and paragraphWord(result, 144) <= @as(u64, line) + 1 and
+        (request[1] == 1 or paragraphWord(result, 144) >= line) and (run_count == 0 or previous_line < paragraphWord(result, 144));
+    if (paragraphWord(result, 144) != 0) return false;
+    const phase = paragraphWord(result, 40);
+    const s = paragraphWord(result, 128);
+    const start = paragraphWord(result, 132);
+    const end = paragraphWord(result, 136);
+    if (!paragraphRange(result, s, start, end) or (request[1] == 1) != (phase == 8)) return false;
+    // A repeated query with unchanged state cannot advance the source walk.
+    if (request[7] == 1 and std.mem.eql(u8, result[40..140], request[40..140]) and std.mem.eql(u8, result[144..], request[144..])) return false;
+    return switch (phase) {
+        1 => s == paragraphWord(result, 44) and start == paragraphWord(result, 48),
+        3 => piece_count < 32 and s == paragraphWord(result, 100) and start == paragraphWord(result, 104),
+        6 => blk: {
+            const p = paragraphWord(result, 112);
+            if (p >= piece_count) break :blk false;
+            const at = pieces + @as(usize, p) * 16;
+            const prefix = paragraphWord(result, 120);
+            break :blk s == paragraphWord(result, at) and start == paragraphWord(result, 116) and
+                start >= paragraphWord(result, at + 4) and start <= prefix and prefix < end and end <= paragraphWord(result, at + 8);
+        },
+        8 => s == paragraphWord(result, 152) and start == paragraphWord(result, 160) and end == paragraphWord(result, 156),
+        else => false,
+    };
+}
+/// Native owns the transport and caller storage. A copied continuation asks
+/// for one raw font slice; only the portable owner schedules measurements,
+/// chooses breaks and emits offset-based runs.
+fn compiledParagraph(spans: []const TextSpan, options: TextSpanLayoutOptions, first_line: usize, runs_storage: []TextSpanRun, intrinsic: bool) TextSpanLayout {
+    const allocator = std.heap.page_allocator;
+    const count = spans.len;
+    const capacity = if (intrinsic) 0 else runs_storage.len;
+    const spans_size = std.math.mul(usize, count, 32) catch @panic("paragraph span capacity");
+    const runs_size = std.math.mul(usize, capacity, 32) catch @panic("paragraph run capacity");
+    const runs_at = std.math.add(usize, 192 + 32 * 16, spans_size) catch @panic("paragraph packet capacity");
+    const data_at = std.math.add(usize, runs_at, runs_size) catch @panic("paragraph packet capacity");
+    var total = data_at;
+    for (spans[0..count]) |span| total = std.math.add(usize, total, span.text.len) catch @panic("paragraph text capacity");
+    if (total > std.math.maxInt(u32)) @panic("paragraph packet range");
+    const request = allocator.alloc(u8, total) catch @panic("paragraph request allocation");
+    defer allocator.free(request);
+    const result = allocator.alloc(u8, total) catch @panic("paragraph result allocation");
+    defer allocator.free(result);
+    @memset(request, 0);
+    request[0..6].* = .{ 53, @intFromBool(intrinsic), 1, @intFromEnum(options.wrap), @intFromEnum(options.alignment), @intFromBool(spans.len > max_text_spans_per_paragraph) };
+    paragraphPut(request, 8, count);
+    paragraphPut(request, 12, capacity);
+    paragraphPut(request, 16, @min(first_line, std.math.maxInt(u32)));
+    paragraphPut(request, 20, data_at);
+    paragraphPut(request, 24, total);
+    paragraphSetFloat(request, 28, options.line_height);
+    paragraphSetFloat(request, 32, options.size);
+    paragraphSetFloat(request, 36, options.max_width);
+    paragraphPut(request, 40, 10);
+    var at = data_at;
+    for (spans[0..count], 0..) |span, s| {
+        const base = 192 + s * 32;
+        paragraphPut(request, base, at);
+        paragraphPut(request, base + 4, span.text.len);
+        paragraphSetFloat(request, base + 12, span.scale);
+        paragraphPut(request, base + 16, @intFromBool(span.monospace));
+        @memcpy(request[at..][0..span.text.len], span.text);
+        at += span.text.len;
+    }
+    // Bound the finite source walk, including up to 32 zero-length
+    // CR pieces per word, cluster retries and skipped lines.
+    const quota = std.math.mul(usize, total, 40) catch @panic("paragraph continuation range");
+    var calls: usize = 0;
+    while (true) {
+        calls += 1;
+        if (calls > quota) @panic("paragraph continuation did not finish");
+        @memset(result, 0xa5);
+        if (options.paragraph_policy.?(request, result) != total or !paragraphResultValid(request, result)) @panic("invalid paragraph continuation");
+        if (result[7] == 2) break;
+        const phase = paragraphWord(result, 40);
+        if (phase != 1 and phase != 3 and phase != 6 and phase != 8) @panic("invalid paragraph measurement action");
+        const s = paragraphWord(result, 128);
+        const start = paragraphWord(result, 132);
+        const end = paragraphWord(result, 136);
+        if (s >= count or start > end or end > spans[s].text.len) @panic("invalid paragraph measurement range");
+        @memcpy(request, result);
+        paragraphSetFloat(request, 140, measureSpanSlice(spans[s], spans[s].text[start..end], options));
+        request[6] = 1;
+    }
+    const run_count = paragraphWord(result, 56);
+    for (runs_storage[0..run_count], 0..) |*run, n| {
+        const base = runs_at + n * 32;
+        const s = paragraphWord(result, base);
+        const start = paragraphWord(result, base + 4);
+        const length = paragraphWord(result, base + 8);
+        const line = paragraphWord(result, base + 12);
+        if (s >= count or start > spans[s].text.len or length > spans[s].text.len - start or line < @min(first_line, std.math.maxInt(u32)) or
+            paragraphWord(result, base + 28) != 0) @panic("invalid paragraph emitted run");
+        run.* = .{ .span_index = s, .text = spans[s].text[start..][0..length], .line_index = line, .x = paragraphFloat(result, base + 16), .width = paragraphFloat(result, base + 20), .baseline = paragraphFloat(result, base + 24), .size = textSpanSize(spans[s], options.size), .font_id = textSpanFontId(spans[s], options.typography) };
+    }
+    return .{ .runs = runs_storage[0..run_count], .line_count = paragraphWord(result, 144), .line_height = paragraphFloat(result, 184), .size = geometry.SizeF.init(paragraphFloat(result, 68), paragraphFloat(result, 148)), .truncated = paragraphWord(result, 76) == 1 };
 }
 
 const LayoutState = struct {
     spans: []const TextSpan,
     options: TextSpanLayoutOptions,
     runs: []TextSpanRun,
+    /// First absolute visual line retained in `runs`. Earlier lines are
+    /// still measured so the returned extent and absolute baselines stay
+    /// identical to a full paragraph layout.
+    run_line_start: usize = 0,
     run_len: usize = 0,
     line_index: usize = 0,
     line_run_start: usize = 0,
@@ -291,6 +684,7 @@ const LayoutState = struct {
             self.max_line_width = @max(self.max_line_width, self.pen_x);
             self.line_has_content = true;
         }
+        if (self.line_index < self.run_line_start) return;
         if (self.run_len > self.line_run_start) {
             const previous = &self.runs[self.run_len - 1];
             if (previous.span_index == span_index and
@@ -302,7 +696,9 @@ const LayoutState = struct {
                 return;
             }
         }
-        if (self.run_len >= self.runs.len or self.line_index >= max_text_span_lines_per_paragraph) {
+        if (self.run_len >= self.runs.len or
+            self.line_index >= self.run_line_start +| max_text_span_lines_per_paragraph)
+        {
             self.truncated = true;
             return;
         }
@@ -353,23 +749,47 @@ const LayoutState = struct {
 /// straight to the uncached breaker — that path stays byte-identical
 /// to the pre-cache behavior (goldens, signatures, reference renders).
 pub fn layoutTextSpans(spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) TextSpanLayout {
-    if (options.measure != null and runs_storage.len >= max_text_span_runs_per_paragraph) {
+    const retained = if (options.paragraph_policy) |owner| measured_cache_policy.admission(owner, 3, @intFromBool(options.measure != null), 0, runs_storage.len).kind == 6 else options.measure != null and runs_storage.len >= max_text_span_runs_per_paragraph;
+    if (retained) {
+        if (options.measure == null or runs_storage.len < max_text_span_runs_per_paragraph) @panic("invalid measured paragraph admission");
+        const cache = span_wrap_cache.get();
         const key = spanWrapKey(spans, options);
-        if (findSpanWrapEntry(key)) |entry_index| {
-            if (rebaseSpanWrapEntry(entry_index, spans, options, runs_storage)) |layout| return layout;
+        if (if (options.paragraph_policy) |owner| findSpanWrapEntryCompiled(cache, key, owner) else findSpanWrapEntry(cache, key)) |entry_index| {
+            if (rebaseSpanWrapEntry(cache, entry_index, spans, options, runs_storage)) |layout| return layout;
         }
-        const layout = layoutTextSpansUncached(spans, options, runs_storage);
-        storeSpanWrapEntry(key, spans, layout);
+        const layout = layoutTextSpansUncached(spans, options, 0, runs_storage);
+        if (options.paragraph_policy) |owner| storeSpanWrapEntryCompiled(cache, key, spans, layout, owner) else storeSpanWrapEntry(cache, key, spans, layout);
         return layout;
     }
-    return layoutTextSpansUncached(spans, options, runs_storage);
+    return layoutTextSpansUncached(spans, options, 0, runs_storage);
 }
 
-fn layoutTextSpansUncached(spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) TextSpanLayout {
+/// Lay out the full paragraph while retaining only the bounded visual-line
+/// page beginning at `first_line`. Runs keep absolute line indexes and
+/// baselines, so a viewport can paint later pages without changing the
+/// paragraph's measured size or allocating source-sized storage.
+pub fn layoutTextSpansFromLine(
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    first_line: usize,
+    runs_storage: []TextSpanRun,
+) TextSpanLayout {
+    if (first_line == 0) return layoutTextSpans(spans, options, runs_storage);
+    return layoutTextSpansUncached(spans, options, first_line, runs_storage);
+}
+
+fn layoutTextSpansUncached(
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    first_line: usize,
+    runs_storage: []TextSpanRun,
+) TextSpanLayout {
+    if (options.paragraph_policy != null) return compiledParagraph(spans, options, first_line, runs_storage, false);
     var state = LayoutState{
         .spans = spans,
         .options = options,
         .runs = runs_storage,
+        .run_line_start = first_line,
         .line_height = textSpanLineHeight(spans, options),
         .baseline_offset = options.size * textSpansMaxScale(spans),
         .max_width = if (options.wrap != .none and options.max_width > 0 and std.math.isFinite(options.max_width))
@@ -395,11 +815,21 @@ fn layoutTextSpansUncached(spans: []const TextSpan, options: TextSpanLayoutOptio
             offset += 1;
             continue;
         }
+        if (byte == '\r') {
+            // Preserve the byte in paragraph offsets/clipboard data but do
+            // not place it in a glyph run. LF remains the single hard-line
+            // delimiter for both Unix and Windows source.
+            offset += 1;
+            continue;
+        }
         if (isSpanBreakByte(byte)) {
             const end = spanWhitespaceEnd(text, offset);
-            // Whitespace at a fresh line start is consumed by the wrap;
-            // mid-line whitespace is held back until the next word lands.
-            if (state.line_has_content) {
+            // Prose consumes whitespace at a fresh line start, but a
+            // monospace span is preformatted content (markdown fences are
+            // assembled from these) and must keep its source indentation.
+            // In both cases whitespace is held until the next word lands,
+            // so trailing spaces still never widen a rendered line.
+            if (state.line_has_content or spans[span_index].monospace) {
                 const slice = text[offset..end];
                 state.recordPendingWhitespace(span_index, slice, measureSpanSlice(spans[span_index], slice, options));
             }
@@ -476,6 +906,7 @@ const SpanWrapKey = struct {
     mono_font_id: FontId = 0,
     provider_context: usize = 0,
     provider_fn: usize = 0,
+    paragraph_policy: usize = 0,
     generation: u64 = 0,
     used: bool = false,
 };
@@ -502,19 +933,31 @@ const SpanWrapEntry = struct {
     last_used: u64 = 0,
 };
 
-threadlocal var span_wrap_entries: [span_wrap_cache_capacity]SpanWrapEntry = @splat(.{});
-threadlocal var span_wrap_runs: [span_wrap_cache_capacity][max_text_span_runs_per_paragraph]SpanWrapRun = undefined;
-threadlocal var span_wrap_use_tick: u64 = 0;
-threadlocal var span_wrap_hit_count: u64 = 0;
-threadlocal var span_wrap_miss_count: u64 = 0;
+/// The whole per-thread wrap cache behind one lazily heap-allocated
+/// pointer (~1 MiB that would otherwise sit in the static TLS template
+/// every OS thread's loader clones). Init happens on the first cached
+/// `layoutTextSpans` call of a thread — the layout thread by
+/// construction — so threads that never wrap spans never allocate it.
+/// `runs` carries no default and stays uninitialized, exactly like the
+/// `= undefined` static it replaces.
+const SpanWrapCache = struct {
+    entries: [span_wrap_cache_capacity]SpanWrapEntry = @splat(.{}),
+    runs: [span_wrap_cache_capacity][max_text_span_runs_per_paragraph]SpanWrapRun,
+    use_tick: u64 = 0,
+    hit_count: u64 = 0,
+    miss_count: u64 = 0,
+};
+const span_wrap_cache = @import("lazy_tls.zig").LazyTls(SpanWrapCache);
 
 /// Cache observability for tests and benchmarks.
 pub fn textSpanWrapCacheHitCount() u64 {
-    return span_wrap_hit_count;
+    const cache = span_wrap_cache.peek() orelse return 0;
+    return cache.hit_count;
 }
 
 pub fn textSpanWrapCacheMissCount() u64 {
-    return span_wrap_miss_count;
+    const cache = span_wrap_cache.peek() orelse return 0;
+    return cache.miss_count;
 }
 
 fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrapKey {
@@ -546,6 +989,7 @@ fn spanWrapKey(spans: []const TextSpan, options: TextSpanLayoutOptions) SpanWrap
         .mono_font_id = options.typography.mono_font_id,
         .provider_context = @intFromPtr(provider.context),
         .provider_fn = @intFromPtr(provider.measure_fn),
+        .paragraph_policy = if (options.paragraph_policy) |p| @intFromPtr(p) else 0,
         .generation = text_measure_cache.textMeasureGeneration(),
         .used = true,
     };
@@ -564,23 +1008,52 @@ fn spanWrapKeysEqual(a: SpanWrapKey, b: SpanWrapKey) bool {
         a.mono_font_id == b.mono_font_id and
         a.provider_context == b.provider_context and
         a.provider_fn == b.provider_fn and
+        a.paragraph_policy == b.paragraph_policy and
         a.generation == b.generation;
 }
 
-fn findSpanWrapEntry(key: SpanWrapKey) ?usize {
-    for (&span_wrap_entries, 0..) |*entry, index| {
+fn findSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey) ?usize {
+    for (&cache.entries, 0..) |*entry, index| {
         if (spanWrapKeysEqual(entry.key, key)) {
-            span_wrap_use_tick += 1;
-            entry.last_used = span_wrap_use_tick;
-            span_wrap_hit_count += 1;
+            cache.use_tick += 1;
+            entry.last_used = cache.use_tick;
+            cache.hit_count += 1;
             return index;
         }
     }
-    span_wrap_miss_count += 1;
+    cache.miss_count += 1;
     return null;
 }
 
-fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
+fn wrapDecision(cache: *SpanWrapCache, key: SpanWrapKey, policy: measured_cache_policy.Policy, store: bool, run_count: usize, valid_offsets: bool) measured_cache_policy.Decision {
+    var request: [measured_cache_policy.facts_at + span_wrap_cache_capacity * measured_cache_policy.fact_bytes]u8 = undefined;
+    measured_cache_policy.header(&request, if (store) 5 else 4, @intFromBool(valid_offsets), span_wrap_cache_capacity, run_count, 0);
+    measured_cache_policy.key(request[32..], key);
+    for (cache.entries, 0..) |entry, i| measured_cache_policy.fact(request[measured_cache_policy.facts_at + i * measured_cache_policy.fact_bytes ..], entry.key, entry.last_used);
+    const decision = measured_cache_policy.execute(policy, &request);
+    if (decision.flags & 1 != 0) cache.use_tick += 1;
+    if (decision.flags & 2 != 0) cache.hit_count += 1;
+    if (decision.flags & 8 != 0) cache.miss_count += 1;
+    return decision;
+}
+fn findSpanWrapEntryCompiled(cache: *SpanWrapCache, key: SpanWrapKey, policy: measured_cache_policy.Policy) ?usize {
+    const decision = wrapDecision(cache, key, policy, false, 0, false);
+    if (decision.slot) |slot| cache.entries[slot].last_used = cache.use_tick;
+    return decision.slot;
+}
+fn storeSpanWrapEntryCompiled(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout, policy: measured_cache_policy.Policy) void {
+    var valid_offsets = true;
+    for (layout.runs) |run| if (spanRunOffset(spans, run) == null) {
+        valid_offsets = false;
+        break;
+    };
+    const decision = wrapDecision(cache, key, policy, true, layout.runs.len, valid_offsets);
+    const victim = decision.slot orelse return;
+    if (layout.runs.len > max_text_span_runs_per_paragraph or !valid_offsets) @panic("invalid measured paragraph store admission");
+    copySpanWrapEntry(cache, victim, key, spans, layout);
+}
+
+fn storeSpanWrapEntry(cache: *SpanWrapCache, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
     if (layout.runs.len > max_text_span_runs_per_paragraph) return;
     // Offsets require every run to alias its span's bytes; the breaker
     // only ever emits subslices of span.text, so a failure here would be
@@ -591,17 +1064,20 @@ fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpa
 
     var victim: usize = 0;
     var victim_tick: u64 = std.math.maxInt(u64);
-    for (&span_wrap_entries, 0..) |*entry, index| {
+    for (&cache.entries, 0..) |*entry, index| {
         const tick = if (entry.key.used) entry.last_used else 0;
         if (tick < victim_tick) {
             victim_tick = tick;
             victim = index;
         }
     }
-    span_wrap_use_tick += 1;
+    cache.use_tick += 1;
+    copySpanWrapEntry(cache, victim, key, spans, layout);
+}
+fn copySpanWrapEntry(cache: *SpanWrapCache, victim: usize, key: SpanWrapKey, spans: []const TextSpan, layout: TextSpanLayout) void {
     for (layout.runs, 0..) |run, run_index| {
         const offset = spanRunOffset(spans, run).?;
-        span_wrap_runs[victim][run_index] = .{
+        cache.runs[victim][run_index] = .{
             .span_index = @intCast(run.span_index),
             .text_start = @intCast(offset),
             .text_len = @intCast(run.text.len),
@@ -611,14 +1087,14 @@ fn storeSpanWrapEntry(key: SpanWrapKey, spans: []const TextSpan, layout: TextSpa
             .baseline = run.baseline,
         };
     }
-    span_wrap_entries[victim] = .{
+    cache.entries[victim] = .{
         .key = key,
         .run_len = layout.runs.len,
         .line_count = layout.line_count,
         .line_height = layout.line_height,
         .size = layout.size,
         .truncated = layout.truncated,
-        .last_used = span_wrap_use_tick,
+        .last_used = cache.use_tick,
     };
 }
 
@@ -639,13 +1115,28 @@ fn spanRunOffset(spans: []const TextSpan, run: TextSpanRun) ?usize {
 /// offset does not fit the current spans — only reachable through a
 /// content-hash collision, and answered by re-laying-out instead of
 /// serving mismatched geometry.
-fn rebaseSpanWrapEntry(entry_index: usize, spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) ?TextSpanLayout {
-    const entry = &span_wrap_entries[entry_index];
-    for (span_wrap_runs[entry_index][0..entry.run_len]) |cached| {
+fn rebaseSpanWrapEntry(cache: *SpanWrapCache, entry_index: usize, spans: []const TextSpan, options: TextSpanLayoutOptions, runs_storage: []TextSpanRun) ?TextSpanLayout {
+    const entry = &cache.entries[entry_index];
+    if (options.paragraph_policy) |owner| {
+        if (entry.run_len > max_text_span_runs_per_paragraph) @panic("measured paragraph run storage overflow");
+        var bytes: [32 + max_text_spans_per_paragraph * 4 + max_text_span_runs_per_paragraph * 12]u8 = undefined;
+        const count: usize = @min(spans.len, max_text_spans_per_paragraph);
+        const request = bytes[0 .. 32 + count * 4 + entry.run_len * 12];
+        measured_cache_policy.header(request, 7, 0, entry.run_len, count, 0);
+        for (spans[0..count], 0..) |span, i| measured_cache_policy.put(request, 32 + i * 4, span.text.len);
+        for (cache.runs[entry_index][0..entry.run_len], 0..) |run, i| {
+            const at = 32 + count * 4 + i * 12;
+            measured_cache_policy.put(request, at, run.span_index);
+            measured_cache_policy.put(request, at + 4, run.text_start);
+            measured_cache_policy.put(request, at + 8, run.text_len);
+        }
+        if (measured_cache_policy.execute(owner, request).kind != 5) return null;
+    }
+    for (cache.runs[entry_index][0..entry.run_len]) |cached| {
         if (cached.span_index >= spans.len) return null;
         if (cached.text_start + cached.text_len > spans[cached.span_index].text.len) return null;
     }
-    for (span_wrap_runs[entry_index][0..entry.run_len], 0..) |cached, run_index| {
+    for (cache.runs[entry_index][0..entry.run_len], 0..) |cached, run_index| {
         const span = spans[cached.span_index];
         runs_storage[run_index] = .{
             .span_index = cached.span_index,
@@ -780,7 +1271,7 @@ fn spanWhitespaceEnd(text: []const u8, start: usize) usize {
 
 fn spanWordEnd(text: []const u8, start: usize) usize {
     var end = start;
-    while (end < text.len and text[end] != '\n' and !isSpanBreakByte(text[end])) end += 1;
+    while (end < text.len and text[end] != '\n' and text[end] != '\r' and !isSpanBreakByte(text[end])) end += 1;
     return end;
 }
 
@@ -796,6 +1287,12 @@ pub fn textSpanBounds(layout: TextSpanLayout, span_index: usize) ?geometry.RectF
         bounds = if (bounds) |existing| existing.unionWith(rect) else rect;
     }
     return bounds;
+}
+
+/// Aggregate with the selected portable owner while retaining the standalone
+/// native reference for callers that supply no compiled policy.
+pub fn textSpanBoundsWithPolicy(layout: TextSpanLayout, span_index: usize, policy: ?query_policy.Policy) ?geometry.RectF {
+    return if (policy) |p| query_policy.bounds(p, layout, span_index) else textSpanBounds(layout, span_index);
 }
 
 /// Bounds of a single run (relative to the paragraph origin), spanning
@@ -832,9 +1329,13 @@ pub fn textSpanOffsetForPoint(
     options: TextSpanLayoutOptions,
     point: geometry.PointF,
 ) ?usize {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 1, .paragraph = paragraph, .spans = spans, .point = point });
+        return if (result.present) result.first else null;
+    }
     var runs: [max_text_span_runs_per_paragraph]TextSpanRun = undefined;
-    const layout = layoutTextSpans(spans, options, &runs);
-    if (layout.runs.len == 0 or layout.line_count == 0 or layout.line_height <= 0) return null;
+    var layout = layoutTextSpans(spans, options, &runs);
+    if (layout.line_count == 0 or layout.line_height <= 0) return null;
 
     const raw_line = point.y / layout.line_height;
     const max_line = layout.line_count - 1;
@@ -842,6 +1343,50 @@ pub fn textSpanOffsetForPoint(
         0
     else
         @min(max_line, @as(usize, @intFromFloat(@floor(raw_line))));
+
+    // Page the same bounded paragraph layout the viewport painter uses.
+    // Page zero deliberately retains only 128 visual lines; without this
+    // handoff every point below that page collapsed onto its last source
+    // offset even though later runs were visibly painted.
+    if (line_index >= max_text_span_lines_per_paragraph) {
+        layout = layoutTextSpansFromLine(spans, options, line_index, &runs);
+    }
+    if (layout.runs.len == 0) {
+        // Preformatted whitespace is valid selectable source even though
+        // the layout deliberately keeps it out of painted runs. Preserve
+        // both edges so a drag can select/copy an all-whitespace block.
+        if (paragraphOnlyUnpaintedWhitespace(paragraph)) {
+            const source_line_count = 1 + std.mem.count(u8, paragraph, "\n") -
+                @intFromBool(paragraph[paragraph.len - 1] == '\n');
+            const source_line: usize = if (raw_line < 0)
+                0
+            else
+                @min(source_line_count - 1, @as(usize, @intFromFloat(@floor(raw_line))));
+            const edge = unpaintedWhitespaceLineRange(paragraph, source_line);
+            const width = textSpanParagraphRangeWidth(
+                paragraph,
+                spans,
+                options,
+                text_interaction.TextRange.init(
+                    edge.start,
+                    if (edge.end > edge.start and paragraph[edge.end - 1] == '\n')
+                        edge.end - 1
+                    else
+                        edge.end,
+                ),
+            ) orelse 0;
+            const midpoint = if (width > 0)
+                width * 0.5
+            else if (options.max_width > 0 and std.math.isFinite(options.max_width))
+                options.max_width * 0.5
+            else
+                0;
+            return if (point.x < midpoint) edge.start else edge.end;
+        }
+        // A later page made only of trailing blank logical lines has no
+        // glyph run to map. Its nearest source edge is the paragraph end.
+        return if (paragraph.len > 0) paragraph.len else null;
+    }
 
     var result: ?usize = null;
     var first_range: ?text_interaction.TextRange = null;
@@ -865,9 +1410,71 @@ pub fn textSpanOffsetForPoint(
     const first = first_range orelse return lineFallbackOffset(paragraph, layout, line_index);
     if (point.x < first_x) return first.start;
     if (last_range) |last| {
-        if (point.x >= last_end_x) return last.end;
+        if (point.x >= last_end_x) return textSpanLineSourceEnd(paragraph, last.end);
     }
     return first.start;
+}
+
+fn paragraphOnlyUnpaintedWhitespace(paragraph: []const u8) bool {
+    if (paragraph.len == 0) return false;
+    for (paragraph) |byte| {
+        if (byte != '\n' and byte != '\r' and !isSpanBreakByte(byte)) return false;
+    }
+    return true;
+}
+
+fn unpaintedWhitespaceLineRange(paragraph: []const u8, line_index: usize) text_interaction.TextRange {
+    var start: usize = 0;
+    var line: usize = 0;
+    while (line < line_index) : (line += 1) {
+        const newline = std.mem.indexOfScalarPos(u8, paragraph, start, '\n') orelse
+            return text_interaction.TextRange.init(paragraph.len, paragraph.len);
+        start = newline + 1;
+    }
+    const newline = std.mem.indexOfScalarPos(u8, paragraph, start, '\n');
+    return text_interaction.TextRange.init(start, if (newline) |index| index + 1 else paragraph.len);
+}
+
+fn textSpanParagraphRangeWidth(
+    paragraph: []const u8,
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    range: text_interaction.TextRange,
+) ?f32 {
+    if (range.start >= range.end) return 0;
+    const paragraph_base = @intFromPtr(paragraph.ptr);
+    var covered = range.start;
+    var width: f32 = 0;
+    for (spans) |span| {
+        const span_start_ptr = @intFromPtr(span.text.ptr);
+        if (span_start_ptr < paragraph_base) return null;
+        const span_start = span_start_ptr - paragraph_base;
+        const span_end = span_start + span.text.len;
+        if (span_end > paragraph.len) return null;
+        const start = @max(range.start, span_start);
+        const end = @min(range.end, span_end);
+        if (start >= end) continue;
+        if (start > covered) return null;
+        width += measureSpanSlice(
+            span,
+            span.text[start - span_start .. end - span_start],
+            options,
+        );
+        covered = @max(covered, end);
+        if (covered >= range.end) return width;
+    }
+    return null;
+}
+
+/// Extend a painted run edge through source bytes that deliberately carry
+/// no ink at the end of its visual line: spaces/tabs and one explicit
+/// newline. A wrapped word begins the next line without being consumed.
+fn textSpanLineSourceEnd(paragraph: []const u8, painted_end: usize) usize {
+    var end = @min(painted_end, paragraph.len);
+    while (end < paragraph.len and isSpanBreakByte(paragraph[end])) end += 1;
+    if (end < paragraph.len and paragraph[end] == '\r') end += 1;
+    if (end < paragraph.len and paragraph[end] == '\n') end += 1;
+    return end;
 }
 
 /// Offset within `run.text` for a run-relative x, midpoint rule per
@@ -905,8 +1512,9 @@ fn lineFallbackOffset(paragraph: []const u8, layout: TextSpanLayout, line_index:
 
 /// Selection highlight rects (relative to the paragraph origin) for a
 /// paragraph byte range: one rect per line, spanning the selected extent
-/// across that line's runs. Returns the rects that fit in `output`;
-/// overflow truncates deterministically like span layout itself.
+/// across that line's runs. A range spanning more lines than `output`
+/// holds folds the overflow into the last rectangle, matching plain text
+/// selection so long selections stay truthfully highlighted.
 pub fn textSpanSelectionRects(
     paragraph: []const u8,
     spans: []const TextSpan,
@@ -914,20 +1522,175 @@ pub fn textSpanSelectionRects(
     range: text_interaction.TextRange,
     output: []text_interaction.TextSelectionRect,
 ) []const text_interaction.TextSelectionRect {
+    if (options.paragraph_policy) |policy| {
+        const result = query_policy.execute(policy, options, .{ .mode = 2, .paragraph = paragraph, .spans = spans, .range = range, .output = output });
+        return output[0..result.len];
+    }
     const normalized = text_interaction.snapTextRange(paragraph, range);
     if (normalized.isCollapsed(paragraph.len)) return output[0..0];
+    if (output.len == 0) return output[0..0];
 
     var runs: [max_text_span_runs_per_paragraph]TextSpanRun = undefined;
-    const layout = layoutTextSpans(spans, options, &runs);
-    if (layout.line_height <= 0) return output[0..0];
+    const first_layout = layoutTextSpans(spans, options, &runs);
+    if (first_layout.line_height <= 0 or first_layout.line_count == 0) return output[0..0];
 
+    const page_count = (first_layout.line_count +
+        max_text_span_lines_per_paragraph - 1) /
+        max_text_span_lines_per_paragraph;
+    const first_page = textSpanSelectionFirstPage(
+        paragraph,
+        spans,
+        options,
+        normalized.start,
+        page_count,
+        &runs,
+    ) orelse return output[0..0];
     var len: usize = 0;
+    var page_index = first_page;
+    while (page_index < page_count) : (page_index += 1) {
+        const first_line = page_index * max_text_span_lines_per_paragraph;
+        const layout = if (page_index == 0)
+            first_layout
+        else
+            layoutTextSpansFromLine(spans, options, first_line, &runs);
+        const page_end = appendTextSpanSelectionPage(
+            paragraph,
+            spans,
+            options,
+            normalized,
+            layout,
+            output,
+            &len,
+        );
+        if (page_end >= normalized.end) break;
+    }
+    return output[0..len];
+}
+
+/// Earliest visual-line page whose retained source runs can intersect a
+/// selection beginning at `offset`. Non-empty pages stay logarithmic; when
+/// explicit newlines create an empty page, inspect the surrounding gap
+/// because emptiness alone does not order that page against the offset.
+fn textSpanSelectionFirstPage(
+    paragraph: []const u8,
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    offset: usize,
+    page_count: usize,
+    runs: []TextSpanRun,
+) ?usize {
+    var low: usize = 0;
+    var high = page_count;
+    var candidate: ?usize = null;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        const page_end = textSpanSelectionPageEnd(
+            paragraph,
+            spans,
+            options,
+            middle,
+            runs,
+        );
+        if (page_end) |end| {
+            if (end <= offset) {
+                low = middle + 1;
+            } else {
+                candidate = middle;
+                high = middle;
+            }
+            continue;
+        }
+
+        // A runless page may sit between source before and after `offset`.
+        // Find its nearest retained neighbor on each side before deciding
+        // which half can be discarded.
+        var left = middle;
+        var left_end: ?usize = null;
+        while (left > low) {
+            left -= 1;
+            left_end = textSpanSelectionPageEnd(
+                paragraph,
+                spans,
+                options,
+                left,
+                runs,
+            );
+            if (left_end != null) break;
+        }
+        if (left_end) |end| {
+            if (end > offset) {
+                candidate = left;
+                high = left;
+                continue;
+            }
+        }
+
+        var right = middle + 1;
+        var right_end: ?usize = null;
+        while (right < high) : (right += 1) {
+            right_end = textSpanSelectionPageEnd(
+                paragraph,
+                spans,
+                options,
+                right,
+                runs,
+            );
+            if (right_end != null) break;
+        }
+        if (right_end) |end| {
+            if (end > offset) return right;
+            low = right + 1;
+            continue;
+        }
+
+        // No retained run in this interval precedes the best page already
+        // found by the binary search.
+        return candidate;
+    }
+    return candidate;
+}
+
+fn textSpanSelectionPageEnd(
+    paragraph: []const u8,
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    page_index: usize,
+    runs: []TextSpanRun,
+) ?usize {
+    const layout = layoutTextSpansFromLine(
+        spans,
+        options,
+        page_index * max_text_span_lines_per_paragraph,
+        runs,
+    );
+    var page_end: ?usize = null;
+    for (layout.runs) |run| {
+        const run_range = textSpanRunParagraphRange(paragraph, run) orelse continue;
+        page_end = @max(page_end orelse 0, run_range.end);
+    }
+    return page_end;
+}
+
+/// Append selection geometry from one absolute visual-line page. Returns
+/// the furthest paragraph byte represented by that page so the caller can
+/// stop once the selected tail has been covered.
+fn appendTextSpanSelectionPage(
+    paragraph: []const u8,
+    spans: []const TextSpan,
+    options: TextSpanLayoutOptions,
+    normalized: text_interaction.TextRange,
+    layout: TextSpanLayout,
+    output: []text_interaction.TextSelectionRect,
+    len: *usize,
+) usize {
+    var page_end: usize = 0;
     var current_line: ?usize = null;
     var line_left: f32 = 0;
     var line_right: f32 = 0;
     var line_range = text_interaction.TextRange.init(0, 0);
     for (layout.runs) |run| {
         const run_range = textSpanRunParagraphRange(paragraph, run) orelse continue;
+        page_end = @max(page_end, run_range.end);
         const start = @max(normalized.start, run_range.start);
         const end = @min(normalized.end, run_range.end);
         if (start >= end) continue;
@@ -942,7 +1705,7 @@ pub fn textSpanSelectionRects(
                 line_range = text_interaction.TextRange.init(@min(line_range.start, start), @max(line_range.end, end));
                 continue;
             }
-            if (!flushSpanSelectionLine(layout, line, line_left, line_right, line_range, output, &len)) return output[0..len];
+            flushSpanSelectionLine(layout, line, line_left, line_right, line_range, output, len);
         }
         current_line = run.line_index;
         line_left = @min(x0, x1);
@@ -950,9 +1713,9 @@ pub fn textSpanSelectionRects(
         line_range = text_interaction.TextRange.init(start, end);
     }
     if (current_line) |line| {
-        if (!flushSpanSelectionLine(layout, line, line_left, line_right, line_range, output, &len)) return output[0..len];
+        flushSpanSelectionLine(layout, line, line_left, line_right, line_range, output, len);
     }
-    return output[0..len];
+    return page_end;
 }
 
 fn flushSpanSelectionLine(
@@ -963,15 +1726,20 @@ fn flushSpanSelectionLine(
     range: text_interaction.TextRange,
     output: []text_interaction.TextSelectionRect,
     len: *usize,
-) bool {
-    if (len.* >= output.len) return false;
+) void {
     const top = @as(f32, @floatFromInt(line_index)) * layout.line_height;
-    output[len.*] = .{
+    const selection = text_interaction.TextSelectionRect{
         .range = range,
         .rect = geometry.RectF.init(left, top, @max(1, right - left), @max(1, layout.line_height)),
     };
+    if (len.* >= output.len) {
+        const last = &output[output.len - 1];
+        last.range = text_interaction.TextRange.init(last.range.start, range.end);
+        last.rect = last.rect.unionWith(selection.rect);
+        return;
+    }
+    output[len.*] = selection;
     len.* += 1;
-    return true;
 }
 
 /// Deep equality for widget invalidation: styles, text bytes, and link
@@ -1007,4 +1775,47 @@ pub fn textSpanLinkCount(spans: []const TextSpan) usize {
         if (span.link.len > 0) count += 1;
     }
     return count;
+}
+
+test "paragraph copied transport rejects malformed ownership cursors and runs" {
+    var request: [773]u8 = @splat(0);
+    request[0..6].* = .{ 53, 0, 1, 1, 0, 0 };
+    paragraphPut(&request, 8, 1);
+    paragraphPut(&request, 12, 1);
+    paragraphPut(&request, 20, 768);
+    paragraphPut(&request, 24, request.len);
+    paragraphPut(&request, 40, 10);
+    paragraphPut(&request, 192, 768);
+    paragraphPut(&request, 196, 5);
+    @memcpy(request[768..], "hello");
+    var good = request;
+    good[7] = 1;
+    paragraphPut(&good, 40, 3);
+    paragraphPut(&good, 136, 5);
+    try std.testing.expect(paragraphResultValid(&request, &good));
+    for ([_]usize{ 0, 6, 7, 8, 24, 28, 172, 192, 768 }) |at| {
+        var bad = good;
+        bad[at] +%= 3;
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    for ([_]usize{ 40, 44, 48, 56, 60, 72, 76, 96, 100, 104, 112, 128, 132, 136, 144, 152, 156, 160 }) |at| {
+        var bad = good;
+        paragraphPut(&bad, at, 999);
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    var done = good;
+    done[7] = 2;
+    paragraphPut(&done, 40, 0);
+    paragraphPut(&done, 56, 1);
+    paragraphPut(&done, 144, 1);
+    paragraphPut(&done, 744, 5);
+    try std.testing.expect(paragraphResultValid(&request, &done));
+    for ([_]usize{ 736, 740, 744, 748, 764 }) |at| {
+        var bad = done;
+        paragraphPut(&bad, at, 999);
+        try std.testing.expect(!paragraphResultValid(&request, &bad));
+    }
+    var repeated = good;
+    repeated[6] = 1;
+    try std.testing.expect(!paragraphResultValid(&repeated, &good));
 }

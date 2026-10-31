@@ -1,0 +1,76 @@
+.{
+    .id = "dev.native_sdk.menu_bar",
+    .name = "menu-bar",
+    .display_name = "Menu Bar",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray", "persist", "menus", "shortcuts" },
+    // Launch as an Accessory app. The activation policy is selected before
+    // the startup window exists, so no Dock tile or cmd+Tab entry flashes.
+    .dock_visible = false,
+    .persist = .{
+        .version = 1,
+        .restore = .{
+            .ok = "restored",
+            .none = "fresh_boot",
+            .err = "restore_failed",
+        },
+    },
+    // The zero-config framework runner reads all three declarations and
+    // routes them through core.ts's commandMsg mapper. No runner.zig is
+    // needed in the app tree.
+    .commands = .{
+        .{ .id = "app.open", .title = "Open Player" },
+        .{ .id = "player.toggle", .title = "Toggle Playback" },
+        .{ .id = "player.next", .title = "Next Track" },
+        .{ .id = "app.quit", .title = "Quit" },
+    },
+    .shortcuts = .{
+        .{ .id = "player.toggle", .key = "p", .modifiers = .{ "primary" } },
+        .{ .id = "player.next", .key = "n", .modifiers = .{ "primary" } },
+    },
+    .menus = .{
+        .{
+            .title = "Player",
+            .items = .{
+                .{ .label = "Open Player", .command = "app.open" },
+                .{ .separator = true },
+                .{ .label = "Play or Pause", .command = "player.toggle", .key = "p", .modifiers = .{ "primary" } },
+                .{ .label = "Next Track", .command = "player.next", .key = "n", .modifiers = .{ "primary" } },
+                .{ .separator = true },
+                .{ .label = "Quit", .command = "app.quit", .key = "q", .modifiers = .{ "primary" } },
+            },
+        },
+    },
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Menu Bar Player",
+                .width = 420,
+                .height = 260,
+                .restore_policy = "center_on_primary",
+                // A true menu-bar app starts behind its status item. The
+                // tray's Open Player command is the initial reveal path.
+                .initially_hidden = true,
+                // The menu-bar-app shape: the red close button HIDES the
+                // window and the app keeps running behind its status
+                // item; the tray "Open Player" row (Cmd.showWindow)
+                // brings it back, and only the tray
+                // "Quit" row (Cmd.quitApp) or cmd+Q actually quits.
+                .close_policy = "hide",
+                .views = .{
+                    .{ .label = "player-canvas", .kind = "gpu_surface", .fill = true, .role = "Menu bar player", .accessibility_label = "Menu bar player", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                },
+            },
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .external_links = .{ .action = "deny" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+}

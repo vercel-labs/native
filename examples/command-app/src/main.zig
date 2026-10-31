@@ -179,7 +179,7 @@ const CommandApp = struct {
                     try self.handleCommand(runtime, command);
                 }
             },
-            .appearance_changed, .shortcut, .timer, .effects_wake, .audio, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
+            .appearance_changed, .shortcut, .timer, .effects_wake, .audio, .video, .files_dropped, .gpu_surface_frame, .gpu_surface_resized, .gpu_surface_input, .canvas_widget_pointer, .canvas_widget_keyboard, .canvas_widget_scroll, .canvas_widget_file_drop, .canvas_widget_drag, .canvas_widget_context_menu, .canvas_widget_context_menu_shown, .canvas_widget_context_menu_dismissed, .canvas_widget_context_menu_request, .canvas_widget_dismiss, .canvas_widget_context_press, .canvas_widget_resize, .canvas_widget_change, .window_closed, .automation_provenance, .lifecycle => {},
         }
     }
 
@@ -241,7 +241,7 @@ test "command app routes toolbar menu tray shortcut and bridge commands" {
         .window_id = 1,
     } });
     try std.testing.expectEqual(@as(usize, 1), harness.null_platform.trayCreateCount());
-    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .tray_action = 1 });
+    try harness.runtime.dispatchPlatformEvent(app.app(), .{ .tray_action = .{ .item_id = 1 } });
     try harness.runtime.dispatchPlatformEvent(app.app(), .{ .shortcut = .{
         .id = command_id,
         .key = "s",

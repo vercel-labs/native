@@ -1,5 +1,7 @@
+const composition = @import("input_composition_policy.zig");
 const std = @import("std");
 const canvas = @import("canvas");
+const runtime_view = @import("view.zig");
 const geometry = @import("geometry");
 const platform = @import("../platform/root.zig");
 const runtime_api = @import("api.zig");
@@ -8,6 +10,7 @@ const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.z
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
+const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 
 const canvasWidgetInputBatchesDisplayListRefresh = canvas_frame_helpers.canvasWidgetInputBatchesDisplayListRefresh;
 const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
@@ -16,7 +19,32 @@ const sizesEqual = canvas_frame_helpers.sizesEqual;
 
 pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
     return struct {
+        const CompositionFacts = struct {
+            dismissed: bool = false,
+            composition_keys: bool = false,
+            claimed: bool = false,
+            latch: ?bool = null,
+            routed_id: u64 = 0,
+        };
+        fn inputPlan(self: *const Runtime, mode: composition.Mode, input: platform.GpuSurfaceInputEvent, extra: CompositionFacts) ?composition.Program {
+            const index = runtimeFindViewIndex(self, input.window_id, input.label) orelse return null;
+            const view = &self.views[index];
+            var facts = if (mode == .normalize) composition.Facts{} else composition.observations(self, view);
+            facts.dismissed = extra.dismissed;
+            facts.composition_keys = extra.composition_keys;
+            facts.claimed = extra.claimed;
+            facts.routed_id = extra.routed_id;
+            if (extra.latch) |value| facts.latch = value;
+            return composition.plan(view.canvas_widget_surface_scope_policy, mode, input, facts);
+        }
         pub fn dispatchGpuSurfaceFrame(self: *Runtime, app: runtime_api.App(Runtime), frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
+            // Media-surface adoption rides the compositor's
+            // presented-frame clock: staged producer frames (latest
+            // wins) are sampled once per frame event, BEFORE view state
+            // and the app dispatch, so a changed texture invalidates
+            // the very frame this event is about to present. Idle
+            // channels cost one fenced flag check each.
+            self.adoptMediaSurfaceFrames();
             var enriched_frame_event = frame_event;
             var had_pending_input = false;
             if (runtimeFindViewIndex(self, frame_event.window_id, frame_event.label)) |index| {
@@ -37,10 +65,13 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // interval, useless for drop detection). Profiling-gated;
                 // a dropped frame shows as max >> p50 on this channel.
                 if (self.frame_profile.enabled) {
-                    const previous_timestamp_ns = self.views[index].gpu_timestamp_ns;
+                    const previous_timestamp_ns = self.views[index].gpu_frame_profile_timestamp_ns;
                     if (previous_timestamp_ns > 0 and frame_event.timestamp_ns > previous_timestamp_ns) {
                         self.frame_profile.recordNs(.interval, frame_event.timestamp_ns - previous_timestamp_ns);
                     }
+                    self.views[index].gpu_frame_profile_timestamp_ns = frame_event.timestamp_ns;
+                } else {
+                    self.views[index].gpu_frame_profile_timestamp_ns = 0;
                 }
                 self.views[index].gpu_timestamp_ns = frame_event.timestamp_ns;
                 self.views[index].recordGpuSurfaceFrameInterval(frame_event.frame_interval_ns);
@@ -61,6 +92,14 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // so accordion reveals replay frame for frame exactly
                 // like split fractions do.
                 try self.advanceCanvasWidgetDisclosureTweenForFrame(index, frame_event.timestamp_ns);
+                // Drag-reflow FLIP offsets share the recorded clock. They
+                // move only presentation transforms; the retained layout is
+                // already the exact drop result used by hit testing.
+                try self.advanceCanvasWidgetDragLayoutMotionForFrame(index, frame_event.timestamp_ns);
+                // The anchored-tooltip hover-intent delay fires on the
+                // same recorded clock: a dwell past the delay shows its
+                // tooltip on a deterministic frame, replayed exactly.
+                try self.advanceCanvasTooltipIntentForFrame(index, frame_event.timestamp_ns);
                 try dispatchPendingCanvasWidgetScrollEvents(self, app, index);
                 // A settling tween notes its ONE split-resize event with
                 // no input in flight; drain it here so the controlled
@@ -74,27 +113,34 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // republish when the runtime is invalidated, and a frame
                 // completion carrying a NEW discrete fact may have no
                 // other invalidation source, leaving the published
-                // snapshot stale forever. Two such facts invalidate here
-                // (a third — a resolved input latency — is checked after
+                // snapshot stale forever. Three such facts invalidate here
+                // (a fourth — a resolved input latency — is checked after
                 // the app dispatch below, where the responding present
                 // stamps it):
                 //   - the host-reported nonblank verdict changed (the
                 //     first nonblank presentation on an idle boot has no
                 //     resize and no input to piggyback on);
+                //   - the concrete presenter changed (for example a
+                //     Direct2D packet refusal fell back to software, or a
+                //     later packet recovered Direct2D);
                 //   - this frame recorded the first-frame latency.
                 // Steady-state frames carry no new fact and stay quiet —
                 // a timer-mode surface must not republish observable
                 // state 60 times a second.
                 const first_frame_latency_recorded = !first_frame_latency_was_recorded and self.views[index].gpu_first_frame_latency_recorded;
-                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or first_frame_latency_recorded) {
+                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or
+                    self.views[index].gpu_occluded != frame_event.occluded or
+                    self.views[index].gpu_backend != frame_event.backend or
+                    first_frame_latency_recorded)
+                {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
                 self.views[index].gpu_frame_nonblank = frame_event.nonblank;
+                self.views[index].gpu_occluded = frame_event.occluded;
                 self.views[index].gpu_sample_color = frame_event.sample_color;
                 self.views[index].gpu_backend = frame_event.backend;
                 self.views[index].gpu_pixel_format = frame_event.pixel_format;
                 self.views[index].gpu_present_mode = frame_event.present_mode;
-                self.views[index].gpu_alpha_mode = frame_event.alpha_mode;
                 self.views[index].gpu_color_space = frame_event.color_space;
                 self.views[index].gpu_vsync = frame_event.vsync;
                 self.views[index].gpu_status = frame_event.status;
@@ -102,11 +148,19 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     try enrichGpuSurfaceFrameDiagnostics(self, index, &enriched_frame_event);
                 } else if (self.views[index].info().gpuFrame()) |gpu_frame| {
                     enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
-                    // GpuFrame is persistent surface state; the occluded
-                    // fact is per-completion metadata and must survive
-                    // the rebuild so the app sees it honestly.
-                    enriched_frame_event.occluded = frame_event.occluded;
                 }
+                // Diagnostic enrichment and the low-cost persistent-frame
+                // rebuild can both replace fields. Reapply facts owned by
+                // this host completion, including device-loss recovery.
+                preserveGpuSurfaceCompletionFacts(frame_event, &enriched_frame_event);
+                // Alpha mode is immutable surface configuration, not a
+                // completion-time measurement. The desktop ABIs predate
+                // premultiplied surfaces and stamp their legacy opaque
+                // default on every completion, while their actual pixel
+                // presenters already preserve/premultiply alpha. Keep the
+                // create-time mode authoritative and normalize the event
+                // delivered to the app in both diagnostics tiers.
+                enriched_frame_event.alpha_mode = self.views[index].gpu_alpha_mode;
                 // Native scroll drivers reconcile against live host state
                 // on every presented frame (the relayout-stomp lesson: a
                 // one-shot frame patch races shell relayout): frames,
@@ -179,7 +233,37 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
+                    // A consumed cancel is still the pointer leaving the
+                    // view (the tooltip machine's exact reading below):
+                    // the proven pointer's departure retires hover-Msg
+                    // containment too, so a window exit mid-secondary
+                    // stream never strands an entered element. Honesty
+                    // about scope: only the secondary DOWN/UP/CANCEL
+                    // stream is consumed here — hosts report drag
+                    // MOTION without a button, so it rides the primary
+                    // path and containment follows the pointer through
+                    // a right-drag (the mouseenter/mouseleave
+                    // convention), exactly as the wash does for the
+                    // same journaled moves.
+                    // A consumed secondary RELEASE outside the view is
+                    // the gesture ending with the pointer already gone —
+                    // hosts hold an implicit grab through a right-drag,
+                    // so no motion-leave fired and none will until
+                    // re-entry: retire containment like the cancel
+                    // above, matching the primary path whose outside
+                    // release re-hit-tests to nothing.
+                    CanvasWidgetEventMethods().retireCanvasWidgetHoverForConsumedPointer(&self.views[index], input_event, gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y));
                 }
+                // The whole consumed stream still feeds the tooltip
+                // intent choke point: every pointer-carrying event
+                // updates the stored position (a later point-blind
+                // reconcile must hit-test where the pointer really is),
+                // the secondary down resets the machine before the menu
+                // presents ("pointer-down dismisses" holds for EVERY
+                // button — no tooltip floats behind or over the native
+                // menu), and a consumed cancel is still the pointer
+                // leaving the view.
+                try CanvasWidgetEventMethods().reconcileCanvasTooltipIntentForConsumedPointerInput(self, input_event);
                 if (input_event.kind == .pointer_down) {
                     try setFocusedView(self, input_event.window_id, input_event.label);
                     self.invalidated = true;
@@ -227,6 +311,30 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 => null,
                 else => return err,
             };
+            // Resolve a draggable ancestor BEFORE the interaction pass can
+            // clear the raw pressed text id on release. A live widget drag
+            // owns text motion, so the text-selection pass below stands
+            // down instead of selecting the card label.
+            var widget_drag_event = CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, &self.widget_drag_event_route_entries) catch |err| switch (err) {
+                error.WindowNotFound,
+                error.ViewNotFound,
+                error.InvalidViewOptions,
+                => null,
+                else => return err,
+            };
+            // A terminal drag event exists only after the gesture crossed the
+            // runtime's drag slop. Pointer capture also routes this release to
+            // the original press target, so retire its click now: otherwise an
+            // element with both on_press and on_drag would activate before its
+            // drop Msg. A sub-slop release produces no drag event and keeps the
+            // ordinary press path intact.
+            const widget_drag_terminal = if (widget_drag_event) |drag_event|
+                drag_event.drag.phase == .end or drag_event.drag.phase == .cancel
+            else
+                false;
+            if (widget_drag_terminal) {
+                if (widget_pointer_event) |*pointer_event| pointer_event.press_target = null;
+            }
             var dismissed_surface_id: canvas.ObjectId = 0;
             var window_drag_started = false;
             if (widget_pointer_event) |*pointer_event| {
@@ -244,31 +352,94 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // click on the native titlebar. Dismissal above still ran:
                 // clicking the header closes an open surface first.
                 window_drag_started = try CanvasWidgetEventMethods().startCanvasWidgetWindowDragFromPointer(self, input_event, pointer_event.*);
-                if (!window_drag_started) {
-                    try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event.*);
+                if (window_drag_started) {
+                    // The drag consumed the down, but "pointer-down
+                    // dismisses" still holds — and the down still
+                    // carried a position the intent machine must
+                    // record: the OS owning the pointer from here must
+                    // not strand an armed or shown tooltip (the
+                    // matching up may never arrive), and a later
+                    // point-blind reconcile must hit-test where the
+                    // pointer really went down.
+                    try CanvasWidgetEventMethods().reconcileCanvasTooltipIntentForConsumedPointerInput(self, input_event);
+                } else {
+                    // The same click-vs-drag arbitration covers runtime-owned
+                    // activation (checkbox/toggle state), not only app Msgs and
+                    // commands. Geometry controls applied their live resize on
+                    // move; a terminal drag owes no release mutation.
+                    if (!widget_drag_terminal) try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event);
                     try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event.*);
-                    // The text pass may stamp a clear edit onto the
-                    // event for the app dispatch below.
-                    try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
+                    // The text pass may stamp a caret/selection or clear
+                    // edit onto the event for the app dispatch below.
+                    if (widget_drag_event == null) {
+                        try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
+                    }
                     try CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event.*);
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event.*);
                 }
             }
-            const widget_drag_event = CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                error.WindowNotFound,
-                error.ViewNotFound,
-                error.InvalidViewOptions,
-                => null,
-                else => return err,
+            // A live target-less composition owns its surface's
+            // UNCHORDED keys wholesale, and it owns them BEFORE any
+            // widget pass runs: on hosts that surface the key ahead of
+            // the input method's result, the confirming Enter (or a
+            // candidate-navigation arrow, or the cancelling Escape)
+            // would otherwise dismiss a popup, move widget focus, or
+            // activate a freshly focused button while the composition
+            // it belongs to is still open. Chorded keys stay live —
+            // input methods never consume command chords, so those are
+            // genuine shortcuts even mid-composition.
+            const targetless_composition_owns_keys = if (inputPlan(self, .keys, input_event, .{})) |program| program.has(4) else (input_event.kind == .key_down or input_event.kind == .key_up) and
+                !canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event) and
+                self.targetless_ime_preedit_len > 0 and
+                self.targetless_ime_preedit_window == input_event.window_id and
+                std.mem.eql(
+                    u8,
+                    self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                    input_event.label,
+                );
+            // A Tab key-down that moved focus INTO a Tab-owning editor is
+            // a focus gesture for its whole physical lifetime. Suppress
+            // repeats and release before a live terminal or editable code
+            // can reinterpret them as input.
+            const tab_input_focus_entry_suppressed =
+                CanvasWidgetEventMethods().consumeCanvasWidgetTabInputFocusEntry(self, input_event);
+            // Terminal Paste owns its matching physical V release even
+            // when Command/Ctrl came up first. Classify it before focus,
+            // routing, or app fallbacks can reinterpret the orphan.
+            const terminal_paste_release_suppressed =
+                CanvasWidgetEventMethods().consumeCanvasWidgetTerminalPasteKeyLifetime(self, input_event);
+            const widget_key_lifetime_suppressed =
+                tab_input_focus_entry_suppressed or terminal_paste_release_suppressed;
+            // Once an actual drag is live, plain Escape is its cancellation
+            // gesture. Resolve it after the input-method ownership test, but
+            // before dismissal/focus/widget-key routing, so one Escape has
+            // exactly one meaning and the app receives phase 2.
+            const widget_drag_escape_cancelled = drag_cancelled: {
+                if (targetless_composition_owns_keys or widget_key_lifetime_suppressed) break :drag_cancelled false;
+                const drag_cancel = CanvasWidgetEventMethods().routeCanvasWidgetDragCancelFromKeyboardInput(self, input_event, &self.widget_drag_event_route_entries) catch |err| switch (err) {
+                    error.WindowNotFound,
+                    error.ViewNotFound,
+                    error.InvalidViewOptions,
+                    => null,
+                    else => return err,
+                };
+                if (drag_cancel) |event| {
+                    widget_drag_event = event;
+                    break :drag_cancelled true;
+                }
+                break :drag_cancelled false;
             };
-            const keyboard_dismissed_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
+            const keyboard_dismissed_id = if (targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
+                0
+            else
+                try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
             if (keyboard_dismissed_id != 0) dismissed_surface_id = keyboard_dismissed_id;
             const widget_surface_dismissed = keyboard_dismissed_id != 0;
-            const widget_focus_moved = if (widget_surface_dismissed)
+            const widget_focus_moved = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
                 false
             else
                 try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromKeyboardInput(self, input_event);
-            var widget_keyboard_event = if (widget_surface_dismissed)
+            var widget_keyboard_event = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetKeyboardInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -283,13 +454,35 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // from "an arrow landed here in place".
             if (widget_keyboard_event) |*keyboard_event| {
                 keyboard_event.keyboard.focus_moved = widget_focus_moved;
+                // Nearest-radio-group navigation owns its key even when
+                // Home/End names the current edge or a one-member group
+                // wraps in place. Selection is a separate stamp: a real
+                // focus move selects the landed radio, and an in-place
+                // move selects only an unchecked current radio. Bare
+                // radios preserve their legacy focus-only spatial
+                // behavior, and Tab entry never synthesizes a selection.
+                const view_index = runtimeFindViewIndex(self, input_event.window_id, input_event.label).?;
+                const layout = self.views[view_index].widgetLayoutTree();
+                const radio_group_navigation = navigation: {
+                    const target = keyboard_event.target orelse break :navigation false;
+                    if (target.kind != .radio) break :navigation false;
+                    if (canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, target.index) == null) break :navigation false;
+                    break :navigation canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput(input_event) != null or
+                        canvas_widget_runtime.canvasWidgetSpatialFocusDirection(input_event) != null;
+                };
+                keyboard_event.keyboard.radio_group_navigation = radio_group_navigation;
+                if (radio_group_navigation) {
+                    const target = keyboard_event.target.?;
+                    keyboard_event.keyboard.radio_group_selection = widget_focus_moved or
+                        !canvas_widget_runtime.canvasWidgetSelectableSelected(layout.nodes[target.index].widget);
+                }
             }
             // Clipboard shortcuts resolve against the raw input (copy has
             // no routed target when a static text selection is live) and
             // may stamp a paste/cut edit onto the routed keyboard event;
             // the pasted bytes live in this frame until dispatch returns.
             var clipboard_paste_buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
-            if (!widget_surface_dismissed) {
+            if (!widget_surface_dismissed and !widget_drag_escape_cancelled) {
                 try CanvasWidgetEventMethods().applyCanvasWidgetClipboardShortcut(
                     self,
                     input_event,
@@ -297,11 +490,132 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     &clipboard_paste_buffer,
                 );
             }
-            if (widget_keyboard_event) |keyboard_event| {
+            // The text pass stamps the edit it derived and applied onto
+            // the event (Escape's clear included), so the app dispatch
+            // below hears exactly the edit the retained editor performed.
+            if (widget_keyboard_event) |*keyboard_event| {
+                // Keyboard activation counts as a press for tooltips:
+                // Space/Enter on the focused trigger dismisses its
+                // armed/shown tooltip before the control mutation and
+                // app dispatch observe the input.
+                try CanvasWidgetEventMethods().updateCanvasTooltipIntentForKeyboardActivation(self, keyboard_event.*);
                 try CanvasWidgetEventMethods().updateCanvasWidgetControlFromKeyboard(self, keyboard_event);
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, keyboard_event);
             }
-            const widget_text_input_event = if (widget_surface_dismissed)
+            // An IME sequence belongs to whoever it STARTED over: a
+            // composition buffered by the target-less consumer (this
+            // surface owns a live target-less preedit) continues
+            // target-less even if a text widget has since taken focus —
+            // routing its commit or cancel to the newly focused editor
+            // would resolve a composition that editor never saw, and the
+            // target-less consumer's composed text would be lost.
+            const compiled_resolution = inputPlan(self, .resolve, input_event, .{ .dismissed = widget_surface_dismissed });
+            if (compiled_resolution) |program| {
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label).?;
+                composition.installWidget(&self.views[index], program);
+                if (program.has(2048)) self.targetless_ime_commit_grace = false;
+            }
+            const ime_continuation_owned_targetless = if (compiled_resolution) |program| program.has(8) else switch (input_event.kind) {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => self.targetless_ime_preedit_len > 0 and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    ),
+                else => false,
+            };
+            // Resolve the one-shot cancel grace FIRST (see
+            // `ImeCommitGrace`): a text_input arriving right after a
+            // cancel is a converted commit's result and still belongs
+            // to the cancelled sequence; any other event disarms the
+            // grace (a plain Escape cancel is chased by its own
+            // key_down, so ordinary typing never inherits it).
+            const ime_grace: runtime_view.ImeCommitGrace = if (compiled_resolution) |program| if (program.has(32)) .swallow else .none else grace: {
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :grace .none;
+                if (self.views[index].kind != .gpu_surface) break :grace .none;
+                const armed = self.views[index].canvas_widget_ime_commit_grace;
+                if (armed == .none) break :grace .none;
+                self.views[index].canvas_widget_ime_commit_grace = .none;
+                if (input_event.kind == .text_input) {
+                    if (armed == .route_to_owner) {
+                        // The owner may have vanished between the cancel
+                        // and this trailing commit (the cancel's own app
+                        // dispatch can rebuild the tree): a dead owner
+                        // converts the grace to a SWALLOW — the composed
+                        // result resolves nowhere, never in whichever
+                        // editor holds focus now.
+                        const owner = self.views[index].canvas_widget_ime_owner_id;
+                        const alive = alive: {
+                            if (owner == 0) break :alive false;
+                            if (self.views[index].widgetLayoutTree().findById(owner)) |node| {
+                                break :alive canvas.isWidgetTextEntry(node.widget);
+                            }
+                            break :alive false;
+                        };
+                        if (!alive) {
+                            self.views[index].canvas_widget_ime_owner_id = 0;
+                            break :grace .swallow;
+                        }
+                    }
+                    break :grace armed;
+                }
+                // Disarmed: release the owner a route_to_owner grace
+                // held through the cancel.
+                if (armed == .route_to_owner) self.views[index].canvas_widget_ime_owner_id = 0;
+                break :grace .none;
+            };
+            // A WIDGET-owned sequence whose owning editor vanished (a
+            // rebuild removed it mid-composition) can resolve NOWHERE:
+            // every continuation is swallowed — routing to the newly
+            // focused editor would resolve (or preedit-update) a
+            // composition that editor never saw, and the target-less
+            // fallback would type it into a consumer that never composed
+            // it. The pin HOLDS through set updates (the sequence is
+            // still open) and clears only when its commit or cancel
+            // closes it; an orphaned cancel arms the swallow grace so a
+            // converted commit's trailing text_input is swallowed too.
+            const ime_widget_owner_orphaned = if (compiled_resolution) |program| program.has(16) else switch (input_event.kind) {
+                .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => blk: {
+                    const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
+                    if (self.views[index].kind != .gpu_surface) break :blk false;
+                    const owner = self.views[index].canvas_widget_ime_owner_id;
+                    if (owner == 0) break :blk false;
+                    const alive = alive: {
+                        if (self.views[index].widgetLayoutTree().findById(owner)) |node| {
+                            break :alive canvas.isWidgetTextEntry(node.widget);
+                        }
+                        break :alive false;
+                    };
+                    if (alive) break :blk false;
+                    if (input_event.kind != .ime_set_composition) {
+                        self.views[index].canvas_widget_ime_owner_id = 0;
+                        if (input_event.kind == .ime_cancel_composition) {
+                            self.views[index].canvas_widget_ime_commit_grace = .swallow;
+                        }
+                    }
+                    break :blk true;
+                },
+                else => false,
+            };
+            const ime_grace_swallow = ime_grace == .swallow;
+            // The target-less twin of the cancel grace: the text_input
+            // trailing a target-less composition's cancel is that
+            // composition's converted commit — it delivers TARGET-LESS
+            // on the owning surface, never into whichever text widget
+            // holds focus by now. One-shot: any other event disarms.
+            const targetless_commit_grace = if (compiled_resolution) |program| program.has(64) else grace: {
+                if (!self.targetless_ime_commit_grace) break :grace false;
+                self.targetless_ime_commit_grace = false;
+                break :grace input_event.kind == .text_input and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    );
+            };
+            var widget_text_input_event = if (widget_surface_dismissed or ime_continuation_owned_targetless or ime_widget_owner_orphaned or ime_grace_swallow or targetless_commit_grace)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetTextInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -311,9 +625,93 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     => null,
                     else => return err,
                 };
-            if (widget_text_input_event) |text_input_event| {
+            if (widget_text_input_event) |*text_input_event| {
                 try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, text_input_event);
+                // Composition ownership follows the ROUTED editor: a
+                // set_composition opens (or continues) the sequence in
+                // its target; a commit — or a direct insertion — closes
+                // it. A CANCEL holds the pin one more event and arms the
+                // route grace: the hosts encode a converted commit as
+                // cancel-then-text_input, so the trailing text_input
+                // must still find the owner (the grace probe above
+                // releases the pin instead when anything else follows a
+                // plain cancel).
+                if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                    if (inputPlan(self, .routed, input_event, .{ .routed_id = text_input_event.keyboard.focused_id orelse 0 })) |program| {
+                        composition.installWidget(&self.views[index], program);
+                    } else switch (input_event.kind) {
+                        .ime_set_composition => self.views[index].canvas_widget_ime_owner_id =
+                            text_input_event.keyboard.focused_id orelse 0,
+                        // Arm ONLY while an owner is pinned: a cancel of
+                        // a live composition holds it. A DUPLICATE
+                        // cancel — hosts emit a synthetic one to disarm
+                        // the grace when the resolving key's own
+                        // key_down was consumed — arrives after the
+                        // probe above already released the owner, and
+                        // re-arming ownerless would convert the next
+                        // ordinary character into a dead-owner swallow.
+                        .ime_cancel_composition => if (self.views[index].canvas_widget_ime_owner_id != 0) {
+                            self.views[index].canvas_widget_ime_commit_grace = .route_to_owner;
+                        },
+                        .ime_commit_composition, .text_input => self.views[index].canvas_widget_ime_owner_id = 0,
+                        else => {},
+                    }
+                }
             }
+            // The target-less committed-text claim is decided NOW —
+            // against the tree the input actually routed through —
+            // because the app dispatches below may rebuild it: a Space
+            // that pressed a focused button whose command removes that
+            // button must still count as claimed, or the same physical
+            // keystroke would double into a command AND a literal space
+            // through `on_text`.
+            const committed_text_claimed = blk: {
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
+                if (inputPlan(self, .claim, input_event, .{ .composition_keys = targetless_composition_owns_keys })) |split| {
+                    // The first stage preserves short-circuiting: a carried
+                    // claim needs no focused-widget intent observation.
+                    if (split.has(256) or targetless_composition_owns_keys) {
+                        composition.installWidget(&self.views[index], split);
+                        break :blk split.has(256);
+                    }
+                    const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                    const program = inputPlan(self, .claim, input_event, .{ .claimed = claimed }).?;
+                    composition.installWidget(&self.views[index], program);
+                    break :blk program.has(256);
+                }
+                // Consume the split-event claim carry first: hosts that
+                // deliver the claimed key_down and its committed text as
+                // SEPARATE events would otherwise recompute the claim
+                // against a tree the activation already rebuilt (see
+                // `canvas_widget_claimed_key_grace`).
+                const split_claim = self.views[index].canvas_widget_claimed_key_grace;
+                self.views[index].canvas_widget_claimed_key_grace = .none;
+                // KEYED: the carry swallows only the armed key's OWN
+                // committed literal. A different key's text arriving
+                // first (a second key pressed while the claimed one is
+                // held, on hosts that emit input-method text before its
+                // key_down) must flow, not feed a stale latch.
+                if (input_event.kind == .text_input and split_claim.coversText(input_event.text)) break :blk true;
+                // An input-method-owned key claims nothing (it reached
+                // no widget above) and must not arm the carry either.
+                if (targetless_composition_owns_keys) break :blk false;
+                const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                // Arm the carry when this claimed key_down brought no
+                // text of its own — its committed character may follow
+                // as a separate event. Only the text-producing
+                // activation keys arm one; other claimed keys commit
+                // nothing, so there is nothing to carry.
+                if (claimed and input_event.kind == .key_down and input_event.text.len == 0) {
+                    self.views[index].canvas_widget_claimed_key_grace =
+                        if (std.ascii.eqlIgnoreCase(input_event.key, "space"))
+                            .space
+                        else if (std.ascii.eqlIgnoreCase(input_event.key, "enter"))
+                            .enter
+                        else
+                            .none;
+                }
+                break :blk claimed;
+            };
             // The refresh batch stays open across the app dispatches
             // below: a click's pointer-up used to emit once for the
             // widget-state change and once more for the Msg-driven
@@ -344,8 +742,48 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (widget_keyboard_event) |keyboard_event| {
                 try CanvasWidgetEventMethods().dispatchCanvasWidgetCommandFromKeyboard(self, app, keyboard_event);
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
-            } else if (input_event.kind == .key_down and !widget_surface_dismissed) {
-                // No focused widget routed this key_down (nothing is
+                // A logical undo/redo can require select -> replace ->
+                // restore-selection. Apply and dispatch each continuation
+                // only after the previous on-input Msg rebuilt the
+                // controlled tree, keeping runtime and model lockstep at
+                // every intermediate state. These synthetic edit carriers
+                // are key_down-shaped (not committed text), so a target
+                // removed, hidden, or replaced with another editor kind by
+                // the rebuild can never receive stale replacement bytes.
+                // The route and focus-target snapshot are tree-relative too:
+                // re-resolve both after every rebuild so custom event
+                // consumers never observe ancestors, indices, bounds, or
+                // state from the tree that handled the previous step.
+                for (0..2) |_| {
+                    if (keyboard_event.history_replay_serial == 0) break;
+                    const view_index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse break;
+                    const target = keyboard_event.target orelse break;
+                    if (self.views[view_index].kind != .gpu_surface) break;
+                    const edit = self.views[view_index].canvasWidgetTextHistoryReplayNext(
+                        target,
+                        keyboard_event.history_replay_serial,
+                        keyboard_event.history_replay_redo,
+                    ) orelse break;
+                    var followup = keyboard_event;
+                    followup.keyboard = .{
+                        .phase = .key_down,
+                        .focused_id = keyboard_event.keyboard.focused_id,
+                        .edit = edit,
+                    };
+                    const route = try self.views[view_index].widgetLayoutTree().routeKeyboardEvent(
+                        followup.keyboard,
+                        &self.widget_event_route_entries,
+                    );
+                    followup.target = route.target orelse break;
+                    followup.route = route.entries;
+                    followup.history_replay = true;
+                    try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, &followup);
+                    try self.dispatchEvent(app, .{ .canvas_widget_keyboard = followup });
+                }
+            } else if ((input_event.kind == .key_down or input_event.kind == .key_up) and
+                !widget_surface_dismissed and !widget_key_lifetime_suppressed and !widget_drag_escape_cancelled)
+            {
+                // No focused widget routed this key (nothing is
                 // focused, or the focused id is gone from the tree): the
                 // key still reaches the app, as a TARGET-LESS keyboard
                 // event. This is the app-level key-fallback seam — the
@@ -353,21 +791,43 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // transport toggle), which chrome shortcuts deliberately
                 // refuse (`validateShortcut` demands a modifier so global
                 // registration can never steal typing). The ui-app layer
-                // maps it through `Options.on_key`; with a target present
-                // the routed event above carries the same fallback duty
-                // once widget dispatch declines the key. A key that just
-                // dismissed a surface was consumed by the dismissal and
-                // never falls through.
+                // maps it through `Options.on_key` (releases only for
+                // apps that opt into `key_release_events` — a terminal
+                // forwarding the kitty protocol's event reporting); with
+                // a target present the routed event above carries the
+                // same fallback duty once widget dispatch declines the
+                // key. A key that just dismissed a surface was consumed
+                // by the dismissal and never falls through.
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    if (self.views[index].kind == .gpu_surface and self.views[index].focused) {
+                    // The composition-ownership gate again (see
+                    // `targetless_composition_owns_keys` above): while
+                    // this surface holds a target-less preedit, an
+                    // unchorded key_down is input-method machinery —
+                    // candidate navigation, the confirming Enter on
+                    // hosts that surface the key before the commit —
+                    // never an app-level key (a terminal mapping Enter
+                    // to CR would submit the half-composed command).
+                    // Hosts that run the input-method filter BEFORE
+                    // surfacing the key (GTK) suppress consumed
+                    // composition keys at the source, so a key_down
+                    // arriving after the resolution is a genuine
+                    // keystroke on every host and always flows.
+                    if (if (inputPlan(self, .key_delivery, input_event, .{ .composition_keys = targetless_composition_owns_keys })) |program| program.has(4096) else self.views[index].kind == .gpu_surface and self.views[index].focused and !targetless_composition_owns_keys) {
+                        // Target-less, but the FOCUSED widget's id still
+                        // rides along (0 = nothing focused): consumers
+                        // that own focused input without editor state —
+                        // the terminal element — resolve their widget
+                        // from it.
+                        const focused_id = self.views[index].canvas_widget_focused_id;
                         try self.dispatchEvent(app, .{ .canvas_widget_keyboard = .{
                             .window_id = input_event.window_id,
                             .view_label = self.views[index].label,
                             .keyboard = .{
-                                .phase = .key_down,
+                                .phase = if (input_event.kind == .key_up) .key_up else .key_down,
+                                .focused_id = if (focused_id != 0) focused_id else null,
                                 .key = input_event.key,
                                 .text = input_event.text,
-                                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                                .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
                             },
                         } });
                     }
@@ -375,6 +835,185 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }
             if (widget_text_input_event) |text_input_event| {
                 try self.dispatchEvent(app, .{ .canvas_widget_keyboard = text_input_event });
+            } else if (!widget_surface_dismissed and !ime_widget_owner_orphaned and !ime_grace_swallow) {
+                // No focused text widget consumed this text: committed
+                // text still reaches the app as a TARGET-LESS text event
+                // — the key_down fallback's typing twin, for apps that
+                // consume typing with no text-entry widget focused (a
+                // terminal grid). IME is handled here too, since no
+                // focused editor tracks the composition: a preedit
+                // (`ime_set_composition`) is buffered but NOT delivered
+                // (provisional), and the commit delivers the composed
+                // text — the host emits an EMPTY commit when the marked
+                // text is committed unchanged, so the bytes come from
+                // the buffered preedit. Only committed UTF-8 ever
+                // reaches `on_text`; key names never reconstruct text.
+                // Preedit state is scoped to its ORIGINATING surface (the
+                // way a focused widget's editor scopes composition to the
+                // widget): only the owning surface's events consume or
+                // clear the buffer, so surface B's empty commit can never
+                // insert a composition typed into surface A.
+                const owns_preedit = self.targetless_ime_preedit_len > 0 and
+                    self.targetless_ime_preedit_window == input_event.window_id and
+                    std.mem.eql(
+                        u8,
+                        self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                        input_event.label,
+                    );
+                const committed: ?[]const u8 = if (inputPlan(self, .fallback, input_event, .{})) |program| compiled: {
+                    const text = switch (program.source) {
+                        0 => "",
+                        1 => input_event.text,
+                        2 => self.targetless_ime_preedit[0..self.targetless_ime_preedit_len],
+                        3 => {
+                            var accepted = true;
+                            if (input_event.text.len > self.targetless_ime_preedit.len) {
+                                if (self.owned_allocator.realloc(self.targetless_ime_preedit, input_event.text.len)) |grown| {
+                                    self.targetless_ime_preedit = grown;
+                                } else |_| accepted = false;
+                            }
+                            const installed = inputPlan(self, .buffer, input_event, .{ .claimed = accepted }).?;
+                            if (installed.has(512)) self.targetless_ime_preedit_len = 0;
+                            if (installed.has(1024)) {
+                                @memcpy(self.targetless_ime_preedit[0..input_event.text.len], input_event.text);
+                                self.targetless_ime_preedit_len = input_event.text.len;
+                                self.targetless_ime_preedit_window = input_event.window_id;
+                                const label_len = @min(input_event.label.len, self.targetless_ime_preedit_label.len);
+                                @memcpy(self.targetless_ime_preedit_label[0..label_len], input_event.label[0..label_len]);
+                                self.targetless_ime_preedit_label_len = label_len;
+                            }
+                            break :compiled null;
+                        },
+                        else => unreachable,
+                    };
+                    if (program.has(512)) self.targetless_ime_preedit_len = 0;
+                    if (program.has(16384)) self.targetless_ime_commit_grace = true;
+                    break :compiled if (text.len > 0) text else null;
+                } else switch (input_event.kind) {
+                    .text_input => blk: {
+                        // A command-chorded text event is a SHORTCUT, not
+                        // typing — the same gate the focused-widget text
+                        // path applies (`canvasWidgetTextEditEventFromGpuInput`),
+                        // so Ctrl/Cmd+C never delivers both the chord and
+                        // a literal "c". It neither commits nor disturbs
+                        // a composition in progress.
+                        if (canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event)) break :blk null;
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        break :blk if (input_event.text.len > 0) input_event.text else null;
+                    },
+                    // A key_down CARRYING text is the other committed-text
+                    // shape: hosts without a separate text event for plain
+                    // typing (the GTK path when no input method consumes
+                    // the key) deliver the printable on the key event
+                    // itself — the focused-widget rule
+                    // (`canvasWidgetTextEditEventFromGpuInput`) inserts
+                    // from it, and the target-less fallback must too or
+                    // ordinary typing never reaches `on_text` there. Same
+                    // chord gate; specials (enter, backspace) carry no
+                    // text on any host, so nothing doubles with the
+                    // key_down fallback dispatched above.
+                    .key_down => blk: {
+                        if (canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event)) break :blk null;
+                        if (input_event.text.len == 0) break :blk null;
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        break :blk input_event.text;
+                    },
+                    .ime_set_composition => blk: {
+                        // Buffer the FULL composition (grow to fit, never
+                        // truncate): each set_composition REPLACES the
+                        // preedit, so this holds one composition's bytes
+                        // — and takes ownership for this surface (at most
+                        // one system composition exists at a time). If
+                        // growth fails, CLEAR the preedit rather than
+                        // leave the prior (now superseded) composition
+                        // active — a later empty commit must never insert
+                        // stale text the user has since replaced.
+                        if (input_event.text.len > self.targetless_ime_preedit.len) {
+                            if (self.owned_allocator.realloc(self.targetless_ime_preedit, input_event.text.len)) |grown| {
+                                self.targetless_ime_preedit = grown;
+                            } else |_| {
+                                self.targetless_ime_preedit_len = 0;
+                                break :blk null;
+                            }
+                        }
+                        @memcpy(self.targetless_ime_preedit[0..input_event.text.len], input_event.text);
+                        self.targetless_ime_preedit_len = input_event.text.len;
+                        self.targetless_ime_preedit_window = input_event.window_id;
+                        const label_len = @min(input_event.label.len, self.targetless_ime_preedit_label.len);
+                        @memcpy(self.targetless_ime_preedit_label[0..label_len], input_event.label[0..label_len]);
+                        self.targetless_ime_preedit_label_len = label_len;
+                        break :blk null; // preedit is provisional
+                    },
+                    .ime_commit_composition => blk: {
+                        // An EMPTY commit means "commit the marked text
+                        // unchanged" — buffered bytes stand in ONLY when
+                        // this surface owns them; another surface's empty
+                        // commit commits nothing of ours.
+                        const text = if (input_event.text.len > 0)
+                            input_event.text
+                        else if (owns_preedit)
+                            self.targetless_ime_preedit[0..self.targetless_ime_preedit_len]
+                        else
+                            "";
+                        if (owns_preedit) self.targetless_ime_preedit_len = 0;
+                        break :blk if (text.len > 0) text else null;
+                    },
+                    .ime_cancel_composition => blk: {
+                        if (owns_preedit) {
+                            self.targetless_ime_preedit_len = 0;
+                            // Hold one event for the converted-commit
+                            // shape (cancel-then-text_input): the
+                            // trailing text still belongs to this
+                            // surface's composition. A plain cancel's
+                            // own key_down disarms it.
+                            self.targetless_ime_commit_grace = true;
+                        }
+                        break :blk null;
+                    },
+                    else => null,
+                };
+                // An IME RESOLUTION is never a widget's claimed key: the
+                // structural-claim gate exists so one keystroke cannot
+                // both activate a focused control and type its literal
+                // character, but a composition's committed result (an
+                // owned empty commit, or a converted commit's trailing
+                // text riding the grace) is the END of a sequence the
+                // widget never participated in — a focused button's
+                // Space claim must not eat it.
+                const ime_resolution = targetless_commit_grace or
+                    input_event.kind == .ime_commit_composition;
+                if (committed) |text| {
+                    if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                        const deliver = if (inputPlan(self, .delivery, input_event, .{ .claimed = committed_text_claimed, .latch = ime_resolution })) |program|
+                            program.has(4096)
+                        else
+                            self.views[index].kind == .gpu_surface and self.views[index].focused and (!committed_text_claimed or ime_resolution);
+                        if (deliver) {
+                            // The focused widget's id rides the
+                            // target-less event (see the key fallback
+                            // above): a focused terminal resolves its
+                            // typing channel from it.
+                            const focused_id = self.views[index].canvas_widget_focused_id;
+                            try self.dispatchEvent(app, .{
+                                .canvas_widget_keyboard = .{
+                                    .window_id = input_event.window_id,
+                                    .view_label = self.views[index].label,
+                                    .keyboard = .{
+                                        .phase = .text_input,
+                                        .focused_id = if (focused_id != 0) focused_id else null,
+                                        .key = input_event.key,
+                                        .text = text,
+                                        // Mark it committed so the ui-app
+                                        // `on_text` gate (insert_text only)
+                                        // delivers it.
+                                        .edit = .{ .insert_text = text },
+                                        .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                                    },
+                                },
+                            });
+                        }
+                    }
+                }
             }
             // Wheel and keyboard scroll mutations above noted pending
             // scroll events on the view; deliver them after the input's
@@ -399,6 +1038,48 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // input changed semantics but no pixels) publish now — there
             // is no present to protect.
             try CanvasWidgetDisplayMethods().settleDeferredCanvasWidgetAccessibility(self);
+        }
+
+        /// Whether a view-local point sits inside the view's surface
+        /// (the consumed-release retirement's outside test).
+        fn gpuViewContainsPoint(view: anytype, x: f32, y: f32) bool {
+            // The engine's own half-open rectangle containment, so a
+            // release at exactly the right or bottom edge counts as
+            // outside the way every hit test already treats it.
+            return geometry.RectF.fromSize(view.gpu_size).containsPoint(geometry.PointF.init(x, y));
+        }
+
+        /// Whether the view's focused widget structurally claims this
+        /// input's key as a control intent (Space/Enter activation and
+        /// kin) — the widget-precedence contract's step 2, applied to
+        /// the target-less committed-text fallback: a focused button
+        /// consumes Space to press, so the same keystroke must not ALSO
+        /// type a literal space through `on_text`. Characters the widget
+        /// does not claim still flow (typing into a terminal while a
+        /// button happens to hold focus). Text events that carry no key
+        /// name (a host's insertText path) probe by the one activation
+        /// key that produces text — a space payload probes as "space".
+        fn targetlessCommittedTextClaimedByFocusedWidget(self: *Runtime, index: usize, input_event: platform.GpuSurfaceInputEvent) bool {
+            const focused_id = self.views[index].canvas_widget_focused_id;
+            if (focused_id == 0) return false;
+            const node = self.views[index].widgetLayoutTree().findById(focused_id) orelse return false;
+            const probe_key = if (inputPlan(self, .claim_probe, input_event, .{})) |program| switch (program.source) {
+                0 => return false,
+                1 => input_event.key,
+                2 => "space",
+                else => unreachable,
+            } else if (input_event.key.len > 0)
+                input_event.key
+            else if (std.mem.eql(u8, input_event.text, " "))
+                "space"
+            else
+                return false;
+            return canvas.widgetKeyboardControlIntent(node.widget, .{
+                .phase = .key_down,
+                .focused_id = focused_id,
+                .key = probe_key,
+                .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+            }) != null;
         }
 
         /// Drain the view's pending scroll-event set into
@@ -497,10 +1178,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 .timestamp_ns = enriched_frame_event.timestamp_ns,
                 .surface_size = enriched_frame_event.size,
                 .scale = enriched_frame_event.scale_factor,
+                .full_repaint = enriched_frame_event.canvas_frame_full_repaint,
             }, CanvasFrameMethods().canvasFrameScratchStorage(self), false);
             const preview_render_pass = preview_frame.renderPass();
             const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
-            const preview_budget_status = preview_frame.budgetStatus();
+            const preview_encoder_counts = preview_render_pass.encoderCounts();
+            const preview_budget_status = preview_frame.budgetStatusFromPlanningSummaries(preview_gpu_packet_summary, preview_encoder_counts);
             enriched_frame_event.canvas_revision = self.views[index].canvas_revision;
             enriched_frame_event.frame_interval_ns = self.views[index].gpu_frame_interval_ns;
             enriched_frame_event.input_timestamp_ns = self.views[index].gpu_input_timestamp_ns;
@@ -516,10 +1199,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             enriched_frame_event.canvas_frame_requires_render = preview_frame.requiresRender();
             enriched_frame_event.canvas_frame_full_repaint = preview_frame.full_repaint;
             enriched_frame_event.canvas_frame_batch_count = preview_frame.batch_plan.batchCount();
-            enriched_frame_event.canvas_frame_encoder_command_count = preview_render_pass.encoderCommandCount();
-            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_render_pass.encoderCacheActionCount();
-            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_render_pass.encoderBindPipelineCount();
-            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_render_pass.encoderDrawBatchCount();
+            enriched_frame_event.canvas_frame_encoder_command_count = preview_encoder_counts.commands;
+            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_encoder_counts.caches;
+            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_encoder_counts.binds;
+            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_encoder_counts.draws;
             enriched_frame_event.canvas_frame_pipeline_count = preview_frame.pipeline_cache_plan.entryCount();
             enriched_frame_event.canvas_frame_pipeline_upload_count = preview_frame.pipeline_cache_plan.uploadCount();
             enriched_frame_event.canvas_frame_pipeline_retain_count = preview_frame.pipeline_cache_plan.retainCount();
@@ -602,6 +1285,30 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
     };
 }
 
+fn preserveGpuSurfaceCompletionFacts(source: platform.GpuSurfaceFrameEvent, target: *platform.GpuSurfaceFrameEvent) void {
+    target.occluded = source.occluded;
+    if (source.canvas_frame_full_repaint) {
+        target.canvas_frame_requires_render = true;
+        target.canvas_frame_full_repaint = true;
+    }
+}
+
+test "GPU completion preserves host-forced full repaint" {
+    var enriched: platform.GpuSurfaceFrameEvent = .{
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+    };
+    preserveGpuSurfaceCompletionFacts(.{
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .occluded = true,
+        .canvas_frame_full_repaint = true,
+    }, &enriched);
+    try std.testing.expect(enriched.occluded);
+    try std.testing.expect(enriched.canvas_frame_requires_render);
+    try std.testing.expect(enriched.canvas_frame_full_repaint);
+}
+
 fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8) !void {
     if (runtimeFindWindowIndexById(self, window_id)) |window_index| {
         self.windows[window_index].main_focused = std.mem.eql(u8, label, "main");
@@ -609,10 +1316,21 @@ fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8
     for (self.views[0..self.view_count], 0..) |*view, view_index| {
         if (view.window_id != window_id) continue;
         const previous_state = view.canvasWidgetRenderState();
+        const was_focused = view.focused;
         view.focused = std.mem.eql(u8, view.label, label);
         const next_state = view.canvasWidgetRenderState();
         if (!runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).canvasWidgetRenderStatesEqual(previous_state, next_state)) {
             try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+        }
+        // A view losing focus drops its tooltip state and re-stamps
+        // hidden — input landing in a sibling view must not leave the
+        // blurred view's tooltip floating.
+        if (was_focused and !view.focused) {
+            try runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(@TypeOf(self.*)).resetCanvasTooltipIntentForViewBlur(self, view_index);
+            // Focus loss also disarms the cancel-to-commit grace and
+            // releases its owner pin — the shared blur hygiene every
+            // focus-mutation path applies (see `clearImeGraceOnViewBlur`).
+            runtime_view.clearImeGraceOnViewBlur(self, view);
         }
     }
     for (self.webviews[0..self.webview_count]) |*webview| {

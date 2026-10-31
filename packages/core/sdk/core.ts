@@ -1,0 +1,2489 @@
+export interface ImageWordsCommand {
+  readonly operation: "load" | "cancel" | "unregister";
+  readonly identity: ImageIdentity;
+  readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.ts";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.ts";
+import { type ImageIdentity } from "./internal/image_identity.ts";
+// @native-sdk/core — the SDK module an app core imports. The subset program
+// maps the "@native-sdk/core" specifier onto this file, so stock tsc types
+// it; the transpiler lowers references to it onto the rt kernel and never
+// emits this module's own code.
+//
+// `Cmd` is the typed-effects surface (spec section 2): `update` (and, since
+// v2, `initialModel`) may return `[model, cmd]`, where the cmd is INERT DATA
+// describing effects for the runtime to perform after the returned model
+// commits. Commands are built only from these factories, and only in that
+// return path (NS1017) — they never live in the Model, in a Msg, in a local,
+// or in a helper.
+//
+// The v5 command set:
+//
+//   Cmd.none                     no effects (what a bare `return model` means)
+//   Cmd.persist()                ask the host to persist the committed model
+//   Cmd.now("tick")              request a timestamp; the runtime dispatches
+//                                the named Msg arm with the time (ms) as its
+//                                single number payload field
+//   Cmd.host(name, ...args)      a host command by name with scalar args —
+//                                the host interprets the name
+//   Cmd.host(name, payload)      the same, carrying one bytes payload — a
+//                                Uint8Array, or a flat record of number /
+//                                boolean / Uint8Array fields that lowers to
+//                                bytes (hostRecordBytes below)
+//   Cmd.request(name, payload,   a routed host command: the host performs it
+//               { key?, ok, err })  and dispatches the `ok` Msg arm with the
+//                                result bytes, or the `err` arm with the error
+//                                bytes — each arm carries exactly one
+//                                Uint8Array payload field, checked by tsc. The
+//                                optional `key` names the in-flight effect:
+//                                re-issuing a live key replaces it, and
+//                                Cmd.cancel(key) drops it.
+//   Cmd.cancel(key)              drop the in-flight keyed effect — request,
+//                                readFile/writeFile/readFileStream/fetch/
+//                                clipboardRead, or
+//                                delay — SILENTLY (no terminal arm dispatch).
+//                                Aimed at a live spawn, streaming fetch, or
+//                                streaming service or write-file sink it
+//                                stays LOUD: the err arm runs with
+//                                "cancelled" — ending a stream is observable
+//   Cmd.batch([a, b, ...])       several commands from one dispatch
+//
+// The named engine ops (each maps onto the host's effect engine directly;
+// routing follows the request rules — string-literal arm names, tsc-checked
+// arm shapes):
+//
+//   Cmd.readFile(path, { key?, ok, err })
+//                                whole-file read; ok arm carries the bytes
+//                                (one Uint8Array field), err arm the reason
+//                                bytes ("not_found", "io_failed", "truncated",
+//                                "rejected")
+//   Cmd.writeFile(path, bytes, { key?, ok, err })
+//                                whole-file write (parents created, replaced
+//                                whole); ok arm carries NOTHING (an arm with
+//                                no payload fields), err arm the reason bytes
+//   Cmd.appendFile / statFile / deleteFile
+//                              bounded append, metadata probe, and deletion
+//   Cmd.readFileStream           256-KiB chunks, then done(total) or err
+//   Cmd.writeFileStream / writeFileChunk / writeFileClose
+//                                atomic streamed sink; chunks are acknowledged
+//                                in order and close installs the destination
+//   Cmd.fetch({ url, method?, headers?, body?, timeoutMs? }, { key?, ok, err })
+//                                buffered HTTP(S) exchange; ok arm carries a
+//                                two-field record — one number field (the real
+//                                HTTP status, non-2xx included) and one
+//                                Uint8Array field (the whole body) — err arm
+//                                the reason bytes ("connect_failed",
+//                                "tls_failed", "protocol_failed", "timed_out",
+//                                "rejected", "truncated")
+//   Cmd.fetch({ ..., maxLineBytes? }, { key?, line, ok, err })
+//                                streaming HTTP(S) exchange; each complete
+//                                response line dispatches the one-bytes-field
+//                                `line` arm, then exactly one terminal follows:
+//                                `ok` with the HTTP status as its one number
+//                                field, or `err` with the transport reason
+//                                (or "truncated" if any line was cut/dropped)
+//   Cmd.clipboardWrite(bytes)    fire-and-forget clipboard write
+//   Cmd.clipboardRead({ key?, ok, err })
+//                                clipboard read; ok arm carries the text bytes,
+//                                err arm the reason bytes ("failed",
+//                                "rejected")
+//   Cmd.showNotification({ id?, title, subtitle?, body?, actionLabel?, actionCommand? })
+//                                fire-and-forget desktop notification; the OS
+//                                remains authoritative over final delivery
+//   Cmd.openExternalUrl(url)      open an allowed HTTP(S) URL in the system
+//                                browser; denied/invalid URLs fail closed
+//   Cmd.revealPath(path)          reveal a path in the system file manager;
+//                                invalid/unavailable requests fail closed
+//   Cmd.credentials.set(key, secret, route)
+//   Cmd.credentials.get(key, route)
+//   Cmd.credentials.delete(key, route)
+//                                routed access to Keychain / Secret Service /
+//                                Credential Manager
+//   Cmd.formatLocalTime(ms, style, route)
+//                                format an epoch timestamp through the host's
+//                                current locale and time zone
+//   Cmd.delay(key, ms, "fired")  a keyed ONE-SHOT timer: dispatches the named
+//                                arm once after `ms`, with the fire time (ms)
+//                                as its single number payload; re-issuing a
+//                                live key re-arms from now (debounce), and
+//                                Cmd.cancel(key) drops it silently
+//
+// The streaming ops (one issue, MANY result Msgs across dispatches, a keyed
+// lifecycle the app drives):
+//
+//   Cmd.spawn(argv, { key?, stdin?, line?, exit, err })
+//   Cmd.spawn(argv, { key?, stdin?, collect: true, exit, err })
+//                                run a subprocess. Line mode streams each
+//                                stdout line to the `line` arm (one Uint8Array
+//                                field; omit `line` to drop lines); collect
+//                                mode buffers whole stdout instead. Exactly one
+//                                terminal follows: a clean exit dispatches
+//                                `exit` — line mode: one number field (the exit
+//                                code); collect mode: a two-field record, one
+//                                number (the code) and one Uint8Array (the
+//                                collected stdout), matched by type — and every
+//                                other end dispatches `err` with the reason
+//                                bytes ("signaled", "cancelled", "rejected",
+//                                "spawn_failed", "truncated"). Cmd.cancel(key)
+//                                ends the child mid-stream (err arm
+//                                "cancelled" — never silent).
+//   Cmd.audioPlay(key, { path?, url?, cachePath?, expectedBytes? }, { event })
+//                                open (or replace — one player is the whole
+//                                surface) the audio event stream: every
+//                                playback event dispatches the `event` arm (the
+//                                six-field record below) until Cmd.audioStop
+//                                closes the stream.
+//   Cmd.audioPause(key) / audioResume(key) / audioStop(key)
+//   Cmd.audioSeek(key, ms) / Cmd.audioSetVolume(key, volume)
+//                                drive the open stream in place — fire-and-
+//                                forget control verbs whose consequences arrive
+//                                on the event stream; aimed at a key with no
+//                                open stream they no-op.
+//   Cmd.videoLoad(key, { surface, path?, url?, autoplay?, loop?, muted? }, { event })
+//                                open (or replace — one player is the whole
+//                                surface) the video event stream feeding the
+//                                media-surface `surface` names (the same
+//                                model-owned id the markup binds): every
+//                                playback event dispatches the `event` arm (the
+//                                seven-field record below) until Cmd.videoStop
+//                                closes the stream. Pixels never ride the
+//                                events — decoded frames flow platform-side
+//                                into the bound surface.
+//   Cmd.videoPlay(key) / videoPause(key) / videoStop(key)
+//   Cmd.videoSeek(key, ms) / Cmd.videoSetVolume(key, volume)
+//   Cmd.videoSetMuted(key, muted) / Cmd.videoSetLoop(key, loop)
+//                                drive the open playback in place — fire-and-
+//                                forget control verbs whose consequences arrive
+//                                on the event stream; aimed at a key with no
+//                                open stream they no-op.
+//   Cmd.imageLoad(id, { path?, url?, cachePath?, expectedBytes? }, { event })
+//                                load an image at runtime by its model-owned
+//                                numeric ImageId (the id markup binds:
+//                                <image image="{id}"/>, avatar likewise): the
+//                                host resolves the source cascade (local path
+//                                first, then a verified cache entry, then the
+//                                network), decodes through the platform codec,
+//                                registers the pixels under the id, and
+//                                dispatches exactly ONE `event` arm (the
+//                                five-field record below, the requested id
+//                                echoed) — state "loaded" with the decoded
+//                                width/height, or one failure class. One load
+//                                per id at a time: a duplicate live id
+//                                dispatches state "rejected".
+//   Cmd.imageCancel(id)          end the in-flight load under the id, if any
+//                                — loud, the spawn discipline: the load's
+//                                event arm delivers state "cancelled" and the
+//                                id frees for a fresh load once it lands. An
+//                                id with no live load no-ops.
+//   Cmd.imageUnregister(id)      free the registry slot under the id: the
+//                                pixels are released, views referencing the
+//                                id draw their fallback, and the slot is
+//                                open for another load. Synchronous registry
+//                                surgery like registration itself — not an
+//                                effect, no Msg follows; an id with no
+//                                registration no-ops. A load IN FLIGHT under
+//                                the id is untouched: its terminal still
+//                                registers — cancel the load first to keep
+//                                the slot free.
+//   Cmd.channelOpen(key, { event })
+//                                open an EXTERNAL-SOURCE CHANNEL under the
+//                                app's numeric key: the host stages a
+//                                long-lived, thread-safe posting seam its
+//                                NATIVE side feeds — embedders and
+//                                platform-services extensions post bytes
+//                                from their own threads (sockets, watchers,
+//                                workers), and each accepted post arrives as
+//                                one "data" event through the `event` arm
+//                                (the five-field record below) with the
+//                                honest back-pressure counters aboard. The
+//                                TS tier opens, closes, and receives;
+//                                POSTING is not a TS verb — transpiled cores
+//                                are single-threaded by design, so the
+//                                posting handle lives on the native side
+//                                (`Effects.channelHandle(key)`). One channel
+//                                per key at a time: a duplicate live key
+//                                dispatches state "rejected". No timer
+//                                polling anywhere: the source wakes the
+//                                loop itself.
+//   Cmd.channelClose(key)        close the open channel under the key, if
+//                                any: staged posts flush, exactly one
+//                                "closed" event (final drop totals)
+//                                dispatches the event arm, and the key
+//                                frees. A key with no open channel no-ops.
+//   Cmd.ptySpawn(argv, { key?, cols?, rows?, term?, event })
+//                                open a PSEUDO-TERMINAL SESSION — a spawn
+//                                with a different transport: run argv on a
+//                                fresh pty whose initial grid is cols x rows
+//                                (80x24 by default) and whose TERM is `term`
+//                                (omitted = the engine's default). Every
+//                                session event dispatches the `event` arm
+//                                (the six-field record below): "output"
+//                                events carry coalesced batches of child
+//                                output across dispatches — feed them to the
+//                                terminal emulator — until the exactly-one
+//                                "exit" terminal (a refused spawn is one
+//                                "exit" with reason "rejected"; a transport
+//                                that could not start, one with
+//                                "spawn_failed"). One session per key at a
+//                                time, never replaced implicitly — kill it
+//                                first, the spawn discipline.
+//   Cmd.ptyWrite(key, bytes)     write bytes toward the session's child —
+//                                keystrokes and pastes, fire-and-forget: a
+//                                key with no open session no-ops, and
+//                                refused payloads count into the exit's
+//                                droppedWrites, never silence.
+//   Cmd.ptyResize(key, cols, rows)
+//                                push a new grid to the session so the child
+//                                receives SIGWINCH — fire-and-forget like
+//                                ptyWrite; a key with no open session
+//                                no-ops.
+//   Cmd.ptyKill(key)             terminate the session's child — LOUD, the
+//                                spawn cancel discipline: the session's one
+//                                "exit" terminal arrives through its own
+//                                event arm with reason "cancelled" and the
+//                                key frees once it lands. A key with no open
+//                                session no-ops. Sessions are their own
+//                                family's to end: the string-keyed
+//                                Cmd.cancel never touches them, the way
+//                                Cmd.audioStop is audio's close.
+//
+// The window verbs (fire-and-forget, no result Msg — the window's own
+// frame event carries the state):
+//
+//   Cmd.showWindow(label)        un-hide + activate the window with the
+//                                declared label — the counterpart to a
+//                                `close_policy = "hide"` hide and the tray
+//                                "Open" consequence; also restores a
+//                                minimized window. An unknown label is a
+//                                no-op.
+//   Cmd.hideWindow(label)        order a live window out while retaining
+//                                its views; showWindow is the inverse.
+//   Cmd.setDockPresence(visible) show or remove the app from the macOS
+//                                Dock/app switcher.
+//   Cmd.quitApp()                graceful terminate, the tray "Quit"
+//                                consequence: the host quits through the
+//                                SAME shutdown path a last-window close
+//                                takes, so the stop hook runs exactly once
+//                                and a recording session seals its journal.
+//
+// The keyed-effect discipline is ONE rule: a keyed effect REPLACES its live
+// predecessor (the superseded effect's result is dropped — no message), and
+// Cmd.cancel drops it silently. That holds for request, readFile, writeFile,
+// readFileStream, buffered fetch, clipboardRead, and delay alike. A reissued
+// readFileStream key retires the old read silently and starts the replacement.
+// Live spawn, streaming-fetch, streaming-service, and write-file SINK keys are
+// the exceptions: a duplicate REJECTS the new stream/sink so two producers are
+// never spliced. Cancelling a sink is loud (`err: cancelled`) because a
+// half-written export is observable; cancelling a read stream is silent.
+//
+// `Sub` is the recurring-effects surface: an app may export
+// `subscriptions(model): Sub<Msg>` returning declarative descriptors the
+// host reconciles after every commit (Sub.timer fires the named arm with the
+// current time on each interval). Like Cmd, Sub values are inert data, legal
+// only in that function's return path (NS1025). Sub and the streaming Cmds
+// are different animals on purpose: a Sub is DECLARED from the model (the
+// host starts/stops it by reconciliation; the app never opens one), while
+// spawn/audioPlay/videoLoad streams are Cmd-INITIATED — imperative opens
+// with a keyed lifecycle the app drives and cancels.
+//
+// The factories return plain frozen-shape objects so the same core runs
+// under node: a dev harness can interpret the `op` tags directly.
+
+// The byte-text method surface (s.toUpperCase(), s.split(sep), ... on
+// Uint8Array): the transpiler adds the ambient file to every core's program
+// itself; this reference carries the same surface into EDITORS of apps that
+// import "@native-sdk/core", so tsc-in-the-editor and `native check` agree.
+/// <reference path="./bytes_text_methods.d.ts" />
+
+import { utf8Bytes } from "./bytes.ts";
+export { asciiBytes, utf8Bytes } from "./bytes.ts";
+
+/// Every app Msg is a discriminated union on a string `kind` tag.
+export type Msgish = { readonly kind: string };
+
+import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
+
+/// Fill the canonical defaults for a model-declared secondary window.
+export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
+  return {
+    label: spec.label,
+    canvasLabel: spec.canvasLabel,
+    title: spec.title ?? new Uint8Array(0),
+    width: spec.width ?? 480,
+    height: spec.height ?? 360,
+    x: spec.x ?? null,
+    y: spec.y ?? null,
+    resizable: spec.resizable ?? true,
+    restorePolicy: spec.restorePolicy ?? "clamp_to_visible_screen",
+    minWidth: spec.minWidth ?? 0,
+    minHeight: spec.minHeight ?? 0,
+    titlebar: spec.titlebar ?? "standard",
+    transparent: spec.transparent ?? false,
+    alwaysOnTop: spec.alwaysOnTop ?? false,
+    clickThrough: spec.clickThrough ?? false,
+    activateOnShow: spec.activateOnShow ?? true,
+    allowsFullscreen: spec.allowsFullscreen ?? true,
+    closePolicy: spec.closePolicy ?? "quit",
+    onCloseCommand: spec.onCloseCommand ?? new Uint8Array(0),
+  };
+}
+
+/** Cooperative cancellation capability supplied by generated service hosts. */
+export interface ServiceCancellation {
+  /** True after Cmd.cancel or the operation deadline requests cancellation. */
+  readonly cancelled: () => boolean;
+  /** Throw a boundary-tagged cancellation error when cancellation was requested. */
+  readonly throwIfCancelled: () => void;
+}
+
+/// The Msg arms `Cmd.now` may target: arms whose payload is exactly one
+/// number-typed field (the runtime dispatches the arm with the timestamp in
+/// that field). Anything else is unrepresentable — the runtime has only a
+/// number to give back.
+export type TimestampKind<M extends Msgish> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends number
+        ? [Exclude<keyof M, "kind">] extends [K]
+          ? M["kind"]
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+/// The Msg arms a routed host result may target: arms whose payload is
+/// exactly one Uint8Array-typed field (the runtime dispatches the arm with
+/// the result/error bytes in that field).
+export type BytesKind<M extends Msgish> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends Uint8Array
+        ? [Exclude<keyof M, "kind">] extends [K]
+          ? M["kind"]
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+/// The Msg arms a generated typed service client may target: exactly one
+/// payload field whose type is the operation's declared result shape.
+export type ServiceKind<M extends Msgish, P> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends P
+        ? P extends M[K]
+          ? [Exclude<keyof M, "kind">] extends [K]
+            ? M["kind"]
+            : never
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+/// Routing for a generated typed service call. Success carries the
+/// operation's declared record/value shape; failures remain UTF-8 bytes so
+/// transport, timeout, cancellation, and service `{ kind, message }` errors
+/// share one stable error channel.
+export interface ServiceRoute<M extends Msgish, P> {
+  readonly key?: string;
+  readonly ok: ServiceKind<M, P>;
+  readonly err: BytesKind<M>;
+}
+
+/// A streaming service opens an external-source channel before issuing the
+/// request. Interim chunks arrive as canonical bytes on `event`; `ok` is the
+/// one typed terminal and `err` is the loud cancellation/timeout/error arm.
+export interface ServiceStreamRoute<M extends Msgish, P> extends ServiceRoute<M, P> {
+  readonly channelKey: number;
+  readonly event: ChannelEventKind<M>;
+}
+
+/// The Msg arms a payload-less routed result may target: arms with no
+/// payload fields at all (`Cmd.writeFile`'s ok route — a successful write
+/// has nothing to report beyond success).
+export type EmptyKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [never]
+    ? M["kind"]
+    : never
+  : never;
+
+/// The Msg arms a buffered fetch response may target: arms whose payload is
+/// exactly two fields — one number (the HTTP status) and one Uint8Array (the
+/// body). The runtime matches the fields by TYPE, so their names are yours.
+export type FetchedKind<M extends Msgish> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends Uint8Array
+        ? Exclude<keyof M, "kind" | K> extends infer O
+          ? O extends keyof M
+            ? M[O] extends number
+              ? [Exclude<keyof M, "kind" | K | O>] extends [never]
+                ? M["kind"]
+                : never
+              : never
+            : never
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+// ------------------------------------------------- wiring channel shapes
+// The generated wiring's opt-in host-event channels: export the channel
+// and it is wired (`commandMsg(name: string): Msg | null` is the same
+// family — menus, shortcuts, chrome tabs — and predates these). Event
+// RECORD shapes (`frameMsg`'s FrameEvent, `keyMsg`'s KeyEvent,
+// `dropMsg`'s FileDropEvent, the appearanceMsg/chromeMsg arm payloads) are DECLARED IN YOUR CORE and
+// matched by field name, the TextInputEvent rule — they must emit as your
+// module's own records, so an SDK interface cannot stand in for them.
+
+/// One `envMsgs` entry: `export const envMsgs = [{ env: "NAME", msg:
+/// "<arm>" }] as const` — each named environment variable present at launch
+/// dispatches its value through the arm (exactly one `Uint8Array` field) as
+/// an ordinary journaled Msg right after the boot command. The core itself
+/// never reads the environment (NS1005); replay carries the recorded values.
+export interface EnvMsg<M extends Msgish> {
+  readonly env: string;
+  readonly msg: BytesKind<M>;
+}
+
+/// The audio event states, mirroring the engine's event vocabulary: `loaded`
+/// acknowledges a successful load with the player's duration estimate;
+/// `position` ticks at the platform's honest cadence (~500ms) while playing;
+/// `completed` fires exactly once at the natural end; `failed` reports a
+/// load/decode/device failure; `rejected` a command the effects layer refused
+/// (an empty or over-long source); `spectrum` carries a band-magnitude
+/// analysis frame from hosts that analyze their playback.
+export type AudioState = "loaded" | "position" | "completed" | "failed" | "rejected" | "spectrum";
+
+/// The payload shape of an audio event arm — six fields, matched by NAME (the
+/// one SDK-fixed record shape, so the host can build it from your union).
+/// `state` must be a named string-literal-union alias carrying exactly the
+/// six AudioState members (any declaration order — the host matches members
+/// by name). `positionMs`/`durationMs` are milliseconds; `playing` is the
+/// player's transport state; `buffering` is true while a streamed source is
+/// stalled waiting for network bytes; `bands` is the 32 spectrum band
+/// magnitudes (0..255 each, all zeros outside "spectrum" events).
+export type AudioEventArm = {
+  readonly state: AudioState;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly bands: Uint8Array;
+};
+
+/** Complete native audio reports. Identities and millisecond counters are
+ * canonical unsigned decimal bytes, preserving every u64 value. */
+export type ExactAudioEventArm = {
+  readonly key: Uint8Array;
+  readonly state: AudioState;
+  readonly positionMs: Uint8Array;
+  readonly durationMs: Uint8Array;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly bands: Uint8Array;
+};
+
+export type ExactAudioEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ExactAudioEventArm]
+    ? [keyof ExactAudioEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ExactAudioEventArm
+        ? [AudioState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The Msg arms an audio event stream may target: arms whose payload is
+/// exactly the six AudioEventArm fields. The `state` check runs BOTH
+/// directions: the `&` constraint holds the arm's states to AudioState,
+/// and the tuple-wrapped reverse check holds AudioState to the arm's
+/// states — a narrower union would silently drop event states the host
+/// emits, so it is refused here, not discovered at runtime.
+export type AudioEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioEventArm]
+    ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioEventArm
+        ? [AudioState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The video event states, the audio vocabulary without spectrum: `loaded`
+/// acknowledges a successful load with the player's duration estimate and
+/// the stream's decoded pixel dimensions; `position` ticks at the
+/// platform's honest cadence (~500ms) while playing; `completed` fires
+/// exactly once when a NON-LOOPING playback reaches its natural end (a
+/// looping playback wraps and never completes); `failed` reports a
+/// load/decode/device failure; `rejected` a command the effects layer
+/// refused (an empty or over-long source, a non-http(s) url, an invalid
+/// surface id).
+export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
+
+/// The payload shape of a video event arm — seven fields, matched by NAME
+/// (the AudioEventArm convention). `state` must be a named
+/// string-literal-union alias carrying exactly the five VideoState members
+/// (any declaration order — the host matches members by name).
+/// `positionMs`/`durationMs` are milliseconds; `playing` is the player's
+/// transport state; `buffering` is true while a streamed source is stalled
+/// waiting for network bytes; `width`/`height` are the stream's decoded
+/// pixel dimensions (delivered on "loaded", 0 elsewhere).
+export type VideoEventArm = {
+  readonly state: VideoState;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly width: number;
+  readonly height: number;
+};
+
+/// The Msg arms a video event stream may target: arms whose payload is
+/// exactly the seven VideoEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to VideoState, and the tuple-wrapped reverse check
+/// holds VideoState to the arm's states — a narrower union would
+/// silently drop event states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type VideoEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof VideoEventArm]
+    ? [keyof VideoEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & VideoEventArm
+        ? [VideoState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The image load result states, mirroring the engine's outcome vocabulary:
+/// "loaded" means the pixels are registered under the requested id (width and
+/// height carry what the codec decoded); every other state is the failure
+/// class — "rejected" (a refused command: invalid id, no source, a duplicate
+/// live id), "not_found" (missing local file, no url), "io_failed" (a local
+/// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
+/// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
+/// it), "cancelled", "too_large" (the encoded source exceeds the fixed
+/// source bound; conforming codecs decode photo-scale pixels down to the
+/// app's registered-image budget),
+/// "unsupported" (no platform codec), "decode_failed", "registry_full", and
+/// "alloc_failed" (the host refused the memory the registration needed —
+/// resource exhaustion, not corrupt bytes: the same source may load once
+/// memory frees).
+export type ImageState =
+  | "loaded"
+  | "rejected"
+  | "not_found"
+  | "io_failed"
+  | "connect_failed"
+  | "tls_failed"
+  | "protocol_failed"
+  | "timed_out"
+  | "http_status"
+  | "cancelled"
+  | "too_large"
+  | "unsupported"
+  | "decode_failed"
+  | "registry_full"
+  | "alloc_failed";
+
+/// The payload shape of an image result arm — five fields, matched by NAME
+/// (the AudioEventArm convention). `id` is the requested ImageId echoed
+/// verbatim, so two concurrent loads sharing one event arm stay
+/// distinguishable in `update` (an id the wire cannot carry exactly — 0,
+/// negatives, fractions, 2^53 and past — echoes 0, the no-image sentinel:
+/// there is no honest integer to echo); `state` must be a named
+/// string-literal-union alias carrying exactly the fifteen ImageState
+/// members (any declaration order — the host matches members by name);
+/// `width`/`height` are the decoded pixel dimensions ("loaded" only, 0
+/// otherwise); `status` is the HTTP status for url loads that performed an
+/// exchange, 0 when none occurred (local paths, cache hits) — 0 is signal,
+/// not a missing value: a cache hit is a real "loaded" with no exchange
+/// behind it, so apps can distinguish a network load from a cached one.
+export type ImageEventArm = {
+  readonly id: number;
+  readonly state: ImageState;
+  readonly width: number;
+  readonly height: number;
+  readonly status: number;
+};
+
+/// The Msg arms an image load result may target: arms whose payload is
+/// exactly the five ImageEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to ImageState, and the tuple-wrapped reverse check
+/// holds ImageState to the arm's states — a narrower union would
+/// silently drop result states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type ImageEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageEventArm]
+    ? [keyof ImageEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageEventArm
+        ? [ImageState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The external-source channel event states, mirroring the engine's
+/// vocabulary: "data" is one delivered post from the native side's
+/// thread-safe handle; "closed" is the exactly-one terminal
+/// `Cmd.channelClose` produces (final drop totals aboard); "rejected" is
+/// the exactly-one terminal of a refused open (duplicate live key, a
+/// full channel table, an occupied engine key).
+export type ChannelState = "data" | "closed" | "rejected";
+
+/// The payload shape of a channel event arm — five fields, matched by
+/// NAME (the AudioEventArm convention). `key` is the channel key echoed
+/// verbatim, so concurrent channels sharing one arm stay
+/// distinguishable (a key the wire cannot carry exactly echoes 0);
+/// `state` must be a named string-literal-union alias carrying exactly
+/// the three ChannelState members (any declaration order — the host
+/// matches members by name); `bytes` is the post's payload ("data"
+/// events only, empty otherwise); `droppedPending`/`droppedTotal` are
+/// the back-pressure counters — posts the native side's handle refused
+/// since the previous delivered event, and over the channel's whole
+/// life. Never silent drops: the counters ride every event.
+export type ChannelEventArm = {
+  readonly key: number;
+  readonly state: ChannelState;
+  readonly bytes: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+/// The Msg arms a channel event stream may target: arms whose payload is
+/// exactly the five ChannelEventArm fields. The `state` check runs BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's states to ChannelState, and the tuple-wrapped reverse check
+/// holds ChannelState to the arm's states — a narrower union would
+/// silently drop event states the host emits, so it is refused here,
+/// not discovered at runtime.
+export type ChannelEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ChannelEventArm]
+    ? [keyof ChannelEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ChannelEventArm
+        ? [ChannelState] extends [M["state"]]
+          ? M["kind"]
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// `Cmd.channelOpen` routing: every channel event dispatches the `event`
+/// arm (the five-field ChannelEventArm record, matched by field name).
+export interface ChannelRoute<M extends Msgish> {
+  readonly event: ChannelEventKind<M>;
+}
+
+/** The immediate outcome of starting an external producer. A refused open
+ * skips startup; a started producer alone may post. Failure bytes describe the
+ * native startup error. Replay supplies this outcome without starting a source.
+ */
+export type ChannelSourceState = "started" | "skipped" | "failed";
+export type ChannelSourceArm = {
+  readonly key: number;
+  readonly state: ChannelSourceState;
+  readonly bytes: Uint8Array;
+};
+export type ChannelSourceKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm]
+    ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ChannelSourceArm
+        ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+/// The native capture source. "microphone" captures the selected/default
+/// input device; "system" captures the process-independent desktop output
+/// mix (the OS may present a screen/audio consent prompt).
+export type AudioCaptureSource = "microphone" | "system";
+
+/// Capture stream states. A successful stream begins with "started", emits
+/// zero or more "data" chunks, and ends with "stopped" after
+/// `Cmd.audioCaptureStop`. "failed" reports a source/permission failure;
+/// stop that stream to retire it. "rejected" means the runtime refused the
+/// start before a native source was opened.
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+
+export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
+export type AudioCaptureChannels = 1 | 2;
+
+/// Requested canonical output format. Native inputs are converted to
+/// interleaved signed 16-bit little-endian PCM before delivery.
+export interface AudioCaptureSpec {
+  readonly source: AudioCaptureSource;
+  readonly sampleRate?: AudioCaptureSampleRate;
+  readonly channels?: AudioCaptureChannels;
+}
+
+/// The payload shape of an audio-capture event arm, matched by field name.
+/// `pcm` is populated only for "data" and is valid for this dispatch; copy
+/// bytes retained by the model. Chunks are at most 20ms. Drop counters make
+/// bounded-queue back-pressure observable rather than silent.
+export type AudioCaptureEventArm = {
+  readonly key: number;
+  readonly state: AudioCaptureState;
+  readonly source: AudioCaptureSource;
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly timestampMs: number;
+  readonly frames: number;
+  readonly pcm: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm]
+    ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioCaptureEventArm
+        ? [AudioCaptureState] extends [M["state"]]
+          ? [AudioCaptureSource] extends [M["source"]]
+            ? M["kind"]
+            : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+export interface AudioCaptureRoute<M extends Msgish> {
+  readonly event: AudioCaptureEventKind<M>;
+}
+
+/// The pty session event states, mirroring the engine's vocabulary:
+/// "output" is one coalesced batch of child output; "exit" is the
+/// exactly-one terminal every session produces — a clean end, a signal,
+/// a `Cmd.ptyKill`, a refused spawn, or a transport that could not
+/// start (the `reason` field tells which).
+export type PtyState = "output" | "exit";
+
+/// How a pty session ended, the spawn exit vocabulary: "exited" with
+/// the child's code, "signaled" with the signal, "cancelled" after
+/// `Cmd.ptyKill`, "rejected" for a spawn refused before a child existed
+/// (duplicate live key, full table, bad grid), "spawn_failed" when the
+/// pty or exec could not start.
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+
+/// The payload shape of a pty event arm — seven fields, matched by NAME
+/// (the AudioEventArm convention). `key` is the app's own session key
+/// as byte text (the `Cmd.ptySpawn` `key`, or empty bytes when the spawn
+/// named none) — two sessions routing one event arm are told apart by
+/// this field. `state`
+/// must be a named string-literal-union alias carrying exactly the two
+/// PtyState members and `reason` one carrying exactly the five
+/// PtyExitReason members (any declaration order — the host matches
+/// members by name); `bytes` is the coalesced output batch ("output"
+/// events only, empty otherwise); `code` is the child's exit code on an
+/// "exited" end, -1 otherwise; `signal` is the fatal signal after a
+/// "signaled" end, else 0; `droppedWrites` counts `Cmd.ptyWrite`
+/// payloads refused over the session's life — zero means every write
+/// reached the child, never a silent drop.
+export type PtyEventArm = {
+  readonly key: Uint8Array;
+  readonly state: PtyState;
+  readonly bytes: Uint8Array;
+  readonly code: number;
+  readonly reason: PtyExitReason;
+  readonly signal: number;
+  readonly droppedWrites: number;
+};
+
+/// The Msg arms a pty session may target: arms whose payload is exactly
+/// the seven PtyEventArm fields. The `state` and `reason` checks run BOTH
+/// directions (the AudioEventKind convention): the `&` constraint holds
+/// the arm's unions to PtyState/PtyExitReason, and the tuple-wrapped
+/// reverse checks hold them to the arm's — a narrower union would
+/// silently drop events the host emits, so it is refused here, not
+/// discovered at runtime.
+export type PtyEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof PtyEventArm]
+    ? [keyof PtyEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & PtyEventArm
+        ? [PtyState] extends [M["state"]]
+          ? [PtyExitReason] extends [M["reason"]]
+            ? M["kind"]
+            : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+/// `Cmd.ptySpawn` routing: every session event dispatches the `event`
+/// arm (the seven-field PtyEventArm record, matched by field name).
+/// `cols`/`rows` are the initial grid the child observes (80x24 when
+/// omitted); `term` is the TERM the child starts with (omitted = the
+/// engine's default). The optional `key` names the session for
+/// ptyWrite/ptyResize/ptyKill.
+export interface PtyRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly cols?: number;
+  readonly rows?: number;
+  readonly term?: string;
+  readonly event: PtyEventKind<M>;
+}
+
+/// One field of a host record payload; see hostRecordBytes for the encoding.
+export type HostScalar = number | boolean | Uint8Array;
+
+/// A structured host payload: a flat record of scalar/bytes fields, lowered
+/// to one bytes payload at build time (natively) and by hostRecordBytes
+/// (under node) — the same bytes either way.
+export type HostRecord = { readonly [field: string]: HostScalar };
+
+/// How a `Cmd.request` result comes back: the host dispatches the `ok` arm
+/// with the result bytes on success, or the `err` arm with the error bytes.
+/// Arm names are string literals — the routing is data, never a callback.
+/// `key` (optional) names the in-flight effect for replace/cancel semantics.
+export interface RequestRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: BytesKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// `Cmd.writeFile` routing: the ok arm carries no payload (success has
+/// nothing to report); the err arm carries the reason bytes.
+export interface WriteRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: EmptyKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// Streaming read routing: zero or more 256-KiB `chunk` messages, then one
+/// `done` carrying the total byte count, or one `err` carrying a closed file
+/// outcome.
+export interface FileReadStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly chunk: BytesKind<M>;
+  readonly done: TimestampKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+export interface FileStatArm {
+  readonly exists: boolean;
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
+export type FileStatKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof FileStatArm]
+    ? [keyof FileStatArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & FileStatArm ? M["kind"] : never
+      : never
+    : never
+  : never;
+
+export interface FileStatRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: FileStatKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// Pagination controls for `Cmd.store.scan`. `limit` defaults to 100 and is
+/// bounded at 256. `after` is the opaque key cursor returned by the previous
+/// page; omit it for the first page.
+export interface StoreScanOptions {
+  readonly limit?: number;
+  readonly after?: string | Uint8Array;
+}
+
+/// Dynamic UTF-8 SQLite TEXT. App-core text is byte-honest, so generated
+/// TEXT parameters wrap model bytes with this marker; literal strings remain
+/// accepted by the raw escape hatch.
+export interface DbText {
+  readonly __dbText: true;
+  readonly bytes: ReadonlyArray<number>;
+}
+
+export function dbText(bytes: Uint8Array): DbText {
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]!);
+  return { __dbText: true, bytes: out };
+}
+
+/// Runtime SQL parameter values. Numbers preserve integer storage when they
+/// are finite integral values; booleans bind as SQLite INTEGER 0/1.
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+
+/// A query dispatches every encoded row page through `page`, then exactly one
+/// payload-less `done`. Any closed DbOutcome instead dispatches `err` as its
+/// UTF-8 name (`constraint`, `busy`, `io_failed`, `corrupt`, `misuse`,
+/// `rejected`, or `cancelled`).
+export interface DbRowsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly page: BytesKind<M>;
+  readonly done: EmptyKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// A generated declared-query route. The row parameter is intentionally
+/// phantom on the wire: generated `decode<Name>Page` turns each bounded page
+/// into this exact row shape without reflection.
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+  readonly __row?: Row;
+}
+
+/// One generated, already-validated write statement. Only generated query
+/// constructors create the brand; `Cmd.qTx` therefore cannot receive a
+/// raw SQL string by accident.
+export interface TypedDbStatement {
+  readonly sql: string;
+  readonly params: ReadonlyArray<DbValue>;
+  readonly __typedDbStatement: true;
+}
+
+// @native-sqlite-generated-types
+
+/// `Cmd.fetch` routing: the ok arm carries `{ status, body }` (one number
+/// field, one bytes field — matched by type); the err arm the reason bytes.
+export interface FetchRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly ok: FetchedKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// Streaming `Cmd.fetch` routing: each complete response line dispatches the
+/// `line` arm with its bytes; the one successful terminal dispatches `ok` with
+/// the HTTP status. A cut/dropped line dispatches `err` with `"truncated"` at
+/// the terminal; transport failure and cancellation dispatch `err` with their
+/// machine-readable reason bytes.
+export interface FetchStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly line: BytesKind<M>;
+  readonly ok: TimestampKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// Complete subprocess and clipboard records retain loss and failure metadata.
+/// Keys echo the authored wire key as bytes; no native engine address crosses the ABI.
+export type SpawnExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export type ClipboardOutcome = "ok" | "failed" | "rejected" | "cancelled";
+export type ClipboardOp = "read" | "write";
+export type VideoSourceKind = "local" | "stream";
+export interface SpawnLineEventArm {
+  readonly key: Uint8Array;
+  readonly line: Uint8Array;
+  readonly truncated: boolean;
+  readonly droppedBefore: number;
+}
+export interface SpawnExitEventArm {
+  readonly key: Uint8Array;
+  readonly code: number;
+  readonly reason: SpawnExitReason;
+  readonly droppedLines: number;
+  readonly output: Uint8Array;
+  readonly outputTruncated: boolean;
+  readonly stderrTail: Uint8Array;
+  readonly stderrTruncated: boolean;
+}
+export interface ClipboardEventArm {
+  readonly key: Uint8Array;
+  readonly operation: ClipboardOp;
+  readonly outcome: ClipboardOutcome;
+  readonly text: Uint8Array;
+  readonly droppedBefore: number;
+}
+/// A copied mirror of the single native playback channel, captured at command
+/// issue. The reply runs in the same dispatch, before returning to the host.
+/// Declarative/foreign playback has an empty key; ownership remains native.
+export interface VideoSnapshotArm {
+  readonly key: Uint8Array;
+  readonly active: boolean;
+  readonly surface: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly completed: boolean;
+  readonly looping: boolean;
+  readonly muted: boolean;
+  readonly source: VideoSourceKind;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly width: number;
+  readonly height: number;
+  readonly volume: number;
+}
+/// A flat, exact capability record. Reverse assignability refuses missing enum
+/// states as well as extra/missing fields, before native dispatch is possible.
+export type CapabilityKind<M extends Msgish, P> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof P]
+    ? [keyof P] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & P
+        ? P extends Omit<M, "kind"> ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface SpawnEventsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly collect?: boolean;
+  readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+  readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+/** Native subprocess identity and complete results, without numeric rounding. */
+export interface ExactSpawnEventsRoute<M extends Msgish> {
+  readonly stdin?: Uint8Array;
+  readonly collect?: boolean;
+  readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+  readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+/// Complete file terminals: byte counters and signed timestamps are decimal
+/// bytes so Node and compiled cores retain the full native integer domain.
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+  readonly key: Uint8Array; readonly operation: FileOperation; readonly event: FileEvent;
+  readonly outcome: FileOutcome; readonly bytes: Uint8Array; readonly totalBytes: Uint8Array;
+  readonly mtimeMs: Uint8Array; readonly exists: boolean; readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm {
+  readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: TimerOutcome;
+}
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly replace?: boolean; readonly result: CapabilityKind<M, FileResultArm>; }
+export interface TimerResultRoute<M extends Msgish> { readonly result: CapabilityKind<M, TimerResultArm>; }
+
+export interface ClipboardResultRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly result: CapabilityKind<M, ClipboardEventArm>;
+}
+export interface VideoSnapshotRoute<M extends Msgish> {
+  readonly snapshot: CapabilityKind<M, VideoSnapshotArm>;
+}
+
+/// `Cmd.spawn` routing, line mode: each stdout line dispatches the optional
+/// `line` arm (one bytes field; omitted = lines dropped), a clean exit the
+/// `exit` arm (one number field — the exit code), every other end the `err`
+/// arm with the reason bytes.
+export interface SpawnRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly line?: BytesKind<M>;
+  readonly exit: TimestampKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// `Cmd.spawn` routing, collect mode: whole stdout buffers until the exit,
+/// which dispatches the `exit` arm as a two-field record — one number field
+/// (the exit code) and one bytes field (the collected stdout), matched by
+/// type so the names are yours. No line arm: there is no line framing.
+export interface SpawnCollectRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly collect: true;
+  readonly exit: FetchedKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// A `Cmd.audioPlay` source: the resolution cascade of the engine underneath.
+/// The local `path` is tried first; a missing file falls through to `url`
+/// (streamed progressively, cached at `cachePath` when given and verified
+/// against `expectedBytes` — 0/omitted means unknown size, existence alone
+/// qualifies a cache entry). At least one of path/url must be present.
+export interface AudioSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+/// `Cmd.audioPlay` routing: every playback event dispatches the `event` arm
+/// (the six-field AudioEventArm record, matched by field name).
+export interface AudioRoute<M extends Msgish> {
+  readonly event: AudioEventKind<M>;
+}
+
+export interface ExactAudioSource extends AudioSource {
+  /** Derive a content-addressed path for the URL when cachePath is empty.
+   * Empty or omitted disables caching. */
+  readonly cacheDir?: Uint8Array;
+}
+
+export interface ExactAudioRoute<M extends Msgish> {
+  readonly event: ExactAudioEventKind<M>;
+}
+
+/** Controls for the single native player. Volume is remembered while idle;
+ * seek positions use canonical unsigned decimal bytes. */
+export { type AudioTransport } from "./events.ts";
+import { type AudioTransport } from "./events.ts";
+
+/// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
+/// the markup binds — the texture channel the decoded frames feed. The
+/// local `path` is tried first; a missing file falls through to `url`
+/// (streamed progressively, playable before the download finishes). At
+/// least one of path/url must be present. `autoplay` (default true) starts
+/// playback as soon as the load lands — false loads paused at position
+/// zero, the poster-frame shape; `loop` wraps from the natural end back to
+/// zero (a looping playback never delivers "completed"); `muted` starts
+/// the audio track muted, independent of the remembered volume.
+export interface VideoSource {
+  readonly surface: number;
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly autoplay?: boolean;
+  readonly loop?: boolean;
+  readonly muted?: boolean;
+}
+
+/// `Cmd.videoLoad` routing: every playback event dispatches the `event`
+/// arm (the seven-field VideoEventArm record, matched by field name).
+export interface VideoRoute<M extends Msgish> {
+  readonly event: VideoEventKind<M>;
+}
+
+/// A `Cmd.imageLoad` source: the audio cascade's shape exactly. The local
+/// `path` is tried first; a missing file falls through to `url` (fetched
+/// whole, installed at `cachePath` when given and verified against
+/// `expectedBytes` — 0/omitted means unknown size, existence alone qualifies
+/// a cache entry; omit `cachePath` and the host derives the conventional
+/// content-addressed path when a caches directory is configured). At least
+/// one of path/url must be present.
+export interface ImageSource {
+  readonly path?: Uint8Array;
+  readonly url?: Uint8Array;
+  readonly cachePath?: Uint8Array;
+  readonly expectedBytes?: number;
+}
+
+/// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
+/// arm (the five-field ImageEventArm record, matched by field name).
+/** Complete image terminal with a lossless requested identity. */
+export type ImageWordsEventArm = {
+  readonly imageLower: number; readonly imageUpper: number;
+  readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number;
+};
+export type ImageWordsEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageWordsEventArm]
+    ? [keyof ImageWordsEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageWordsEventArm
+        ? [ImageState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface ImageWordsRoute<M extends Msgish> { readonly event: ImageWordsEventKind<M>; }
+
+export interface ImageRoute<M extends Msgish> {
+  readonly event: ImageEventKind<M>;
+}
+
+/// The closed HTTP verb set of `Cmd.fetch` (wire value = declaration order).
+export type FetchMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD";
+
+/// A `Cmd.fetch` request. `url` is bytes (asciiBytes for literals); headers
+/// are a flat record whose NAMES are compile-time text and whose VALUES are
+/// string literals or runtime bytes (`Uint8Array` — how a launch-supplied
+/// credential rides an `Authorization` header); `timeoutMs` omitted means
+/// the host engine's default.
+export interface FetchSpec {
+  readonly url: Uint8Array;
+  readonly method?: FetchMethod;
+  readonly headers?: { readonly [name: string]: string | Uint8Array };
+  readonly body?: Uint8Array;
+  readonly timeoutMs?: number;
+}
+
+/// A line-streamed fetch request. `maxLineBytes` overrides the engine's 4 KiB
+/// per-line default for SSE/NDJSON protocols whose individual records are
+/// larger; it is bounded by the engine's 256 KiB per-line ceiling. If a line
+/// is cut or dropped, the stream still ends through `err: "truncated"` rather
+/// than reporting a successful terminal.
+export interface FetchStreamSpec extends FetchSpec {
+  readonly maxLineBytes?: number;
+}
+
+/// A desktop notification request. Text is bytes so every field may come
+/// directly from model data; subtitle and body default to empty. Delivery is
+/// fire-and-forget because the OS may suppress an accepted request through
+/// Focus / Do Not Disturb or the user's notification settings.
+export interface NotificationSpec {
+  readonly id?: Uint8Array;
+  readonly title: Uint8Array;
+  readonly subtitle?: Uint8Array;
+  readonly body?: Uint8Array;
+  readonly actionLabel?: Uint8Array;
+  readonly actionCommand?: Uint8Array;
+}
+
+/// The three bounded host-local timestamp presentations. Unlike the markup
+/// `date`/`time`/`datetime` functions (fixed UTC), this is intentionally an
+/// effect because the user's locale and time zone are ambient host state.
+export type LocalTimeStyle = "date" | "time" | "datetime";
+
+/// An inert command value, parameterized by the app's Msg union so the
+/// factories can validate message targets. Opaque to app code: build with
+/// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
+/// or store.
+export type Cmd<M extends Msgish> =
+  | { readonly op: "none" }
+  | { readonly op: "persist" }
+  | { readonly op: "now"; readonly msgKind: string }
+  | { readonly op: "host"; readonly name: string; readonly args: readonly number[] }
+  | { readonly op: "host_bytes"; readonly name: string; readonly payload: Uint8Array }
+  | {
+      readonly op: "request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly typedService: boolean;
+      readonly payload: Uint8Array;
+    }
+  | {
+      readonly op: "service_stream_request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly typedService: true;
+      readonly channelKey: number;
+      readonly eventKind: string;
+      readonly maxPending: number;
+      readonly payload: Uint8Array;
+    }
+  | { readonly op: "cancel"; readonly key: string }
+  | {
+      readonly op: "read_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "append_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "stat_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "delete_file";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "read_file_stream";
+      readonly key: string;
+      readonly chunkKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_stream";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly path: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_chunk";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "write_file_close";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+    }
+  | {
+      readonly op: "store_set";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_get" | "store_delete";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+    }
+  | {
+      readonly op: "store_scan";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly prefix: string;
+      readonly limit: number;
+      readonly after: string | Uint8Array;
+    }
+  | {
+      readonly op: "store_set_many";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+    }
+  | {
+      readonly op: "db_query";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+    }
+  | {
+      readonly op: "db_exec";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly statements: ReadonlyArray<DbStatement>;
+    }
+  | {
+      readonly op: "fetch";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly method: FetchMethod;
+      readonly timeoutMs: number;
+      readonly url: Uint8Array;
+      /// Header pairs, already in TS-field-name (code-unit) sort order.
+      /// A string value is compile-time text; a Uint8Array value is
+      /// runtime bytes (both encode as the record's length-prefixed
+      /// value field).
+      readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
+      readonly body: Uint8Array;
+    }
+  | {
+      readonly op: "fetch_stream";
+      readonly key: string;
+      readonly lineKind: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly method: FetchMethod;
+      readonly timeoutMs: number;
+      readonly maxLineBytes: number;
+      readonly url: Uint8Array;
+      readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
+      readonly body: Uint8Array;
+    }
+  | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "wall_time"; readonly msgKind: string }
+  | { readonly op: "read_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "cancel_key"; readonly key: Uint8Array }
+  | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "timer_result_exact"; readonly key: string; readonly afterMs: Uint8Array; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "spawn_events_exact"; readonly key: Uint8Array; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "cancel_exact"; readonly key: Uint8Array }
+  | { readonly op: "video_snapshot"; readonly snapshotKind: string }
+  | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
+  | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
+  | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
+  | {
+      readonly op: "spawn";
+      readonly key: string;
+      /// "" = no line routing (collect mode, or a line spawn that only
+      /// cares about the exit).
+      readonly lineKind: string;
+      readonly exitKind: string;
+      readonly errKind: string;
+      readonly collect: boolean;
+      readonly argv: readonly Uint8Array[];
+      readonly stdin: Uint8Array;
+    }
+  | {
+      readonly op: "audio_play";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
+  | {
+      readonly op: "audio_ctl";
+      readonly key: string;
+      readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
+      /// Seek position (ms) / volume (0..1); 0 for the value-less verbs.
+      readonly value: number;
+    }
+  | { readonly op: "audio_play_exact"; readonly key: Uint8Array; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly cacheDir: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "audio_transport"; readonly transport: AudioTransport }
+  | {
+      readonly op: "video_load";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly surface: number;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly autoplay: boolean;
+      readonly loop: boolean;
+      readonly muted: boolean;
+    }
+  | {
+      readonly op: "video_ctl";
+      readonly key: string;
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
+      /// Seek position (ms) / volume (0..1) / the muted-loop switch
+      /// (0 = off, 1 = on); 0 for the value-less verbs.
+      readonly value: number;
+    }
+  | { readonly op: "window_show"; readonly label: string }
+  | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "window_close"; readonly label: string }
+  | { readonly op: "window_minimize"; readonly label: string }
+  | { readonly op: "dock_presence"; readonly visible: boolean }
+  | { readonly op: "quit_app" }
+  | {
+      readonly op: "image_load";
+      readonly id: number;
+      readonly eventKind: string;
+      readonly path: Uint8Array;
+      readonly url: Uint8Array;
+      readonly cachePath: Uint8Array;
+      readonly expectedBytes: number;
+    }
+  | { readonly op: "image_load_words"; readonly identity: ImageIdentity; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "image_cancel_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_unregister_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_cancel"; readonly id: number }
+  | { readonly op: "image_unregister"; readonly id: number }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
+  | { readonly op: "channel_open_source"; readonly key: number; readonly eventKind: string; readonly startedKind: string; readonly maxPending: number; readonly source: string; readonly payload: Uint8Array }
+  | { readonly op: "channel_close"; readonly key: number }
+  | {
+      readonly op: "audio_capture_start";
+      readonly key: number;
+      readonly source: AudioCaptureSource;
+      readonly sampleRate: number;
+      readonly channels: number;
+      readonly eventKind: string;
+    }
+  | { readonly op: "audio_capture_stop"; readonly key: number }
+  | {
+      readonly op: "pty_spawn";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly cols: number;
+      readonly rows: number;
+      /// "" = the engine's default TERM (the wire never bakes it in).
+      readonly term: string;
+      readonly argv: readonly Uint8Array[];
+    }
+  | { readonly op: "pty_write"; readonly key: string; readonly bytes: Uint8Array }
+  | { readonly op: "pty_resize"; readonly key: string; readonly cols: number; readonly rows: number }
+  | { readonly op: "pty_kill"; readonly key: string }
+  | { readonly op: "batch"; readonly cmds: readonly Cmd<M>[] };
+
+/// The wire encoding of a host record payload, byte-identical to what the
+/// transpiler derives from the record's TS shape at build time: fields
+/// sorted by name (code-unit order), concatenated with no field headers —
+/// number -> f64 little-endian (8 bytes), boolean -> one 0/1 byte,
+/// Uint8Array -> u32 little-endian length + bytes.
+export function hostRecordBytes(payload: HostRecord): Uint8Array {
+  const names = Object.keys(payload).sort();
+  let len = 0;
+  for (const n of names) {
+    const v = payload[n];
+    if (typeof v === "number") len += 8;
+    else if (typeof v === "boolean") len += 1;
+    else len += 4 + v.length;
+  }
+  const out = new Uint8Array(len);
+  const dv = new DataView(out.buffer);
+  let off = 0;
+  for (const n of names) {
+    const v = payload[n];
+    if (typeof v === "number") {
+      dv.setFloat64(off, v, true);
+      off += 8;
+    } else if (typeof v === "boolean") {
+      out[off] = v ? 1 : 0;
+      off += 1;
+    } else {
+      dv.setUint32(off, v.length, true);
+      off += 4;
+      out.set(v, off);
+      off += v.length;
+    }
+  }
+  return out;
+}
+
+function serviceU32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  out[0] = value & 255;
+  out[1] = (value >>> 8) & 255;
+  out[2] = (value >>> 16) & 255;
+  out[3] = (value >>> 24) & 255;
+  return out;
+}
+
+/// Canonical service-value codec primitives. Generated clients compose these
+/// in declaration order; the service host and Zig result dispatcher consume
+/// the same format as shim_rt (LE scalars, length-prefixed bytes/slices,
+/// declaration-order enum/union tags).
+export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+export function serviceBoolBytes(value: boolean): Uint8Array {
+  return new Uint8Array([value ? 1 : 0]);
+}
+
+export function serviceF64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  view.setFloat64(0, Number.isNaN(value) ? Number.NaN : value, true);
+  return out;
+}
+
+export function serviceI64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  const base = 4294967296;
+  let low = value % base;
+  if (low < 0) low += base;
+  const high = Math.floor(value / base);
+  view.setUint32(0, low, true);
+  view.setInt32(4, high, true);
+  return out;
+}
+
+export function serviceBytes(value: Uint8Array): Uint8Array {
+  return serviceConcat([serviceU32(value.length), value]);
+}
+
+export function serviceEnumBytes(index: number): Uint8Array {
+  return serviceU32(index);
+}
+
+export function serviceUnionBytes(index: number): Uint8Array {
+  return new Uint8Array([index]);
+}
+
+export function serviceOptionalBytes(value: Uint8Array | null): Uint8Array {
+  return value === null ? new Uint8Array([0]) : serviceConcat([new Uint8Array([1]), value]);
+}
+
+export function serviceSliceBytes(values: readonly Uint8Array[]): Uint8Array {
+  return serviceConcat([serviceU32(values.length), ...values]);
+}
+
+function lowerHostPayload(payload: Uint8Array | HostRecord): Uint8Array {
+  return payload instanceof Uint8Array ? payload : hostRecordBytes(payload);
+}
+
+/// A host command by name; the host decides what the name means. The name is
+/// a string literal. Args are scalar numbers, or exactly one bytes payload
+/// (a Uint8Array, or a flat record that lowers to bytes).
+function hostCmd(name: string, payload: Uint8Array | HostRecord): Cmd<never>;
+function hostCmd(name: string, ...args: readonly number[]): Cmd<never>;
+function hostCmd(name: string, ...rest: readonly (number | Uint8Array | HostRecord)[]): Cmd<never> {
+  const first = rest[0];
+  if (rest.length === 1 && typeof first === "object" && first !== null) {
+    return { op: "host_bytes", name, payload: lowerHostPayload(first) };
+  }
+  return { op: "host", name, args: rest as readonly number[] };
+}
+
+/// HTTP(S) as effect data. The two-field `{ ok, err }` route buffers the whole
+/// response. Adding `line` selects line streaming: each complete line arrives
+/// through that one-bytes-field arm, then `ok` receives the terminal HTTP
+/// status as its one number payload. A non-2xx status is still `ok` because the
+/// server delivered a response; cut/dropped stream lines, transport failures,
+/// and cancellation use `err` (`"truncated"` for stream data loss).
+function fetchCmd<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
+function fetchCmd<M extends Msgish>(spec: FetchStreamSpec, route: FetchStreamRoute<M>): Cmd<M>;
+function fetchCmd<M extends Msgish>(
+  spec: FetchStreamSpec,
+  route: FetchRoute<M> | FetchStreamRoute<M>,
+): Cmd<M> {
+  const names = Object.keys(spec.headers ?? {}).sort();
+  const headers = names.map((n) => ({ name: n, value: spec.headers![n] }));
+  if ("line" in route) {
+    return {
+      op: "fetch_stream",
+      key: route.key ?? "",
+      lineKind: route.line,
+      okKind: route.ok,
+      errKind: route.err,
+      method: spec.method ?? "GET",
+      timeoutMs: spec.timeoutMs ?? 0,
+      maxLineBytes: spec.maxLineBytes ?? 0,
+      url: spec.url,
+      headers,
+      body: spec.body ?? new Uint8Array(0),
+    };
+  }
+  return {
+    op: "fetch",
+    key: route.key ?? "",
+    okKind: route.ok,
+    errKind: route.err,
+    method: spec.method ?? "GET",
+    timeoutMs: spec.timeoutMs ?? 0,
+    url: spec.url,
+    headers,
+    body: spec.body ?? new Uint8Array(0),
+  };
+}
+
+export const Cmd = {
+  /// No effects. `return model` is sugar for `return [model, Cmd.none]`.
+  none: { op: "none" } as Cmd<never>,
+
+  /// Snapshot the just-committed Model through the engine-owned store.
+  /// Requires app.zon's `persist` capability and restore-route config;
+  /// the host owns coalescing, atomic placement, and journal/replay.
+  persist(): Cmd<never> {
+    return { op: "persist" };
+  },
+
+  /// Request the current time. The runtime dispatches the named Msg arm with
+  /// the timestamp (milliseconds, a plain number) as its single payload field.
+  now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M> {
+    return { op: "now", msgKind };
+  },
+
+  /// Journaled signed-i64 milliseconds as canonical decimal bytes.
+  wallTime<M extends Msgish>(msgKind: BytesKind<M>): Cmd<M> { return { op: "wall_time", msgKind }; },
+
+  /// Read a whole file with every terminal field, including loss metadata.
+  /// Byte keys retain exact identities generated by app state, including u64 decimals.
+  readFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "read_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path };
+  },
+  writeFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "write_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path, bytes };
+  },
+  cancelKey(key: Uint8Array): Cmd<never> { return { op: "cancel_key", key }; },
+  readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "read_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path };
+  },
+  /// Write with the complete terminal. Named keys follow readFile's replace
+  /// and silent-cancel policy; unrelated live capabilities refuse the request.
+  writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "write_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path, bytes };
+  },
+  /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
+  /// the same key; cancellation remains silent, like Cmd.delay.
+  timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
+    return { op: "timer_result", key, afterMs, mode, msgKind: route.result };
+  },
+  /// Canonical unsigned decimal milliseconds; zero and nanosecond overflow reject.
+  timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
+    return { op: "timer_result_exact", key, afterMs, mode, msgKind: route.result };
+  },
+
+  host: hostCmd,
+
+  /// A routed host command: the host performs `name` with the payload and
+  /// dispatches exactly one result Msg back — the `ok` arm with the result
+  /// bytes, or the `err` arm with the error bytes. Both arms must carry
+  /// exactly one Uint8Array payload field (tsc checks that). An optional
+  /// `key` names the in-flight effect: re-issuing a live key replaces it,
+  /// and Cmd.cancel(key) drops it.
+  request<M extends Msgish>(
+    name: string,
+    payload: Uint8Array | HostRecord,
+    route: RequestRoute<M>,
+  ): Cmd<M> {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: false,
+      payload: lowerHostPayload(payload),
+    };
+  },
+
+  /// Generated typed service clients use this constructor after encoding the
+  /// request shape. It lowers to the ordinary request wire record with the
+  /// typed-result bit set so the host decodes the success payload.
+  serviceRequest<M extends Msgish, P>(
+    name: string,
+    payload: Uint8Array,
+    route: ServiceRoute<M, P>,
+  ): Cmd<M> {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      payload,
+    };
+  },
+
+  serviceStreamRequest<M extends Msgish, P>(
+    name: string,
+    channelKey: number,
+    payload: Uint8Array,
+    route: ServiceStreamRoute<M, P>,
+    maxPending: number,
+  ): Cmd<M> {
+    return {
+      op: "service_stream_request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      channelKey,
+      eventKind: route.event,
+      maxPending,
+      payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
+    };
+  },
+
+  /// Drop the in-flight keyed effect — request, named engine op, or delay —
+  /// with this key, if any, SILENTLY (neither routing arm is dispatched for
+  /// it). Live spawn, streaming-fetch, streaming-service, and write-file-sink operations are the exceptions:
+  /// cancel ends the stream and its err arm runs with "cancelled".
+  cancel(key: string): Cmd<never> {
+    return { op: "cancel", key };
+  },
+
+  /// Read a whole file. Exactly one terminal Msg: the `ok` arm with the
+  /// content bytes (one Uint8Array field), or the `err` arm with the reason
+  /// bytes ("not_found", "io_failed", "truncated", "rejected").
+  readFile<M extends Msgish>(path: Uint8Array, route: RequestRoute<M>): Cmd<M> {
+    return { op: "read_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  /// Write a whole file (parent directories created, an existing file
+  /// replaced whole). Exactly one terminal Msg: the `ok` arm — which carries
+  /// no payload — or the `err` arm with the reason bytes.
+  writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  appendFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "append_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
+  },
+
+  statFile<M extends Msgish>(path: Uint8Array, route: FileStatRoute<M>): Cmd<M> {
+    return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  /// Delete one file. The ok arm carries no payload. A final symlink is
+  /// unlinked without deleting its target. A missing file routes the err arm
+  /// with "not_found"; directories and other OS refusals route "io_failed".
+  deleteFile<M extends Msgish>(path: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "delete_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+
+  readFileStream<M extends Msgish>(path: Uint8Array, route: FileReadStreamRoute<M>): Cmd<M> {
+    return { op: "read_file_stream", key: route.key ?? "", chunkKind: route.chunk, doneKind: route.done, errKind: route.err, path };
+  },
+
+  writeFileStream<M extends Msgish>(key: string, path: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_stream", key, okKind: route.ok, errKind: route.err, path };
+  },
+
+  writeFileChunk<M extends Msgish>(key: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_chunk", key, okKind: route.ok, errKind: route.err, bytes };
+  },
+
+  writeFileClose<M extends Msgish>(key: string, route: WriteRoute<M>): Cmd<M> {
+    return { op: "write_file_close", key, okKind: route.ok, errKind: route.err };
+  },
+
+  /// Capability-gated, engine-owned per-record storage. Keys are UTF-8 text
+  /// up to 512 bytes; values are bytes up to 1 MiB. Results remain effects:
+  /// they arrive through the supplied Msg routes after update commits.
+  store: {
+    set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey, bytes };
+    },
+
+    /// The ok payload is `[1][value...]` for a hit or `[0]` for a miss, so
+    /// an empty stored value remains distinguishable from absence.
+    get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M> {
+      return { op: "store_get", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(storeKey: string, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_delete", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// The ok payload is a length-prefixed page of `(key,value)` pairs and
+    /// a next-key cursor. Pages end at record boundaries; data is never cut.
+    scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M> {
+      return {
+        op: "store_scan",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        prefix,
+        limit: options.limit ?? 0,
+        after: options.after ?? "",
+      };
+    },
+
+    /// Atomically upsert all entries (at most 64 entries / 8 MiB encoded).
+    setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set_many", key: route.key ?? "", okKind: route.ok, errKind: route.err, entries };
+    },
+  },
+
+  /// App-scoped OS credential storage. The app manifest id supplies the
+  /// service namespace, so authored code chooses only a UTF-8 key. Declare
+  /// both the `credentials` capability and permission in app.zon.
+  credentials: {
+    set<M extends Msgish>(credentialKey: string, secret: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.set",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey), secret }),
+      };
+    },
+
+    /// The ok arm carries secret bytes; a miss routes err with `miss`.
+    get<M extends Msgish>(credentialKey: string, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("core.credentials.get", { key: utf8Bytes(credentialKey) }, route);
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(credentialKey: string, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.delete",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey) }),
+      };
+    },
+  },
+
+  /// Capability-gated relational SQLite. Reads remain effects: pages and the
+  /// terminal arrive as Msg values after the issuing model has committed.
+  /// Every exec statement in one command commits atomically or all roll back.
+  db: {
+    query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M> {
+      return {
+        op: "db_query",
+        key: route.key ?? "",
+        pageKind: route.page,
+        doneKind: route.done,
+        errKind: route.err,
+        sql,
+        params,
+      };
+    },
+
+    exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "db_exec", key: route.key ?? "", okKind: route.ok, errKind: route.err, statements };
+    },
+  },
+
+  // @native-sqlite-generated-cmds
+
+  fetch: fetchCmd,
+
+  /// Put bytes on the system clipboard, fire-and-forget (an over-bound or
+  /// refused write is dropped — there is no route to report on).
+  clipboardWrite(bytes: Uint8Array): Cmd<never> {
+    return { op: "clip_write", bytes };
+  },
+
+  /// Write with one complete terminal result, including refusal/cancellation.
+  /// A duplicate live key is rejected; it never replaces a pending write.
+  clipboardWriteResult<M extends Msgish>(bytes: Uint8Array, route: ClipboardResultRoute<M>): Cmd<M> {
+    return { op: "clip_write_result", key: route.key ?? "", resultKind: route.result, bytes };
+  },
+
+  /// Read the system clipboard. Exactly one terminal Msg: the `ok` arm with
+  /// the text bytes, or the `err` arm with the reason bytes ("failed",
+  /// "rejected").
+  clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M> {
+    return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
+  },
+
+  /// Ask the desktop host to show a system notification. Fire-and-forget:
+  /// platform acceptance cannot promise display while OS focus modes and user
+  /// notification settings remain authoritative. A stable id replaces the
+  /// earlier notification with that id; paired actionLabel/actionCommand bytes
+  /// dispatch through the normal app-command path while the process is live.
+  /// Empty or over-bound titles, over-bound optional fields, unpaired actions,
+  /// invalid command names, and unavailable services fail closed.
+  showNotification(spec: NotificationSpec): Cmd<never> {
+    return {
+      op: "show_notification",
+      id: spec.id ?? new Uint8Array(0),
+      title: spec.title,
+      subtitle: spec.subtitle ?? new Uint8Array(0),
+      body: spec.body ?? new Uint8Array(0),
+      actionLabel: spec.actionLabel ?? new Uint8Array(0),
+      actionCommand: spec.actionCommand ?? new Uint8Array(0),
+    };
+  },
+
+  /// Open an HTTP(S) URL in the user's system browser. Fire-and-forget: the
+  /// runtime validates the URL and enforces `external_links`; invalid,
+  /// denied, or unavailable requests fail closed.
+  openExternalUrl(url: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.openUrl", payload: url };
+  },
+
+  /// Reveal a path in the system file manager (Finder, Files, or Explorer).
+  /// Fire-and-forget; invalid or unavailable requests fail closed.
+  revealPath(path: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
+  /// the host's current locale and local time zone. The localized UTF-8 text
+  /// arrives on ok; invalid timestamps or unavailable services route err.
+  formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M> {
+    const styleCode = style === "date" ? 0 : style === "time" ? 1 : 2;
+    return Cmd.request("native-sdk.time.formatLocal", { style: styleCode, timestampMs }, route);
+  },
+
+  /// A keyed one-shot delay: dispatch the named Msg arm once, `ms` from now,
+  /// with the fire time (milliseconds) as its single number payload field.
+  /// Re-issuing a live key re-arms it from now (the debounce discipline);
+  /// `Cmd.cancel(key)` drops it silently.
+  delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M> {
+    return { op: "delay", key, afterMs: ms, msgKind };
+  },
+
+  /// Run a subprocess as a STREAM: each stdout line dispatches the `line`
+  /// arm as it arrives (line mode), or whole stdout buffers to the exit
+  /// (`collect: true`); exactly one terminal follows — the `exit` arm on a
+  /// clean exit, the `err` arm with the reason bytes on every other end.
+  /// The key stays live for the whole stream: `Cmd.cancel(key)` ends the
+  /// child mid-stream (err arm "cancelled" — loud on purpose: killing a
+  /// process is an observable event), and a spawn whose key is already
+  /// streaming is rejected, never replaced — a running subprocess is never
+  /// killed implicitly; cancel it first.
+  spawn<M extends Msgish>(
+    argv: readonly Uint8Array[],
+    route: SpawnRoute<M> | SpawnCollectRoute<M>,
+  ): Cmd<M> {
+    const collect = "collect" in route && route.collect === true;
+    return {
+      op: "spawn",
+      key: route.key ?? "",
+      lineKind: collect ? "" : ((route as SpawnRoute<M>).line ?? ""),
+      exitKind: route.exit,
+      errKind: route.err,
+      collect,
+      argv,
+      stdin: route.stdin ?? new Uint8Array(0),
+    };
+  },
+
+  /// Stream complete line/exit records. Collect mode retains stdout, stderr
+  /// tails, truncation and drop counts even for unsuccessful exits.
+  spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M> {
+    return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""),
+      exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
+  /** Stream complete subprocess records under a canonical unsigned decimal key.
+   * Native admission owns duplicate-key refusal and the one terminal per request.
+   * A refused request retains its own completion route without replacing a live child.
+   * Malformed keys fail admission before any native operation. */
+  spawnEventsExact<M extends Msgish>(key: Uint8Array, argv: readonly Uint8Array[], route: ExactSpawnEventsRoute<M>): Cmd<M> {
+    return { op: "spawn_events_exact", key, lineKind: route.collect ? "" : (route.line ?? ""),
+      exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
+  /** Cancel an engine effect by its exact native identity. Its ordinary terminal remains routed. */
+  cancelExact(key: Uint8Array): Cmd<never> { return { op: "cancel_exact", key }; },
+
+  /// Open (or replace — one player is the whole surface) the keyed audio
+  /// event stream: resolve the source cascade (local path, then url, cached
+  /// and integrity-gated) and start playback. Every playback event
+  /// dispatches the `event` arm until `Cmd.audioStop(key)` closes the
+  /// stream. Failure is never silent: an unplayable source arrives as a
+  /// "failed" event, a refused command as "rejected".
+  audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M> {
+    return {
+      op: "audio_play",
+      key,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
+  },
+
+  /** Open the single player with an exact caller-chosen u64 identity.
+   * Deferred rejections and failures retain their load's route and key after replacement.
+   * A rejected source reports its own key without replacing the active player.
+   * Malformed identities fail admission before any native operation. */
+  audioPlayExact<M extends Msgish>(key: Uint8Array, source: ExactAudioSource, route: ExactAudioRoute<M>): Cmd<M> {
+    return { op: "audio_play_exact", key, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), cacheDir: source.cacheDir ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+
+  audioTransport(transport: AudioTransport): Cmd<never> {
+    return { op: "audio_transport", transport };
+  },
+
+  /// Pause the keyed playback in place (no event echo — the caller
+  /// commanded it). A key with no open stream no-ops.
+  audioPause(key: string): Cmd<never> {
+    return { op: "audio_ctl", key, verb: "pause", value: 0 };
+  },
+
+  /// Resume the keyed playback. A player that can no longer resume reports
+  /// one "failed" event on the stream instead of silence.
+  audioResume(key: string): Cmd<never> {
+    return { op: "audio_ctl", key, verb: "resume", value: 0 };
+  },
+
+  /// Stop the keyed playback and CLOSE its event stream: no events for the
+  /// key after this. Stop is the audio stream's cancel.
+  audioStop(key: string): Cmd<never> {
+    return { op: "audio_ctl", key, verb: "stop", value: 0 };
+  },
+
+  /// Jump the keyed playback to `ms` (the platform clamps to the duration).
+  /// No event echo — the next position tick reports from there.
+  audioSeek(key: string, ms: number): Cmd<never> {
+    return { op: "audio_ctl", key, verb: "seek", value: ms };
+  },
+
+  /// Set playback volume, clamped to 0..1 and remembered across tracks: the
+  /// next audioPlay re-applies it.
+  audioSetVolume(key: string, volume: number): Cmd<never> {
+    return { op: "audio_ctl", key, verb: "volume", value: volume };
+  },
+
+  /// Open (or replace — one player is the whole surface) the keyed video
+  /// event stream: claim the media-surface the source names, resolve the
+  /// source cascade (local path, then url) and start playback (autoplay,
+  /// the default). Every playback event dispatches the `event` arm until
+  /// `Cmd.videoStop(key)` closes the stream. Pixels never ride the
+  /// events: decoded frames flow platform-side into the bound surface.
+  /// Failure is never silent: an unplayable source arrives as a "failed"
+  /// event, a refused command as "rejected". Replacing is not stopping:
+  /// a replaced load still delivers the terminal it owes (its failure is
+  /// never silent either), routed to ITS OWN event arm — only
+  /// `Cmd.videoStop` cancels a stream's undelivered answers.
+  videoLoad<M extends Msgish>(key: string, source: VideoSource, route: VideoRoute<M>): Cmd<M> {
+    return {
+      op: "video_load",
+      key,
+      eventKind: route.event,
+      surface: source.surface,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      autoplay: source.autoplay ?? true,
+      loop: source.loop ?? false,
+      muted: source.muted ?? false,
+    };
+  },
+
+  /// Read the native channel mirror as an explicit, deterministic reply.
+  /// This performs no OS operation and adds no effect journal entry.
+  videoSnapshot<M extends Msgish>(route: VideoSnapshotRoute<M>): Cmd<M> {
+    return { op: "video_snapshot", snapshotKind: route.snapshot };
+  },
+
+  /// Reload the same owned source from zero, including completed playback.
+  videoRestart(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "restart", value: 0 };
+  },
+
+  /// Start or resume the loaded playback — the poster-frame counterpart
+  /// of `autoplay: false`, and un-pause. A key with no open stream
+  /// no-ops; a player that can no longer start reports one "failed"
+  /// event on the stream instead of silence.
+  videoPlay(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "play", value: 0 };
+  },
+
+  /// Pause the keyed playback in place; the surface keeps its last frame
+  /// (no event echo — the caller commanded it). A key with no open
+  /// stream no-ops.
+  videoPause(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "pause", value: 0 };
+  },
+
+  /// Stop the keyed playback, release the surface claim, and CLOSE its
+  /// event stream: no events for the key after this. Stop is the video
+  /// stream's cancel, exactly `Cmd.audioStop`'s discipline.
+  videoStop(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "stop", value: 0 };
+  },
+
+  /// Jump the keyed playback to `ms` (the platform clamps to the
+  /// duration; a paused seek still pushes the sought frame, so scrubbing
+  /// is visible). No event echo — the next position tick reports from
+  /// there.
+  videoSeek(key: string, ms: number): Cmd<never> {
+    return { op: "video_ctl", key, verb: "seek", value: ms };
+  },
+
+  /// Set playback volume, clamped to 0..1 and remembered across loads:
+  /// the next videoLoad re-applies it. Independent of mute.
+  videoSetVolume(key: string, volume: number): Cmd<never> {
+    return { op: "video_ctl", key, verb: "volume", value: volume };
+  },
+
+  /// Mute or unmute the playback's audio track without touching the
+  /// remembered volume (a fresh load's `muted` option is the way to
+  /// start muted).
+  videoSetMuted(key: string, muted: boolean): Cmd<never> {
+    return { op: "video_ctl", key, verb: "muted", value: muted ? 1 : 0 };
+  },
+
+  /// Enable or disable looping on the open playback (a fresh load's
+  /// `loop` option covers the start-looping case). A looping playback
+  /// never delivers "completed".
+  videoSetLoop(key: string, loop: boolean): Cmd<never> {
+    return { op: "video_ctl", key, verb: "loop", value: loop ? 1 : 0 };
+  },
+
+  /// Show the window with the declared `label`: un-hide + activate — the
+  /// counterpart to a `close_policy = "hide"` hide and the tray "Open"
+  /// consequence; also restores a minimized window. Fire-and-forget: no
+  /// result Msg (the window's own frame event carries the state), and an
+  /// unknown label is a no-op. The label is a string literal — window
+  /// labels are declarations.
+  showWindow(label: string): Cmd<never> {
+    return { op: "window_show", label };
+  },
+
+  /// Hide a live window without closing it. Its views and native identity
+  /// remain intact; `showWindow` brings it back. Unknown labels no-op.
+  hideWindow(label: string): Cmd<never> {
+    return { op: "window_hide", label };
+  },
+
+  /// Close the declared window through its native close policy. Closing
+  /// the last window follows the app's normal shutdown path.
+  closeWindow(label: string): Cmd<never> {
+    return { op: "window_close", label };
+  },
+
+  /// Minimize the declared window using the native window manager.
+  /// Both window verbs are fire-and-forget; unknown labels no-op.
+  minimizeWindow(label: string): Cmd<never> {
+    return { op: "window_minimize", label };
+  },
+
+  /// Control whether the app appears in the macOS Dock and app switcher.
+  /// Unsupported hosts ignore the command.
+  setDockPresence(visible: boolean): Cmd<never> {
+    return { op: "dock_presence", visible };
+  },
+
+  /// Query the installed bundle's launch-at-login registration. The ok
+  /// route receives UTF-8 bytes naming `enabled`, `disabled`,
+  /// `requires_approval`, or `not_found`; the err route receives a reason.
+  launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.status", new Uint8Array(0), route);
+  },
+
+  /// Register or unregister the installed bundle for launch at login. The
+  /// ok and err payloads follow `launchAtLoginStatus`.
+  setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.set", new Uint8Array([enabled ? 1 : 0]), route);
+  },
+
+  /// Quit the app for real — the graceful terminate, and the tray "Quit"
+  /// consequence. The host quits through the SAME shutdown path a
+  /// last-window close takes, so the stop hook runs exactly once and a
+  /// recording session seals its journal. Fire-and-forget.
+  quitApp(): Cmd<never> {
+    return { op: "quit_app" };
+  },
+
+  /// Load an image at runtime under the model-owned numeric ImageId your
+  /// markup binds (`<image image="{id}"/>`, `<avatar image="{id}"/>`):
+  /// resolve the source cascade (local path first, then a verified cache
+  /// entry, then the network), decode through the platform codec, register
+  /// the pixels under `id`, and dispatch exactly ONE `event` arm — state
+  /// "loaded" with the decoded width/height, or one failure class, always
+  /// echoing the requested id so concurrent loads sharing the arm stay
+  /// distinguishable. Failure is never silent, and views referencing the
+  /// id repaint on the next
+  /// frame. One load per id at a time: a duplicate live id dispatches state
+  /// "rejected" (finish or re-key instead — ids are model data). Ids are
+  /// positive integers below 2^53 outside the reserved bit-63 namespace;
+  /// 0 is the no-image sentinel and dispatches "rejected".
+  imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M> {
+    return {
+      op: "image_load",
+      id,
+      eventKind: route.event,
+      path: source.path ?? new Uint8Array(0),
+      url: source.url ?? new Uint8Array(0),
+      cachePath: source.cachePath ?? new Uint8Array(0),
+      expectedBytes: source.expectedBytes ?? 0,
+    };
+  },
+
+  /** Lossless 63-bit identities: a 32-bit lower word and a 31-bit upper word. */
+  imageLoadWords<M extends Msgish>(identity: ImageIdentity, source: ImageSource, route: ImageWordsRoute<M>): Cmd<M> {
+    return { op: "image_load_words", identity, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+  imageCancelWords(identity: ImageIdentity): Cmd<never> { return { op: "image_cancel_words", identity }; },
+  imageUnregisterWords(identity: ImageIdentity): Cmd<never> { return { op: "image_unregister_words", identity }; },
+  imageBatchWords<M extends Msgish>(commands: readonly ImageWordsCommand[], route: ImageWordsRoute<M>): Cmd<M> {
+    const cmds: Cmd<M>[] = [];
+    for (const command of commands) {
+      if (command.operation === "load") cmds.push({ op: "image_load_words", identity: command.identity, eventKind: route.event, path: command.path, url: command.url, cachePath: command.cachePath, expectedBytes: command.expectedBytes });
+      else if (command.operation === "cancel") cmds.push({ op: "image_cancel_words", identity: command.identity });
+      else cmds.push({ op: "image_unregister_words", identity: command.identity });
+    }
+    return { op: "batch", cmds };
+  },
+  /// End the in-flight image load under `id`, if any — LOUDLY: the load's
+  /// one terminal arrives as its own `event` arm with state "cancelled"
+  /// (ending an in-flight load is an observable event, the spawn cancel
+  /// discipline), and the id is free for a fresh load once that terminal
+  /// lands. Aimed at an id with no live load it no-ops (the load it aimed
+  /// at already delivered its terminal). Image loads are keyed by their
+  /// numeric id, so the string-keyed `Cmd.cancel` never touches them —
+  /// this is their cancel, the way `Cmd.audioStop` is audio's.
+  imageCancel(id: number): Cmd<never> {
+    return { op: "image_cancel", id };
+  },
+
+  /// Free the registry slot under `id`: the pixels are released, views
+  /// referencing the id draw their fallback (avatar initials) on the next
+  /// frame, and the slot — one of the registry's 16 — is open for another
+  /// load (the gallery eviction move: unregister the evictee, load the
+  /// newcomer under a fresh id). Like registration itself this is
+  /// synchronous registry surgery, not an effect: no Msg follows, and an
+  /// id with no registration no-ops (whatever it aimed at is already
+  /// gone, `Cmd.imageCancel`'s idle rule). It frees only the CURRENT
+  /// registration — a load IN FLIGHT under the id is untouched and its
+  /// terminal still registers the pixels; to keep the slot free, end the
+  /// load with `Cmd.imageCancel(id)` first.
+  imageUnregister(id: number): Cmd<never> {
+    return { op: "image_unregister", id };
+  },
+
+  /// Open an external-source channel under your numeric `key`: the
+  /// host stages a long-lived, thread-safe posting seam its NATIVE
+  /// side feeds — an embedder or platform-services extension resolves
+  /// the handle (`Effects.channelHandle(key)`) and posts bytes from
+  /// its own threads (a socket reader, a file watcher, a worker), and
+  /// each accepted post arrives as one "data" event through the
+  /// `event` arm, waking the loop itself — no timer polling anywhere.
+  /// POSTING is deliberately not a TS verb: transpiled cores are
+  /// single-threaded, so the TS tier opens, closes, and receives while
+  /// the native side feeds. Back-pressure is part of the contract:
+  /// the native `post` answers a four-way `ChannelHandle.PostResult`
+  /// (accepted / dropped_full / dropped_oversized / closed), so a
+  /// producer tells transient back-pressure from closure, and refused
+  /// posts count into `droppedPending`/`droppedTotal` on the next
+  /// delivered event, never silence. The native post never blocks its
+  /// producer given a conforming host wake — the platform's `wake_fn`
+  /// is contractually a bounded, enqueue-only nudge (see
+  /// `PlatformServices.wake_fn`; every first-party host conforms), and
+  /// the runtime holds no channel lock across it. One channel per key at a
+  /// time — a duplicate live key dispatches state "rejected" — and the
+  /// key shares the engine's effect-key space (a same-key fetch is
+  /// blocked while the channel lives). Keys are positive integers
+  /// below 2^53; the events are journaled at the effect boundary, so
+  /// a recorded session replays the whole stream from the journal and
+  /// never NEEDS the source — under replay the open parks and the
+  /// native handle is inert (every post answers closed). The opening
+  /// update still re-executes, so a native producer launched
+  /// unconditionally really starts and is stopped at its first post;
+  /// one that consults the handle's live() before launching never
+  /// starts, keeping replay fully offline.
+  channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
+    return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
+  },
+
+  /** Open a channel and attempt native producer startup in the same dispatch.
+   * The source name is 1–255 UTF-8 bytes and arguments are at most 4096 bytes.
+   * Startup runs only for this newly accepted occupancy; a refused open never
+   * starts an existing producer. The started arm runs before the settled view,
+   * while channel events retain their normal drain boundary. On failure the
+   * app closes the channel. The built-in native-sdk.process.samples source
+   * takes empty arguments and posts process readings every 500 ms.
+   */
+  channelOpenSource<M extends Msgish>(key: number, source: string, payload: Uint8Array, route: ChannelRoute<M> & { readonly started: ChannelSourceKind<M> }): Cmd<M> {
+    return { op: "channel_open_source", key, source, payload, eventKind: route.event, startedKind: route.started, maxPending: 64 };
+  },
+
+  /// Close the open channel under `key`: posts stop landing, the
+  /// staged backlog flushes, and exactly one "closed" event (final
+  /// drop totals aboard) dispatches the event arm — then the key is
+  /// free again. A key with no open channel no-ops. Channels are keyed
+  /// by their numeric key, so the string-keyed `Cmd.cancel` never
+  /// touches them — this is their close, the way `Cmd.audioStop` is
+  /// audio's.
+  channelClose(key: number): Cmd<never> {
+    return { op: "channel_close", key };
+  },
+
+  /// Start microphone or system-output capture under a positive numeric
+  /// `key`. The stream is normalized to interleaved signed 16-bit LE PCM
+  /// at the requested rate/channels (48kHz mono by default). Microphone and
+  /// system capture may run concurrently; only one stream per source may
+  /// be live. The event stream is bounded and journal/replay aware.
+  audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M> {
+    return {
+      op: "audio_capture_start",
+      key,
+      source: spec.source,
+      sampleRate: spec.sampleRate ?? 48000,
+      channels: spec.channels ?? 1,
+      eventKind: route.event,
+    };
+  },
+
+  /// Stop capture under `key`. Native callbacks quiesce synchronously,
+  /// accepted backlog drains, then exactly one "stopped" event retires the
+  /// stream. A key with no live capture is a no-op.
+  audioCaptureStop(key: number): Cmd<never> {
+    return { op: "audio_capture_stop", key };
+  },
+
+  /// Open a pseudo-terminal session — a spawn with a different
+  /// transport: run `argv` on a fresh pty (same argv budgets, same
+  /// child environment policy) whose initial grid is `cols` x `rows`
+  /// (80x24 by default) and whose TERM is `term` (omitted = the
+  /// engine's default). Every session event dispatches the `event` arm:
+  /// "output" events carry coalesced batches of child output across
+  /// dispatches — feed them to the terminal emulator and move on —
+  /// until the exactly-one "exit" terminal retires the session (a
+  /// refused spawn is one "exit" with reason "rejected"; a transport
+  /// that could not start, one with "spawn_failed" — failure is never
+  /// silent). One session per key at a time, never replaced implicitly:
+  /// a running terminal's child is a running subprocess — kill it
+  /// first, the spawn discipline.
+  ptySpawn<M extends Msgish>(argv: readonly Uint8Array[], route: PtyRoute<M>): Cmd<M> {
+    return {
+      op: "pty_spawn",
+      key: route.key ?? "",
+      eventKind: route.event,
+      cols: route.cols ?? 80,
+      rows: route.rows ?? 24,
+      term: route.term ?? "",
+      argv,
+    };
+  },
+
+  /// Write bytes toward the keyed session's child — keystrokes and
+  /// pastes, fire-and-forget: a key with no open session no-ops (the
+  /// exit was already on its way), and refused payloads (over the
+  /// engine's per-write bound, or a child that stopped reading) count
+  /// into the exit event's droppedWrites — never silence.
+  ptyWrite(key: string, bytes: Uint8Array): Cmd<never> {
+    return { op: "pty_write", key, bytes };
+  },
+
+  /// Push a new grid to the keyed session so the child receives
+  /// SIGWINCH — fire-and-forget like ptyWrite; a key with no open
+  /// session no-ops.
+  ptyResize(key: string, cols: number, rows: number): Cmd<never> {
+    return { op: "pty_resize", key, cols, rows };
+  },
+
+  /// Terminate the keyed session's child — LOUD, the spawn cancel
+  /// discipline: the session's one "exit" terminal arrives through its
+  /// own event arm with reason "cancelled" and the key frees once it
+  /// lands. A key with no open session no-ops. Sessions are their own
+  /// family's to end: the string-keyed `Cmd.cancel` never touches them
+  /// — this is their kill, the way `Cmd.audioStop` is audio's close.
+  ptyKill(key: string): Cmd<never> {
+    return { op: "pty_kill", key };
+  },
+
+  /// Several commands from one dispatch, performed in order.
+  batch<M extends Msgish>(cmds: readonly Cmd<M>[]): Cmd<M> {
+    return { op: "batch", cmds };
+  },
+};
+
+/// An inert subscription descriptor: recurring effects declared FROM the
+/// model. An app that needs them exports `subscriptions(model): Sub<Msg>`;
+/// after every commit the host reconciles the returned set against its
+/// active timers by key (new key or changed interval re-arms; a missing key
+/// cancels). Like Cmd, Sub values are data, legal only in that function's
+/// return path (NS1025).
+export type Sub<M extends Msgish> =
+  | { readonly op: "none" }
+  | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | {
+      readonly op: "db_live";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+      readonly tables: readonly string[];
+    }
+  | { readonly op: "batch"; readonly subs: readonly Sub<M>[] };
+
+export const Sub = {
+  /// No subscriptions (e.g. everything paused).
+  none: { op: "none" } as Sub<never>,
+
+  /// A repeating timer named by `key`, firing every `everyMs` milliseconds.
+  /// Each fire dispatches the named Msg arm with the current time (ms) as
+  /// its single number payload field.
+  timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
+    return { op: "timer", key, everyMs, msgKind };
+  },
+
+  // @native-sqlite-generated-subs
+
+  /// Several subscriptions at once.
+  batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M> {
+    return { op: "batch", subs };
+  },
+};

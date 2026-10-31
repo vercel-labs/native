@@ -7,6 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "eval": "node src/main.ts",
+    "metrics": "node src/authoring-metrics.ts",
     "check": "pnpm typecheck"
   },
   "devDependencies": {

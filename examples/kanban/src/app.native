@@ -1,0 +1,32 @@
+<import src="components/board-column.native"/>
+<!-- The TypeScript Kanban view. Native file drops are handled by core.ts's
+     dropMsg channel; every dropped basename becomes a Todo card. -->
+<column background="background">
+  <!-- The header IS the titlebar (tall hidden-inset chrome). chromeMsg
+       keeps its controls clear of the traffic lights. -->
+  <row height="{headerHeight}" padding="12" cross="center" window-drag="true" label="Kanban header">
+    <spacer width="{chromeLeading}" />
+    <spacer grow="1" />
+    <button size="icon" variant="ghost" icon="plus" label="Add card" on-press="add"></button>
+  </row>
+  <row grow="1" gap="12" padding="16">
+    <use template="board-column" title="Todo">
+      <text foreground="text_muted">Todo</text>
+      <scroll grow="1" value="{todoScroll}" on-scroll="todo_scrolled" label="Todo cards">
+        <use template="board-card-list" cards="{todoCards}" />
+      </scroll>
+    </use>
+    <use template="board-column" title="Doing">
+      <text foreground="text_muted">Doing</text>
+      <scroll grow="1" value="{doingScroll}" on-scroll="doing_scrolled" label="Doing cards">
+        <use template="board-card-list" cards="{doingCards}" />
+      </scroll>
+    </use>
+    <use template="board-column" title="Done">
+      <text foreground="text_muted">Done</text>
+      <scroll grow="1" value="{doneScroll}" on-scroll="done_scrolled" label="Done cards">
+        <use template="board-card-list" cards="{doneCards}" />
+      </scroll>
+    </use>
+  </row>
+</column>

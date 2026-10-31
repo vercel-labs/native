@@ -1,3 +1,5 @@
+const scene_policy = @import("canvas_scene_observation_policy.zig");
+const sampling_policy = @import("motion_sampling_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_frame_helpers = @import("canvas_frame.zig");
@@ -209,8 +211,14 @@ fn addCanvasCount(value: *usize, amount: usize, max_value: usize, comptime failu
 /// the half-full bound; small lists keep the linear scans.
 const summary_id_index_slots = 4096;
 const SummaryIdIndex = canvas.plan_key_index.HashSlots(summary_id_index_slots);
-threadlocal var summary_current_id_index: SummaryIdIndex = .{};
-threadlocal var summary_presented_id_index: SummaryIdIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// diff, so first-use init on the diffing thread is the only contract —
+// threads that never diff summaries never allocate it.
+const SummaryIdScratch = struct {
+    current: SummaryIdIndex = .{},
+    presented: SummaryIdIndex = .{},
+};
+const summary_id_scratch = canvas.lazy_tls.LazyTls(SummaryIdScratch);
 
 pub const PresentedCanvasCommand = struct {
     id: ?canvas.ObjectId = null,
@@ -305,6 +313,21 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             if (entries.len > self.canvas_frame_image_cache.len) return error.ImageListFull;
             @memcpy(self.canvas_frame_image_cache[0..entries.len], entries);
             self.canvas_frame_image_cache_count = entries.len;
+        }
+
+        /// Forget every retained cache key for one platform image. The
+        /// platform removal seam destroys the resource independently of
+        /// this per-view planner mirror; leaving an identical key here
+        /// would turn a same-content re-registration into `.retain` and
+        /// skip the upload needed to recreate that resource.
+        pub fn removeCanvasFrameImageCacheId(self: *RuntimeView, image_id: canvas.ImageId) void {
+            var kept: usize = 0;
+            for (self.canvas_frame_image_cache[0..self.canvas_frame_image_cache_count]) |entry| {
+                if (entry.key.image_id == image_id) continue;
+                self.canvas_frame_image_cache[kept] = entry;
+                kept += 1;
+            }
+            self.canvas_frame_image_cache_count = kept;
         }
 
         pub fn copyCanvasFrameLayerCache(self: *RuntimeView, entries: []const canvas.RenderLayerCacheEntry) anyerror!void {
@@ -414,6 +437,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return canvas.sampleCanvasRenderAnimations(self.canvasRenderAnimations(), timestamp_ns, output);
         }
 
+        pub fn sampleCanvasRenderAnimationsWithPolicy(self: *const RuntimeView, timestamp_ns: u64, output: []canvas.CanvasRenderOverride, policy: ?sampling_policy.Policy) anyerror![]const canvas.CanvasRenderOverride {
+            if (policy) |owner| return sampling_policy.sample(self.canvasRenderAnimations(), timestamp_ns, output, owner);
+            return self.sampleCanvasRenderAnimations(timestamp_ns, output);
+        }
+
         pub fn pruneCompletedNoopCanvasRenderAnimations(self: *RuntimeView, timestamp_ns: u64) bool {
             var len: usize = 0;
             var pruned = false;
@@ -458,13 +486,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFrame(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             const render_pass = frame.renderPass();
             const gpu_packet_summary = frame.gpuPacketSummary();
+            const encoder_counts = render_pass.encoderCounts();
             self.canvas_frame_requires_render = frame.requiresRender();
             self.canvas_frame_full_repaint = frame.full_repaint;
             self.canvas_frame_batch_count = frame.batch_plan.batchCount();
-            self.canvas_frame_encoder_command_count = render_pass.encoderCommandCount();
-            self.canvas_frame_encoder_cache_action_count = render_pass.encoderCacheActionCount();
-            self.canvas_frame_encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount();
-            self.canvas_frame_encoder_draw_batch_count = render_pass.encoderDrawBatchCount();
+            self.canvas_frame_encoder_command_count = encoder_counts.commands;
+            self.canvas_frame_encoder_cache_action_count = encoder_counts.caches;
+            self.canvas_frame_encoder_bind_pipeline_count = encoder_counts.binds;
+            self.canvas_frame_encoder_draw_batch_count = encoder_counts.draws;
             self.canvas_frame_pipeline_count = frame.pipeline_cache_plan.entryCount();
             self.canvas_frame_pipeline_upload_count = frame.pipeline_cache_plan.uploadCount();
             self.canvas_frame_pipeline_retain_count = frame.pipeline_cache_plan.retainCount();
@@ -512,7 +541,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_frame_gpu_packet_representable = gpu_packet_summary.fullyRepresentable();
             self.canvas_frame_change_count = frame.changes.len;
             self.canvas_frame_budget = frame.budget;
-            self.canvas_frame_budget_status = frame.budgetStatus();
+            self.canvas_frame_budget_status = frame.budgetStatusFromPlanningSummaries(gpu_packet_summary, encoder_counts);
             self.canvas_frame_dirty_bounds = frame.dirty_bounds;
             const profile = frame.profile();
             self.canvas_frame_profile_work_units = profile.work_units;
@@ -525,6 +554,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFramePresentationComplete(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             if (!self.presented_canvas_valid or self.presented_canvas_revision != self.canvas_revision) return;
             self.recordCanvasFrame(.{
+                .gpu_plan_policy = frame.gpu_plan_policy,
                 .frame_index = frame.frame_index,
                 .timestamp_ns = frame.timestamp_ns,
                 .surface_size = frame.surface_size,
@@ -591,6 +621,10 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyPresentedCanvasSummary(self: *RuntimeView, display_list: canvas.DisplayList, surface_size: geometry.SizeF, scale: f32) anyerror!void {
+            return self.copyPresentedCanvasSummaryWithPolicy(display_list, surface_size, scale, null);
+        }
+
+        pub fn copyPresentedCanvasSummaryWithPolicy(self: *RuntimeView, display_list: canvas.DisplayList, surface_size: geometry.SizeF, scale: f32, owner: ?scene_policy.Policy) anyerror!void {
             _ = try CanvasResourceCounts.fromDisplayList(display_list);
 
             self.presented_canvas_valid = true;
@@ -610,9 +644,10 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     .id = id,
                     .bounds = command_bounds,
                 };
-                if (id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
+                if (owner == null and id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
                 self.presented_canvas_command_count += 1;
             }
+            if (owner) |policy| self.presented_canvas_has_unkeyed = scene_policy.summaryHasUnkeyed(self.presented_canvas_commands[0..self.presented_canvas_command_count], policy);
             self.presented_canvas_revision = self.canvas_revision;
         }
 
@@ -627,6 +662,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn currentCanvasHasUnkeyed(self: *const RuntimeView) bool {
+            return self.currentCanvasHasUnkeyedWithPolicy(null);
+        }
+
+        pub fn currentCanvasHasUnkeyedWithPolicy(self: *const RuntimeView, owner: ?scene_policy.Policy) bool {
+            if (owner) |policy| return scene_policy.currentHasUnkeyed(self.canvasDisplayList().commands, policy);
             for (self.canvasDisplayList().commands) |command| {
                 if (command.objectId() == null and command.bounds() != null) return true;
             }
@@ -634,6 +674,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn diffPresentedCanvasSummary(self: *const RuntimeView, output: []canvas.DiffChange) anyerror![]const canvas.DiffChange {
+            return self.diffPresentedCanvasSummaryWithPolicy(output, null);
+        }
+
+        pub fn diffPresentedCanvasSummaryWithPolicy(self: *const RuntimeView, output: []canvas.DiffChange, owner: ?scene_policy.Policy) anyerror![]const canvas.DiffChange {
+            if (owner) |policy| return scene_policy.diff(self, output, policy);
             if (self.canvas_revision == self.presented_canvas_revision) return output[0..0];
 
             // Id lookups ride the probe-table index whenever the lists
@@ -647,28 +692,29 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                 presented.len >= canvas.plan_key_index.min_entries_for_index) and
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, current_commands.len) and
                 canvas.plan_key_index.fitsHashSlots(summary_id_index_slots, presented.len);
-            if (use_index) {
-                summary_current_id_index.reset();
+            const id_scratch: ?*SummaryIdScratch = if (use_index) summary_id_scratch.get() else null;
+            if (id_scratch) |scratch| {
+                scratch.current.reset();
                 for (current_commands, 0..) |command, index| {
                     const id = command.objectId() orelse continue;
                     var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-                    while (summary_current_id_index.next(&p)) |_| {}
-                    summary_current_id_index.insert(p, @intCast(index));
+                    while (scratch.current.next(&p)) |_| {}
+                    scratch.current.insert(p, @intCast(index));
                 }
-                summary_presented_id_index.reset();
+                scratch.presented.reset();
                 for (presented, 0..) |command, index| {
                     const id = command.id orelse continue;
                     var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-                    while (summary_presented_id_index.next(&p)) |_| {}
-                    summary_presented_id_index.insert(p, @intCast(index));
+                    while (scratch.presented.next(&p)) |_| {}
+                    scratch.presented.insert(p, @intCast(index));
                 }
             }
 
             var len: usize = 0;
             for (presented) |previous| {
                 const id = previous.id orelse continue;
-                const current_ref = if (use_index)
-                    currentCanvasCommandByIdIndexed(current_commands, id)
+                const current_ref = if (id_scratch) |scratch|
+                    currentCanvasCommandByIdIndexed(&scratch.current, current_commands, id)
                 else
                     self.currentCanvasCommandById(id);
                 if (current_ref == null) {
@@ -683,8 +729,8 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             for (current_commands, 0..) |command, index| {
                 const id = command.objectId() orelse continue;
                 const bounds = command.bounds();
-                const previous_ref = if (use_index)
-                    presentedCanvasCommandByIdIndexed(presented, id)
+                const previous_ref = if (id_scratch) |scratch|
+                    presentedCanvasCommandByIdIndexed(&scratch.presented, presented, id)
                 else
                     self.presentedCanvasCommandById(id);
                 if (previous_ref) |previous| {
@@ -708,17 +754,17 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return output[0..len];
         }
 
-        fn currentCanvasCommandByIdIndexed(commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
+        fn currentCanvasCommandByIdIndexed(current_index: *const SummaryIdIndex, commands: []const canvas.CanvasCommand, id: canvas.ObjectId) ?canvas.CommandRef {
             var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-            while (summary_current_id_index.next(&p)) |candidate| {
+            while (current_index.next(&p)) |candidate| {
                 if (commands[candidate].objectId() == id) return .{ .index = candidate, .command = commands[candidate] };
             }
             return null;
         }
 
-        fn presentedCanvasCommandByIdIndexed(presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
+        fn presentedCanvasCommandByIdIndexed(presented_index: *const SummaryIdIndex, presented: []const PresentedCanvasCommand, id: canvas.ObjectId) ?PresentedCanvasCommandRef {
             var p = SummaryIdIndex.probe(canvas.plan_key_index.mixHash(id));
-            while (summary_presented_id_index.next(&p)) |candidate| {
+            while (presented_index.next(&p)) |candidate| {
                 if (presented[candidate].id == id) return .{ .index = candidate, .command = presented[candidate] };
             }
             return null;

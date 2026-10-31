@@ -13,6 +13,8 @@ const app_manifest = @import("app_manifest");
 const core = @import("core.zig");
 const ui_app_model = @import("ui_app.zig");
 const support = @import("test_support.zig");
+const session_record = @import("session_record.zig");
+const session_replay = @import("session_replay.zig");
 
 const canvas_label = "panel-canvas";
 const settings_canvas_label = "settings-canvas";
@@ -20,6 +22,9 @@ const settings_window_label = "settings";
 
 const PanelModel = struct {
     settings_open: bool = false,
+    position_settings: bool = true,
+    center_settings: bool = false,
+    transparent_settings: bool = false,
     bumps: u32 = 0,
     user_closes: u32 = 0,
 };
@@ -59,8 +64,13 @@ fn panelWindows(model: *const PanelModel, scratch: *PanelApp.WindowsScratch) []c
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .x = if (model.position_settings) 84 else null,
+            .y = if (model.position_settings) 126 else null,
+            .restore_policy = if (model.center_settings) .center_on_primary else .clamp_to_visible_screen,
             .min_width = 280,
             .min_height = 200,
+            .titlebar = if (model.transparent_settings) .chromeless else .standard,
+            .transparent = model.transparent_settings,
             .on_close = .settings_closed,
         };
         count += 1;
@@ -94,6 +104,10 @@ const Fixture = struct {
     app: core.App,
 
     fn create() !Fixture {
+        return createWithPolicy(null);
+    }
+
+    fn createWithPolicy(policy: ?*const fn ([]const u8, []u8) usize) !Fixture {
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
         errdefer harness.destroy(std.testing.allocator);
         harness.null_platform.gpu_surfaces = true;
@@ -104,6 +118,7 @@ const Fixture = struct {
             .update = panelUpdate,
             .view = panelView,
             .windows_fn = panelWindows,
+            .window_policy = policy,
             .window_view = panelWindowView,
         });
         const app = app_state.app();
@@ -143,13 +158,17 @@ const Fixture = struct {
 
     /// Deliver the settings window's installing gpu frame.
     fn installSettingsCanvas(self: Fixture, window_id: support.platform.WindowId) !void {
+        try self.dispatchSettingsCanvasFrame(window_id, 1, 2_000_000);
+    }
+
+    fn dispatchSettingsCanvasFrame(self: Fixture, window_id: support.platform.WindowId, frame_index: u64, timestamp_ns: u64) !void {
         try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
             .window_id = window_id,
             .label = settings_canvas_label,
             .size = geometry.SizeF.init(320, 240),
             .scale_factor = 2,
-            .frame_index = 1,
-            .timestamp_ns = 2_000_000,
+            .frame_index = frame_index,
+            .timestamp_ns = timestamp_ns,
             .nonblank = true,
         } });
     }
@@ -160,6 +179,61 @@ fn widgetIdByText(layout: canvas.WidgetLayoutTree, kind: canvas.WidgetKind, text
         if (node.widget.kind == kind and std.mem.eql(u8, node.widget.text, text)) return node.widget.id;
     }
     return null;
+}
+
+fn panelThemeState(model: *const PanelModel) PanelApp.ThemeState {
+    return .{ .color_scheme = switch (model.bumps) {
+        0 => .dark,
+        1 => .light,
+        else => .system,
+    } };
+}
+
+test "window appearance reaches new hidden and reopened secondary windows" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+    fixture.app_state.options.theme_state_fn = panelThemeState;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(1).?);
+    try fixture.clickSettingsButton();
+    var settings = fixture.settingsWindowInfo().?;
+    // Creation gets the theme before its own first GPU frame.
+    try std.testing.expect(!fixture.app_state.window_slots[0].installed);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try fixture.harness.runtime.hideWindow(settings.id);
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.light, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try std.testing.expect(fixture.settingsWindowInfo().?.hidden);
+    try fixture.harness.runtime.showWindow(settings.id);
+    try fixture.installSettingsCanvas(settings.id);
+    const light = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    const tokens = try fixture.harness.runtime.canvasWidgetDesignTokens(settings.id, settings_canvas_label);
+    try std.testing.expectEqualDeep(light.colors.background, tokens.colors.background);
+
+    // Closing and reopening reuses the declaration's label, not its old
+    // native appearance. Returning to system clears both live overrides.
+    try fixture.clickSettingsButton();
+    try fixture.app_state.dispatch(&fixture.harness.runtime, 1, .bump);
+    try fixture.clickSettingsButton();
+    settings = fixture.settingsWindowInfo().?;
+    try std.testing.expectEqual(support.platform.WindowColorScheme.system, fixture.harness.null_platform.windowColorScheme(settings.id).?);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.system, fixture.harness.null_platform.windowColorScheme(1).?);
+    try fixture.installSettingsCanvas(settings.id);
+
+    // A surviving secondary window can still change appearance after the
+    // primary canvas closes. Never call the capability on the dead window.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .window_frame_changed = .{
+        .id = 1,
+        .label = "main",
+        .title = "Panel",
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+        .scale_factor = 2,
+        .open = false,
+        .focused = false,
+    } });
+    fixture.app_state.model.bumps = 0;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(support.platform.WindowColorScheme.dark, fixture.harness.null_platform.windowColorScheme(settings.id).?);
 }
 
 test "a Msg declares the settings window, its canvas installs, and automation drives it by label" {
@@ -184,6 +258,9 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
             if (window.id != info.id) continue;
             try std.testing.expectEqual(@as(f32, 280), null_platform.window_min_width[index]);
             try std.testing.expectEqual(@as(f32, 200), null_platform.window_min_height[index]);
+            try std.testing.expectEqual(support.platform.WindowInitialPlacement.explicit, null_platform.window_placement[index]);
+            try std.testing.expectEqual(@as(f32, 84), window.frame.x);
+            try std.testing.expectEqual(@as(f32, 126), window.frame.y);
             found = true;
         }
         try std.testing.expect(found);
@@ -219,11 +296,112 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
     const closed = fixture.settingsWindowInfo();
     try std.testing.expect(closed == null or !closed.?.open);
 
-    // Reopen under the SAME label: the closed slot released it.
+    // Reopen under the SAME label without an authored origin: the closed slot
+    // released it, and a descriptor with no x/y takes default host placement.
+    fixture.app_state.model.position_settings = false;
     try fixture.clickSettingsButton();
     try std.testing.expect(fixture.app_state.model.settings_open);
     const reopened = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reopened.open);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != reopened.id) continue;
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+    }
+}
+
+test "a windows_fn restore policy reaches fresh WindowOptions" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    fixture.app_state.model.position_settings = false;
+    fixture.app_state.model.center_settings = true;
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != info.id) continue;
+        // Model-declared windows deliberately set restore_state=false. With
+        // no authored origin this remains a fresh/default placement while
+        // preserving the descriptor's policy at WindowOptions.
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+        try std.testing.expectEqual(support.platform.WindowRestorePolicy.center_on_primary, fixture.harness.null_platform.window_restore_policy[index]);
+        return;
+    }
+    return error.WindowNotFound;
+}
+
+test "a transparent descriptor selects premultiplied canvas alpha and an alpha-zero clear" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    fixture.app_state.model.transparent_settings = true;
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+
+    const index = for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, i| {
+        if (window.id == info.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expect(fixture.harness.null_platform.window_transparent[index]);
+    try std.testing.expectEqual(support.platform.WindowTitlebarStyle.chromeless, fixture.harness.null_platform.window_titlebar[index]);
+
+    var views_buffer: [4]support.platform.ViewInfo = undefined;
+    const views = fixture.harness.runtime.listViews(info.id, &views_buffer);
+    try std.testing.expectEqual(@as(usize, 1), views.len);
+    try std.testing.expectEqualStrings(settings_canvas_label, views[0].label);
+    try std.testing.expectEqual(support.platform.GpuSurfaceAlphaMode.premultiplied, views[0].gpu_alpha_mode);
+
+    // A packet present's completion with no invalidation must idle. Real
+    // hosts schedule this event after every successful present; presenting
+    // it again would create a self-sustaining display-rate loop.
+    try fixture.installSettingsCanvas(info.id);
+    const packet_present_count = fixture.harness.null_platform.gpu_surface_packet_present_count;
+    try fixture.dispatchSettingsCanvasFrame(info.id, 2, 3_000_000);
+    try std.testing.expectEqual(packet_present_count, fixture.harness.null_platform.gpu_surface_packet_present_count);
+
+    // Exercise the pixels-only shape used by Windows' layered-window
+    // compositor after the packet-path idle check.
+    fixture.harness.runtime.options.platform.services.present_gpu_surface_packet_fn = null;
+    fixture.harness.runtime.options.platform.services.present_gpu_surface_packet_binary_fn = null;
+    try fixture.dispatchSettingsCanvasFrame(info.id, 3, 4_000_000);
+    try std.testing.expectEqual(info.id, fixture.harness.null_platform.gpu_surface_present_window_id);
+    try std.testing.expectEqual(@as(u8, 0), fixture.harness.null_platform.gpu_surface_present_sample_rgba[3]);
+    try std.testing.expect(std.mem.indexOfScalar(u8, fixture.app_state.pixel_buffer, 255) != null);
+
+    // The current software-buffer owner also idles after its completion.
+    const idle_pixel_present_count = fixture.harness.null_platform.gpu_surface_present_count;
+    try fixture.dispatchSettingsCanvasFrame(info.id, 4, 5_000_000);
+    try std.testing.expectEqual(idle_pixel_present_count, fixture.harness.null_platform.gpu_surface_present_count);
+
+    // Hand the shared UiApp pixel buffer to the main canvas. Invalidating
+    // only that view models a host/resource full repaint without changing
+    // the secondary canvas's retained summary.
+    fixture.harness.runtime.views[0].presented_canvas_valid = false;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 2,
+        .timestamp_ns = 6_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(@as(support.platform.WindowId, 1), fixture.harness.null_platform.gpu_surface_present_window_id);
+
+    // The next transparent-slot completion must repaint once after that
+    // ownership handoff, restoring a complete alpha image instead of
+    // presenting the main surface's bytes.
+    @memset(fixture.app_state.pixel_buffer, 0);
+    const handoff_present_count = fixture.harness.null_platform.gpu_surface_present_count;
+    try fixture.dispatchSettingsCanvasFrame(info.id, 5, 7_000_000);
+    try std.testing.expectEqual(handoff_present_count + 1, fixture.harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqual(info.id, fixture.harness.null_platform.gpu_surface_present_window_id);
+    try std.testing.expect(std.mem.indexOfScalar(u8, fixture.app_state.pixel_buffer, 255) != null);
+
+    // That one corrective present must not re-arm another present when
+    // the following completion carries no invalidation.
+    const corrected_present_count = fixture.harness.null_platform.gpu_surface_present_count;
+    try fixture.dispatchSettingsCanvasFrame(info.id, 6, 8_000_000);
+    try std.testing.expectEqual(corrected_present_count, fixture.harness.null_platform.gpu_surface_present_count);
 }
 
 test "a user close dispatches on_close and the model owns the consequence" {
@@ -402,16 +580,202 @@ test "each window's tokens carry its own surface density, not the main canvas's"
     try std.testing.expectEqual(@as(f32, 1), main_after.pixel_snap.scale);
 }
 
+// ------------------- window-control clearance in secondary windows
+
+const CaptionWinModel = struct {
+    settings_open: bool = true,
+    /// The padded variant appends the contract spacer (the soundboard
+    /// pattern) so its header already clears the caption cluster.
+    padded: bool = false,
+};
+
+const CaptionWinMsg = union(enum) {
+    settings_closed,
+};
+
+const CaptionWinApp = ui_app_model.UiApp(CaptionWinModel, CaptionWinMsg);
+
+fn captionWinUpdate(model: *CaptionWinModel, msg: CaptionWinMsg) void {
+    switch (msg) {
+        .settings_closed => model.settings_open = false,
+    }
+}
+
+fn captionWinView(ui: *CaptionWinApp.Ui, model: *const CaptionWinModel) CaptionWinApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.text(.{}, "main body"),
+    });
+}
+
+fn captionWinWindows(model: *const CaptionWinModel, scratch: *CaptionWinApp.WindowsScratch) []const CaptionWinApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.settings_open) {
+        scratch.windows[count] = .{
+            .label = settings_window_label,
+            .canvas_label = settings_canvas_label,
+            .title = "Tools",
+            .width = 320,
+            .height = 240,
+            .on_close = .settings_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+/// A hidden-inset SECONDARY window's titlebar: a drag row with a
+/// leading title and a right-aligned status text — the same
+/// system-monitor shape the main-canvas caption tests use, but built
+/// through `window_view` and `rebuildWindowSlot`.
+fn captionWinWindowView(ui: *CaptionWinApp.Ui, model: *const CaptionWinModel, window_label: []const u8) CaptionWinApp.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
+    if (model.padded) {
+        return ui.column(.{}, .{
+            ui.row(.{ .window_drag = true, .height = 40 }, .{
+                ui.text(.{}, "Tools"),
+                ui.el(.stack, .{ .grow = 1 }, .{}),
+                ui.text(.{}, "recording"),
+                ui.el(.stack, .{ .width = 138 }, .{}),
+            }),
+            ui.text(.{}, "body"),
+        });
+    }
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 40 }, .{
+            ui.text(.{}, "Tools"),
+            ui.el(.stack, .{ .grow = 1 }, .{}),
+            ui.text(.{}, "recording"),
+        }),
+        ui.text(.{}, "body"),
+    });
+}
+
+const CaptionWinFixture = struct {
+    harness: *core.TestHarness(),
+    app_state: *CaptionWinApp,
+    app: core.App,
+    settings_id: support.platform.WindowId,
+
+    /// Start the app with Windows-shaped hidden-titlebar chrome (the
+    /// DWM caption cluster overlays the trailing 138pt of the 320pt
+    /// secondary window's top band) and install both canvases.
+    fn create(padded: bool) !CaptionWinFixture {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.window_chrome = .{
+            .insets = .{ .top = 32, .right = 138 },
+            .buttons = geometry.RectF.init(182, 0, 138, 32),
+        };
+        const app_state = try CaptionWinApp.create(std.heap.page_allocator, .{
+            .name = "ui-app-caption-window",
+            .scene = panel_scene,
+            .canvas_label = canvas_label,
+            .update = captionWinUpdate,
+            .view = captionWinView,
+            .windows_fn = captionWinWindows,
+            .window_view = captionWinWindowView,
+        });
+        errdefer app_state.destroy();
+        app_state.model.padded = padded;
+        const app = app_state.app();
+        try harness.start(app);
+        // The model declares the settings window from the start, so the
+        // main canvas's installing rebuild creates it.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        var settings_id: support.platform.WindowId = 0;
+        for (harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+        }
+        if (settings_id == 0) return error.TestUnexpectedResult;
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = settings_id,
+            .label = settings_canvas_label,
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 1,
+            .frame_index = 1,
+            .timestamp_ns = 2_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app, .settings_id = settings_id };
+    }
+
+    fn destroy(self: CaptionWinFixture) void {
+        self.app_state.destroy();
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    fn textFrame(self: CaptionWinFixture, window_id: support.platform.WindowId, label: []const u8, text: []const u8) !geometry.RectF {
+        const layout = try self.harness.runtime.canvasWidgetLayout(window_id, label);
+        for (layout.nodes) |node| {
+            if (node.widget.kind == .text and std.mem.eql(u8, node.widget.text, text)) return node.frame;
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+test "a secondary window's drag header content stays clear of the Windows caption cluster" {
+    // The naive shape: the window view never consumed the chrome
+    // channel, so its right-aligned status would lay out flush to the
+    // window edge — UNDER the min/max/close buttons. `rebuildWindowSlot`
+    // must run the same collision scan + one-retry clearance the main
+    // rebuild runs, with the cluster stamped into the SLOT's tokens.
+    const fixture = try CaptionWinFixture.create(false);
+    defer fixture.destroy();
+
+    // The trailing status text ends at (or before) the cluster's
+    // leading edge (182 = 320 - 138); without the reservation it ended
+    // at the window's right edge, inside the cluster.
+    const status = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "recording");
+    try std.testing.expect(status.maxX() <= 182 + 0.01);
+    // The leading title and the body below the band are untouched.
+    const title = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "Tools");
+    try std.testing.expectEqual(@as(f32, 0), title.x);
+
+    // The stamp lived in a LOCAL copy of the slot's tokens: the main
+    // canvas (no drag header, no collision) keeps an unstamped stored
+    // set and its own layout.
+    const main_stored = try fixture.harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expect(main_stored.window_controls == null);
+    const main_body = try fixture.textFrame(1, canvas_label, "main body");
+    try std.testing.expectEqual(@as(f32, 12), main_body.x);
+}
+
+test "a padded secondary drag header keeps its layout (no double reservation)" {
+    // The contract shape: the header's own trailing spacer already
+    // clears the cluster, so nothing collides and the slot retry must
+    // NOT fire — a double reservation would shove the status text a
+    // full cluster-width further left (near 182 - 138 = 44).
+    const fixture = try CaptionWinFixture.create(true);
+    defer fixture.destroy();
+
+    const status = try fixture.textFrame(fixture.settings_id, settings_canvas_label, "recording");
+    try std.testing.expect(@abs(status.maxX() - 182) < 0.5);
+}
+
 // ------------------------------------------------- window-action effects
 
 const VerbModel = struct {
     settings_open: bool = true,
+    close_policy: app_manifest.WindowClosePolicy = .quit,
+    activate_settings: bool = true,
 };
 
 const VerbMsg = union(enum) {
     minimize_settings,
     minimize_main,
     close_settings,
+    show_settings,
+    quit,
     settings_closed,
 };
 
@@ -424,6 +788,8 @@ fn verbUpdate(model: *VerbModel, msg: VerbMsg, fx: *VerbApp.Effects) void {
         // The imperative close, for the seam test — a real app's
         // model-declared window usually closes declaratively instead.
         .close_settings => fx.closeWindow(settings_window_label),
+        .show_settings => fx.showWindow(settings_window_label),
+        .quit => fx.quitApp(),
         .settings_closed => model.settings_open = false,
     }
 }
@@ -442,6 +808,8 @@ fn verbWindows(model: *const VerbModel, scratch: *VerbApp.WindowsScratch) []cons
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .close_policy = model.close_policy,
+            .activate_on_show = model.activate_settings,
             .on_close = .settings_closed,
         };
         count += 1;
@@ -453,6 +821,80 @@ fn verbWindowView(ui: *VerbApp.Ui, model: *const VerbModel, window_label: []cons
     _ = model;
     std.debug.assert(std.mem.eql(u8, window_label, settings_window_label));
     return ui.text(.{}, "settings");
+}
+
+fn showReplayView(ui: *VerbApp.Ui, model: *const VerbModel) VerbApp.Ui.Node {
+    _ = model;
+    return ui.button(.{ .on_press = .show_settings }, "Show");
+}
+
+test "show-window replay preserves immediate focus before the native frame echo" {
+    const Sink = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        fn write(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.bytes.appendSlice(std.testing.allocator, bytes);
+        }
+    };
+    for ([_]bool{ true, false }) |activate| {
+        var sink: Sink = .{};
+        defer sink.bytes.deinit(std.testing.allocator);
+        const recorder = try std.testing.allocator.create(session_record.SessionRecorder);
+        defer std.testing.allocator.destroy(recorder);
+        recorder.* = session_record.SessionRecorder.init(.{ .context = &sink, .write_fn = Sink.write });
+        recorder.begin(.{ .app_name = "show-replay", .platform_name = "null" });
+        var fingerprint: u64 = undefined;
+        for ([_]bool{ false, true }) |replaying| {
+            const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+            defer harness.destroy(std.testing.allocator);
+            harness.null_platform.gpu_surfaces = true;
+            const state = try VerbApp.create(std.heap.page_allocator, .{
+                .name = "show-replay",
+                .scene = panel_scene,
+                .canvas_label = canvas_label,
+                .update_fx = verbUpdate,
+                .view = showReplayView,
+                .windows_fn = verbWindows,
+                .window_view = verbWindowView,
+            });
+            defer state.destroy();
+            state.model.close_policy = .hide;
+            state.model.activate_settings = activate;
+            const app = state.app();
+            if (replaying) {
+                const report = try session_replay.replaySession(&harness.runtime, app, sink.bytes.items, .{ .require_same_platform = false });
+                try std.testing.expect(report.ok());
+                try std.testing.expect(report.checkpoints_verified > 0);
+                try std.testing.expectEqual(fingerprint, harness.runtime.sessionStateFingerprint());
+                // The replay callback restores runtime state only.
+                try std.testing.expectEqual(@as(u32, 0), harness.null_platform.showCountForWindow(2));
+                continue;
+            }
+            harness.runtime.options.session_recorder = recorder;
+            try harness.start(app);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+                .label = canvas_label,
+                .size = geometry.SizeF.init(400, 300),
+                .scale_factor = 1,
+                .frame_index = 1,
+                .timestamp_ns = 1_000_000,
+            } });
+            const hide = harness.null_platform.userCloseWindow(2) orelse return error.TestUnexpectedResult;
+            try harness.runtime.dispatchPlatformEvent(app, hide);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .window_focused = 1 });
+            const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+            const id = widgetIdByText(layout, .button, "Show") orelse return error.TestUnexpectedResult;
+            var text: [96]u8 = undefined;
+            try harness.runtime.dispatchAutomationCommand(app, try std.fmt.bufPrint(&text, "widget-click {s} {d}", .{ canvas_label, id }));
+            // Checkpoint before any delayed host echo: active show drops
+            // the main button's keyboard focus; passive show retains it.
+            try harness.runtime.dispatchPlatformEvent(app, .frame_requested);
+            fingerprint = harness.runtime.sessionStateFingerprint();
+            recorder.finish();
+            try std.testing.expect(!recorder.failed);
+            try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(2));
+        }
+    }
 }
 
 test "window-action effects resolve labels to live windows and drive the real verbs" {
@@ -510,6 +952,14 @@ test "window-action effects resolve labels to live windows and drive the real ve
         if (info.id == settings_id) try std.testing.expect(info.open);
     }
 
+    // Show by label is the counterpart verb: it reaches the platform's
+    // show (the minimized window comes back with focus) and the mirror
+    // counts it.
+    try app_state.dispatch(&harness.runtime, 1, .show_settings);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(settings_id));
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().show_count);
+    try std.testing.expectEqualStrings(settings_window_label, app_state.effects.windowActionState().lastLabel());
+
     // The main window resolves by label too (the runtime adopted the
     // host-reported startup window above). The fake host never created
     // a native window for it — live hosts own the startup window — so
@@ -532,4 +982,888 @@ test "window-action effects resolve labels to live windows and drive the real ve
     // main window still answers after the secondary's churn.
     try app_state.dispatch(&harness.runtime, 1, .minimize_main);
     try std.testing.expectEqual(@as(u32, 3), app_state.effects.windowActionState().minimize_count);
+
+    // quitApp asks the platform for the graceful terminate (the modeled
+    // host records the request; a real host QUEUES the stop so
+    // app_shutdown emits on the next loop turn, after this dispatch
+    // has returned) and the mirror counts it.
+    try app_state.dispatch(&harness.runtime, 1, .quit);
+    try std.testing.expectEqual(@as(u32, 1), app_state.effects.windowActionState().quit_count);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.quit_request_count);
+    // The host's queued shutdown echo delivers the exactly-once stop
+    // hook — the same path a last-window close takes. Draining it here
+    // IS the next loop turn, and it drains exactly once.
+    const shutdown_event = harness.null_platform.takeQueuedQuit() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(harness.null_platform.takeQueuedQuit() == null);
+    try harness.runtime.dispatchPlatformEvent(app, shutdown_event);
+}
+
+test "the .hide close then showWindow round-trip: tray Open brings the hidden window back" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-hide-show-loop",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    app_state.model.close_policy = .hide;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var settings_id: support.platform.WindowId = 0;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, settings_window_label)) settings_id = info.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = settings_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    _ = try harness.runtime.canvasWidgetLayout(settings_id, settings_canvas_label);
+
+    // The model-declared descriptor's policy reached the REAL platform
+    // create seam. Closing as the user hides the window instead of
+    // tearing down its slot, views, or model declaration.
+    try std.testing.expectEqual(support.platform.WindowClosePolicy.hide, harness.null_platform.closePolicyForWindow(settings_id).?);
+    const hide_event = harness.null_platform.userCloseWindow(settings_id).?;
+    try harness.runtime.dispatchPlatformEvent(app, hide_event);
+    try std.testing.expect(app_state.model.settings_open);
+    try std.testing.expectEqual(@as(usize, 1), app_state.window_slot_count);
+    // The canvas tree and view stay installed under the same identity.
+    _ = try harness.runtime.canvasWidgetLayout(settings_id, settings_canvas_label);
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (info.id == settings_id) {
+            try std.testing.expect(info.open);
+            try std.testing.expect(info.hidden);
+        }
+    }
+
+    // The tray "Open" consequence: the model returns the show verb, the
+    // label resolves against the still-open hidden window, and the
+    // platform + runtime state both flip back.
+    try app_state.dispatch(&harness.runtime, 1, .show_settings);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.showCountForWindow(settings_id));
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (info.id == settings_id) try std.testing.expect(!info.hidden);
+    }
+    for (harness.null_platform.windows[0..harness.null_platform.window_count]) |window| {
+        if (window.id == settings_id) {
+            try std.testing.expect(!window.hidden);
+            try std.testing.expect(window.focused);
+        }
+    }
+}
+
+test "a model-declared .hide window is refused on a host that cannot bring it back" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.window_hide_on_close = false;
+    const app_state = try VerbApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-hide-unsupported",
+        .scene = panel_scene,
+        .canvas_label = canvas_label,
+        .update_fx = verbUpdate,
+        .view = verbView,
+        .windows_fn = verbWindows,
+        .window_view = verbWindowView,
+    });
+    defer app_state.destroy();
+    app_state.model.close_policy = .hide;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    // UiApp creation failures degrade to a warning, so the observable
+    // contract is that no unreachable window or retained slot exists.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        try std.testing.expect(!std.mem.eql(u8, info.label, settings_window_label));
+    }
+    try std.testing.expectEqual(@as(usize, 0), app_state.window_slot_count);
+}
+
+// ------------------------------------- close_policy (.quit | .hide)
+
+test "close_policy .hide: the user close hides the window, nothing tears down, and the reopen re-shows it" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A menu-bar-shaped window through the REAL create seam (the same
+    // `ShellWindow` path a manifest-declared window rides): the
+    // declared policy must survive to the platform.
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    try std.testing.expectEqual(support.platform.WindowClosePolicy.hide, fixture.harness.null_platform.closePolicyForWindow(info.id).?);
+
+    // The user clicks the red button: the modeled close delegate hides
+    // instead of closing — the window stays in the host's records
+    // (open = true), only the hidden flag flips, and because open never
+    // transitioned, NO window_closed app event (and so no on_close Msg)
+    // fires.
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try std.testing.expect(hide_event.window_frame_changed.open);
+    try std.testing.expect(hide_event.window_frame_changed.hidden);
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.user_closes);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(window.hidden);
+    }
+
+    // The Dock-icon reopen: every policy-hidden window re-shows and the
+    // hidden flag clears through the same journaled frame channel.
+    var reopen_buffer: [support.platform.max_windows]support.platform.Event = undefined;
+    const reopen_events = fixture.harness.null_platform.userReopenApp(&reopen_buffer);
+    try std.testing.expectEqual(@as(usize, 1), reopen_events.len);
+    try std.testing.expect(!reopen_events[0].window_frame_changed.hidden);
+    for (reopen_events) |event| try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, event);
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(!window.hidden);
+    }
+
+    // A reopen with nothing hidden is honestly empty — the host's
+    // default reopen behavior stays in charge.
+    try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
+}
+
+test "an app-driven close of a policy-hidden window clears hidden with open, and rolls it back on platform failure" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A menu-bar-shaped window through the REAL create seam, hidden by
+    // its .hide close policy (the user clicked the red button).
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(window.hidden);
+    }
+
+    // The platform refuses the close: EVERY optimistically flipped flag
+    // rolls back — the window is still open, still policy-hidden.
+    fixture.harness.null_platform.fail_next_close_window = true;
+    try std.testing.expectError(error.CloseFailed, fixture.harness.runtime.closeWindow(info.id));
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(window.hidden);
+    }
+
+    // The app closes its hidden window for real: a closed window is not
+    // "hidden", it is gone — the runtime table (the JS bridge's window
+    // list) must read {open=false, hidden=false}, never a closed window
+    // still flying the hidden flag.
+    try fixture.harness.runtime.closeWindow(info.id);
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+    try std.testing.expect(found);
+}
+
+test "showWindow activates: the shown window takes key in the runtime table, and a refused show moves nothing" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A policy-hidden window (the user's close under .hide).
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+
+    // The show verb's contract is show AND activate — every host's show
+    // path makes the window key. After a successful platform show, the
+    // runtime table (what listWindows and the JS bridge serve) must
+    // read the shown window focused and every other window unfocused,
+    // not a frontmost window still reported keyless.
+    try fixture.harness.runtime.showWindow(info.id);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id == info.id) {
+            found = true;
+            try std.testing.expect(!window.hidden);
+            try std.testing.expect(window.focused);
+        } else {
+            try std.testing.expect(!window.focused);
+        }
+    }
+    try std.testing.expect(found);
+
+    // Hide again, then refuse the show at the platform: hidden rolls
+    // back and focus does not move — a refused show must never report
+    // a focused window that never came back to the glass.
+    const rehide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, rehide_event);
+    fixture.harness.null_platform.fail_next_show_window = true;
+    try std.testing.expectError(error.ShowFailed, fixture.harness.runtime.showWindow(info.id));
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+}
+
+test "the window verbs refuse a retained closed slot: show, focus, and minimize answer WindowNotFound with no platform call" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A closed window keeps its table slot (the id and label release
+    // lazily, at the next create), so resolving the id is not liveness.
+    // Without the open gate the null platform accepts the verbs and
+    // reports {open:false, focused:true}, and the CEF host — which
+    // retains browser-bearing windows past their close — would visibly
+    // re-order the closed window onto the glass. The runtime gate holds
+    // independent of host timing.
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    try fixture.harness.runtime.closeWindow(info.id);
+
+    // show: the dead-slot answer, and the platform recorder never moves.
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.showWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.showCountForWindow(info.id));
+
+    // focus resolves by id too, and close cleared `hidden` with `open`,
+    // so without its own gate it skips the hidden-routing and reaches
+    // the platform's focus verb directly.
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.focusWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.showCountForWindow(info.id));
+
+    // The minimize twin (the CEF host would genie the retained closed
+    // window into the Dock).
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.minimizeWindow(info.id));
+    try std.testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.minimizeCountForWindow(info.id));
+
+    // Nothing resurrected: the runtime table and the platform mirror
+    // both still read the window closed, unfocused, un-hidden.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.focused);
+        try std.testing.expect(!window.hidden);
+    }
+    try std.testing.expect(found);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.focused);
+    }
+}
+
+test "the modeled host mirrors the app close of a hidden window, and the reopen never resurrects a closed one" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    // A menu-bar-shaped window, policy-hidden by the user's close.
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+
+    // The app closes the hidden window through the runtime. The modeled
+    // host's mirror must read closed AND un-hidden — the same
+    // hidden-clears-with-open rule the real hosts' close paths carry
+    // (set cleanup before the open=false emit) and the runtime table
+    // already pins for its own flags.
+    try fixture.harness.runtime.closeWindow(info.id);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+
+    // The Dock reopen after the close: NO frame event for the closed
+    // window — nothing hidden-and-open remains to re-show.
+    var reopen_buffer: [support.platform.max_windows]support.platform.Event = undefined;
+    try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
+
+    // The reopen's liveness check must hold on its own, not lean on the
+    // close mirror's hidden clear: model a host whose close path forgot
+    // that cleanup by forcing the stale flag onto the closed slot — the
+    // reopen still refuses to resurrect (hidden alone is not liveness).
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |*window| {
+        if (window.id == info.id) window.hidden = true;
+    }
+    try std.testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.userReopenApp(&reopen_buffer).len);
+
+    // No events dispatched, so the runtime table is untouched: the
+    // window stays closed, un-hidden, never re-focused.
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    var found = false;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        found = true;
+        try std.testing.expect(!window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(!window.focused);
+    }
+    try std.testing.expect(found);
+}
+
+test "focus-while-hidden routes through the show verb: hidden clears before the window takes key" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const info = try fixture.harness.runtime.createSourcelessShellWindow(.{
+        .label = "player",
+        .title = "Player",
+        .width = 400,
+        .height = 300,
+        .close_policy = .hide,
+    });
+
+    // The user close hides the window (policy .hide) and the runtime
+    // adopts the hidden state off the journaled frame channel.
+    const hide_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, hide_event);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id == info.id) try std.testing.expect(window.hidden);
+    }
+
+    // Focusing the hidden window must drive the platform's SHOW verb
+    // (the path that clears the hosts' policy-hidden bookkeeping and
+    // emits consistent state), not just its focus verb: the hidden
+    // flag clears, focus lands, and the show count pins the routing —
+    // a focusWindow that skips the show seam leaves this count at 0
+    // and the window reported hidden while standing on the glass.
+    try fixture.harness.runtime.focusWindow(info.id);
+    try std.testing.expectEqual(@as(u32, 1), fixture.harness.null_platform.showCountForWindow(info.id));
+    for (fixture.harness.runtime.listWindows(&buffer)) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(window.open);
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(window.focused);
+    }
+    // The platform mirror agrees on both flags.
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count]) |window| {
+        if (window.id != info.id) continue;
+        try std.testing.expect(!window.hidden);
+        try std.testing.expect(window.focused);
+    }
+
+    // A visible window's focus stays a plain focus: no second show.
+    try fixture.harness.runtime.focusWindow(info.id);
+    try std.testing.expectEqual(@as(u32, 1), fixture.harness.null_platform.showCountForWindow(info.id));
+}
+
+test "close_policy default stays .quit: the user close still tears the window down" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    // No declaration means .quit: the capture proves the default rode
+    // the create seam unchanged.
+    try std.testing.expectEqual(support.platform.WindowClosePolicy.quit, fixture.harness.null_platform.closePolicyForWindow(info.id).?);
+    const close_event = fixture.harness.null_platform.userCloseWindow(info.id).?;
+    try std.testing.expect(!close_event.window_frame_changed.open);
+    try std.testing.expect(!close_event.window_frame_changed.hidden);
+}
+
+test "close_policy .hide is refused loudly at create on hosts without the affordance" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    // Model a GTK-shaped host: no status item, no way to bring a
+    // hidden window back — the feature reports false and window create
+    // refuses the declaration instead of stranding the window.
+    harness.null_platform.window_hide_on_close = false;
+    try std.testing.expectError(error.UnsupportedWindowClosePolicy, harness.runtime.createSourcelessShellWindow(.{
+        .label = "tools",
+        .title = "Tools",
+        .width = 320,
+        .height = 240,
+        .close_policy = .hide,
+    }));
+    // The same shape under .quit (the default) creates fine.
+    const info = try harness.runtime.createSourcelessShellWindow(.{
+        .label = "tools",
+        .title = "Tools",
+        .width = 320,
+        .height = 240,
+    });
+    try std.testing.expect(info.open);
+}
+
+test "close_policy .hide on a secondary startup window is refused loudly at startup load on hosts without the affordance" {
+    const SourceApp = struct {
+        fn app(self: *@This()) support.App {
+            return .{ .context = self, .name = "startup-hide", .source = support.platform.WebViewSource.html("<p>Startup</p>") };
+        }
+    };
+    const startup_windows = [_]support.platform.WindowOptions{
+        .{ .id = 1, .label = "main", .title = "Main" },
+        .{ .id = 2, .label = "panel", .title = "Panel", .close_policy = .hide },
+    };
+
+    // Model a GTK-shaped host: the feature reports false, and the
+    // startup-window load — which creates secondary windows through
+    // the platform services directly, not the runtime's createWindow —
+    // must refuse the secondary window's `.hide` declaration with the
+    // same loud error as the create seam. A silent accept here means
+    // the host ignores the policy and the user's close really closes.
+    {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.window_hide_on_close = false;
+        harness.runtime.options.platform.app_info.windows = &startup_windows;
+        var app_state: SourceApp = .{};
+        try std.testing.expectError(error.UnsupportedWindowClosePolicy, harness.start(app_state.app()));
+    }
+
+    // A host WITH the affordance loads the same declaration: both
+    // startup windows come up.
+    {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.runtime.options.platform.app_info.windows = &startup_windows;
+        var app_state: SourceApp = .{};
+        try harness.start(app_state.app());
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        try std.testing.expectEqual(@as(usize, 2), harness.runtime.listWindows(&buffer).len);
+    }
+}
+
+test "active immediate secondary startup window becomes the runtime focus owner" {
+    const SourceApp = struct {
+        fn app(self: *@This()) support.App {
+            return .{ .context = self, .name = "startup-focus", .source = support.platform.WebViewSource.html("<p>Startup</p>") };
+        }
+    };
+    const startup_windows = [_]support.platform.WindowOptions{
+        .{ .id = 1, .label = "main", .title = "Main" },
+        .{ .id = 2, .label = "panel", .title = "Panel" },
+    };
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.runtime.options.platform.app_info.windows = &startup_windows;
+    var app_state: SourceApp = .{};
+    try harness.start(app_state.app());
+
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    const windows = harness.runtime.listWindows(&buffer);
+    try std.testing.expectEqual(@as(usize, 2), windows.len);
+    try std.testing.expect(!windows[0].focused);
+    try std.testing.expect(windows[1].focused);
+}
+
+// --------------------- context-menu pin across the window lifecycle
+
+const MenuWinModel = struct {
+    a_open: bool = true,
+    b_open: bool = true,
+    generation: u32 = 0,
+    sends: u32 = 0,
+    received_storage: [64]u8 = undefined,
+    received_len: usize = 0,
+    received_ptr: usize = 0,
+};
+
+const MenuWinMsg = union(enum) {
+    bump,
+    close_a,
+    a_closed,
+    b_closed,
+    send: []const u8,
+};
+
+const MenuWinApp = ui_app_model.UiApp(MenuWinModel, MenuWinMsg);
+
+fn menuWinUpdate(model: *MenuWinModel, msg: MenuWinMsg) void {
+    switch (msg) {
+        .bump => model.generation += 1,
+        .close_a, .a_closed => model.a_open = false,
+        .b_closed => model.b_open = false,
+        .send => |bytes| {
+            const len = @min(bytes.len, model.received_storage.len);
+            @memcpy(model.received_storage[0..len], bytes[0..len]);
+            model.received_len = len;
+            model.received_ptr = @intFromPtr(bytes.ptr);
+            model.sends += 1;
+        },
+    }
+}
+
+fn menuWinView(ui: *MenuWinApp.Ui, model: *const MenuWinModel) MenuWinApp.Ui.Node {
+    _ = model;
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.button(.{ .on_press = .bump }, "Rebuild"),
+        ui.button(.{ .on_press = .close_a }, "Close A"),
+    });
+}
+
+fn menuWinWindows(model: *const MenuWinModel, scratch: *MenuWinApp.WindowsScratch) []const MenuWinApp.WindowDescriptor {
+    var count: usize = 0;
+    if (model.a_open) {
+        scratch.windows[count] = .{
+            .label = "win-a",
+            .canvas_label = "canvas-a",
+            .title = "A",
+            .width = 320,
+            .height = 240,
+            .on_close = .a_closed,
+        };
+        count += 1;
+    }
+    if (model.b_open) {
+        scratch.windows[count] = .{
+            .label = "win-b",
+            .canvas_label = "canvas-b",
+            .title = "B",
+            .width = 320,
+            .height = 240,
+            .on_close = .b_closed,
+        };
+        count += 1;
+    }
+    return scratch.windows[0..count];
+}
+
+fn menuWinWindowView(ui: *MenuWinApp.Ui, model: *const MenuWinModel, window_label: []const u8) MenuWinApp.Ui.Node {
+    // The same address-stability slab as the main-canvas arena fixture:
+    // if the pin regresses, the byte assertion fails deterministically
+    // instead of reading whatever the reused chunk happens to hold.
+    const slab = ui.arena.alloc(u8, 64 * 1024) catch @panic("arena slab");
+    @memset(slab, '!');
+    // Window labels share a length, so every window's payload is
+    // same-sized and generation-stamped.
+    const payload = ui.fmt("payload-{s}-{d:0>4}", .{ window_label, model.generation });
+    return ui.column(.{ .gap = 8, .padding = 12 }, .{
+        ui.el(.list_item, .{
+            .text = "Row",
+            .context_menu = &.{
+                .{ .label = "Send", .msg = .{ .send = payload } },
+            },
+        }, .{}),
+    });
+}
+
+const MenuWinFixture = struct {
+    harness: *core.TestHarness(),
+    app_state: *MenuWinApp,
+    app: core.App,
+
+    fn create() !MenuWinFixture {
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        errdefer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const app_state = try MenuWinApp.create(std.testing.allocator, .{
+            .name = "ui-app-menu-windows",
+            .scene = panel_scene,
+            .canvas_label = canvas_label,
+            .update = menuWinUpdate,
+            .view = menuWinView,
+            .windows_fn = menuWinWindows,
+            .window_view = menuWinWindowView,
+        });
+        errdefer app_state.destroy();
+        const app = app_state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        return .{ .harness = harness, .app_state = app_state, .app = app };
+    }
+
+    fn destroy(self: MenuWinFixture) void {
+        self.app_state.destroy();
+        self.harness.destroy(std.testing.allocator);
+    }
+
+    fn windowInfo(self: MenuWinFixture, label: []const u8) ?support.platform.WindowInfo {
+        var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+        for (self.harness.runtime.listWindows(&buffer)) |info| {
+            if (std.mem.eql(u8, info.label, label)) return info;
+        }
+        return null;
+    }
+
+    fn installCanvas(self: MenuWinFixture, window_id: support.platform.WindowId, label: []const u8, timestamp_ns: u64) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
+            .window_id = window_id,
+            .label = label,
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = timestamp_ns,
+            .nonblank = true,
+        } });
+    }
+
+    /// A real secondary-button press on the window's "Row" item — the
+    /// path that presents the row's native menu.
+    fn rightClickRow(self: MenuWinFixture, window_id: support.platform.WindowId, label: []const u8, timestamp_ns: u64) !void {
+        const layout = try self.harness.runtime.canvasWidgetLayout(window_id, label);
+        const id = widgetIdByText(layout, .list_item, "Row") orelse return error.TestUnexpectedResult;
+        var frame: geometry.RectF = .{};
+        for (layout.nodes) |node| {
+            if (node.widget.id == id) frame = node.frame;
+        }
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = window_id,
+            .label = label,
+            .kind = .pointer_down,
+            .button = 1,
+            .x = frame.x + 4,
+            .y = frame.y + 4,
+            .timestamp_ns = timestamp_ns,
+        } });
+    }
+
+    /// Drive a main-canvas button through the real automation click.
+    fn clickMainButton(self: MenuWinFixture, text: []const u8) !void {
+        const layout = try self.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        const id = widgetIdByText(layout, .button, text) orelse return error.TestUnexpectedResult;
+        var buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&buffer, "widget-click {s} {d}", .{ canvas_label, id });
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    fn slotCanvasLabel(self: MenuWinFixture, index: usize) []const u8 {
+        const slot = &self.app_state.window_slots[index];
+        return slot.canvas_label_storage[0..slot.canvas_label_len];
+    }
+};
+
+test "the menu pin follows its window across slot compaction" {
+    const fixture = try MenuWinFixture.create();
+    defer fixture.destroy();
+    try std.testing.expect(fixture.windowInfo("win-a") != null);
+    const b_info = fixture.windowInfo("win-b") orelse return error.TestUnexpectedResult;
+    try fixture.installCanvas(b_info.id, "canvas-b", 2_000_000);
+
+    // Present the menu from window B (slot index 1) and capture the
+    // presented payload's address.
+    try fixture.rightClickRow(b_info.id, "canvas-b", 3_000_000);
+    try std.testing.expectEqual(@as(usize, 1), fixture.harness.null_platform.context_menu_request_count);
+    const token = fixture.harness.null_platform.context_menu_token;
+    const pin = fixture.app_state.context_menu_pin orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(b_info.id, pin.window_id.?);
+    var presented_ptr: usize = 0;
+    for (fixture.app_state.window_slots[0..fixture.app_state.window_slot_count]) |*slot| {
+        if (!std.mem.eql(u8, slot.canvas_label_storage[0..slot.canvas_label_len], "canvas-b")) continue;
+        const layout = try fixture.harness.runtime.canvasWidgetLayout(b_info.id, "canvas-b");
+        const row_id = widgetIdByText(layout, .list_item, "Row") orelse return error.TestUnexpectedResult;
+        const msg = slot.tree.?.msgForContextMenu(row_id, 0) orelse return error.TestUnexpectedResult;
+        presented_ptr = @intFromPtr(msg.send.ptr);
+    }
+    try std.testing.expect(presented_ptr != 0);
+
+    // Close window A: the slot bookkeeping swap-moves B's slot into
+    // A's index while B's menu is still on the glass. The pin is keyed
+    // by window identity, so it moves with the slot.
+    try fixture.clickMainButton("Close A");
+    try std.testing.expect(!fixture.app_state.model.a_open);
+    const closed = fixture.windowInfo("win-a");
+    try std.testing.expect(closed == null or !closed.?.open);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqualStrings("canvas-b", fixture.slotCanvasLabel(0));
+    try std.testing.expect(fixture.app_state.context_menu_pin != null);
+
+    // Rebuild twice under the open menu (the arena-pair race), then
+    // select: the dispatched Msg is the ORIGINAL presented value.
+    try fixture.clickMainButton("Rebuild");
+    try fixture.clickMainButton("Rebuild");
+    try std.testing.expectEqual(@as(u32, 2), fixture.app_state.model.generation);
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .context_menu_action = .{
+        .window_id = b_info.id,
+        .view_label = "canvas-b",
+        .token = token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.sends);
+    try std.testing.expectEqualStrings("payload-win-b-0000", fixture.app_state.model.received_storage[0..fixture.app_state.model.received_len]);
+    try std.testing.expectEqual(presented_ptr, fixture.app_state.model.received_ptr);
+    try std.testing.expect(fixture.app_state.context_menu_pin == null);
+}
+
+test "closing the pin-owning window releases its snapshot and pin" {
+    const fixture = try MenuWinFixture.create();
+    defer fixture.destroy();
+    const a_info = fixture.windowInfo("win-a") orelse return error.TestUnexpectedResult;
+    try fixture.installCanvas(a_info.id, "canvas-a", 2_000_000);
+
+    try fixture.rightClickRow(a_info.id, "canvas-a", 3_000_000);
+    const token = fixture.harness.null_platform.context_menu_token;
+    try std.testing.expect(fixture.app_state.context_menu_pin != null);
+    try std.testing.expect(fixture.app_state.context_menu_shown_token != 0);
+
+    // The model stops declaring window A while its menu is open: the
+    // reconcile close deinits the slot's arenas, so the snapshot and
+    // pin presented from it must release NOW — a stale pin would keep
+    // steering the reused slot's rebuild cadence around a generation
+    // that no longer exists.
+    try fixture.clickMainButton("Close A");
+    try std.testing.expect(!fixture.app_state.model.a_open);
+    const closed = fixture.windowInfo("win-a");
+    try std.testing.expect(closed == null or !closed.?.open);
+    try std.testing.expect(fixture.app_state.context_menu_pin == null);
+    try std.testing.expectEqual(@as(u64, 0), fixture.app_state.context_menu_shown_token);
+
+    // The dead window's selection dispatches nothing.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .context_menu_action = .{
+        .window_id = a_info.id,
+        .view_label = "canvas-a",
+        .token = token,
+        .item_id = 1,
+    } });
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.sends);
+}
+
+// These intentionally choose outcomes independently of the reference key
+// lookup, proving the native consumer applies the policy's decisions.
+const WindowPolicyProbe = struct {
+    var refuse_create = false;
+    var retire_once = false;
+    var has_window = false;
+    var calls: usize = 0;
+
+    fn decide(request: []const u8, output: []u8) usize {
+        calls += 1;
+        output[0] = 0;
+        output[1] = 255;
+        if (request[0] == 0) {
+            if (retire_once and has_window) {
+                output[1] = 0;
+                retire_once = false;
+                has_window = false;
+            }
+        } else if (refuse_create) {
+            output[0] = 2;
+        } else if (has_window) {
+            output[0] = 1;
+            output[1] = 0;
+        } else {
+            has_window = true;
+        }
+        return 2;
+    }
+};
+
+test "window consumer follows policy admission retirement and existing-slot decisions" {
+    WindowPolicyProbe.refuse_create = true;
+    WindowPolicyProbe.retire_once = false;
+    WindowPolicyProbe.has_window = false;
+    WindowPolicyProbe.calls = 0;
+    const fixture = try Fixture.createWithPolicy(WindowPolicyProbe.decide);
+    defer fixture.destroy();
+    try fixture.clickSettingsButton();
+    try std.testing.expect(fixture.app_state.model.settings_open);
+    try std.testing.expect(fixture.settingsWindowInfo() == null);
+    WindowPolicyProbe.refuse_create = false;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    const first = fixture.settingsWindowInfo().?.id;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expectEqual(first, fixture.settingsWindowInfo().?.id);
+    WindowPolicyProbe.retire_once = true;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo().?.id != first);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.user_closes);
+    try std.testing.expect(WindowPolicyProbe.calls >= 9);
+}
+
+test "failed native create leaves the next policy decision's window table empty" {
+    const AdmissionProbe = struct {
+        fn decide(request: []const u8, output: []u8) usize {
+            output[0] = 0;
+            output[1] = 255;
+            if (request[0] == 1) {
+                var at: usize = 1;
+                for (0..3) |_| {
+                    const length = std.mem.readInt(u32, request[at..][0..4], .little);
+                    at += 4 + length;
+                }
+                if (request[at] != 0) {
+                    output[0] = 1;
+                    output[1] = 0;
+                }
+            }
+            return 2;
+        }
+    };
+    const fixture = try Fixture.createWithPolicy(AdmissionProbe.decide);
+    defer fixture.destroy();
+    fixture.app_state.model.settings_open = true;
+    fixture.harness.null_platform.fail_next_create_window = true;
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo() == null);
+    try std.testing.expectEqual(@as(usize, 0), fixture.app_state.window_slot_count);
+    try fixture.app_state.rebuild(&fixture.harness.runtime, 1);
+    try std.testing.expect(fixture.settingsWindowInfo() != null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app_state.window_slot_count);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.user_closes);
 }

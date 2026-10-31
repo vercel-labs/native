@@ -423,6 +423,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
         build_file = try buildgraph.ensureGeneratedBuild(allocator, io, ".", .{
             .app_name = app_name,
             .framework_root = framework_root,
+            .manifest_name = manifest_tool.defaultPath(io) orelse "app.json",
         });
         try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
@@ -526,18 +527,18 @@ pub fn assembleApk(allocator: std.mem.Allocator, io: std.Io, options: ApkOptions
     const javac = try javaSiblingAlloc(allocator, options.java, "javac");
     defer allocator.free(javac);
     try runInherit(io, &.{
-        javac,          "--release", "17",       "-encoding",
-        "UTF-8",        "-cp",       options.toolchain.android_jar, "-d",
-        classes_dir,    activity_path,
+        javac,       "--release",   "17",                          "-encoding",
+        "UTF-8",     "-cp",         options.toolchain.android_jar, "-d",
+        classes_dir, activity_path,
     }, error.ApkAssemblyFailed);
 
     // Classes -> classes.dex at the APK root.
     var dex_argv: std.ArrayList([]const u8) = .empty;
     defer dex_argv.deinit(allocator);
     try dex_argv.appendSlice(allocator, &.{
-        options.java, "-cp",      options.toolchain.d8_jar, "com.android.tools.r8.D8",
-        "--release",  "--lib",    options.toolchain.android_jar,
-        "--min-api",  min_sdk_version, "--output", root_dir,
+        options.java,    "-cp",      options.toolchain.d8_jar,      "com.android.tools.r8.D8",
+        "--release",     "--lib",    options.toolchain.android_jar, "--min-api",
+        min_sdk_version, "--output", root_dir,
     });
     var class_files = try collectFilesAlloc(allocator, io, classes_dir, ".class");
     defer freePathList(allocator, &class_files);
@@ -603,11 +604,9 @@ pub fn assembleApk(allocator: std.mem.Allocator, io: std.Io, options: ApkOptions
 
     try ensureDebugKeystore(allocator, io, options.java, options.keystore_path);
     try runInherit(io, &.{
-        options.java,           "-jar",           options.toolchain.apksigner_jar, "sign",
-        "--ks",                 options.keystore_path,
-        "--ks-pass",            "pass:android",
-        "--ks-key-alias",       "native-sdk-debug",
-        "--out",                options.out_apk,
+        options.java,     "-jar",                options.toolchain.apksigner_jar, "sign",
+        "--ks",           options.keystore_path, "--ks-pass",                     "pass:android",
+        "--ks-key-alias", "native-sdk-debug",    "--out",                         options.out_apk,
         aligned,
     }, error.ApkAssemblyFailed);
 }
@@ -628,11 +627,11 @@ fn ensureDebugKeystore(allocator: std.mem.Allocator, io: std.Io, java: []const u
     defer allocator.free(keytool);
     std.debug.print("native (android): generating the debug signing keystore at {s}\n", .{keystore_path});
     try runInherit(io, &.{
-        keytool,      "-genkeypair", "-keystore", keystore_path,
-        "-storepass", "android",     "-keypass",  "android",
-        "-alias",     "native-sdk-debug",
-        "-keyalg",    "RSA",         "-keysize",  "2048",
-        "-validity",  "10950",       "-dname",    "CN=Native SDK Debug",
+        keytool,      "-genkeypair",         "-keystore", keystore_path,
+        "-storepass", "android",             "-keypass",  "android",
+        "-alias",     "native-sdk-debug",    "-keyalg",   "RSA",
+        "-keysize",   "2048",                "-validity", "10950",
+        "-dname",     "CN=Native SDK Debug",
     }, error.ApkAssemblyFailed);
 }
 
@@ -657,15 +656,15 @@ pub const DevOptions = struct {
 /// directory through an Io the desktop runner supplies, and the embed
 /// host supplies neither — edit + rerun is the loop today.
 pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !void {
-    if (!buildgraph.fileExists(io, "app.zon")) {
+    const manifest_path = manifest_tool.defaultPath(io) orelse {
         std.debug.print(
-            \\no app.zon here — `native dev --target android` runs inside an app directory
+            \\no app.json or app.zon here — `native dev --target android` runs inside an app directory
             \\(or pass one: `native dev path/to/app --target android`). Start one with `native init`.
             \\
         , .{});
         return error.MissingManifest;
-    }
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path);
     const application_id = try applicationIdAlloc(allocator, metadata.id);
     defer allocator.free(application_id);
 
@@ -1154,6 +1153,13 @@ test "the embedded host sources are the toolkit host" {
     try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "nativeAudioEvent") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_audio_service_t") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_app_audio_event") != null);
+    // Tier-4 credentials: non-exportable AndroidKeyStore AES-GCM key,
+    // ciphertext-only private preferences, and the shared embed ABI.
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "nativeSetCredentialService") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "AndroidKeyStore") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_activity_source, "AES/GCM/NoPadding") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_bridge_source, "native_sdk_app_set_credential_service") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_header, "native_sdk_credential_service_t") != null);
 }
 
 test "adb device parsing prefers ready devices and honors requests" {

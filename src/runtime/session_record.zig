@@ -6,6 +6,9 @@
 //! BEFORE the event record — the ordering replay depends on (feed the
 //! stub executor, then dispatch). Nested dispatches (automation commands
 //! inside `frame_requested`) commit innermost-first for the same reason.
+//! One exception: events nested inside a dispatched accessibility
+//! action are suppressed — replaying the action re-derives them, so the
+//! outer record is the whole representation (see `stageEvent`).
 //!
 //! Recording must never take the app down: any failure — a sink write
 //! error, an over-budget event, a journal past its size budget — flips
@@ -22,6 +25,13 @@ const platform = @import("../platform/root.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_effects = @import("effects.zig");
 const journal = @import("session_journal.zig");
+const session_blobs = @import("session_blobs.zig");
+const recording = @import("recording_policy.zig");
+
+/// Keep ordinary query pages self-contained while spilling pages large
+/// enough to dominate the journal. The relational page's own hard ceiling
+/// remains `max_effect_db_page_bytes`.
+pub const max_inline_db_page_bytes: usize = 64 * 1024;
 
 pub const Header = journal.Header;
 
@@ -34,6 +44,15 @@ pub const RecorderSink = struct {
 
 pub const SessionRecorder = struct {
     sink: RecorderSink,
+    /// Compiled coordination is independent of replay callbacks. Bind before begin.
+    recording_policy: recording.Policy = null,
+    /// Where large effect payloads go out of line (`blobs/` beside the
+    /// journal, content-addressed — see session_blobs.zig). Bound by
+    /// the owner alongside the sink; null means no blob storage, and
+    /// the first effect result that NEEDS one (an image load's source
+    /// bytes) fails the recording loudly rather than journaling a
+    /// record replay could never resolve.
+    blob_sink: ?session_blobs.SessionBlobSink = null,
     began: bool = false,
     finished: bool = false,
     failed: bool = false,
@@ -42,12 +61,28 @@ pub const SessionRecorder = struct {
     effect_count: u64 = 0,
     checkpoint_count: u64 = 0,
     screenshot_count: u64 = 0,
+    window_chrome_count: u64 = 0,
+    window_chrome_source: journal.WindowChromeSource = .native_queries,
+    /// Per-session salt for credential replay-placeholder digests. The digest
+    /// is deliberately independent of the secret, so a shareable journal is
+    /// not an offline guessing oracle. Successful secret bytes are never
+    /// written to either the journal or its blob store.
+    credentials_salt: [16]u8 = @splat(0),
     /// Frame index of the last recorded checkpoint, so exactly one
     /// checkpoint follows each published frame.
     last_checkpoint_frame: u64 = 0,
     depth: usize = 0,
+    /// Staging-stack depth of the accessibility or widget-menu action
+    /// currently being dispatched, if any. While set, nested
+    /// stage/commit pairs are suppressed: the outer action record is the
+    /// journal's WHOLE representation of the interaction (see
+    /// `stageEvent`).
+    suppress_owner_depth: ?usize = null,
     staged_lens: [journal.max_session_event_depth]usize = [_]usize{0} ** journal.max_session_event_depth,
+    staged_suppressed: [journal.max_session_event_depth]bool = [_]bool{false} ** journal.max_session_event_depth,
     staged: [journal.max_session_event_depth][journal.max_session_event_bytes]u8 = undefined,
+    staged_chrome_counts: [journal.max_session_event_depth]usize = @splat(0),
+    staged_chrome: [journal.max_session_event_depth][journal.max_session_window_chrome_queries]journal.WindowChromeRecord = undefined,
     /// Encode scratch for effect payloads (up to a whole file read).
     effect_buffer: [journal.max_session_record_bytes]u8 = undefined,
     small_buffer: [1024]u8 = undefined,
@@ -59,11 +94,29 @@ pub const SessionRecorder = struct {
     /// Write the preamble and session header. Must run before the first
     /// dispatched event.
     pub fn begin(self: *SessionRecorder, header: Header) void {
-        if (self.began or self.failed) return;
+        if (self.recordingPlan(.begin, .{})) |decision| {
+            if (decision.action == .skip) return;
+            std.debug.assert(decision.action == .proceed);
+        } else if (self.began or self.failed) return;
         self.began = true;
+        self.window_chrome_source = header.window_chrome_source;
+        // SessionRecorder deliberately has no ambient-I/O handle. Derive a
+        // per-session salt from the already-journaled header identity and
+        // timestamp. The resulting placeholder digest is metadata only and
+        // never hashes credential bytes.
+        var salt_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        salt_hasher.update(header.platform_name);
+        salt_hasher.update(header.app_name);
+        var salt_scalars: [16]u8 = undefined;
+        std.mem.writeInt(u64, salt_scalars[0..8], header.protocol_fingerprint, .little);
+        std.mem.writeInt(i64, salt_scalars[8..16], header.recorded_at_wall_ms, .little);
+        salt_hasher.update(&salt_scalars);
+        var salt_digest: [32]u8 = undefined;
+        salt_hasher.final(&salt_digest);
+        @memcpy(&self.credentials_salt, salt_digest[0..self.credentials_salt.len]);
         var preamble_buffer: [journal.preamble_len]u8 = undefined;
-        self.write(journal.writePreamble(&preamble_buffer));
-        const payload = journal.encodeHeader(header, &self.small_buffer) catch {
+        self.write(journal.writePreambleWithPolicy(self.recording_policy, &preamble_buffer));
+        const payload = journal.encodeHeaderWithPolicy(self.recording_policy, header, &self.small_buffer) catch {
             return self.fail("session header does not fit its record budget");
         };
         self.writeRecord(.header, payload);
@@ -72,45 +125,158 @@ pub const SessionRecorder = struct {
     /// Serialize `event` into the staging stack. Effect results drained
     /// during its dispatch write directly to the stream; `commitEvent`
     /// then appends the event record after them.
+    ///
+    /// Accessibility actions journal OUTER-WINS: a dispatched
+    /// `widget_accessibility_action` synthesizes real platform events
+    /// (a press dispatches its Enter key, set_text a select-all plus a
+    /// text input, composition its ime inputs) through the same choke
+    /// point, so recording both the action and its children would make
+    /// replay dispatch the children twice — once from their own records,
+    /// then again when replaying the action re-runs the verb. The outer
+    /// record wins because the children are deterministic derivations of
+    /// the action against runtime state replay has already rebuilt, and
+    /// because it keeps the ASSISTIVE semantics visible in the journal
+    /// ("press on widget 12", not an anonymous key event). While the
+    /// action sits on the staging stack, nested stage/commit pairs are
+    /// therefore suppressed — staged as placeholders so commit pairing
+    /// stays balanced, never written, never counted (`event_count` must
+    /// keep matching the records a replay reader will actually see;
+    /// checkpoints fire only at depth 0, so no ordinal can land inside
+    /// the suppressed window). Effect results are NOT suppressed: they
+    /// write directly to the stream and still precede the action record,
+    /// exactly the feed-then-dispatch order replay depends on. BOTH
+    /// Declared widget-menu invocations likewise own their synthetic
+    /// selection: replay reconstructs the pending request and its token
+    /// before dispatching the selection, with chrome facts owned here.
+    /// Both accessibility entry surfaces stage the action record: the platform AX event
+    /// path stages it at the dispatch choke point, and the direct verb
+    /// surfaces (an embed host's `widgetAction`, automation
+    /// `widget_action` commands) stage a synthetic one inside
+    /// `dispatchCanvasWidgetAccessibilityAction` — without it, their
+    /// journaled children were untargeted inputs routed by focus while
+    /// the verb's focus write stayed unjournaled, so a fresh replay
+    /// delivered them against the wrong editor. A second accessibility
+    /// action staged while one is already on the stack (the direct
+    /// dispatch reached through a staged platform AX event) is just a
+    /// suppressed placeholder: the outermost action owns the window and
+    /// the journal keeps exactly one record.
     pub fn stageEvent(self: *SessionRecorder, event: platform.Event) void {
+        if (self.recordingPlan(.stage, .{ .category = @intFromBool(event == .widget_accessibility_action or event == .widget_context_menu_action) })) |decision| {
+            switch (decision.action) {
+                .skip => return,
+                .depth_budget => return self.fail("dispatch nesting exceeded max_session_event_depth - this is a runtime bug, not a session shape"),
+                .suppressed => {
+                    self.staged_suppressed[self.depth] = true;
+                    self.staged_lens[self.depth] = 0;
+                },
+                .proceed => {
+                    const encoded = journal.encodeEventWithPolicy(self.recording_policy, event, &self.staged[self.depth]) catch
+                        return self.fail("a platform event exceeded max_session_event_bytes");
+                    self.staged_lens[self.depth] = encoded.len;
+                    self.staged_suppressed[self.depth] = false;
+                    self.staged_chrome_counts[self.depth] = 0;
+                },
+                else => @panic("invalid compiled event staging action"),
+            }
+            self.depth = decision.depth;
+            self.suppress_owner_depth = decision.owner;
+            return;
+        }
         if (!self.began or self.failed or self.finished) return;
         if (self.depth >= journal.max_session_event_depth) {
             return self.fail("dispatch nesting exceeded max_session_event_depth - this is a runtime bug, not a session shape");
         }
-        const encoded = journal.encodeEvent(event, &self.staged[self.depth]) catch {
+        if (self.suppress_owner_depth != null) {
+            self.staged_suppressed[self.depth] = true;
+            self.staged_lens[self.depth] = 0;
+            self.depth += 1;
+            return;
+        }
+        const encoded = journal.encodeEventWithPolicy(self.recording_policy, event, &self.staged[self.depth]) catch {
             return self.fail("a platform event exceeded max_session_event_bytes");
         };
         self.staged_lens[self.depth] = encoded.len;
+        self.staged_suppressed[self.depth] = false;
+        self.staged_chrome_counts[self.depth] = 0;
+        if (event == .widget_accessibility_action or event == .widget_context_menu_action) self.suppress_owner_depth = self.depth;
         self.depth += 1;
     }
 
     /// Append the innermost staged event record. Call exactly once per
     /// successful `stageEvent`, on dispatch exit.
     pub fn commitEvent(self: *SessionRecorder) void {
-        if (!self.began or self.failed or self.finished) return;
-        if (self.depth == 0) return;
-        self.depth -= 1;
+        if (self.recordingPlan(.commit, .{})) |decision| {
+            if (decision.action == .skip) return;
+            self.depth = decision.depth;
+            self.suppress_owner_depth = decision.owner;
+            if (decision.action == .suppressed) return;
+            if (decision.action != .proceed) @panic("invalid compiled event commit action");
+        } else {
+            if (!self.began or self.failed or self.finished) return;
+            if (self.depth == 0) return;
+            self.depth -= 1;
+            if (self.staged_suppressed[self.depth]) return;
+            if (self.suppress_owner_depth) |owner_depth| {
+                if (owner_depth == self.depth) self.suppress_owner_depth = null;
+            }
+        }
+        // Facts belong to the event that queried them. A nested event
+        // commits its own facts first; suppressed accessibility children
+        // contribute to their outer action in the original query order.
+        for (self.staged_chrome[self.depth][0..self.staged_chrome_counts[self.depth]]) |record| {
+            const payload = journal.encodeWindowChromeWithPolicy(self.recording_policy, record, &self.small_buffer) catch return self.fail("window chrome record over budget");
+            self.writeRecord(.window_chrome, payload);
+            self.window_chrome_count = self.nextCount(self.window_chrome_count);
+        }
         self.writeRecord(.event, self.staged[self.depth][0..self.staged_lens[self.depth]]);
-        if (!self.failed) self.event_count += 1;
+        self.event_count = self.nextCount(self.event_count);
+    }
+
+    /// Stage the complete OS result beside its consuming event, rather
+    /// than publishing it ahead of an unrelated nested dispatch.
+    pub fn recordWindowChrome(self: *SessionRecorder, record: journal.WindowChromeRecord) void {
+        if (self.recordingPlan(.chrome, .{})) |decision| {
+            switch (decision.action) {
+                .skip => return,
+                .unavailable_chrome => return self.fail("a chrome-less session queried native window chrome"),
+                .unowned_chrome => return self.fail("window chrome queried outside a recorded event"),
+                .chrome_budget => return self.fail("window chrome queries exceeded their per-event budget"),
+                .proceed => {},
+                else => @panic("invalid compiled chrome staging action"),
+            }
+            self.staged_chrome[decision.depth][self.staged_chrome_counts[decision.depth]] = record;
+            self.staged_chrome_counts[decision.depth] = decision.chrome_count;
+            return;
+        }
+        if (!self.began or self.failed or self.finished) return;
+        if (self.window_chrome_source == .unavailable) return self.fail("a chrome-less session queried native window chrome");
+        if (self.depth == 0) return self.fail("window chrome queried outside a recorded event");
+        const owner = self.suppress_owner_depth orelse (self.depth - 1);
+        const count = self.staged_chrome_counts[owner];
+        if (count == journal.max_session_window_chrome_queries) return self.fail("window chrome queries exceeded their per-event budget");
+        self.staged_chrome[owner][count] = record;
+        self.staged_chrome_counts[owner] = count + 1;
     }
 
     /// True when dispatch just returned to the top level and the frame
     /// index moved — the once-per-published-frame checkpoint gate.
     pub fn wantsCheckpoint(self: *const SessionRecorder, frame_index: u64) bool {
+        if (self.recordingPlan(.checkpoint_gate, .{ .a = frame_index, .b = self.last_checkpoint_frame })) |decision|
+            return decision.action == .proceed;
         return self.began and !self.failed and !self.finished and
             self.depth == 0 and frame_index != self.last_checkpoint_frame;
     }
 
     pub fn recordCheckpoint(self: *SessionRecorder, frame_index: u64, fingerprint: u64) void {
-        if (!self.began or self.failed or self.finished) return;
+        if (!self.active(.checkpoint)) return;
         self.last_checkpoint_frame = frame_index;
-        const payload = journal.encodeCheckpoint(.{
+        const payload = journal.encodeCheckpointWithPolicy(self.recording_policy, .{
             .event_ordinal = self.event_count,
             .frame_index = frame_index,
             .fingerprint = fingerprint,
         }, &self.small_buffer) catch return self.fail("checkpoint record over budget");
         self.writeRecord(.checkpoint, payload);
-        if (!self.failed) self.checkpoint_count += 1;
+        self.checkpoint_count = self.nextCount(self.checkpoint_count);
     }
 
     /// Mark the session with a pixel checkpoint (an automation
@@ -118,8 +284,8 @@ pub const SessionRecorder = struct {
     /// at the same scale through the deterministic reference renderer
     /// and compares hashes.
     pub fn recordScreenshot(self: *SessionRecorder, view_label: []const u8, scale: f32, png_hash: u64, png_len: u64) void {
-        if (!self.began or self.failed or self.finished) return;
-        const payload = journal.encodeScreenshot(.{
+        if (!self.active(.screenshot)) return;
+        const payload = journal.encodeScreenshotWithPolicy(self.recording_policy, .{
             .event_ordinal = self.event_count,
             .view_label = view_label,
             .scale = scale,
@@ -127,18 +293,105 @@ pub const SessionRecorder = struct {
             .png_len = png_len,
         }, &self.small_buffer) catch return self.fail("screenshot record over budget");
         self.writeRecord(.screenshot, payload);
-        if (!self.failed) self.screenshot_count += 1;
+        self.screenshot_count = self.nextCount(self.screenshot_count);
     }
 
     /// Record one drained effect result (the `Effects.bindJournal`
-    /// callback target).
+    /// callback target). Image results carry their ENCODED source
+    /// bytes in `payload`; those move into the content-addressed blob
+    /// store at this moment — effect-result time — and the journal
+    /// record keeps only the address and length, so records stay small
+    /// and identical payloads share one blob.
     pub fn recordEffect(self: *SessionRecorder, record: runtime_effects.EffectResultRecord) void {
-        if (!self.began or self.failed or self.finished) return;
-        const payload = journal.encodeEffect(record, &self.effect_buffer) catch {
+        const decision = self.recordingPlan(.effect, .{ .category = @intFromEnum(record.kind), .file_chunk = record.file_event == .chunk, .credential_get = record.credentials_operation == .get, .credential_ok = record.credentials_outcome == .ok, .b = record.payload.len, .limit_a = max_inline_db_page_bytes });
+        if (decision) |value| {
+            if (value.action == .skip) return;
+            if (value.action != .proceed) @panic("invalid compiled effect recording action");
+        } else if (!self.began or self.failed or self.finished) return;
+        var journaled = record;
+        if (if (decision) |value| value.treatment == .redact or value.treatment == .placeholder else record.kind == .credentials) {
+            // Error bytes duplicate the closed outcome and successful get
+            // bytes are secrets. Neither belongs in a shareable artifact.
+            journaled.payload = "";
+            if (if (decision) |value| value.treatment == .placeholder else record.credentials_operation == .get and record.credentials_outcome == .ok) {
+                var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+                hasher.update(&self.credentials_salt);
+                var ordinal: [8]u8 = undefined;
+                std.mem.writeInt(u64, ordinal[0..], self.effect_count, .little);
+                hasher.update(&ordinal);
+                hasher.update(@tagName(record.credentials_operation));
+                hasher.final(&journaled.credentials_digest);
+                journaled.credentials_salt = self.credentials_salt;
+                journaled.credentials_secret_len = record.payload.len;
+            }
+        }
+        if (if (decision) |value| value.treatment == .file else record.kind == .file and record.file_event == .chunk and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a streamed file chunk needs the session blob store, and none is bound - wire SessionRecorder.blob_sink");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| return self.fail(@errorName(err));
+            journaled.file_blob_hash = hash;
+            journaled.file_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        if (if (decision) |value| value.treatment == .image else record.kind == .image and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("an image effect result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.image_blob_hash = hash;
+            journaled.image_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        // Pty output batches take the same road: bytes into the
+        // content-addressed store, address into the record — stream
+        // payloads stay out of the journal and identical batches
+        // (prompts, repeated screens) share one blob.
+        if (if (decision) |value| value.treatment == .pty else record.kind == .pty and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a pty output result needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.pty_blob_hash = hash;
+            journaled.pty_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        if (if (decision) |value| value.treatment == .persist else record.kind == .persist and record.payload.len > 0) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a model restore needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.persist_blob_hash = hash;
+            journaled.persist_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        if (if (decision) |value| value.treatment == .db else record.kind == .db and record.payload.len > max_inline_db_page_bytes) {
+            const blob_sink = self.blob_sink orelse {
+                return self.fail("a large relational page needs the session blob store, and none is bound - wire SessionRecorder.blob_sink (the app runner creates blobs/ beside the journal)");
+            };
+            const hash = session_blobs.hashBytes(record.payload);
+            blob_sink.write_fn(blob_sink.context, hash, record.payload) catch |err| {
+                return self.fail(@errorName(err));
+            };
+            journaled.db_blob_hash = hash;
+            journaled.db_blob_len = record.payload.len;
+            journaled.payload = "";
+        }
+        const payload = journal.encodeEffectWithPolicy(self.recording_policy, journaled, &self.effect_buffer) catch {
             return self.fail("an effect result exceeded max_session_record_bytes");
         };
         self.writeRecord(.effect, payload);
-        if (!self.failed) self.effect_count += 1;
+        self.effect_count = self.nextCount(self.effect_count);
     }
 
     /// The type-erased binding `Effects.bindJournal` takes.
@@ -155,45 +408,94 @@ pub const SessionRecorder = struct {
     /// seals nothing: without the end record, replay refuses the file
     /// as truncated rather than silently replaying a prefix.
     pub fn finish(self: *SessionRecorder) void {
-        if (!self.began or self.failed or self.finished) return;
+        if (!self.active(.finish)) return;
         self.finished = true;
-        const payload = journal.encodeEnd(.{
+        const payload = journal.encodeEndWithPolicy(self.recording_policy, .{
             .event_count = self.event_count,
             .effect_count = self.effect_count,
             .checkpoint_count = self.checkpoint_count,
             .screenshot_count = self.screenshot_count,
+            .window_chrome_count = self.window_chrome_count,
         }, &self.small_buffer) catch return self.fail("end record over budget");
         self.writeRecord(.end, payload);
     }
 
     fn writeRecord(self: *SessionRecorder, kind: journal.RecordKind, payload: []const u8) void {
-        if (self.failed) return;
-        if (payload.len > journal.max_session_record_bytes) {
-            return self.fail("a record exceeded max_session_record_bytes");
+        var total: u64 = undefined;
+        if (self.recordingPlan(.record, .{ .a = self.bytes_written, .b = payload.len, .limit_a = journal.max_session_record_bytes, .limit_b = journal.max_session_journal_bytes })) |decision| {
+            switch (decision.action) {
+                .skip => return,
+                .record_budget => return self.fail("a record exceeded max_session_record_bytes"),
+                .journal_budget => return self.fail("the journal exceeded max_session_journal_bytes - recording stopped"),
+                .proceed => total = decision.value,
+                else => @panic("invalid compiled record write action"),
+            }
+        } else {
+            if (self.failed) return;
+            if (payload.len > journal.max_session_record_bytes) return self.fail("a record exceeded max_session_record_bytes");
+            total = self.bytes_written + 5 + payload.len;
+            if (total > journal.max_session_journal_bytes) return self.fail("the journal exceeded max_session_journal_bytes - recording stopped");
         }
-        const total = self.bytes_written + 5 + payload.len;
-        if (total > journal.max_session_journal_bytes) {
-            return self.fail("the journal exceeded max_session_journal_bytes - recording stopped");
-        }
-        var record_header: [5]u8 = undefined;
-        record_header[0] = @intFromEnum(kind);
-        std.mem.writeInt(u32, record_header[1..5], @intCast(payload.len), .little);
+        const record_header = journal.frameHeader(self.recording_policy, kind, payload.len, 5 + payload.len) catch @panic("admitted journal frame exceeded its budget");
         self.write(&record_header);
         self.write(payload);
-        if (!self.failed) self.bytes_written = total;
+        if (self.writable()) self.bytes_written = total;
     }
 
     fn write(self: *SessionRecorder, bytes: []const u8) void {
-        if (self.failed) return;
+        if (!self.writable()) return;
         self.sink.write_fn(self.sink.context, bytes) catch |err| {
             self.fail(@errorName(err));
         };
     }
 
+    fn recordingPlan(self: *const SessionRecorder, stage: recording.Stage, extra: recording.Facts) ?recording.Plan {
+        if (self.recording_policy == null) return null;
+        var facts = extra;
+        facts.began = self.began;
+        facts.finished = self.finished;
+        facts.failed = self.failed;
+        facts.depth = self.depth;
+        facts.owner = self.suppress_owner_depth;
+        facts.suppressed = self.depth > 0 and self.staged_suppressed[self.depth - 1];
+        facts.chrome_unavailable = self.window_chrome_source == .unavailable;
+        if (self.depth > 0) facts.chrome_count = self.staged_chrome_counts[self.suppress_owner_depth orelse (self.depth - 1)];
+        return recording.plan(self.recording_policy, stage, facts);
+    }
+
+    fn writable(self: *const SessionRecorder) bool {
+        if (self.recordingPlan(.write, .{})) |decision| return decision.action == .proceed;
+        return !self.failed;
+    }
+
+    fn active(self: *const SessionRecorder, stage: recording.Stage) bool {
+        if (self.recordingPlan(stage, .{})) |decision| return decision.action == .proceed;
+        return self.began and !self.failed and !self.finished;
+    }
+
+    fn nextCount(self: *const SessionRecorder, count: u64) u64 {
+        if (self.recordingPlan(.count, .{ .a = count })) |decision| {
+            if (decision.action == .skip) return count;
+            if (decision.action != .proceed) @panic("invalid compiled recording count action");
+            return decision.value;
+        }
+        return if (self.failed) count else count + 1;
+    }
+
+    /// Stop recording because the session can no longer replay
+    /// faithfully (for example, its view changed mid-session). Same
+    /// loud, once-only failure as an internal recording failure.
+    pub fn abandon(self: *SessionRecorder, reason: []const u8) void {
+        self.fail(reason);
+    }
+
     /// Flip into the failed state, loudly, once. Recording failures
     /// degrade — the app keeps running; only the journal dies.
     fn fail(self: *SessionRecorder, reason: []const u8) void {
-        if (self.failed) return;
+        if (self.recordingPlan(.fail, .{})) |decision| {
+            if (decision.action == .skip) return;
+            if (decision.action != .proceed) @panic("invalid compiled recording failure action");
+        } else if (self.failed) return;
         self.failed = true;
         // No stderr on freestanding targets (the docs' wasm preview
         // host): analyzing the print would drag `std.Io.Threaded` in.
@@ -274,6 +576,147 @@ test "recorder orders effect results before their consuming event" {
     try testing.expectEqual(@as(u64, 1), end.end.effect_count);
 }
 
+test "recorder moves model restore snapshots into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    recorder.begin(.{ .platform_name = "test", .app_name = "persisted" });
+    recorder.recordEffect(.{ .kind = .persist, .key = 0, .payload = "canonical model", .persist_outcome = .ok });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectResultKind.persist, effect.kind);
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, "canonical model".len), effect.persist_blob_len);
+    var scratch: [64]u8 = undefined;
+    const restored = try blobs.read(effect.persist_blob_hash, &scratch);
+    try testing.expectEqualStrings("canonical model", restored);
+}
+
+test "recorder moves streamed file chunks into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+    recorder.begin(.{ .platform_name = "test", .app_name = "file-stream" });
+    recorder.recordEffect(.{
+        .kind = .file,
+        .key = 91,
+        .payload = "streamed bytes",
+        .file_op = .read_stream,
+        .file_event = .chunk,
+        .file_outcome = .ok,
+        .file_total = 14,
+    });
+    recorder.finish();
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, 14), effect.file_blob_len);
+    var scratch: [32]u8 = undefined;
+    try testing.expectEqualStrings("streamed bytes", try blobs.read(effect.file_blob_hash, &scratch));
+}
+
+test "recorder redacts credential bytes from journal and blob storage" {
+    const secret = "storage-tier-four-live-token";
+    const set_secret = "storage-tier-four-set-token";
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    recorder.begin(.{
+        .platform_name = "test",
+        .app_name = "credentials",
+        .recorded_at_wall_ms = 1_723_000_000_000,
+    });
+    recorder.recordEffect(.{
+        .kind = .credentials,
+        .key = 44,
+        .payload = secret,
+        .credentials_operation = .get,
+        .credentials_outcome = .ok,
+    });
+    // Set requests are not journaled at all, but keep the result encoder
+    // defensive: if a caller ever supplies request bytes here, credential
+    // records elide them for every operation, not only successful gets.
+    recorder.recordEffect(.{
+        .kind = .credentials,
+        .key = 45,
+        .payload = set_secret,
+        .credentials_operation = .set,
+        .credentials_outcome = .ok,
+    });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    try testing.expect(std.mem.indexOf(u8, buffer_sink.bytes(), secret) == null);
+    try testing.expect(std.mem.indexOf(u8, buffer_sink.bytes(), set_secret) == null);
+    try testing.expectEqual(@as(usize, 0), blobs.count);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectResultKind.credentials, effect.kind);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOperation.get, effect.credentials_operation);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOutcome.ok, effect.credentials_outcome);
+    try testing.expectEqual(@as(u64, secret.len), effect.credentials_secret_len);
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expect(!std.mem.allEqual(u8, &effect.credentials_salt, 0));
+    try testing.expect(!std.mem.allEqual(u8, &effect.credentials_digest, 0));
+    const set_effect = (try reader.next()).?.effect;
+    try testing.expectEqual(runtime_effects.EffectCredentialsOperation.set, set_effect.credentials_operation);
+    try testing.expectEqual(@as(usize, 0), set_effect.payload.len);
+    try testing.expectEqual(@as(u64, 0), set_effect.credentials_secret_len);
+}
+
+test "recorder spills large relational pages into the session blob store" {
+    var buffer_sink = BufferSink{};
+    var blobs = session_blobs.MemoryBlobStore.init(testing.allocator);
+    defer blobs.deinit();
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.blob_sink = blobs.sink();
+
+    const page = try testing.allocator.alloc(u8, max_inline_db_page_bytes + 1);
+    defer testing.allocator.free(page);
+    @memset(page, 0x5a);
+    recorder.begin(.{ .platform_name = "test", .app_name = "relational" });
+    recorder.recordEffect(.{
+        .kind = .db,
+        .key = 73,
+        .payload = page,
+        .code = runtime_effects.dbJournalCode(.page, .ok),
+    });
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?;
+    const effect = (try reader.next()).?.effect;
+    try testing.expectEqual(@as(usize, 0), effect.payload.len);
+    try testing.expectEqual(@as(u64, page.len), effect.db_blob_len);
+    const scratch = try testing.allocator.alloc(u8, page.len);
+    defer testing.allocator.free(scratch);
+    const restored = try blobs.read(effect.db_blob_hash, scratch);
+    try testing.expectEqualSlices(u8, page, restored);
+}
+
 test "recorder commits nested events innermost-first" {
     var buffer_sink = BufferSink{};
     const recorder = try testing.allocator.create(SessionRecorder);
@@ -292,6 +735,118 @@ test "recorder commits nested events innermost-first" {
     try testing.expectEqualStrings("app.about", inner.event.menu_command.name);
     const outer = (try reader.next()).?;
     try testing.expect(outer.event == .frame_requested);
+}
+
+test "accessibility actions suppress their synthesized children in the journal" {
+    var buffer_sink = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "demo" });
+
+    // An AX press dispatches its synthesized Enter key through the same
+    // choke point: the nested event must not land — replaying the action
+    // re-derives it — but an effect result drained during the dispatch
+    // still writes through, ahead of the action record.
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .press,
+    } });
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "enter",
+    } });
+    recorder.recordEffect(.{ .kind = .line, .key = 3, .payload = "drained" });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    // Suppression ends with the action: a later top-level input records.
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    recorder.commitEvent();
+    recorder.recordCheckpoint(1, 0xbeef);
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?; // header
+    const effect = (try reader.next()).?;
+    try testing.expectEqualStrings("drained", effect.effect.payload);
+    const action = (try reader.next()).?;
+    try testing.expectEqual(platform.WidgetAccessibilityActionKind.press, action.event.widget_accessibility_action.action);
+    const key = (try reader.next()).?;
+    try testing.expectEqualStrings("tab", key.event.gpu_surface_input.key);
+    // The checkpoint ordinal and end counts see only the two surviving
+    // events — coherent with what a replay reader will process.
+    const checkpoint = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), checkpoint.checkpoint.event_ordinal);
+    const end = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), end.end.event_count);
+    try testing.expectEqual(@as(u64, 1), end.end.effect_count);
+}
+
+test "a nested accessibility action stays a suppressed placeholder" {
+    var buffer_sink = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer_sink.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "demo" });
+
+    // The platform AX event path stages tag 23 at the dispatch choke
+    // point, then `dispatchCanvasWidgetAccessibilityAction` stages its
+    // synthetic copy of the same action: the inner stage must ride the
+    // suppression window as a placeholder (one journal record, the
+    // outer one), and suppression must survive the inner commit so the
+    // verb's children staged AFTER it stay suppressed too.
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .set_text,
+        .text = "outer",
+    } });
+    recorder.stageEvent(.{ .widget_accessibility_action = .{
+        .window_id = 1,
+        .label = "canvas",
+        .id = 7,
+        .action = .set_text,
+        .text = "synthetic",
+    } });
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .text_input,
+        .text = "outer",
+    } });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.commitEvent();
+    // The window closed with the outer action: a later input records.
+    recorder.stageEvent(.{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = "tab",
+    } });
+    recorder.commitEvent();
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+
+    var reader = try journal.Reader.init(buffer_sink.bytes());
+    _ = (try reader.next()).?; // header
+    const action = (try reader.next()).?;
+    try testing.expectEqualStrings("outer", action.event.widget_accessibility_action.text);
+    const key = (try reader.next()).?;
+    try testing.expectEqualStrings("tab", key.event.gpu_surface_input.key);
+    const end = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), end.end.event_count);
 }
 
 test "recorder fails loudly once and seals nothing after a sink error" {
@@ -329,4 +884,57 @@ test "checkpoint gate fires once per frame index" {
     recorder.recordCheckpoint(1, 5);
     try testing.expect(!recorder.wantsCheckpoint(1));
     try testing.expect(recorder.wantsCheckpoint(2));
+}
+
+test "recorder binds chrome facts to nested events and outer accessibility actions" {
+    var buffer = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.stageEvent(.frame_requested);
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{ .insets = .{ .left = 98 } } });
+    recorder.stageEvent(.wake);
+    recorder.recordWindowChrome(.{ .window_id = 2, .chrome = .{ .tabs_projected = true } });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.stageEvent(.{ .widget_accessibility_action = .{ .window_id = 1, .label = "canvas", .id = 1, .action = .press } });
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.stageEvent(.wake);
+    recorder.recordWindowChrome(.{ .window_id = 2, .chrome = .{} });
+    recorder.commitEvent();
+    recorder.commitEvent();
+    recorder.finish();
+    try testing.expect(!recorder.failed);
+    var reader = try journal.Reader.init(buffer.bytes());
+    _ = (try reader.next()).?;
+    try testing.expectEqual(@as(u64, 2), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .wake);
+    try testing.expectEqual(@as(u64, 1), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .frame_requested);
+    try testing.expectEqual(@as(u64, 1), (try reader.next()).?.window_chrome.window_id);
+    try testing.expectEqual(@as(u64, 2), (try reader.next()).?.window_chrome.window_id);
+    try testing.expect((try reader.next()).?.event == .widget_accessibility_action);
+    const end = (try reader.next()).?.end;
+    try testing.expectEqual(@as(u64, 3), end.event_count);
+    try testing.expectEqual(@as(u64, 4), end.window_chrome_count);
+}
+
+test "recorder refuses unowned and over-budget chrome facts without sealing" {
+    var buffer = BufferSink{};
+    const recorder = try testing.allocator.create(SessionRecorder);
+    defer testing.allocator.destroy(recorder);
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    try testing.expect(recorder.failed);
+    try testing.expect(!recorder.finished);
+    buffer.len = 0;
+    recorder.* = SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome" });
+    recorder.stageEvent(.wake);
+    for (0..journal.max_session_window_chrome_queries + 1) |_| recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.finish();
+    try testing.expect(recorder.failed);
+    try testing.expect(!recorder.finished);
 }

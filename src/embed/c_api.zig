@@ -4,7 +4,8 @@
 //! for a host type: the fixed WebView shell (`MobileHostApp`, this module's
 //! re-exported default) or a user-app canvas host
 //! (`ui_host.UiAppHost(AppDef)` in libs built via `addMobileLib`). A host
-//! must expose `create`/`destroy`/`start`/`frame`, an `embedded`
+//! must expose `create`/`destroy`/`start`/`frame` (`destroy` reports whether
+//! callback context must survive), an `embedded`
 //! `EmbeddedApp`, and the error/command/asset bookkeeping fields both
 //! hosts share. `exportMobileCApi(Host)` exports every function under its
 //! canonical symbol name for a static library root.
@@ -57,7 +58,16 @@ pub fn MobileCApi(comptime Host: type) type {
 
         pub fn native_sdk_app_destroy(app: ?*anyopaque) callconv(.c) void {
             const self = hostApp(Host, app) orelse return;
-            self.destroy();
+            _ = self.destroy();
+        }
+
+        /// Destroy the app and report whether teardown had to preserve the
+        /// host because a detached platform callback may still be running.
+        /// A mobile shim that owns the callback context must preserve that
+        /// context too when this returns 1.
+        pub fn native_sdk_app_destroy_with_status(app: ?*anyopaque) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            return if (self.destroy()) 1 else 0;
         }
 
         pub fn native_sdk_app_start(app: ?*anyopaque) callconv(.c) void {
@@ -195,6 +205,20 @@ pub fn MobileCApi(comptime Host: type) type {
             return 1;
         }
 
+        /// Register or clear the mobile host's OS-backed credential store.
+        /// This supplies platform backing only; app.zon capability and
+        /// permission gates are still enforced by the runtime.
+        pub fn native_sdk_app_set_credential_service(app: ?*anyopaque, service: ?*const types.MobileCredentialService, context: ?*anyopaque) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const table: types.MobileCredentialService = if (service) |value| value.* else .{};
+            host.setCredentialService(self, table, context) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            self.last_error = null;
+            return 1;
+        }
+
         /// One report from the shim's audio player (kind ordinals: 0
         /// loaded, 1 position, 2 completed, 3 failed), dispatched into the
         /// embedded runtime exactly like a desktop platform's `.audio`
@@ -238,6 +262,25 @@ pub fn MobileCApi(comptime Host: type) type {
                 recordError(self, err);
                 return 0;
             };
+            self.last_error = null;
+            return 1;
+        }
+
+        /// Supply the OS-owned app-data directory before start. Hosts call
+        /// this for every app; non-store host types accept it as a no-op so
+        /// the mobile ABI does not vary with capability shedding.
+        pub fn native_sdk_app_set_data_root(app: ?*anyopaque, path: ?[*]const u8, len: usize) callconv(.c) c_int {
+            const self = hostApp(Host, app) orelse return 0;
+            const dir = inputSlice(path, len) catch |err| {
+                recordError(self, err);
+                return 0;
+            };
+            if (comptime @hasDecl(Host, "setDataRoot")) {
+                self.setDataRoot(dir) catch |err| {
+                    recordError(self, err);
+                    return 0;
+                };
+            }
             self.last_error = null;
             return 1;
         }
@@ -748,6 +791,7 @@ const FixedShellApi = MobileCApi(MobileHostApp);
 
 pub const native_sdk_app_create = FixedShellApi.native_sdk_app_create;
 pub const native_sdk_app_destroy = FixedShellApi.native_sdk_app_destroy;
+pub const native_sdk_app_destroy_with_status = FixedShellApi.native_sdk_app_destroy_with_status;
 pub const native_sdk_app_start = FixedShellApi.native_sdk_app_start;
 pub const native_sdk_app_activate = FixedShellApi.native_sdk_app_activate;
 pub const native_sdk_app_deactivate = FixedShellApi.native_sdk_app_deactivate;
@@ -759,9 +803,11 @@ pub const native_sdk_app_gpu_frame_state = FixedShellApi.native_sdk_app_gpu_fram
 pub const native_sdk_app_text_input_state = FixedShellApi.native_sdk_app_text_input_state;
 pub const native_sdk_app_set_text_measure = FixedShellApi.native_sdk_app_set_text_measure;
 pub const native_sdk_app_set_audio_service = FixedShellApi.native_sdk_app_set_audio_service;
+pub const native_sdk_app_set_credential_service = FixedShellApi.native_sdk_app_set_credential_service;
 pub const native_sdk_app_audio_event = FixedShellApi.native_sdk_app_audio_event;
 pub const native_sdk_app_set_image_service = FixedShellApi.native_sdk_app_set_image_service;
 pub const native_sdk_app_set_automation_dir = FixedShellApi.native_sdk_app_set_automation_dir;
+pub const native_sdk_app_set_data_root = FixedShellApi.native_sdk_app_set_data_root;
 pub const native_sdk_app_touch = FixedShellApi.native_sdk_app_touch;
 pub const native_sdk_app_scroll = FixedShellApi.native_sdk_app_scroll;
 pub const native_sdk_app_key = FixedShellApi.native_sdk_app_key;

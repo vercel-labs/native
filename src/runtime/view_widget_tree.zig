@@ -1,3 +1,5 @@
+const retention = @import("widget_retention_policy.zig");
+const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const validation = @import("validation.zig");
@@ -22,10 +24,10 @@ const canvasWidgetInteractionTargetExists = canvas_widget_runtime.canvasWidgetIn
 const canvasWidgetLayoutNodeClippedBounds = canvas_widget_runtime.canvasWidgetLayoutNodeClippedBounds;
 const canvasWidgetDismissibleSurfaceKind = canvas_widget_runtime.canvasWidgetDismissibleSurfaceKind;
 const canvasWidgetEditableTextKind = canvas_widget_runtime.canvasWidgetEditableTextKind;
-const collectCanvasWidgetControlReconcileEntries = canvas_widget_runtime.collectCanvasWidgetControlReconcileEntries;
-const collectCanvasWidgetScrollReconcileEntries = canvas_widget_runtime.collectCanvasWidgetScrollReconcileEntries;
+const collectCanvasWidgetControlReconcileEntries = canvas_widget_runtime.collectCanvasWidgetControlReconcileEntriesWithPolicy;
+const collectCanvasWidgetScrollReconcileEntries = canvas_widget_runtime.collectCanvasWidgetScrollReconcileEntriesWithPolicy;
 const canvasWidgetScrollStateForLayoutNode = canvas_widget_runtime.canvasWidgetScrollStateForLayoutNode;
-const collectCanvasWidgetTextReconcileEntries = canvas_widget_runtime.collectCanvasWidgetTextReconcileEntries;
+const collectCanvasWidgetTextReconcileEntries = canvas_widget_runtime.collectCanvasWidgetTextReconcileEntriesWithPolicy;
 const canvasWidgetSourceTextFingerprint = canvas_widget_runtime.canvasWidgetSourceTextFingerprint;
 const canvasWidgetLayoutNodeWithControlReconcileState = canvas_widget_runtime.canvasWidgetLayoutNodeWithControlReconcileState;
 const canvasWidgetLayoutNodeWithTextReconcileState = canvas_widget_runtime.canvasWidgetLayoutNodeWithTextReconcileState;
@@ -57,6 +59,7 @@ fn subsliceOffset(outer: []const u8, inner: []const u8) ?usize {
 fn validateWidgetLayoutPoolBudgets(
     layout: canvas.WidgetLayoutTree,
     previous_texts: *const canvas_widget_runtime.CanvasWidgetTextEntryIndex,
+    plan: ?*const canvas_widget_runtime.reconcile_policy.Plan,
 ) anyerror!void {
     var text_len: usize = 0;
     var span_len: usize = 0;
@@ -67,7 +70,7 @@ fn validateWidgetLayoutPoolBudgets(
     for (layout.nodes, 0..) |node, node_index| {
         // The copy loop charges the RECONCILED node (runtime editor text
         // can outgrow the source's) — mirror the same transform.
-        const widget = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, node_index, previous_texts).widget;
+        const widget = (if (plan) |actions| canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedText(node, actions.entries[node_index], previous_texts) else canvasWidgetLayoutNodeWithTextReconcileState(node, layout, node_index, previous_texts)).widget;
         text_len += widget.text.len + widget.icon.len + widget.command.len + widget.semantics.label.len;
         span_len += widget.spans.len;
         for (widget.spans) |span| {
@@ -95,7 +98,19 @@ fn validateWidgetLayoutPoolBudgets(
 pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
     return struct {
         pub fn widgetLayoutTree(self: *const RuntimeView) canvas.WidgetLayoutTree {
-            return .{ .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count] };
+            return .{
+                .nodes = self.widget_layout_nodes[0..self.widget_layout_node_count],
+                .root_bounds = self.widget_layout_root_bounds,
+                .semantic_policy = self.widget_tokens.intrinsic_layout_policy,
+                .audit_policy = self.widget_tokens.widget_audit_policy,
+                .routing_policy = self.widget_tokens.widget_routing_policy,
+                .change_policy = self.widget_tokens.widget_change_policy,
+                .retention_policy = self.widget_tokens.widget_retention_policy,
+                .text_run_policy = self.widget_tokens.text_run_policy,
+                .paint_policy = self.widget_tokens.widget_paint_policy,
+                .presentation_policy = self.widget_tokens.widget_presentation_policy,
+                .paint_walk_policy = self.widget_tokens.widget_paint_walk_policy,
+            };
         }
 
         pub fn widgetSemantics(self: *const RuntimeView) []const canvas.WidgetSemanticsNode {
@@ -111,7 +126,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasWidgetSourceScroll(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
-            const entries = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntries(
+            const entries = canvas_widget_runtime.collectCanvasWidgetScrollOffsetEntriesWithPolicy(
+                layout.retention_policy orelse self.widget_tokens.widget_retention_policy,
                 layout.nodes,
                 &self.widget_source_scroll_entries,
             );
@@ -124,6 +140,13 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// previous rebuild — newly mounted editors and freshly flipped
         /// flags focus, level-held flags never re-steal.
         pub fn canvasWidgetAutofocusTarget(self: *RuntimeView, layout: canvas.WidgetLayoutTree) ?canvas.ObjectId {
+            var previous: [canvas_limits.max_canvas_widget_autofocus_per_view]struct { id: canvas.ObjectId } = undefined;
+            for (self.widget_autofocus_ids[0..self.widget_autofocus_count], 0..) |id, i| previous[i] = .{ .id = id };
+            if (retention.collect(layout.retention_policy orelse self.widget_tokens.widget_retention_policy, .autofocus, layout.nodes, previous[0..self.widget_autofocus_count], self.widget_autofocus_ids.len, 0)) |plan| {
+                for (plan.entries[0..plan.count], 0..) |entry, i| self.widget_autofocus_ids[i] = layout.nodes[entry.node].widget.id;
+                self.widget_autofocus_count = plan.count;
+                return if (plan.target) |index| layout.nodes[index].widget.id else null;
+            }
             var target: ?canvas.ObjectId = null;
             var new_ids: [canvas_limits.max_canvas_widget_autofocus_per_view]canvas.ObjectId = undefined;
             var new_count: usize = 0;
@@ -154,7 +177,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasWidgetSourceControls(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
-            const entries = canvas_widget_runtime.collectCanvasWidgetSourceControlEntries(
+            const entries = canvas_widget_runtime.collectCanvasWidgetSourceControlEntriesWithPolicy(
+                layout.retention_policy orelse self.widget_tokens.widget_retention_policy,
                 layout.nodes,
                 &self.widget_source_control_entries,
             );
@@ -162,6 +186,15 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn copyCanvasWidgetSourceText(self: *RuntimeView, layout: canvas.WidgetLayoutTree) anyerror!void {
+            if (retention.collect(layout.retention_policy orelse self.widget_tokens.widget_retention_policy, .source_text, layout.nodes, @as([]const CanvasWidgetSourceTextEntry, &.{}), self.widget_source_text_entries.len, 0)) |plan| {
+                for (plan.entries[0..plan.count], 0..) |entry, i| {
+                    const widget = layout.nodes[entry.node].widget;
+                    const fingerprint = canvasWidgetSourceTextFingerprint(widget.text);
+                    self.widget_source_text_entries[i] = .{ .id = widget.id, .kind = widget.kind, .text_len = fingerprint.len, .text_hash = fingerprint.hash, .text_selection = widget.text_selection };
+                }
+                self.widget_source_text_count = plan.count;
+                return;
+            }
             var entries: [max_canvas_widget_source_text_entries_per_view]CanvasWidgetSourceTextEntry = undefined;
             var entry_count: usize = 0;
 
@@ -174,6 +207,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     .kind = node.widget.kind,
                     .text_len = source_text.len,
                     .text_hash = source_text.hash,
+                    .text_selection = node.widget.text_selection,
                 };
                 entry_count += 1;
             }
@@ -193,12 +227,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             if (anchored_count > canvas_limits.max_canvas_widget_anchored_per_view) return error.WidgetAnchoredSurfaceLimitReached;
             if (layout.nodes.len > 0 and layout.nodes.ptr == self.widget_layout_nodes[0..].ptr) {
+                self.widget_tokens.text_run_policy = layout.text_run_policy orelse self.widget_tokens.text_run_policy;
+                self.widget_layout_root_bounds = layout.root_bounds;
                 self.widget_revision += 1;
+                self.canvas_widget_layout_adoptions +%= 1;
                 return;
             }
 
             const source_semantics = try layout.collectSemantics(&scratch.source_semantics);
             const previous_control_states = collectCanvasWidgetControlReconcileEntries(
+                self.widget_tokens.widget_retention_policy,
                 self.widgetLayoutTree().nodes,
                 &scratch.control_entries,
             );
@@ -212,12 +250,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 }
             }
             const previous_scroll_states = collectCanvasWidgetScrollReconcileEntries(
+                self.widget_tokens.widget_retention_policy,
                 self.widgetLayoutTree().nodes,
                 self.widget_scroll_states[0..self.widget_layout_node_count],
                 &scratch.scroll_entries,
             );
             var previous_text_len: usize = 0;
             const previous_text_states = try collectCanvasWidgetTextReconcileEntries(
+                self.widget_tokens.widget_retention_policy,
                 self.widgetLayoutTree().nodes,
                 self.widgetSourceTextEntries(),
                 &scratch.text_entries,
@@ -226,10 +266,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             );
 
             // Per-pass probe-table indices over the collected entry lists
-            // (shared threadlocal scratch; see the reconcile-id-index note
+            // (shared per-thread scratch; see the reconcile-id-index note
             // in canvas_widget_runtime.zig). Lookups return exactly what
             // the linear scans returned; only the search cost changes.
-            const index_scratch = &canvas_widget_runtime.canvas_widget_reconcile_index_scratch;
+            const index_scratch = canvas_widget_runtime.canvas_widget_reconcile_index_scratch.get();
             index_scratch.controls.build(previous_control_states);
             index_scratch.source_controls.build(self.widgetSourceControlEntries());
             index_scratch.texts.build(previous_text_states);
@@ -245,7 +285,9 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // errors as the copy path, which stays as the structural
             // backstop; the display-list side already follows this
             // pattern (`copyCanvasDisplayList` counts before it copies).
-            try validateWidgetLayoutPoolBudgets(layout, &index_scratch.texts);
+            const reconcile_plan = canvas_widget_runtime.canvasWidgetReconcilePlan(self.widget_tokens.widget_reconcile_policy, layout, &index_scratch.controls, &index_scratch.source_controls, &index_scratch.texts);
+            const continuity_plan = canvas_widget_runtime.continuity_policy.layout(self.widget_tokens.widget_continuity_policy, layout.nodes, previous_scroll_states, &index_scratch.semantics);
+            try validateWidgetLayoutPoolBudgets(layout, &index_scratch.texts, if (reconcile_plan) |*plan| plan else null);
 
             // Keyboard-focus return for unmounting anchored surfaces:
             // when the focus sits INSIDE an anchored menu that this
@@ -256,19 +298,39 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             var focus_return_id: canvas.ObjectId = 0;
             if (self.canvas_widget_focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(self.canvas_widget_focused_id)) |focused_index| {
-                    var current: ?usize = self.widget_layout_nodes[focused_index].parent_index;
-                    while (current) |ancestor_index| {
-                        const ancestor = self.widget_layout_nodes[ancestor_index].widget;
-                        if (canvas.widgetIsAnchored(ancestor) and canvasWidgetDismissibleSurfaceKind(ancestor.kind)) {
-                            focus_return_id = self.canvasWidgetAnchorTriggerFocusId(ancestor_index) orelse 0;
-                            break;
+                    if (self.canvas_widget_focus_return_policy) |policy| {
+                        focus_return_id = compiledCanvasWidgetFocusReturn(self, policy, focused_index, true) orelse 0;
+                    } else {
+                        var current: ?usize = self.widget_layout_nodes[focused_index].parent_index;
+                        while (current) |ancestor_index| {
+                            const ancestor = self.widget_layout_nodes[ancestor_index].widget;
+                            if (canvas.widgetIsAnchored(ancestor) and canvasWidgetDismissibleSurfaceKind(ancestor.kind)) {
+                                focus_return_id = self.canvasWidgetAnchorTriggerFocusId(ancestor_index) orelse 0;
+                                break;
+                            }
+                            current = self.widget_layout_nodes[ancestor_index].parent_index;
                         }
-                        current = self.widget_layout_nodes[ancestor_index].parent_index;
                     }
                 }
             }
 
+            // ADOPTION begins here: the pool resets below are
+            // destructive, and a later per-node failure (an invalid
+            // command name escapes the pre-validation) leaves a TORN
+            // retained tree — so the witness the ui-app hover currency
+            // samples must move at this boundary, not at the
+            // function's successful return. Everything above —
+            // node/anchored/pool-budget validation — rejects with the
+            // previous tree fully applied and the witness unmoved. A
+            // torn copy also prunes hover containment against whatever
+            // partial tree it retained, so the owed leaves dispatch at
+            // the failure's own drain instead of waiting for the next
+            // pointer move.
+            self.canvas_widget_layout_adoptions +%= 1;
+            self.widget_tokens.text_run_policy = layout.text_run_policy orelse self.widget_tokens.text_run_policy;
+            errdefer self.pruneCanvasWidgetHoverMsgChain();
             self.widget_layout_node_count = 0;
+            self.widget_layout_root_bounds = layout.root_bounds;
             self.widget_semantics_node_count = 0;
             self.widget_text_len = 0;
             self.widget_span_len = 0;
@@ -278,43 +340,73 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             self.widget_chart_x_labels_len = 0;
 
             for (layout.nodes, 0..) |node, layout_index| {
-                const text_reconciled = canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, &index_scratch.texts);
-                const text_copy = try self.copyWidgetLayoutNode(text_reconciled, &index_scratch.semantics);
-                const copy = canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, &index_scratch.controls, &index_scratch.source_controls);
+                const text_reconciled = if (reconcile_plan) |*plan| canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedText(node, plan.entries[layout_index], &index_scratch.texts) else canvasWidgetLayoutNodeWithTextReconcileState(node, layout, layout_index, &index_scratch.texts);
+                const text_copy = try copyWidgetLayoutNodeWithContinuity(self, text_reconciled, &index_scratch.semantics, if (continuity_plan) |plan| plan.actions[layout_index] else null);
+                const copy = if (reconcile_plan) |*plan| canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedControl(text_copy, plan.entries[layout_index]) else canvasWidgetLayoutNodeWithControlReconcileState(text_copy, layout, layout_index, &index_scratch.controls, &index_scratch.source_controls);
                 self.widget_layout_nodes[self.widget_layout_node_count] = copy;
-                self.widget_scroll_states[self.widget_layout_node_count] = canvasWidgetScrollStateForLayoutNode(copy, previous_scroll_states);
+                self.widget_scroll_states[self.widget_layout_node_count] = canvas_widget_runtime.canvasWidgetScrollStateWithPlan(copy, previous_scroll_states, if (continuity_plan) |plan| plan.actions[layout_index] else null);
                 self.widget_layout_node_count += 1;
             }
 
-            clampCanvasWidgetLayoutScrollOffsets(
+            try clampCanvasWidgetLayoutScrollOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 self.widget_scroll_states[0..self.widget_layout_node_count],
+                self.widget_layout_root_bounds,
+                self.widget_tokens,
             );
             clampCanvasWidgetLayoutTextOffsets(
                 self.widget_layout_nodes[0..self.widget_layout_node_count],
                 self.widget_tokens,
             );
 
+            // Anchored-tooltip hover intent survives the rebuild the way
+            // hover/press ids do: drop state whose tooltip unmounted,
+            // then re-stamp runtime-owned visibility BEFORE semantics
+            // collect, so the a11y snapshot (and the replay fingerprint
+            // riding it) always reflects the intent machine.
+            self.pruneCanvasTooltipIntent();
+            self.applyCanvasTooltipVisibility();
+
             const semantics = try self.widgetLayoutTree().collectSemantics(&self.widget_semantics_nodes);
-            applyCanvasWidgetSourceScrollSemantics(self.widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);
+            canvas_widget_runtime.applyCanvasWidgetSourceScrollSemanticsWithPolicy(self.widget_tokens.widget_continuity_policy, self.widget_semantics_nodes[0..semantics.len], &index_scratch.semantics);
             self.widget_semantics_node_count = semantics.len;
             if (self.canvas_widget_focused_id != 0 and self.widgetLayoutTree().focusTargetById(self.canvas_widget_focused_id) == null) {
                 const return_id = if (focus_return_id != 0 and self.widgetLayoutTree().focusTargetById(focus_return_id) != null) focus_return_id else 0;
                 self.canvas_widget_focused_id = return_id;
                 self.canvas_widget_focus_visible_id = return_id;
+                // The focus-return ring is not a keyboard ARRIVAL:
+                // reveals fire only on focus-visible transitions (the
+                // dismissal seam's rule), so the returned ring never
+                // grants adoption-time tooltip reveals either.
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or self.widgetLayoutTree().focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_hovered_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_hovered_id)) {
                 self.canvas_widget_hovered_id = 0;
             }
+            // Hover-Msg entries whose widgets this rebuild unmounted owe
+            // their leave edge; survivors keep standing (the adoption
+            // reconcile re-hit-tests the stored pointer position right
+            // after, wherever one exists).
+            self.pruneCanvasWidgetHoverMsgChain();
             // The hover point belongs to the hovered widget's detail
             // chrome; without a hovered widget it means nothing.
             if (self.canvas_widget_hovered_id == 0) self.canvas_widget_hover_point = null;
             if (self.canvas_widget_pressed_id != 0 and !canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_pressed_id)) {
                 self.canvas_widget_pressed_id = 0;
             }
+            // Keep live drag capture across a source unmount/disable/hide.
+            // Its preview naturally disappears because the fresh layout has
+            // no paintable source, while the next motion or terminal pointer
+            // edge resolves through the retained route snapshot and emits the
+            // cancel owed to consumers that already received `.change`.
+            if (self.canvas_widget_drag_source_id != 0) {
+                self.canvas_widget_drag_source_attached = canvasWidgetInteractionTargetExists(self.widgetLayoutTree(), self.canvas_widget_drag_source_id);
+            }
+            self.pruneCanvasWidgetTextHistory();
             self.canvas_widget_cursor = self.canvasWidgetCursorForId(self.canvas_widget_hovered_id);
             self.widget_revision += 1;
         }
@@ -335,6 +427,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         pub fn canvasWidgetRenderState(self: *const RuntimeView) canvas.WidgetRenderState {
             const focused_id: ?canvas.ObjectId = if (!self.focused or self.canvas_widget_focused_id == 0) null else self.canvas_widget_focused_id;
             return .{
+                .keyboard_active = self.keyboard_active,
                 .focused_id = focused_id,
                 .focus_visible_id = if (focused_id) |id| if (self.canvas_widget_focus_visible_id == id) id else null else null,
                 .hovered_id = if (self.canvas_widget_hovered_id == 0) null else self.canvas_widget_hovered_id,
@@ -343,6 +436,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // the press fall-through so a click anywhere in a
                 // composite row lights the row, matching the hover walk.
                 .pressed_id = if (self.canvas_widget_pressed_id == 0) null else canvasWidgetPressWashTargetId(self, self.canvas_widget_pressed_id),
+                .drag_preview_id = if (self.canvas_widget_drag_source_id == 0 or !self.canvas_widget_drag_source_attached) null else self.canvas_widget_drag_source_id,
+                .drag_preview_origin = if (self.canvas_widget_drag_source_id == 0 or !self.canvas_widget_drag_source_attached) null else self.canvas_widget_drag_source_origin,
+                .drag_preview_offset = self.canvas_widget_drag_delta,
+                .layout_motions = self.canvas_widget_drag_layout_motions[0..self.canvas_widget_drag_layout_motion_count],
                 .hover_point = if (self.canvas_widget_hovered_id == 0) null else self.canvas_widget_hover_point,
                 // Closing disclosure widgets keep painting their content
                 // (clipped to the shrinking frame) only while the
@@ -362,14 +459,45 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return layout.nodes[target_index].widget.id;
         }
 
+        /// Recompute the standing hover-Msg chain from a raw hit — the
+        /// pointer and scroll seams call this with the SAME raw hit the
+        /// wash resolution consumed, so containment and the wash always
+        /// agree on where the pointer stands.
+        pub fn setCanvasWidgetHoverMsgChainForHit(self: *RuntimeView, hit: ?canvas.WidgetHit) void {
+            const chain = self.widgetLayoutTree().hoverMsgChainForHit(hit, &self.canvas_widget_hover_msg_chain);
+            self.canvas_widget_hover_msg_chain_len = chain.len;
+        }
+
+        /// Point-blind prune of the standing hover-Msg chain: drop
+        /// entries whose widgets left the tree (their leave edge is
+        /// due), keep the rest — the wash's exact rebuild rule (an id
+        /// survives a rebuild until a re-hit-test says otherwise).
+        pub fn pruneCanvasWidgetHoverMsgChain(self: *RuntimeView) void {
+            const layout = self.widgetLayoutTree();
+            var kept: usize = 0;
+            for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len]) |id| {
+                // Survival is the HOVER predicate, not the interactive
+                // one: a hover-only listener must not be evicted (a
+                // false leave), and a widget whose hover bindings this
+                // rebuild removed must stop standing (its leave is
+                // owed) even though it still exists interactively.
+                if (!canvas_widget_runtime.canvasWidgetHoverMsgTargetExists(layout, id)) continue;
+                self.canvas_widget_hover_msg_chain[kept] = id;
+                kept += 1;
+            }
+            self.canvas_widget_hover_msg_chain_len = kept;
+        }
+
         pub fn reconcileCanvasWidgetRenderStateAfterScroll(self: *RuntimeView, point: ?geometry.PointF) void {
             const layout = self.widgetLayoutTree();
             if (self.canvas_widget_focused_id != 0 and layout.focusTargetById(self.canvas_widget_focused_id) == null) {
                 self.canvas_widget_focused_id = 0;
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
             if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or layout.focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
                 self.canvas_widget_focus_visible_id = 0;
+                self.canvas_widget_focus_visible_keyboard = false;
             }
 
             var next_hovered_id = self.canvas_widget_hovered_id;
@@ -379,12 +507,28 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // Same hover-target walk as live pointer moves: the wash
                 // and cursor a scroll settles on must match what a real
                 // move to this point would produce.
-                const hit = layout.hoverTargetForHit(layout.hitTestWithTokens(value, self.widget_tokens));
+                const raw = layout.hitTestWithTokens(value, self.widget_tokens);
+                const hit = layout.hoverTargetForHit(raw);
                 next_hovered_id = if (hit) |target| target.id else 0;
                 next_cursor = platformCursorFromCanvas(layout.cursorForHit(hit));
             } else if (!canvasWidgetInteractionTargetExists(layout, next_hovered_id)) {
                 next_hovered_id = 0;
                 next_cursor = .arrow;
+            }
+            // The hover-Msg chain re-resolves whenever a hover-capable
+            // pointer stands, at that pointer's OWN anchor — content
+            // sliding out from under it fires the same leave a real
+            // move off it would, on the wheel path and the point-blind
+            // paths (kinetic, drivers, keyboard) alike. Never the
+            // passed point: that follows `canvas_last_pointer_position`,
+            // which any device updates — a touch drag must not steer
+            // the mouse's containment (on single-pointer hosts the two
+            // agree). Without a proven pointer, entries survive by id
+            // until their widgets leave the tree — the wash's rule.
+            if (self.canvas_widget_hover_pointer_live) {
+                self.setCanvasWidgetHoverMsgChainForHit(layout.hitTestHoverWithTokens(self.canvas_widget_hover_pointer_position, self.widget_tokens));
+            } else {
+                self.pruneCanvasWidgetHoverMsgChain();
             }
 
             var next_pressed_id = self.canvas_widget_pressed_id;
@@ -399,7 +543,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
         /// Escape's dismissal resolution: the nearest dismissible surface
         /// up the focused widget's chain when something is focused, and
-        /// otherwise — or when the chain finds none — the topmost MOUNTED
+        /// otherwise — or when the chain finds none — the topmost painted
         /// anchored surface in the view. The fallback is what makes
         /// surfaces opened from NON-focusable triggers dismissible: a
         /// text-crumb trigger takes no focus on click, so nothing is
@@ -407,6 +551,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// would leave Escape dead. A focused editable with live IME
         /// composition always wins: Escape cancels the composition and
         /// never dismisses a surface, not even through the fallback.
+        /// With SEVERAL surfaces anchored on one stack (the select
+        /// trigger's focus-shown tooltip floating over its open menu),
+        /// each Escape peels exactly one, topmost by effective layer first —
+        /// the tooltip goes, then the menu.
         pub fn dismissCanvasWidgetSurfaceFromEscape(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             if (focused_id != 0) {
                 if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index| {
@@ -424,12 +572,14 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// transient choice, so moving the keyboard on closes it WITHOUT
         /// committing, exactly like a click outside. Scoped to menu
         /// surfaces only: Tab through a persistent popover's form fields
-        /// must not tear the popover down.
+        /// must not tear the popover down. The lookup scans FOR menu
+        /// kinds rather than kind-checking whatever floats topmost — a
+        /// trigger can anchor a tooltip beside its menu, and the
+        /// focus-visible tooltip shadowing the open menu left Tab unable
+        /// to close it.
         pub fn dismissCanvasWidgetMenuSurfaceForFocusDeparture(self: *RuntimeView, focused_id: canvas.ObjectId) anyerror!?CanvasWidgetSurfaceDismissal {
             const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .menu) orelse return null;
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
@@ -443,9 +593,40 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
         }
 
+        /// Outside-click light dismissal targets INTERACTIVE surfaces
+        /// only. A tooltip's whole lifecycle already belongs to the
+        /// intent machine's own causes on any outside down — hover
+        /// leave, focus moving with the click, the press itself — so
+        /// letting the topmost tooltip absorb this gesture would both
+        /// double-cover those and leave the menu beneath it floating
+        /// after the user clicked away.
         pub fn dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(self: *RuntimeView, focused_id: canvas.ObjectId, route: []const canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetSurfaceDismissal {
-            const focused_index = self.canvasWidgetNodeIndexById(focused_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(focused_index) orelse return null;
+            const focused_surface_index = if (focused_id != 0)
+                if (self.canvasWidgetNodeIndexById(focused_id)) |focused_index|
+                    canvasWidgetSurfaceIndexForTargetInScope(self, focused_index, .interactive)
+                else
+                    null
+            else
+                null;
+            // A non-focusable trigger (text/icon/stack) can open an
+            // anchored menu while leaving no focus behind, and focus may
+            // also live in an unrelated branch. Match Escape's deliberate
+            // whole-view fallback, scoped to interactive surfaces so the
+            // tooltip intent machine keeps owning tooltip dismissal.
+            const surface_index = focused_surface_index orelse
+                canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .interactive) orelse return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const anchor = if (canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))
+                    self.widget_layout_nodes[surface_index].parent_index
+                else
+                    null;
+                const facts = @as(u8, @intFromBool(self.canvasWidgetRouteDescendsFromIndex(route, surface_index))) |
+                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget))) << 1) |
+                    (@as(u8, @intFromBool(anchor != null)) << 2) |
+                    (@as(u8, @intFromBool(if (anchor) |index| self.canvasWidgetRouteDescendsFromIndex(route, index) else false)) << 3);
+                if (compiledCanvasSurfaceDismissalAction(policy, 1, facts) == 0) return null;
+                return self.dismissCanvasWidgetSurfaceAtIndex(surface_index);
+            }
             if (self.canvasWidgetRouteDescendsFromIndex(route, surface_index)) return null;
             // Clicking the ANCHOR region of an anchored surface (the
             // trigger, or the stack that wraps trigger + surface) is the
@@ -461,12 +642,65 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn dismissCanvasWidgetSurfaceAtIndex(self: *RuntimeView, surface_index: usize) anyerror!?CanvasWidgetSurfaceDismissal {
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const present = surface_index < self.widget_layout_node_count;
+                const facts = @as(u8, @intFromBool(present)) |
+                    (@as(u8, @intFromBool(present and self.widget_layout_nodes[surface_index].widget.semantics.hidden)) << 1);
+                if (compiledCanvasSurfaceDismissalAction(policy, 0, facts) == 0) return null;
+            }
             if (surface_index >= self.widget_layout_node_count) return null;
             const surface = self.widget_layout_nodes[surface_index].widget;
             if (surface.semantics.hidden) return null;
             const dirty = self.canvasWidgetDirtyBounds(surface_index, surface.frame) orelse surface.frame;
             self.widget_layout_nodes[surface_index].widget.semantics.hidden = true;
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) {
+            // A dismissed anchored tooltip leaves the intent machine too,
+            // or the next visibility stamp would undo the dismissal. No
+            // warm window: Escape is a deliberate dismissal, not the
+            // pointer moving on to the next trigger.
+            if (surface.kind == .tooltip) {
+                if (self.applyCompiledCanvasTooltipIntent(.dismissal, surface.id, self.canvas_tooltip_shown_owner_id, false) == null) {
+                    if (self.canvas_tooltip_shown_id == surface.id) {
+                        // Covers the focus-shown path too: Escape on the
+                        // focused trigger clears the reason flag with the
+                        // slot, and focus (still on the trigger) does not
+                        // re-reveal — reveals fire only on focus-visible
+                        // TRANSITIONS, so tabbing away and back re-earns it.
+                        // The one non-transition reveal — the adoption
+                        // binding-reconcile, which honors a STANDING
+                        // keyboard ring when a rebuild swaps the tooltip it
+                        // owns — is blocked by consuming that standing
+                        // intent here: when the ring rests on the dismissed
+                        // tooltip's owner, the dismissal spends
+                        // `canvas_widget_focus_visible_keyboard` (its only
+                        // readers are the tooltip reveal gates; the ring
+                        // itself renders from `canvas_widget_focus_visible_id`
+                        // and stays painted), so a rebuild that rekeys the
+                        // tooltip cannot resurrect it one frame after
+                        // Escape. Same design as the keyboard-activation
+                        // dismissal seam in canvas_widget_events.zig.
+                        if (self.canvas_widget_focus_visible_id != 0 and
+                            self.canvas_widget_focus_visible_id == self.canvas_tooltip_shown_owner_id)
+                        {
+                            self.canvas_widget_focus_visible_keyboard = false;
+                        }
+                        self.canvas_tooltip_shown_id = 0;
+                        self.canvas_tooltip_shown_owner_id = 0;
+                        self.canvas_tooltip_transit_deadline_ns = 0;
+                        self.canvas_tooltip_shown_from_focus = false;
+                    }
+                    if (self.canvas_tooltip_armed_id == surface.id) {
+                        self.canvas_tooltip_armed_id = 0;
+                        self.canvas_tooltip_armed_owner_id = 0;
+                        self.canvas_tooltip_deadline_ns = 0;
+                    }
+                }
+            }
+            const focus_descends = self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index);
+            const return_focus = if (self.canvas_widget_surface_scope_policy) |policy|
+                compiledCanvasSurfaceDismissalAction(policy, 2, @intFromBool(focus_descends)) != 0
+            else
+                focus_descends;
+            if (return_focus) {
                 // A dismissal that swallows the focus returns it to the
                 // surface's own trigger when the surface is anchored (the
                 // Escape-closes-the-picker flow keeps the keyboard on the
@@ -474,48 +708,162 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 const return_id = self.canvasWidgetAnchorTriggerFocusId(surface_index) orelse 0;
                 self.canvas_widget_focused_id = return_id;
                 self.canvas_widget_focus_visible_id = return_id;
+                // Same rule as the rebuild's focus return: a returned
+                // ring is not a keyboard arrival, so it earns no
+                // reveal — here or at a later layout adoption.
+                self.canvas_widget_focus_visible_keyboard = false;
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index)) self.canvas_widget_focus_visible_id = 0;
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index)) {
-                self.canvas_widget_hovered_id = 0;
-                self.canvas_widget_cursor = .arrow;
+            // Query the current ring only AFTER focus return. The returned
+            // anchor can live outside the hidden surface; an earlier fact
+            // would erase its newly returned ring.
+            const cleanup_facts = @as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focus_visible_id, surface_index))) |
+                (@as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_hovered_id, surface_index))) << 1) |
+                (@as(u8, @intFromBool(self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index))) << 2);
+            const cleanup = if (self.canvas_widget_surface_scope_policy) |policy|
+                compiledCanvasSurfaceDismissalAction(policy, 3, cleanup_facts)
+            else
+                @as(u8, if ((cleanup_facts & 1) != 0) 3 else 0) |
+                    @as(u8, if ((cleanup_facts & 2) != 0) 12 else 0) |
+                    @as(u8, if ((cleanup_facts & 4) != 0) 16 else 0);
+            if ((cleanup & 1) != 0) self.canvas_widget_focus_visible_id = 0;
+            if ((cleanup & 2) != 0) self.canvas_widget_focus_visible_keyboard = false;
+            if ((cleanup & 4) != 0) self.canvas_widget_hovered_id = 0;
+            if ((cleanup & 8) != 0) self.canvas_widget_cursor = .arrow;
+            if ((cleanup & 16) != 0) self.canvas_widget_pressed_id = 0;
+            // Hover-Msg listeners inside the dismissed surface owe their
+            // leave edge — the surface is gone from under the pointer;
+            // listeners outside it keep standing (the wash rule).
+            {
+                var listener_actions: [canvas.max_widget_depth]u8 = undefined;
+                if (self.canvas_widget_surface_scope_policy) |policy| {
+                    const count = self.canvas_widget_hover_msg_chain_len;
+                    var request: [4 + canvas.max_widget_depth]u8 = undefined;
+                    request[0..2].* = .{ 28, 4 };
+                    std.mem.writeInt(u16, request[2..4], @intCast(count), .little);
+                    for (self.canvas_widget_hover_msg_chain[0..count], 0..) |id, index|
+                        request[4 + index] = @intFromBool(self.canvasWidgetIdDescendsFromIndex(id, surface_index));
+                    if (policy(request[0 .. 4 + count], listener_actions[0..count]) != count)
+                        @panic("invalid compiled surface listener result");
+                    for (listener_actions[0..count]) |action| {
+                        if (action > 1) @panic("invalid compiled surface listener action");
+                    }
+                }
+                var kept: usize = 0;
+                for (self.canvas_widget_hover_msg_chain[0..self.canvas_widget_hover_msg_chain_len], 0..) |id, index| {
+                    const keep = if (self.canvas_widget_surface_scope_policy != null)
+                        listener_actions[index] != 0
+                    else
+                        !self.canvasWidgetIdDescendsFromIndex(id, surface_index);
+                    if (!keep) continue;
+                    self.canvas_widget_hover_msg_chain[kept] = id;
+                    kept += 1;
+                }
+                self.canvas_widget_hover_msg_chain_len = kept;
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_pressed_id, surface_index)) self.canvas_widget_pressed_id = 0;
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
             return .{ .id = surface.id, .dirty = dirty };
         }
 
+        fn compiledCanvasSurfaceDismissalAction(policy: *const fn ([]const u8, []u8) usize, stage: u8, facts: u8) u8 {
+            const request = [3]u8{ 28, stage, facts };
+            var output: [1]u8 = undefined;
+            if (policy(&request, &output) != output.len or output[0] > @as(u8, if (stage == 3) 31 else 1))
+                @panic("invalid compiled surface dismissal result");
+            return output[0];
+        }
+
+        /// Which anchored dismissible surfaces a lookup means to see. A
+        /// widget stack can anchor SEVERAL surfaces at once (a select
+        /// trigger with both its dropdown-menu and a tooltip), so every
+        /// consumer names the population it is really after — grabbing
+        /// "the anchored child" and kind-checking the winner let a
+        /// focus-visible tooltip shadow the open menu mounted before it.
+        pub const CanvasWidgetAnchoredSurfaceScope = enum {
+            /// Every dismissible surface, tooltips included. Escape and
+            /// the automation/accessibility dismiss actions peel
+            /// whatever floats TOPMOST, one surface per gesture.
+            any,
+            /// Surfaces that can hold interaction and keyboard focus —
+            /// everything but tooltips, which are hover chrome the
+            /// intent machine owns: outside-click dismissal and focus
+            /// scoping.
+            interactive,
+            /// Menu surfaces only (`menu_surface`/`dropdown_menu`): the
+            /// open-select keymap and Tab's focus-departure close.
+            menu,
+        };
+
+        fn canvasWidgetAnchoredSurfaceKindInScope(kind: canvas.WidgetKind, comptime scope: CanvasWidgetAnchoredSurfaceScope) bool {
+            if (!canvasWidgetDismissibleSurfaceKind(kind)) return false;
+            return switch (scope) {
+                .any => true,
+                .interactive => kind != .tooltip,
+                .menu => kind == .menu_surface or kind == .dropdown_menu,
+            };
+        }
+
         pub fn canvasWidgetDismissibleSurfaceIndexForTarget(self: *const RuntimeView, target_index: usize) ?usize {
+            return canvasWidgetSurfaceIndexForTargetInScope(self, target_index, .any);
+        }
+
+        /// The nearest in-scope surface up the target's chain: the first
+        /// visible dismissible ancestor, or an in-scope anchored surface
+        /// HANGING OFF an ancestor (the ancestor is its anchor) — Escape
+        /// on the focused trigger, or on the stack wrapping trigger +
+        /// surface, closes its own menu even though the surface is a
+        /// descendant, not an ancestor, of the focus. A visible ancestor
+        /// surface OUTSIDE the scope shields rather than defers: the
+        /// keyboard living in a persistent popover must not reach past
+        /// it to a menu further out.
+        fn canvasWidgetSurfaceIndexForTargetInScope(self: *const RuntimeView, target_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
             if (target_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 2 + target_index * 6 + 2);
+            }
             var current: ?usize = target_index;
             while (current) |index| {
                 if (index >= self.widget_layout_node_count) return null;
                 const widget = self.widget_layout_nodes[index].widget;
-                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) return index;
-                // An anchored dismissible surface HANGING OFF this
-                // ancestor (the ancestor is its anchor) is the nearest
-                // floating surface: Escape on the focused trigger — or on
-                // the stack wrapping trigger + surface — closes its own
-                // menu even though the surface is a descendant, not an
-                // ancestor, of the focus.
-                if (self.canvasWidgetAnchoredDismissibleChildIndex(index)) |surface_index| return surface_index;
+                if (canvasWidgetDismissibleSurfaceKind(widget.kind) and !widget.semantics.hidden) {
+                    return if (canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope)) index else null;
+                }
+                if (canvasWidgetAnchoredChildIndexInScope(self, index, scope)) |surface_index| return surface_index;
                 current = self.widget_layout_nodes[index].parent_index;
             }
             return null;
         }
 
-        /// The topmost (last-mounted) visible anchored dismissible surface
+        /// The topmost visible anchored dismissible surface
         /// whose anchor is `anchor_index`, or null.
         pub fn canvasWidgetAnchoredDismissibleChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .any);
+        }
+
+        /// The topmost visible anchored child of `anchor_index` whose
+        /// kind is IN SCOPE — the scope filters DURING the scan, so an
+        /// out-of-scope sibling mounted later (the tooltip above the
+        /// menu) never masks the surface the caller asked for.
+        fn canvasWidgetAnchoredChildIndexInScope(self: *const RuntimeView, anchor_index: usize, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
+            if (anchor_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 2 + anchor_index * 6);
+            }
             var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (node.parent_index != anchor_index) continue;
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
-                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (node.widget.semantics.hidden) continue;
-                found = index;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(self.widgetLayoutTree(), index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
             }
             return found;
         }
@@ -526,6 +874,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// in the composed select/combobox pattern.
         pub fn canvasWidgetOwnedMenuSurfaceIndex(self: *const RuntimeView, trigger_index: usize) ?usize {
             if (trigger_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, .menu);
+                return surfacePlanIndex(&plan, 2 + trigger_index * 6 + 4);
+            }
             if (canvasWidgetAnchoredMenuChildIndex(self, trigger_index)) |surface_index| return surface_index;
             const parent_index = self.widget_layout_nodes[trigger_index].parent_index orelse return null;
             const surface_index = canvasWidgetAnchoredMenuChildIndex(self, parent_index) orelse return null;
@@ -533,17 +885,332 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         fn canvasWidgetAnchoredMenuChildIndex(self: *const RuntimeView, anchor_index: usize) ?usize {
-            const surface_index = self.canvasWidgetAnchoredDismissibleChildIndex(anchor_index) orelse return null;
-            const kind = self.widget_layout_nodes[surface_index].widget.kind;
-            if (kind != .menu_surface and kind != .dropdown_menu) return null;
-            return surface_index;
+            return canvasWidgetAnchoredChildIndexInScope(self, anchor_index, .menu);
+        }
+
+        /// The anchored tooltip a trigger owns: the last-mounted anchored
+        /// `.tooltip` child of the trigger itself or of its parent — the
+        /// stack wrapping trigger + tooltip, mirroring the anchored-menu
+        /// ownership shape. Deliberately IGNORES the hidden flag: the
+        /// runtime itself stamps non-shown anchored tooltips hidden, and
+        /// arming must find them to show them.
+        pub fn canvasWidgetOwnedTooltipIndex(self: *const RuntimeView, trigger_index: usize) ?usize {
+            if (trigger_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_tooltip_policy) |policy|
+                return compiledCanvasTooltipBinding(policy, self.widgetLayoutTree(), trigger_index, null, 0, 0);
+            return canvasWidgetOwnedTooltipIndexInNodes(self.widget_layout_nodes[0..self.widget_layout_node_count], trigger_index);
+        }
+
+        /// The ID of the anchored tooltip `owner_id` owns in the
+        /// CURRENT retained tree, or 0 (no such owner / no owned
+        /// tooltip). The layout-adoption reconcile compares this value
+        /// across a rebuild — captured against the outgoing tree in
+        /// `setCanvasWidgetLayout`, re-read against the adopted one —
+        /// to see a binding that changed beneath a STABLE owner: a
+        /// tooltip mounted, replaced, rekeyed, or reparented under a
+        /// trigger whose own ID survived produces no hover or focus
+        /// delta, so only this comparison can arm (or reveal) it.
+        pub fn canvasWidgetOwnedTooltipIdForOwner(self: *const RuntimeView, owner_id: canvas.ObjectId) canvas.ObjectId {
+            if (owner_id == 0) return 0;
+            const owner_index = self.canvasWidgetNodeIndexById(owner_id) orelse return 0;
+            const tooltip_index = self.canvasWidgetOwnedTooltipIndex(owner_index) orelse return 0;
+            return self.widget_layout_nodes[tooltip_index].widget.id;
+        }
+
+        /// Stamp hover-intent visibility onto every ANCHORED tooltip
+        /// node: hidden unless it is the intent machine's shown tooltip.
+        /// Anchored tooltips are runtime-owned chrome, so the stamp
+        /// overrides authored visibility; static (non-anchored) tooltips
+        /// are never touched. Runs at tree adoption (each rebuild) and
+        /// after every intent transition.
+        pub fn applyCanvasTooltipVisibility(self: *RuntimeView) void {
+            self.applyCanvasTooltipVisibilityToNodes(self.widget_layout_nodes[0..self.widget_layout_node_count]);
+        }
+
+        /// The same stamp over an arbitrary node slice, against the
+        /// view's LIVE shown register.
+        pub fn applyCanvasTooltipVisibilityToNodes(self: *const RuntimeView, nodes: []canvas.WidgetLayoutNode) void {
+            applyCanvasTooltipVisibilityToNodesForShownId(self, nodes, self.canvas_tooltip_shown_id);
+        }
+
+        /// The stamp against an EXPLICIT shown id. The rebuild path
+        /// normalizes the RECONCILED scratch tree with it BEFORE diffing
+        /// against the retained tree (see `setCanvasWidgetLayout`),
+        /// passing the PROSPECTIVE prune verdict from
+        /// `canvasTooltipShownIdSurvivingLayout` rather than mutating
+        /// the live registers first: the retained side carries the
+        /// intent machine's hidden stamps while the source declares
+        /// authored visibility, so diffing them un-normalized reported
+        /// the runtime's own stamp as a spurious visibility
+        /// invalidation on every rebuild that contained a hidden
+        /// anchored tooltip — and mutating the registers before the
+        /// fallible adoption steps left a FAILED adoption with the old
+        /// tree stamped visible and cleared registers (an unhideable
+        /// tooltip).
+        pub fn applyCanvasTooltipVisibilityToNodesForShownId(self: *const RuntimeView, nodes: []canvas.WidgetLayoutNode, shown_id: canvas.ObjectId) void {
+            if (self.canvas_widget_tooltip_policy) |policy| {
+                if (nodes.len > max_canvas_widget_nodes_per_view) @panic("tooltip presentation exceeds native view budget");
+                var request: [4 + max_canvas_widget_nodes_per_view]u8 = undefined;
+                request[0] = 27;
+                request[1] = 0;
+                std.mem.writeInt(u16, request[2..4], @intCast(nodes.len), .little);
+                for (nodes, 0..) |node, index| {
+                    request[4 + index] = @as(u8, @intFromBool(node.widget.kind == .tooltip)) |
+                        (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 1) |
+                        (@as(u8, @intFromBool(node.widget.id != 0)) << 2) |
+                        (@as(u8, @intFromBool(node.widget.id == shown_id)) << 3);
+                }
+                var output: [max_canvas_widget_nodes_per_view]u8 = undefined;
+                const actions = output[0..nodes.len];
+                if (policy(request[0 .. 4 + nodes.len], actions) != actions.len)
+                    @panic("invalid compiled tooltip presentation result");
+                for (actions) |action| {
+                    if (action > 2) @panic("invalid compiled tooltip visibility action");
+                }
+                for (nodes, actions) |*node, action| {
+                    if (action != 0) node.widget.semantics.hidden = action == 2;
+                }
+                return;
+            }
+            for (nodes) |*node| {
+                if (node.widget.kind != .tooltip) continue;
+                if (!canvas.widgetIsAnchored(node.widget)) continue;
+                node.widget.semantics.hidden = node.widget.id == 0 or node.widget.id != shown_id;
+            }
+        }
+
+        /// Drop intent state whose tooltip OR owning trigger left the
+        /// tree on a rebuild — the interaction-id pruning policy
+        /// hovered/pressed ids follow, applied to both ends of the
+        /// tooltip binding. The tooltip node surviving is not enough:
+        /// a trigger that vanished, was rekeyed (a new id is a new
+        /// widget), re-parented away from its tooltip, or disabled
+        /// (disabled widgets leave both hover and focus routing, so
+        /// nothing could ever hide the tooltip again) invalidates the
+        /// slot, and the pruned slot re-stamps hidden through the
+        /// `applyCanvasTooltipVisibility` call that follows adoption.
+        /// The warm window survives rebuilds that keep the bindings
+        /// alive (warmth belongs to the pointer, not to any one
+        /// widget), but a pruned binding closes it: instant re-shows
+        /// earned against widgets the rebuild replaced are not earned
+        /// at all.
+        pub fn pruneCanvasTooltipIntent(self: *RuntimeView) void {
+            self.pruneCanvasTooltipIntentForLayout(self.widgetLayoutTree());
+        }
+
+        /// The same prune against an arbitrary layout. Runs inside
+        /// `copyWidgetLayoutTree` against the freshly retained tree —
+        /// AFTER every fallible adoption step has succeeded, which is
+        /// what keeps the registers transactional: the rebuild path's
+        /// pre-diff stamp reads only the VERDICT
+        /// (`canvasTooltipShownIdSurvivingLayout`) so a failed adoption
+        /// leaves both the old tree and the registers that can hide its
+        /// tooltip intact.
+        pub fn pruneCanvasTooltipIntentForLayout(self: *RuntimeView, layout: canvas.WidgetLayoutTree) void {
+            if (compiledCanvasTooltipPrune(self, layout, .armed)) |armed| {
+                if ((armed & 1) != 0) {
+                    self.canvas_tooltip_armed_id = 0;
+                    self.canvas_tooltip_armed_owner_id = 0;
+                    self.canvas_tooltip_deadline_ns = 0;
+                }
+                if ((armed & 4) != 0) self.canvas_tooltip_warm_until_ns = 0;
+                const shown = compiledCanvasTooltipPrune(self, layout, .shown).?;
+                if ((shown & 2) != 0) {
+                    self.canvas_tooltip_shown_id = 0;
+                    self.canvas_tooltip_shown_owner_id = 0;
+                    self.canvas_tooltip_shown_from_focus = false;
+                }
+                if ((shown & 4) != 0) self.canvas_tooltip_warm_until_ns = 0;
+                if ((shown & 8) != 0) self.canvas_tooltip_transit_deadline_ns = 0;
+                return;
+            }
+            if (self.canvas_tooltip_armed_id != 0 and !canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_armed_id, self.canvas_tooltip_armed_owner_id, false)) {
+                self.canvas_tooltip_armed_id = 0;
+                self.canvas_tooltip_armed_owner_id = 0;
+                self.canvas_tooltip_deadline_ns = 0;
+                self.canvas_tooltip_warm_until_ns = 0;
+            }
+            if (self.canvas_tooltip_shown_id != 0 and !canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) {
+                self.canvas_tooltip_shown_id = 0;
+                self.canvas_tooltip_shown_owner_id = 0;
+                self.canvas_tooltip_shown_from_focus = false;
+                self.canvas_tooltip_warm_until_ns = 0;
+                self.canvas_tooltip_transit_deadline_ns = 0;
+            }
+        }
+
+        /// The shown-tooltip prune VERDICT against a prospective
+        /// layout, WITHOUT the register mutation: the shown id that
+        /// would survive adopting `layout`, or 0 when the rebuild kills
+        /// the binding. `setCanvasWidgetLayout` stamps the reconciled
+        /// scratch tree with this ahead of the diff (so the diff
+        /// reports the hide a binding-breaking rebuild really causes,
+        /// and an unchanged rebuild diffs clean) while the live
+        /// registers stay untouched until the fallible adoption steps —
+        /// the diff itself and the retained-pool validation/copy —
+        /// succeed; `copyWidgetLayoutTree`'s own prune then applies the
+        /// same verdict for real. A failed adoption therefore leaves
+        /// the OLD tree with the registers that own its stamps: the
+        /// tooltip that is still painted is still hideable.
+        pub fn canvasTooltipShownIdSurvivingLayout(self: *const RuntimeView, layout: canvas.WidgetLayoutTree) canvas.ObjectId {
+            if (compiledCanvasTooltipPrune(self, layout, .shown)) |actions|
+                return if ((actions & 2) != 0) 0 else self.canvas_tooltip_shown_id;
+            if (self.canvas_tooltip_shown_id == 0) return 0;
+            if (!canvasTooltipIntentBindingAlive(self, layout, self.canvas_tooltip_shown_id, self.canvas_tooltip_shown_owner_id, self.canvas_tooltip_shown_from_focus)) return 0;
+            return self.canvas_tooltip_shown_id;
+        }
+
+        const CanvasTooltipPruneSlot = enum(u8) { armed = 1, shown = 2 };
+
+        fn compiledCanvasTooltipPrune(self: *const RuntimeView, layout: canvas.WidgetLayoutTree, slot: CanvasTooltipPruneSlot) ?u8 {
+            const policy = self.canvas_widget_tooltip_policy orelse return null;
+            const id = if (slot == .armed) self.canvas_tooltip_armed_id else self.canvas_tooltip_shown_id;
+            const owner = if (slot == .armed) self.canvas_tooltip_armed_owner_id else self.canvas_tooltip_shown_owner_id;
+            const present = id != 0;
+            const alive = present and canvasTooltipIntentBindingAlive(self, layout, id, owner, slot == .shown and self.canvas_tooltip_shown_from_focus);
+            const facts = @as(u8, @intFromBool(present)) | (@as(u8, @intFromBool(alive)) << 1);
+            const request = [3]u8{ 27, @intFromEnum(slot), facts };
+            var output: [1]u8 = undefined;
+            if (policy(&request, &output) != output.len or (output[0] != 0 and output[0] != @as(u8, if (slot == .armed) 5 else 14)))
+                @panic("invalid compiled tooltip pruning result");
+            return output[0];
+        }
+
+        /// Both ends of a tooltip intent slot are still live: the
+        /// tooltip node exists and is anchored, its recorded owner
+        /// still exists AND still resolves to this very tooltip
+        /// (`canvasWidgetOwnedTooltipIndex`, the inverse of the arming
+        /// walk), and the owner remains reachable by the routing that
+        /// earned the slot — focus targeting for focus-shown tooltips,
+        /// hover/interaction targeting for pointer ones. Both
+        /// predicates already reject disabled and hidden widgets, so
+        /// "the trigger can no longer be left" implies "the tooltip
+        /// must not stay".
+        fn canvasTooltipIntentBindingAlive(self: *const RuntimeView, layout: canvas.WidgetLayoutTree, tooltip_id: canvas.ObjectId, owner_id: canvas.ObjectId, from_focus: bool) bool {
+            const tooltip_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, tooltip_id) orelse return false;
+            if (self.canvas_widget_tooltip_policy) |policy| {
+                const owner_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, owner_id) orelse return false;
+                const eligible = if (from_focus) layout.focusTargetById(owner_id) != null else canvasWidgetInteractionTargetExists(layout, owner_id);
+                return compiledCanvasTooltipBinding(policy, layout, owner_index, tooltip_index, if (from_focus) 2 else 1, if (eligible) (if (from_focus) @as(u8, 2) else 1) else 0) != null;
+            }
+            const tooltip_widget = layout.nodes[tooltip_index].widget;
+            if (tooltip_widget.kind != .tooltip or !canvas.widgetIsAnchored(tooltip_widget)) return false;
+            const owner_index = canvasWidgetNodeIndexByIdInNodes(layout.nodes, owner_id) orelse return false;
+            const owned_index = canvasWidgetOwnedTooltipIndexInNodes(layout.nodes, owner_index) orelse return false;
+            if (owned_index != tooltip_index) return false;
+            if (from_focus) return layout.focusTargetById(owner_id) != null;
+            return canvasWidgetInteractionTargetExists(layout, owner_id);
+        }
+
+        fn compiledCanvasTooltipBinding(
+            policy: *const fn ([]const u8, []u8) usize,
+            layout: canvas.WidgetLayoutTree,
+            owner: usize,
+            tooltip: ?usize,
+            mode: u8,
+            eligibility: u8,
+        ) ?usize {
+            if (layout.nodes.len > max_canvas_widget_nodes_per_view) @panic("tooltip policy tree exceeds native view budget");
+            var request: [9 + max_canvas_widget_nodes_per_view * 3]u8 = undefined;
+            request[0] = 23;
+            request[1] = mode;
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], @intCast(owner), .little);
+            std.mem.writeInt(u16, request[6..8], if (tooltip) |index| @intCast(index) else std.math.maxInt(u16), .little);
+            request[8] = eligibility;
+            for (layout.nodes, 0..) |node, index| {
+                const at = 9 + index * 3;
+                request[at] = @intFromBool(node.widget.kind == .tooltip and canvas.widgetIsAnchored(node.widget));
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+            }
+            var output: [2]u8 = undefined;
+            if (policy(request[0 .. 9 + layout.nodes.len * 3], &output) != output.len)
+                @panic("invalid compiled tooltip policy result");
+            const selected = std.mem.readInt(u16, &output, .little);
+            if (selected == std.math.maxInt(u16)) return null;
+            if (selected >= layout.nodes.len or (mode != 0 and selected != tooltip.?))
+                @panic("invalid compiled tooltip binding index");
+            const widget = layout.nodes[selected].widget;
+            if (widget.kind != .tooltip or !canvas.widgetIsAnchored(widget))
+                @panic("ineligible compiled tooltip binding target");
+            return selected;
+        }
+
+        pub const CanvasTooltipIntentCause = enum(u8) {
+            focus,
+            press,
+            activation,
+            programmatic_focus,
+            blur,
+            pointer_close,
+            dismissal,
+        };
+
+        /// Ask the compiled policy for a transition over native facts, then
+        /// apply it to native registers. Null selects the native reference.
+        /// The callback copies its borrowed result without resetting the app
+        /// cycle arena; opaque IDs and nanosecond clocks never cross the wire.
+        pub fn applyCompiledCanvasTooltipIntent(
+            self: *RuntimeView,
+            cause: CanvasTooltipIntentCause,
+            target_id: canvas.ObjectId,
+            owner_id: canvas.ObjectId,
+            reveal_allowed: bool,
+        ) ?bool {
+            const policy = self.canvas_widget_tooltip_policy orelse return null;
+            const facts: u8 = @as(u8, @intFromBool(self.canvas_tooltip_shown_id != 0)) |
+                (@as(u8, @intFromBool(self.canvas_tooltip_shown_from_focus)) << 1) |
+                (@as(u8, @intFromBool(target_id != 0)) << 2) |
+                (@as(u8, @intFromBool(self.canvas_tooltip_shown_id == target_id)) << 3) |
+                (@as(u8, @intFromBool(self.canvas_tooltip_armed_id == target_id)) << 4) |
+                (@as(u8, @intFromBool(owner_id != 0 and self.canvas_widget_focus_visible_id == owner_id)) << 5) |
+                (@as(u8, @intFromBool(reveal_allowed)) << 6);
+            const request = [3]u8{ 24, @intFromEnum(cause), facts };
+            var output: [1]u8 = undefined;
+            if (policy(&request, &output) != output.len or output[0] > 127)
+                @panic("invalid compiled tooltip intent result");
+            const flags = output[0];
+            if ((flags & 4) != 0 and (cause != .focus or target_id == 0 or !reveal_allowed))
+                @panic("ineligible compiled tooltip focus reveal");
+            if ((flags & 1) != 0) {
+                self.canvas_tooltip_armed_id = 0;
+                self.canvas_tooltip_armed_owner_id = 0;
+                self.canvas_tooltip_deadline_ns = 0;
+            }
+            if ((flags & 2) != 0) {
+                self.canvas_tooltip_shown_id = 0;
+                self.canvas_tooltip_shown_owner_id = 0;
+                self.canvas_tooltip_shown_from_focus = false;
+            }
+            if ((flags & 4) != 0) {
+                self.canvas_tooltip_shown_id = target_id;
+                self.canvas_tooltip_shown_owner_id = owner_id;
+                self.canvas_tooltip_shown_from_focus = true;
+            }
+            if ((flags & 8) != 0) self.canvas_tooltip_warm_until_ns = 0;
+            if ((flags & 16) != 0) self.canvas_tooltip_transit_deadline_ns = 0;
+            if ((flags & 32) != 0) self.canvas_widget_focus_visible_keyboard = false;
+            return (flags & 64) != 0;
+        }
+
+        /// True while the intent machine needs presented frames to keep
+        /// coming: an armed show delay and a running transit grace both
+        /// fire only on a frame timestamp, so the frame pump
+        /// re-invalidates until they resolve (the render-animation
+        /// pump's policy exactly).
+        pub fn canvasTooltipIntentArmed(self: *const RuntimeView) bool {
+            return self.canvas_tooltip_armed_id != 0 or self.canvas_tooltip_transit_deadline_ns != 0;
         }
 
         /// Keyboard entry point into an anchored menu surface: the marked
         /// (`selected`) row when the menu has one, otherwise the first
         /// focusable row for an ArrowDown entry or the last for ArrowUp —
-        /// the open-select keymap.
+        /// the open-menu keymap shared by picker and menu-button triggers.
         pub fn canvasWidgetMenuSurfaceEntryId(self: *const RuntimeView, surface_index: usize, from_end: bool) ?canvas.ObjectId {
+            if (surface_index < self.widget_layout_node_count and self.widget_layout_nodes[surface_index].widget.interaction_policy != null) {
+                const target = canvas_widget_runtime.canvasWidgetCompiledMenuFocus(self.widgetLayoutTree(), surface_index, if (from_end) 3 else 2) orelse return null;
+                return target.id;
+            }
             var first: ?canvas.ObjectId = null;
             var last: ?canvas.ObjectId = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, node_index| {
@@ -563,6 +1230,8 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         /// OUTSIDE the surface (the select trigger in the stack pattern).
         pub fn canvasWidgetAnchorTriggerFocusId(self: *const RuntimeView, surface_index: usize) ?canvas.ObjectId {
             if (surface_index >= self.widget_layout_node_count) return null;
+            if (self.canvas_widget_focus_return_policy) |policy|
+                return compiledCanvasWidgetFocusReturn(self, policy, surface_index, false);
             if (!canvas.widgetIsAnchored(self.widget_layout_nodes[surface_index].widget)) return null;
             const anchor_index = self.widget_layout_nodes[surface_index].parent_index orelse return null;
             const anchor_id = self.widget_layout_nodes[anchor_index].widget.id;
@@ -575,18 +1244,31 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         /// The topmost visible anchored dismissible surface in the whole
-        /// view — highest node index, matching both the anchored late
-        /// z-pass paint order and reverse-order hit-testing, so "topmost"
-        /// here is the surface the user sees on top. Ancestor-hidden
+        /// view — highest effective `(layer, node index)`, matching both
+        /// the anchored late z-pass and reverse-order hit-testing, so
+        /// "topmost" here is the surface the user sees on top. Ancestor-hidden
         /// subtrees are skipped: a surface inside a hidden branch is not
         /// on screen and must not swallow Escape.
         pub fn canvasWidgetTopmostAnchoredDismissibleIndex(self: *const RuntimeView) ?usize {
+            return canvasWidgetTopmostAnchoredSurfaceIndexInScope(self, .any);
+        }
+
+        fn canvasWidgetTopmostAnchoredSurfaceIndexInScope(self: *const RuntimeView, comptime scope: CanvasWidgetAnchoredSurfaceScope) ?usize {
+            if (self.canvas_widget_surface_scope_policy) |policy| {
+                const plan = compiledCanvasWidgetSurfacePlan(self, policy, scope);
+                return surfacePlanIndex(&plan, 0);
+            }
             var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
             for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
                 if (!canvas.widgetIsAnchored(node.widget)) continue;
-                if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) continue;
+                if (!canvasWidgetAnchoredSurfaceKindInScope(node.widget.kind, scope)) continue;
                 if (canvasWidgetNodeHiddenInTree(self, index)) continue;
-                found = index;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(self.widgetLayoutTree(), index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
             }
             return found;
         }
@@ -611,10 +1293,229 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return false;
         }
 
+        /// Tab cycling scopes to the INTERACTIVE surface around the
+        /// focus: a tooltip can never hold a focus target, so scoping to
+        /// one (the trigger's visible tooltip shadowing its popover or
+        /// menu) would always come up empty and spill the keyboard out
+        /// of the trap into the page's global walk.
         pub fn canvasWidgetScopedFocusTarget(self: *const RuntimeView, current_id: canvas.ObjectId, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
             const current_index = self.canvasWidgetNodeIndexById(current_id) orelse return null;
-            const surface_index = self.canvasWidgetDismissibleSurfaceIndexForTarget(current_index) orelse return null;
+            const surface_index = canvasWidgetSurfaceIndexForTargetInScope(self, current_index, .interactive) orelse return null;
             return self.canvasWidgetFocusTargetInScope(surface_index, current_index, direction);
+        }
+
+        /// Radio groups contribute one stop to the flat Tab order. The
+        /// first currently reachable radio fixes that stop's authored
+        /// position; entering retargets to the selected radio (or first
+        /// focusable radio), while leaving resumes from the fixed stop.
+        /// That distinction keeps nested/interleaved scopes ordered even
+        /// when an outer group's selected radio appears after an inner
+        /// group. Existing anchored-surface focus traps remain authoritative.
+        pub fn canvasWidgetRovingTabTarget(
+            self: *const RuntimeView,
+            current_id: ?canvas.ObjectId,
+            direction: canvas.WidgetFocusDirection,
+        ) ?canvas.WidgetFocusTarget {
+            if (direction == .forward or direction == .backward) {
+                if (self.canvas_widget_tab_focus_policy) |policy| return compiledCanvasWidgetTabTarget(self, policy, current_id, direction);
+            }
+            const layout = self.widgetLayoutTree();
+            const current_scope = if (current_id) |id|
+                if (self.canvasWidgetNodeIndexById(id)) |index|
+                    canvas_widget_runtime.canvasWidgetRovingTabScope(layout, index)
+                else
+                    null
+            else
+                null;
+
+            var walk_id = current_id;
+            if (current_scope) |scope| {
+                if (canvas_widget_runtime.canvasWidgetRovingTabStopTarget(layout, scope)) |stop| {
+                    walk_id = stop.id;
+                }
+            }
+            var attempts: usize = 0;
+            while (attempts <= self.widget_layout_node_count) : (attempts += 1) {
+                const target = if (walk_id) |id|
+                    self.canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(walk_id, direction) orelse return null
+                else
+                    layout.focusTarget(null, direction) orelse return null;
+
+                if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
+                    // Radios after the first visible member do not create
+                    // extra flat-order stops. This also prevents a later
+                    // outer-group radio from retargeting backward across a
+                    // nested group's stop and forming a Tab cycle.
+                    const target_stop = canvas_widget_runtime.canvasWidgetRovingTabStopTarget(layout, target_scope) orelse {
+                        walk_id = target.id;
+                        continue;
+                    };
+                    if (target.id != target_stop.id) {
+                        walk_id = target.id;
+                        continue;
+                    }
+                    if (current_scope) |scope| {
+                        if (target_scope.kind == scope.kind and target_scope.index == scope.index) {
+                            walk_id = target.id;
+                            continue;
+                        }
+                    }
+                    return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, target_scope) orelse target;
+                }
+                return target;
+            }
+
+            // A trapped surface whose only focusable composite is this
+            // radio group wraps onto the group's one entry stop.
+            if (current_scope) |scope| return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, scope);
+            return null;
+        }
+
+        fn compiledCanvasWidgetTabTarget(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            current_id: ?canvas.ObjectId,
+            direction: canvas.WidgetFocusDirection,
+        ) ?canvas.WidgetFocusTarget {
+            const layout = self.widgetLayoutTree();
+            var request: [6 + max_canvas_widget_nodes_per_view * 7]u8 = undefined;
+            const absent = std.math.maxInt(u16);
+            const current_index = if (current_id) |id| self.canvasWidgetNodeIndexById(id) else null;
+            request[0] = 20;
+            request[1] = @intFromBool(direction == .backward);
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], if (current_index) |index| @intCast(index) else absent, .little);
+            // A single surface plan supplies every node's scope. Do not
+            // call the compiled whole-tree policy once for each node.
+            const surface_plan = if (self.canvas_widget_surface_scope_policy) |surface_policy|
+                compiledCanvasWidgetSurfacePlan(self, surface_policy, .interactive)
+            else
+                null;
+            for (layout.nodes, 0..) |node, index| {
+                const at = 6 + index * 7;
+                const visible = layout.focusTargetById(node.widget.id) != null;
+                const logical = layout.logicalFocusTargetAtIndex(index) != null;
+                request[at] = @as(u8, @intFromBool(visible)) |
+                    (@as(u8, @intFromBool(logical)) << 1) |
+                    (@as(u8, @intFromBool(node.widget.kind == .radio)) << 2) |
+                    (@as(u8, @intFromBool(node.widget.kind == .radio_group)) << 3) |
+                    (@as(u8, @intFromBool(canvas_widget_runtime.canvasWidgetSelectableSelected(node.widget))) << 4);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], @intCast(node.depth), .little);
+                std.mem.writeInt(u16, request[at + 3 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else absent, .little);
+                const surface = if (surface_plan) |*plan|
+                    surfacePlanIndex(plan, 2 + index * 6 + 2)
+                else
+                    canvasWidgetSurfaceIndexForTargetInScope(self, index, .interactive);
+                std.mem.writeInt(u16, request[at + 5 ..][0..2], if (surface) |owner| @intCast(owner) else absent, .little);
+            }
+            var result: [2]u8 = undefined;
+            if (policy(request[0 .. 6 + layout.nodes.len * 7], &result) != result.len) @panic("invalid compiled Tab focus result");
+            const selected = std.mem.readInt(u16, &result, .little);
+            if (selected == absent) return null;
+            if (selected >= layout.nodes.len) @panic("invalid compiled Tab focus index");
+            // A group's logical entry may need native scroll reveal;
+            // every other target must already satisfy visible focus gates.
+            const target = if (layout.nodes[selected].widget.kind == .radio)
+                layout.logicalFocusTargetAtIndex(selected)
+            else
+                layout.focusTargetById(layout.nodes[selected].widget.id);
+            return target orelse @panic("ineligible compiled Tab focus target");
+        }
+
+        const SurfacePlan = [2 + max_canvas_widget_nodes_per_view * 6]u8;
+
+        fn surfacePlanIndex(plan: *const SurfacePlan, at: usize) ?usize {
+            const index = std.mem.readInt(u16, plan[at..][0..2], .little);
+            return if (index == std.math.maxInt(u16)) null else index;
+        }
+
+        fn compiledCanvasWidgetSurfacePlan(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            comptime scope: CanvasWidgetAnchoredSurfaceScope,
+        ) SurfacePlan {
+            const layout = self.widgetLayoutTree();
+            var request: [4 + max_canvas_widget_nodes_per_view * 7]u8 = undefined;
+            request[0] = 21;
+            request[1] = switch (scope) {
+                .any => 0,
+                .interactive => 1,
+                .menu => 2,
+            };
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            for (layout.nodes, 0..) |node, index| {
+                const at = 4 + index * 7;
+                const kind: u8 = if (!canvasWidgetDismissibleSurfaceKind(node.widget.kind)) 0 else switch (node.widget.kind) {
+                    .tooltip => 3,
+                    .menu_surface, .dropdown_menu => 2,
+                    else => 1,
+                };
+                const anchored = canvas.widgetIsAnchored(node.widget);
+                request[at] = kind | (@as(u8, @intFromBool(node.widget.semantics.hidden)) << 2) |
+                    (@as(u8, @intFromBool(anchored)) << 3);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+                // Only anchored surfaces participate in paint-order
+                // comparisons; ordinary nodes need no ancestor layer walk.
+                const layer = if (kind != 0 and anchored) canvas.widgetLayoutWindowSurfaceOrder(layout, index, self.widget_tokens).layer else 0;
+                std.mem.writeInt(i32, request[at + 3 ..][0..4], layer, .little);
+            }
+            var result: SurfacePlan = undefined;
+            const length = 2 + layout.nodes.len * 6;
+            if (policy(request[0 .. 4 + layout.nodes.len * 7], result[0..length]) != length)
+                @panic("invalid compiled surface scope result");
+            // Every selected index is copied and checked before native
+            // consumers dereference it. No ABI pointer outlives this call.
+            var at: usize = 0;
+            while (at < length) : (at += 2) {
+                if (surfacePlanIndex(&result, at)) |index| {
+                    if (index >= layout.nodes.len) @panic("invalid compiled surface scope index");
+                    const widget = layout.nodes[index].widget;
+                    if (!canvasWidgetAnchoredSurfaceKindInScope(widget.kind, scope) or widget.semantics.hidden)
+                        @panic("ineligible compiled surface scope index");
+                    if (at == 0 or (at - 2) % 6 != 2) {
+                        if (!canvas.widgetIsAnchored(widget)) @panic("unanchored compiled surface scope index");
+                    }
+                }
+            }
+            return result;
+        }
+
+        fn compiledCanvasWidgetFocusReturn(
+            self: *const RuntimeView,
+            policy: *const fn ([]const u8, []u8) usize,
+            subject: usize,
+            from_focused: bool,
+        ) ?canvas.ObjectId {
+            const layout = self.widgetLayoutTree();
+            var request: [6 + max_canvas_widget_nodes_per_view * 3]u8 = undefined;
+            request[0] = 22;
+            request[1] = @intFromBool(from_focused);
+            std.mem.writeInt(u16, request[2..4], @intCast(layout.nodes.len), .little);
+            std.mem.writeInt(u16, request[4..6], @intCast(subject), .little);
+            // Reuse the native ID index so facts keep first-match ID
+            // semantics without a full ID scan for every retained node.
+            const Entry = struct { id: canvas.ObjectId, index: usize };
+            var entries: [max_canvas_widget_nodes_per_view]Entry = undefined;
+            for (layout.nodes, 0..) |node, index| entries[index] = .{ .id = node.widget.id, .index = index };
+            var ids: canvas_widget_runtime.CanvasWidgetIdIndex(Entry) = .{};
+            ids.build(entries[0..layout.nodes.len]);
+            for (layout.nodes, 0..) |node, index| {
+                const at = 6 + index * 3;
+                const eligible = if (ids.first(node.widget.id)) |first| layout.focusTargetAtIndex(first.index) != null else false;
+                request[at] = @as(u8, @intFromBool(eligible)) |
+                    (@as(u8, @intFromBool(canvas.widgetIsAnchored(node.widget))) << 1) |
+                    (@as(u8, @intFromBool(canvasWidgetDismissibleSurfaceKind(node.widget.kind))) << 2);
+                std.mem.writeInt(u16, request[at + 1 ..][0..2], if (node.parent_index) |parent| @intCast(parent) else std.math.maxInt(u16), .little);
+            }
+            var result: [2]u8 = undefined;
+            if (policy(request[0 .. 6 + layout.nodes.len * 3], &result) != result.len)
+                @panic("invalid compiled focus return result");
+            const selected = std.mem.readInt(u16, &result, .little);
+            if (selected == std.math.maxInt(u16)) return null;
+            if (selected >= layout.nodes.len) @panic("invalid compiled focus return index");
+            const id = layout.nodes[selected].widget.id;
+            if (layout.focusTargetById(id) == null) @panic("ineligible compiled focus return target");
+            return id;
         }
 
         pub fn canvasWidgetFocusTargetInScope(
@@ -701,14 +1602,44 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             };
             return switch (self.widget_layout_nodes[index].widget.kind) {
                 .grid, .scroll_view, .list, .data_grid, .table => switch (direction) {
-                    .increment => "pagedown",
-                    .decrement => "pageup",
+                    // Page keys step the vertical axis on every keymap
+                    // except the horizontal-only one (which mirrors the
+                    // whole map sideways) — so a BOTH-axes region whose
+                    // live axis is horizontal needs the both-keymap's
+                    // horizontal keys instead, or the assistive step
+                    // would page a zero-range vertical axis and report
+                    // success without moving.
+                    .increment => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowright" else "pagedown",
+                    .decrement => if (canvasWidgetStepAxisHorizontal(self, index)) "arrowleft" else "pageup",
                 },
                 else => switch (direction) {
                     .increment => "arrowright",
                     .decrement => "arrowleft",
                 },
             };
+        }
+
+        /// Whether a BOTH-axes scroll region's assistive step must take
+        /// the horizontal keys: the vertical axis has no range while
+        /// the horizontal one does. The extents come from the SEMANTICS
+        /// metrics — the same derivation the assistive node reports its
+        /// primary axis through, concealed-disclosure and anchored
+        /// exclusions included — so the key an increment synthesizes
+        /// can never disagree with the axis the node advertised.
+        /// Vertical-capable regions with vertical range — and
+        /// horizontal-only regions, whose keymap already maps the page
+        /// keys sideways — keep the page keys.
+        fn canvasWidgetStepAxisHorizontal(self: *const RuntimeView, index: usize) bool {
+            const node = self.widget_layout_nodes[index];
+            if (node.widget.kind != .scroll_view or node.widget.scroll_axes != .both) return false;
+            const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+            if (viewport.isEmpty()) return false;
+            const layout = self.widgetLayoutTree();
+            const vertical = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .vertical, viewport);
+            const horizontal = canvas.widgetScrollAxisMetrics(layout, index, canvas.virtualWidgetScrollContentExtent, .horizontal, viewport);
+            const vertical_range = vertical.present and vertical.content_extent > vertical.viewport_extent;
+            const horizontal_range = horizontal.present and horizontal.content_extent > horizontal.viewport_extent;
+            return !vertical_range and horizontal_range;
         }
 
         pub fn refreshCanvasWidgetSemantics(self: *RuntimeView) anyerror!void {
@@ -721,6 +1652,10 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
         }
 
         pub fn copyWidgetLayoutNode(self: *RuntimeView, node: canvas.WidgetLayoutNode, source_semantics: *const canvas_widget_runtime.CanvasWidgetSemanticsIndex) anyerror!canvas.WidgetLayoutNode {
+            return copyWidgetLayoutNodeWithContinuity(self, node, source_semantics, null);
+        }
+
+        fn copyWidgetLayoutNodeWithContinuity(self: *RuntimeView, node: canvas.WidgetLayoutNode, source_semantics: *const canvas_widget_runtime.CanvasWidgetSemanticsIndex, continuity_action: ?u8) anyerror!canvas.WidgetLayoutNode {
             var copy = node;
             if (node.widget.command.len > 0) try validateCommandName(node.widget.command);
             copy.widget.text = try self.copyWidgetText(node.widget.text);
@@ -730,7 +1665,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             copy.widget.semantics.label = try self.copyWidgetText(node.widget.semantics.label);
             copy.widget.context_menu = try self.copyWidgetContextMenu(node.widget.context_menu);
             copy.widget.chart = try self.copyWidgetChart(node.widget.chart);
-            copy = canvasWidgetLayoutNodeWithSourceSemantics(copy, source_semantics);
+            copy = canvas_widget_runtime.canvasWidgetLayoutNodeWithPlannedSourceSemantics(copy, source_semantics, continuity_action);
             copy.widget.children = &.{};
             return copy;
         }
@@ -840,4 +1775,41 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             return self.widget_span_entries[start..end];
         }
     };
+}
+
+/// Node index by widget id over a bare node slice — the retained
+/// tree's `canvasWidgetNodeIndexById` generalized so the tooltip
+/// binding checks can run against the RECONCILED scratch tree before
+/// adoption (the pre-diff visibility normalization) exactly as they
+/// run against the retained one.
+fn canvasWidgetNodeIndexByIdInNodes(nodes: []const canvas.WidgetLayoutNode, id: canvas.ObjectId) ?usize {
+    if (id == 0) return null;
+    for (nodes, 0..) |node, index| {
+        if (node.widget.id == id) return index;
+    }
+    return null;
+}
+
+/// The anchored tooltip a trigger owns, over a bare node slice: the
+/// last-mounted anchored `.tooltip` child of the trigger itself or of
+/// its parent — the stack-wraps-trigger-plus-tooltip ownership shape,
+/// mirroring the anchored-menu walk. Deliberately IGNORES the hidden
+/// flag: the runtime itself stamps non-shown anchored tooltips hidden,
+/// and arming must find them to show them.
+fn canvasWidgetOwnedTooltipIndexInNodes(nodes: []const canvas.WidgetLayoutNode, trigger_index: usize) ?usize {
+    if (trigger_index >= nodes.len) return null;
+    if (canvasWidgetAnchoredTooltipChildIndexInNodes(nodes, trigger_index)) |tooltip_index| return tooltip_index;
+    const parent_index = nodes[trigger_index].parent_index orelse return null;
+    return canvasWidgetAnchoredTooltipChildIndexInNodes(nodes, parent_index);
+}
+
+fn canvasWidgetAnchoredTooltipChildIndexInNodes(nodes: []const canvas.WidgetLayoutNode, anchor_index: usize) ?usize {
+    var found: ?usize = null;
+    for (nodes, 0..) |node, index| {
+        if (node.parent_index != anchor_index) continue;
+        if (node.widget.kind != .tooltip) continue;
+        if (!canvas.widgetIsAnchored(node.widget)) continue;
+        found = index;
+    }
+    return found;
 }

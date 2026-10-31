@@ -14,6 +14,10 @@
 //!   `canvas_label` must be `mobile-surface` (use `mobile_shell_scene` /
 //!   `mobile_gpu_surface_label` for the canonical single-surface scene).
 //! - optional `pub const features: native_sdk.UiAppFeatures`
+//! - optional `pub fn serviceDataRoot([]const u8) void` /
+//!   `pub fn serviceTeardown() void` — the generated TypeScript mobile
+//!   wiring's hooks: the host hands `setDataRoot`'s directory to the
+//!   in-process service pool and tears the pool down on destroy.
 //!
 //! The host owns a `NullPlatform` runtime (M1: no real surface — M2 adds
 //! presentation) and pumps the `UiApp` loop from the shim's frame callback:
@@ -24,10 +28,13 @@
 //! the ABI via `native_sdk_app_render_pixels`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const app_manifest = @import("app_manifest");
 const canvas = @import("canvas");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
+const app_dirs = @import("app_dirs");
+const security = @import("../security/root.zig");
 const types = @import("types.zig");
 const host = @import("host.zig");
 const conversions = @import("conversions.zig");
@@ -57,7 +64,75 @@ pub const mobile_shell_windows = [_]app_manifest.ShellWindow{.{
 pub const mobile_shell_scene: app_manifest.ShellConfig = .{ .windows = &mobile_shell_windows };
 
 pub fn UiAppHost(comptime AppDef: type) type {
+    return UiAppHostWithStorage(AppDef, false, false, &.{});
+}
+
+/// Capability-specialized mobile host. The boolean is comptime so a mobile
+/// artifact without `store` never analyzes SQLite open/deinit and carries no
+/// database symbols; `build/app.zig` supplies the manifest-inferred value.
+pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_enabled: bool) type {
+    return UiAppHostWithStorage(AppDef, record_store_enabled, false, &.{});
+}
+
+/// Capability-specialized mobile host for the two SQLite-backed storage
+/// tiers. Both databases use the OS-owned data root but remain separate files.
+pub fn UiAppHostWithStorage(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+) type {
+    return UiAppHostWithStorageAndCredentials(
+        AppDef,
+        record_store_enabled,
+        relational_store_enabled,
+        relational_migrations,
+        false,
+        false,
+        false,
+        "dev.native_sdk.app",
+    );
+}
+
+/// Capability-specialized mobile host including the OS credential-store
+/// gate and the app identity used as its service namespace.
+pub fn UiAppHostWithStorageAndCredentials(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+    comptime credentials_enabled: bool,
+    comptime credentials_permitted: bool,
+    comptime filesystem_permitted: bool,
+    comptime credentials_service: []const u8,
+) type {
+    return UiAppHostWithStorageCredentialsAndImages(
+        AppDef,
+        record_store_enabled,
+        relational_store_enabled,
+        relational_migrations,
+        credentials_enabled,
+        credentials_permitted,
+        filesystem_permitted,
+        credentials_service,
+        1024 * 1024,
+    );
+}
+
+pub fn UiAppHostWithStorageCredentialsAndImages(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+    comptime credentials_enabled: bool,
+    comptime credentials_permitted: bool,
+    comptime filesystem_permitted: bool,
+    comptime credentials_service: []const u8,
+    comptime max_image_pixel_bytes: usize,
+) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
+    const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
+    const RelationalStoreType = if (relational_store_enabled) runtime.RelationalStore else void;
     return struct {
         const Self = @This();
 
@@ -69,6 +144,10 @@ pub fn UiAppHost(comptime AppDef: type) type {
         /// the host wraps it so ABI-facing counters observe every event.
         inner_app: runtime.App,
         embedded: EmbeddedApp,
+        record_store: RecordStoreType = undefined,
+        record_store_open: bool = false,
+        relational_store: RelationalStoreType = undefined,
+        relational_store_open: bool = false,
         started: bool = false,
         frame_index: u64 = 0,
         last_error: ?anyerror = null,
@@ -78,11 +157,14 @@ pub fn UiAppHost(comptime AppDef: type) type {
         asset_root_len: usize = 0,
         asset_entry: [max_mobile_asset_entry_bytes]u8 = undefined,
         asset_entry_len: usize = 0,
+        file_root_storage: [6][max_mobile_asset_root_bytes]u8 = undefined,
+        file_roots: [6][]const u8 = undefined,
         automation_dir: [max_mobile_asset_root_bytes]u8 = undefined,
         automation_dir_len: usize = 0,
         automation_io: ?*std.Io.Threaded = null,
         text_measure: host.MobileTextMeasure = .{},
         audio: host.MobileAudio = .{},
+        credentials: host.MobileCredentials = .{},
         // Image decode stays declined until the shim registers a real
         // codec (`native_sdk_app_set_image_service`): the null platform's
         // strict test decoder is opt-in (`image_decode`, default off), so
@@ -113,7 +195,10 @@ pub fn UiAppHost(comptime AppDef: type) type {
             const options = AppDef.mobileOptions();
             if (!std.mem.eql(u8, options.canvas_label, mobile_gpu_surface_label)) return error.InvalidViewOptions;
             if (!sceneHasMobileSurface(options.scene)) return error.ViewNotFound;
-            self.null_platform = platform.NullPlatform.init(.{});
+            self.null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+                .app_name = options.name,
+                .bundle_id = credentials_service,
+            });
             self.null_platform.gpu_surfaces = true;
             // Audio is declined until the shim registers a real service
             // (`native_sdk_app_set_audio_service`): without one,
@@ -123,11 +208,15 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // snapshotted below.
             self.null_platform.audio_playback = false;
             self.null_platform.audio_streaming = false;
+            self.null_platform.microphone_capture = false;
+            self.null_platform.system_audio_capture = false;
             // The null packet presenter records only counts; disabling it
             // routes presentation through the CPU pixel path so frames
             // produce real pixels (the buffer M2's surface blit consumes).
             self.null_platform.gpu_surface_packets = false;
             self.started = false;
+            self.record_store_open = false;
+            self.relational_store_open = false;
             self.frame_index = 0;
             self.last_error = null;
             self.command_count = 0;
@@ -136,11 +225,14 @@ pub fn UiAppHost(comptime AppDef: type) type {
             self.asset_root_len = 0;
             self.asset_entry = undefined;
             self.asset_entry_len = 0;
+            self.file_root_storage = undefined;
+            self.file_roots = undefined;
             self.automation_dir = undefined;
             self.automation_dir_len = 0;
             self.automation_io = null;
             self.text_measure = .{};
             self.audio = .{};
+            self.credentials = .{};
             self.image = .{};
             self.form_factor = .unknown;
             self.chrome_tabs_projected = false;
@@ -153,13 +245,33 @@ pub fn UiAppHost(comptime AppDef: type) type {
             MobileUi.initInPlace(&self.ui, allocator, options);
             self.ui.model = AppDef.initModel();
             self.inner_app = self.ui.app();
-            self.embedded.initInPlace(.{
+            self.embedded.initInPlaceWithImageBudget(.{
                 .context = self,
                 .name = options.name,
                 .scene_fn = hostScene,
                 .event_fn = hostEvent,
                 .stop_fn = hostStop,
-            }, self.null_platform.platform());
+            }, self.null_platform.platform(), max_image_pixel_bytes);
+            // The NullPlatform map is for native test only. Installed mobile
+            // apps start with no backing until the UIKit/Android shim
+            // registers its OS credential service.
+            try host.setCredentialService(self, .{}, null);
+            self.embedded.runtime.options.credentials_enabled = credentials_enabled;
+            self.embedded.runtime.options.security.permissions = if (credentials_permitted and filesystem_permitted)
+                &.{ security.permission_credentials, security.permission_filesystem }
+            else if (credentials_permitted)
+                &.{security.permission_credentials}
+            else if (filesystem_permitted)
+                &.{security.permission_filesystem}
+            else
+                &.{};
+            // Until the OS data root is installed, fail closed for ungranted
+            // raw paths. A filesystem grant is sufficient on its own.
+            self.embedded.runtime.options.file_access = .{
+                .roots = &.{},
+                .permitted = filesystem_permitted,
+                .enforce = true,
+            };
             // The damage seam: capture pixel presents (chained through
             // the null platform's recording present, so nonblank
             // sampling keeps working), drop the packet presenters no
@@ -170,16 +282,127 @@ pub fn UiAppHost(comptime AppDef: type) type {
             return self;
         }
 
-        pub fn destroy(self: *Self) void {
+        /// Returns true when teardown deliberately preserves the host because
+        /// an abandoned platform callback may still enter it. Mobile shims
+        /// use the companion C ABI result to preserve their callback context
+        /// under the same condition.
+        pub fn destroy(self: *Self) bool {
             host.disableAutomation(self);
             self.render_memo.deinit();
             self.ui.deinit();
+            // One lifecycle owner: the embedded app's own deinit returns
+            // its heap-owned registrations (registered canvas font
+            // bytes) before the host storage goes.
+            self.embedded.deinit();
+            // An AppDef owning module-level service state (the generated
+            // TypeScript mobile wiring's in-process pool) tears it down
+            // after the effects channel is gone; the pool's own shutdown
+            // already ran through the binding.
+            if (comptime @hasDecl(AppDef, "serviceTeardown")) AppDef.serviceTeardown();
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) self.record_store.deinit();
+            }
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) self.relational_store.deinit();
+            }
+            // The embedded null platform lives inside `self`, so freeing
+            // `self` IS this path's platform destruction — and an
+            // abandoned platform call may still enter that platform
+            // at any later time (see
+            // `PlatformServices.note_channel_wake_abandoned_fn`; the
+            // null platform's own enqueue-only wake never triggers it,
+            // but a shim-registered service could). Consult the latch
+            // like every first-party destroy path: skip the free and
+            // leak the host storage, process-lived, with one loud line.
+            if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) {
+                std.debug.print("mobile ui host teardown: an abandoned platform call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
+                return true;
+            }
             std.heap.page_allocator.destroy(self);
+            return false;
         }
 
         pub fn start(self: *Self) anyerror!void {
+            if (comptime record_store_enabled) {
+                if (!self.record_store_open) return error.StoreDataDirUnavailable;
+            }
+            if (comptime relational_store_enabled) {
+                if (!self.relational_store_open) return error.SqliteDataDirUnavailable;
+            }
             self.started = true;
             try self.embedded.start();
+        }
+
+        /// Install the OS-owned app-data directory before start. iOS passes
+        /// Library/Application Support and Android passes files/, exactly the
+        /// `.data` directories resolved by `app_dirs` on those platforms.
+        /// An AppDef declaring `serviceDataRoot` (the generated TypeScript
+        /// mobile wiring) receives the directory too — the in-process
+        /// service pool keeps its cooperative-cancellation markers and
+        /// stream relays there, and cores reading `NATIVE_SDK_APP_DATA_DIR`
+        /// through `envMsgs` get this value.
+        pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
+            if (self.started) return error.AppAlreadyStarted;
+            if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
+            if (comptime @hasDecl(AppDef, "serviceDataRoot")) AppDef.serviceDataRoot(data_root);
+            const platform_value = app_dirs.currentPlatform();
+            if (builtin.is_test and platform_value != .ios and platform_value != .android) {
+                for (&self.file_root_storage, 0..) |*storage, index| {
+                    @memcpy(storage[0..data_root.len], data_root);
+                    self.file_roots[index] = storage[0..data_root.len];
+                }
+                self.embedded.runtime.options.file_access = .{
+                    .roots = &self.file_roots,
+                    .permitted = filesystem_permitted,
+                    .enforce = true,
+                };
+            } else {
+                const home = switch (platform_value) {
+                    // iOS data_root is HOME/Library/Application Support.
+                    .ios => std.fs.path.dirname(std.fs.path.dirname(data_root) orelse return error.InvalidStoreDataDir) orelse return error.InvalidStoreDataDir,
+                    // Android data_root is HOME/files.
+                    .android => std.fs.path.dirname(data_root) orelse return error.InvalidStoreDataDir,
+                    else => return error.InvalidStoreDataDir,
+                };
+                const dir_buffers = app_dirs.Buffers.fromArray(max_mobile_asset_root_bytes, &self.file_root_storage);
+                const dirs = try app_dirs.resolve(
+                    .{ .name = credentials_service },
+                    platform_value,
+                    .{ .home = home },
+                    dir_buffers,
+                );
+                self.file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+                self.embedded.runtime.options.file_access = .{
+                    .roots = &self.file_roots,
+                    .permitted = filesystem_permitted,
+                    .enforce = true,
+                };
+            }
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) {
+                    self.record_store.deinit();
+                    self.record_store_open = false;
+                    self.embedded.runtime.options.record_store = null;
+                }
+                self.record_store = try runtime.RecordStore.open(std.heap.page_allocator, data_root);
+                self.record_store_open = true;
+                self.embedded.runtime.options.record_store = self.record_store.binding();
+            }
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) {
+                    self.relational_store.deinit();
+                    self.relational_store_open = false;
+                    self.embedded.runtime.options.relational_store = null;
+                }
+                const opened = try runtime.RelationalStore.openMigrated(std.heap.page_allocator, data_root, relational_migrations);
+                self.relational_store = switch (opened.outcome) {
+                    .ok => opened.database.?,
+                    .migrate_failed => return error.SqliteMigrationFailed,
+                    .version_unknown => return error.SqliteVersionUnknown,
+                };
+                self.relational_store_open = true;
+                self.embedded.runtime.options.relational_store = self.relational_store.binding();
+            }
         }
 
         /// Host-pumped frame step: the shim's display-link (or test) tick.

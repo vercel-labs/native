@@ -1,0 +1,7 @@
+{"settle":true}
+{"kind":"stream_hang"}
+{"waitForServiceChunk":true}
+{"kind":"cancel_stream"}
+{"settle":true}
+{"kind":"hang"}
+{"settle":true}

@@ -4,7 +4,7 @@
 //! The ownership model, stated once: the default is to USE the library
 //! composites and theme them through design tokens; ejecting writes the
 //! composite's canonical source into the app (`src/components/`) for the
-//! moment you need to own its shape. Only honest compositions are on the
+//! moment you need to own its shape. Only library compositions are on the
 //! menu — views the library itself builds from public primitives (rows,
 //! columns, badges, separators, text). Engine control classes (buttons,
 //! text fields, tabs, ...) are never ejectable: their behavior lives in
@@ -12,7 +12,7 @@
 //! fork.
 //!
 //! Each canonical source lives as a real file next to this one
-//! (`components/`), embedded verbatim at compile time, and held honest
+//! (`components/`), embedded verbatim at compile time, and held in parity
 //! by identity tests (`src/tooling/components/identity_tests.zig`) that
 //! build the ejected form and the library form against the same inputs
 //! and require identical widget trees. Whether a component ejects as a
@@ -25,6 +25,9 @@
 const std = @import("std");
 const buildgraph = @import("buildgraph.zig");
 
+pub const ComponentForm = enum { markup, zig };
+pub const ComponentCore = enum { ts, zig };
+
 pub const Component = struct {
     /// The name `native eject component <name>` accepts (the registry
     /// element / builder-sugar name, so users name the thing they see).
@@ -36,30 +39,75 @@ pub const Component = struct {
     /// The canonical source, embedded verbatim — the identity tests keep
     /// it building the exact tree the library builds.
     source: []const u8,
+    /// The source form written into an app. This is explicit so the CLI can
+    /// refuse a future Zig-form component in a TypeScript tree rather than
+    /// violating the app-authoring rule.
+    form_kind: ComponentForm = .markup,
     /// One-line form summary for listings and the success message.
     form: []const u8,
+    /// Legacy Zig source retained for Zig-core apps. TypeScript apps use the
+    /// markup source above; Zig apps keep the builder-shaped component API
+    /// that existed before markup templates became the default.
+    zig_path: ?[]const u8 = null,
+    zig_source: ?[]const u8 = null,
+    zig_form: []const u8 = "Zig view function",
 };
+
+pub const Ejection = struct {
+    name: []const u8,
+    path: []const u8,
+    source: []const u8,
+    form: []const u8,
+    form_kind: ComponentForm,
+};
+
+pub fn forCore(component: *const Component, core: ComponentCore) ?Ejection {
+    return switch (core) {
+        .ts => .{
+            .name = component.name,
+            .path = component.path,
+            .source = component.source,
+            .form = component.form,
+            .form_kind = component.form_kind,
+        },
+        .zig => if (component.zig_path != null and component.zig_source != null) .{
+            .name = component.name,
+            .path = component.zig_path.?,
+            .source = component.zig_source.?,
+            .form = component.zig_form,
+            .form_kind = .zig,
+        } else null,
+    };
+}
 
 /// The ejectable set. Growing it is three steps: add the canonical
 /// source under `components/`, add its identity test, add a row here.
 pub const components = [_]Component{
     .{
         .name = "stepper",
-        .path = "src/components/stepper.zig",
-        .source = @embedFile("components/stepper.zig"),
-        .form = "Zig view function",
+        .path = "src/components/stepper.native",
+        .source = @embedFile("components/stepper.native"),
+        .form = "markup template",
+        .form_kind = .markup,
+        .zig_path = "src/components/stepper.zig",
+        .zig_source = @embedFile("components/stepper.zig"),
     },
     .{
         .name = "timeline",
         .path = "src/components/timeline.native",
         .source = @embedFile("components/timeline.native"),
         .form = "markup template",
+        .zig_path = null,
+        .zig_source = null,
     },
     .{
         .name = "timeline-item",
-        .path = "src/components/timeline_item.zig",
-        .source = @embedFile("components/timeline_item.zig"),
-        .form = "Zig view function",
+        .path = "src/components/timeline-item.native",
+        .source = @embedFile("components/timeline-item.native"),
+        .form = "markup template",
+        .form_kind = .markup,
+        .zig_path = "src/components/timeline_item.zig",
+        .zig_source = @embedFile("components/timeline_item.zig"),
     },
 };
 
@@ -119,6 +167,10 @@ fn editDistance(a: []const u8, b: []const u8) ?usize {
 /// destination already exists — eject transfers ownership exactly once
 /// and never overwrites a component the user may have edited.
 pub fn eject(io: std.Io, app_dir: []const u8, component: *const Component) error{ AlreadyEjected, WriteFailed }!void {
+    return ejectSelection(io, app_dir, forCore(component, .ts).?);
+}
+
+pub fn ejectSelection(io: std.Io, app_dir: []const u8, component: Ejection) error{ AlreadyEjected, WriteFailed }!void {
     var dir = std.Io.Dir.cwd().openDir(io, app_dir, .{}) catch return error.WriteFailed;
     defer dir.close(io);
     if (buildgraph.fileExistsIn(io, dir, component.path)) return error.AlreadyEjected;
@@ -167,4 +219,20 @@ test "unknown names suggest their nearest ejectable component" {
 
 test "the component list names every ejectable component" {
     try std.testing.expectEqualStrings("stepper, timeline, timeline-item", component_list);
+}
+
+test "current ejectable components all use the markup form" {
+    for (components) |component| {
+        try std.testing.expectEqual(ComponentForm.markup, component.form_kind);
+        try std.testing.expect(std.mem.endsWith(u8, component.path, ".native"));
+        try std.testing.expectEqualStrings("markup template", component.form);
+    }
+}
+
+test "Zig-core selection preserves the legacy builder sources" {
+    try std.testing.expectEqualStrings("src/components/stepper.zig", forCore(&components[0], .zig).?.path);
+    try std.testing.expectEqual(ComponentForm.zig, forCore(&components[0], .zig).?.form_kind);
+    try std.testing.expect(forCore(&components[1], .zig) == null);
+    try std.testing.expectEqualStrings("src/components/timeline_item.zig", forCore(&components[2], .zig).?.path);
+    try std.testing.expect(std.mem.indexOf(u8, forCore(&components[2], .zig).?.source, "on_press") != null);
 }

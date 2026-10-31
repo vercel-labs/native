@@ -73,6 +73,54 @@ test "anchored frame clamps into the window horizontally and by offset" {
     try std.testing.expectEqual(@as(f32, 58), frame.y); // 20 + 28 + 10
 }
 
+test "point anchor places the surface corner at the point" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // The anchor rect (a wide row's frame) must be ignored: only the
+    // point positions the surface.
+    const frame = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(180, 60) },
+        geometry.RectF.init(0, 40, 400, 40),
+    );
+    try std.testing.expectEqual(@as(f32, 180), frame.x);
+    try std.testing.expectEqual(@as(f32, 60), frame.y);
+    try std.testing.expectEqual(@as(f32, 140), frame.width);
+    try std.testing.expectEqual(@as(f32, 90), frame.height);
+}
+
+test "point anchor flips above when the surface would cross the bottom edge" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // window is 300 tall: below the point has 300-260 = 40 < 90, above
+    // has 260 — flip, bottom edge lands on the point.
+    const frame = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(50, 260) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 260 - 90), frame.y);
+    try std.testing.expectEqual(@as(f32, 90), frame.height);
+}
+
+test "point anchor clamps into the window horizontally" {
+    const child = Widget{ .kind = .dropdown_menu, .frame = geometry.RectF.init(0, 0, 140, 90) };
+    // window is 400 wide: a point near the right edge cannot push the
+    // surface off-screen — it clamps to the window's right edge.
+    const right = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(390, 60) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 400 - 140), right.x);
+    // A point beyond the window clamps into it first (never off-screen
+    // left either).
+    const left = anchoredFrame(
+        child,
+        .{ .offset = 0, .point = geometry.PointF.init(-30, 60) },
+        geometry.RectF.init(0, 0, 400, 300),
+    );
+    try std.testing.expectEqual(@as(f32, 0), left.x);
+}
+
 test "anchored children consume no flow space and float against the parent" {
     const menu_items = [_]Widget{.{ .id = 4, .kind = .menu_item, .text = "One" }};
     const dropdown = Widget{
@@ -134,6 +182,44 @@ test "leaf trigger kinds lay out their anchored children" {
     try std.testing.expect(layout.findById(4) != null);
 }
 
+test "anchored relayout recomputes placement from a translated trigger frame" {
+    const menu_items = [_]Widget{.{ .id = 5, .kind = .menu_item, .frame = geometry.RectF.init(0, 0, 0, 24), .text = "One" }};
+    const dropdown = Widget{
+        .id = 4,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 140, 50),
+        .layout = .{ .anchor = .{} },
+        .children = &menu_items,
+    };
+    const wrap_children = [_]Widget{
+        .{ .id = 3, .kind = .text, .text = "Files" },
+        dropdown,
+    };
+    const scroll_children = [_]Widget{
+        .{ .id = 2, .kind = .stack, .frame = geometry.RectF.init(0, 140, 160, 28), .children = &wrap_children },
+        .{ .id = 6, .kind = .panel, .frame = geometry.RectF.init(0, 320, 160, 20) },
+    };
+    const scroll = Widget{ .id = 1, .kind = .scroll_view, .children = &scroll_children };
+    var nodes: [6]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(scroll, geometry.RectF.init(0, 0, 180, 100), &nodes);
+
+    // Model the post-layout scroll restore: content moved, while the old
+    // anchored frame merely rode the translation and retained its stale
+    // pre-scroll clamp.
+    for (nodes[1..layout.nodes.len]) |*node| {
+        node.frame.y -= 130;
+        node.widget.frame = node.frame;
+    }
+    try canvas.relayoutAnchoredChildren(nodes[0..layout.nodes.len], .{});
+
+    const relaid = canvas.WidgetLayoutTree{ .nodes = nodes[0..layout.nodes.len] };
+    const trigger = relaid.findById(2).?.frame;
+    const surface = relaid.findById(4).?.frame;
+    try std.testing.expectEqual(@as(f32, 10), trigger.y);
+    try std.testing.expectEqual(trigger.maxY() + 4, surface.y);
+    try std.testing.expectEqual(@as(f32, 50), surface.height);
+}
+
 /// The shared fixture for z-order/clip tests: a scroll pane whose content
 /// holds the trigger + anchored dropdown, and a LATER sibling panel the
 /// dropdown overlaps. In-tree paint order would put the panel above the
@@ -167,6 +253,74 @@ fn firstCommandIndexForWidget(list: canvas.DisplayList, widget_id: canvas.Object
         if (id / 16 == widget_id) return index;
     }
     return null;
+}
+
+test "window-level modals paint and route above later anchored overlays" {
+    const dialog = Widget{
+        .id = 2,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+    };
+    const dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(100, 100) } },
+    };
+    // The dropdown mounts later and overlaps the centered dialog exactly.
+    // Modal token order, not raw node order, owns the window-level stack.
+    const root = Widget{ .id = 1, .kind = .stack, .children = &.{ dialog, dropdown } };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, window, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const list = builder.displayList();
+    const dialog_index = firstCommandIndexForWidget(list, 2) orelse return error.TestUnexpectedResult;
+    const dropdown_index = firstCommandIndexForWidget(list, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dialog_index > dropdown_index);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), layout.hitTest(geometry.PointF.init(150, 150)).?.id);
+
+    // An explicit layer remains the author-controlled escape hatch.
+    const elevated_dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .layer = 400,
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(100, 100) } },
+    };
+    const elevated_root = Widget{ .id = 1, .kind = .stack, .children = &.{ dialog, elevated_dropdown } };
+    var elevated_nodes: [4]WidgetLayoutNode = undefined;
+    const elevated = try canvas.layoutWidgetTree(elevated_root, window, &elevated_nodes);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), elevated.hitTest(geometry.PointF.init(150, 150)).?.id);
+}
+
+test "default anchored surfaces inside a modal stay above their modal" {
+    const dropdown = Widget{
+        .id = 3,
+        .kind = .dropdown_menu,
+        .frame = geometry.RectF.init(0, 0, 100, 50),
+        .layout = .{ .anchor = .{ .offset = 0, .point = geometry.PointF.init(120, 120) } },
+    };
+    const dialog = Widget{
+        .id = 2,
+        .kind = .dialog,
+        .frame = geometry.RectF.init(0, 0, 200, 100),
+        .children = &.{dropdown},
+    };
+    const root = Widget{ .id = 1, .kind = .stack, .children = &.{dialog} };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, window, &nodes);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try layout.emitDisplayList(&builder, .{});
+    const list = builder.displayList();
+    const dialog_index = firstCommandIndexForWidget(list, 2) orelse return error.TestUnexpectedResult;
+    const dropdown_index = firstCommandIndexForWidget(list, 3) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dropdown_index > dialog_index);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 3), layout.hitTest(geometry.PointF.init(140, 140)).?.id);
 }
 
 test "anchored surfaces render in a late z-pass above later siblings and outside ancestor clips" {

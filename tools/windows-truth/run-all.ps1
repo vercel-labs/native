@@ -5,7 +5,7 @@
 # in %TEMP%\native-truth-out\.
 #
 # Run over ssh from the repo root on the box:
-#   powershell -NoProfile -File tools\windows-truth\run-all.ps1 [recon|drive|effects|record|writeback|package|all]
+#   powershell -NoProfile -File tools\windows-truth\run-all.ps1 [recon|drive|perf|effects|record|writeback|package|all]
 #
 # Session model: ssh commands run in an invisible service session.
 # Anything that must touch the real desktop (launch a window, screenshot,
@@ -20,6 +20,10 @@
 #   drive     - per-app interaction scenarios: clicks, text input, wheel
 #               scrolling, synthetic resizes, dispatch-error sweep
 #               (drive.ps1; recon builds first)
+#   perf      - release gpu-dashboard on the real desktop: OS cursor-hover
+#               latency plus display-aware retained-animation and sustained
+#               wheel/frame-cadence gates
+#               (perf-input.ps1)
 #   effects   - effects-probe: spawn streaming, cancel, the PostMessage
 #               wake path, clipboard write verified via a console-session
 #               Get-Clipboard hop (effects-run.ps1)
@@ -48,18 +52,19 @@ param([string]$Step = "all")
 $steps = @{
     "recon" = { & "$PSScriptRoot\recon.ps1" }
     "drive" = { & "$PSScriptRoot\drive.ps1" }
+    "perf" = { & "$PSScriptRoot\perf-input.ps1" }
     "effects" = { & "$PSScriptRoot\effects-run.ps1" }
     "record" = { & "$PSScriptRoot\record-replay.ps1" }
     "writeback" = { & "$PSScriptRoot\writeback-run.ps1" }
     "package" = { & "$PSScriptRoot\package-launch.ps1" }
 }
 if ($Step -eq "all") {
-    foreach ($name in @("recon", "drive", "effects", "record", "writeback", "package")) {
+    foreach ($name in @("recon", "drive", "perf", "effects", "record", "writeback", "package")) {
         Write-Output "#### $name"
         & $steps[$name]
     }
 } elseif ($steps.ContainsKey($Step)) {
     & $steps[$Step]
 } else {
-    Write-Output "usage: run-all.ps1 [recon|drive|effects|record|writeback|package|all]"
+    Write-Output "usage: run-all.ps1 [recon|drive|perf|effects|record|writeback|package|all]"
 }

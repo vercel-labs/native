@@ -1,4 +1,6 @@
 const std = @import("std");
+const control_content = @import("control_content_policy.zig");
+const appearance = @import("control_appearance_policy.zig");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
 const token_model = @import("tokens.zig");
@@ -37,6 +39,7 @@ const WidgetState = widget_model.WidgetState;
 /// device scales snap in DEVICE space and unsnapped surfaces render
 /// untouched.
 pub fn snapHairlineStrokeRect(tokens: DesignTokens, value: StrokeRect) StrokeRect {
+    if (tokens.control_geometry_policy != null) return control_content.hairline(value, tokens);
     if (!tokens.pixel_snap.geometry) return value;
     const scale = tokens.pixel_snap.scale;
     if (!std.math.isFinite(scale) or scale <= 0) return value;
@@ -70,12 +73,18 @@ pub fn snapHairlineStrokeRect(tokens: DesignTokens, value: StrokeRect) StrokeRec
 /// own border and the ring floats that gap outside it, so focus never
 /// restyles the control.
 pub fn focusRingRect(rect: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_geometry_policy != null) return control_content.rect(.focus_rect, rect, tokens);
     return rect.normalized().inflate(geometry.InsetsF.all(nonNegative(tokens.stroke.focus_offset)));
 }
 
 /// The ring's corner radius: the control's own radius grown by the
 /// offset so the ring stays concentric with the border it wraps.
 pub fn focusRingRadius(radius: Radius, tokens: DesignTokens) Radius {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.focus_radius, .{}, tokens);
+        request.radius(radius);
+        return request.run(tokens).radius;
+    }
     const offset = nonNegative(tokens.stroke.focus_offset);
     return .{
         .top_left = radius.top_left + offset,
@@ -91,6 +100,7 @@ pub fn focusRingRadius(radius: Radius, tokens: DesignTokens) Radius {
 /// beside it — the soft focus-ring gray that used to fill this role
 /// hints at focus but disappears as an insertion point.
 pub fn textEditingInkColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 14, appearance.visual(widget, tokens, .text_input), .{});
     const visual = textInputControlVisualTokens(widget, tokens);
     return widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
 }
@@ -102,6 +112,7 @@ pub fn textEditingInkColor(widget: Widget, tokens: DesignTokens) Color {
 /// schemes, including the monochrome register where the accent is
 /// near-black on light surfaces.
 pub fn textSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 15, .{}, .{});
     return widget.style.accent orelse tokens.colors.accent;
 }
 
@@ -109,6 +120,7 @@ pub fn textSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
 /// foreground, so the selected run inverts against the solid fill the
 /// way filled-primary controls pair accent with accent_text.
 pub fn textSelectionTextColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 16, .{}, .{});
     return widget.style.accent_foreground orelse tokens.colors.accent_text;
 }
 
@@ -118,6 +130,7 @@ pub fn textSelectionTextColor(widget: Widget, tokens: DesignTokens) Color {
 /// (links, emphasis, code), so the highlight sits under them as a
 /// translucent band instead of inverting them like editable fields do.
 pub fn staticTextSelectionFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 17, .{}, .{});
     return colorWithAlpha(widget.style.accent orelse tokens.colors.accent, tokens.states.selection_wash_alpha);
 }
 
@@ -153,37 +166,45 @@ pub fn widgetBorderFill(widget: Widget, fallback: Color) Fill {
 }
 
 pub fn widgetFocusRingFill(widget: Widget, tokens: DesignTokens) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 27, .{}, tokens.colors.focus_ring));
     return colorFill(widget.style.focus_ring orelse tokens.colors.focus_ring);
 }
 
 pub fn widgetBackgroundColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 28, .{}, fallback);
     return widget.style.background orelse fallback;
 }
 
 pub fn widgetAccentColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 29, .{}, fallback);
     return widget.style.accent orelse fallback;
 }
 
 pub fn widgetBorderColor(widget: Widget, fallback: Color) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, DesignTokens{}, 30, .{}, fallback);
     return widget.style.border orelse fallback;
 }
 
 pub fn widgetForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
-    if (widget.state.disabled) return tokens.colors.text_muted;
-    return widget.style.foreground orelse fallback;
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 12, .{}, fallback);
+    const color = widget.style.foreground orelse fallback;
+    return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
 }
 
 pub fn widgetAccentForegroundColor(widget: Widget, tokens: DesignTokens, fallback: Color) Color {
-    if (widget.state.disabled) return tokens.colors.text_muted;
-    return widget.style.accent_foreground orelse fallback;
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 13, .{}, fallback);
+    const color = widget.style.accent_foreground orelse fallback;
+    return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
 }
 
 pub fn widgetRadius(widget: Widget, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 18, .{}, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(widgetSizedRadiusValue(widget, fallback)));
 }
 
 pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 19, visual, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(widgetSizedRadiusValue(widget, visual.radius orelse fallback)));
 }
@@ -194,6 +215,7 @@ pub fn controlRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32)
 /// never the full size-stepped scale of `controlRadius` (a lg button
 /// with a 12px corner starts reading as a card).
 pub fn buttonControlRadius(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, tokens, 20, visual, 0));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     const fallback = switch (widget.size) {
         .sm => tokens.radius.md,
@@ -203,6 +225,7 @@ pub fn buttonControlRadius(widget: Widget, visual: ControlVisualTokens, tokens: 
 }
 
 pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 22, .{}, fallback);
     return switch (widget.size) {
         .sm => @max(0, fallback - 2),
         // heading/display are text-leaf typography rungs; radii are
@@ -213,10 +236,12 @@ pub fn widgetSizedRadiusValue(widget: Widget, fallback: f32) f32 {
 }
 
 pub fn widgetStrokeWidth(widget: Widget, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 23, .{}, fallback);
     return nonNegative(widget.style.stroke_width orelse fallback);
 }
 
 pub fn controlStrokeWidth(widget: Widget, visual: ControlVisualTokens, fallback: f32) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, DesignTokens{}, 24, visual, fallback);
     return nonNegative(widget.style.stroke_width orelse visual.stroke_width orelse fallback);
 }
 
@@ -225,6 +250,7 @@ pub fn buttonFill(widget: Widget, tokens: DesignTokens) Fill {
 }
 
 pub fn buttonFillColor(widget: Widget, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 2, appearance.visual(widget, tokens, .button), .{});
     // Disabled keeps the variant's identity at the disabled-wash
     // strength (`states.disabled_alpha`) — the same wash the selection
     // controls wear — instead of collapsing every variant to one gray
@@ -282,7 +308,7 @@ pub fn buttonFillColor(widget: Widget, tokens: DesignTokens) Color {
         // the light recipe, so a bare untheme'd `DesignTokens{}` (whose
         // color defaults are the light palette) renders identically.
         .destructive => widgetAccentColor(widget, destructiveChipBackground(visual, tokens, pressed, selected, hovered)),
-        .secondary => widgetBackgroundColor(widget, buttonStateBackground(visual, pressed or selected, hovered, if (pressed or selected) tokens.colors.surface_pressed else hoverWash(tokens.colors.surface_subtle, false, hovered, tokens.states.secondary_hover_alpha))),
+        .secondary => widgetAccentColor(widget, buttonStateBackground(visual, pressed or selected, hovered, if (pressed or selected) tokens.colors.surface_pressed else hoverWash(tokens.colors.surface_subtle, false, hovered, tokens.states.secondary_hover_alpha))),
         // The quiet variants step through the neutral washes: hover and
         // a toggle's on-state sit on the muted wash, a press deepens one
         // step further so the moment of commitment is visible under the
@@ -361,17 +387,23 @@ pub fn disabledWash(color: Color, disabled: bool, alpha: f32) Color {
 }
 
 pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
-    // Disabled ink is the variant's own ink at the disabled-wash
-    // strength, matching the washed fill — the whole control fades as
-    // one piece (primary keeps knockout text on its washed fill; the
-    // quiet variants keep their body ink) instead of swapping to the
-    // shared muted gray, which read as a live-but-secondary label.
-    // Themes with a stated disabled ink (`disabled_foreground`) take it
-    // instead.
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 3, appearance.visual(widget, tokens, .button), .{});
+    // Disabled ink normally keeps the variant's own ink at the
+    // disabled-wash strength. A filled primary is the exception: CSS
+    // opacity composites its knockout label and fill as ONE layer, so
+    // on the matching surface the label lands near the surface color
+    // instead of fading a second time through the already-muted fill.
+    // Precomposite that ink over the themed page at the requested state
+    // strength; this preserves the group-opacity result while still
+    // honoring a custom `disabled_alpha`. Themes with a stated disabled
+    // ink (`disabled_foreground`) take it instead — Geist uses that for
+    // its gray swap register.
     if (widget.state.disabled) {
         const visual = buttonControlVisualTokens(widget, tokens);
         if (visual.disabled_foreground) |color| return color;
-        return disabledWash(buttonTextColorForWidget(restStateWidget(widget), tokens), true, tokens.states.disabled_alpha);
+        const rest = buttonTextColorForWidget(restStateWidget(widget), tokens);
+        if (widget.variant == .primary) return compositeOver(rest, tokens.colors.background, tokens.states.disabled_alpha);
+        return disabledWash(rest, true, tokens.states.disabled_alpha);
     }
     const active = widget.state.pressed or widget.state.selected;
     const visual = buttonControlVisualTokens(widget, tokens);
@@ -397,6 +429,7 @@ pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
 }
 
 pub fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 4, appearance.visual(widget, tokens, .button), tokens.colors.border));
     // The disabled edge is the variant's own edge at half strength, so
     // it fades in lockstep with the half-strength fill and ink — a
     // full-strength edge around a washed body would read as a live
@@ -414,10 +447,50 @@ pub fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
             // chip's edge is where its wash ends, nothing more.
             .destructive => widgetAccentColor(widget, visual.border orelse transparentColor()),
             .ghost => widgetBorderColor(widget, visual.border orelse transparentColor()),
+            .secondary => widgetAccentColor(widget, visual.border orelse tokens.colors.border),
             else => widgetBorderColor(widget, visual.border orelse tokens.colors.border),
         };
     };
+    if (widget.state.disabled and widget.style.border == null) {
+        const visual = buttonControlVisualTokens(widget, tokens);
+        // The shared edge is independently overridable: a custom theme
+        // may want a solid disabled outline while keeping the house fill
+        // wash instead of also stating a disabled body color.
+        switch (widget.variant) {
+            .default, .secondary, .outline => if (tokens.controls.button_disabled_border) |disabled_border| return colorFill(disabled_border),
+            .primary, .ghost, .destructive => {},
+        }
+        // shadcn's filled default button has a transparent CSS border.
+        // At rest our fallback accent stroke is invisible against the
+        // identical opaque fill, but washing both commands separately
+        // makes their overlap darker and creates a false outline. Drop
+        // that implicit edge in the disabled state. This remains
+        // transparent even when a theme states a translucent disabled
+        // body: painting that color again as a stroke would double-blend
+        // into a false outline. An explicitly themed or locally authored
+        // border still follows its own opacity wash.
+        if (widget.variant == .primary and visual.border == null) return colorFill(transparentColor());
+    }
     return colorFill(disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha));
+}
+
+/// The command color equivalent to painting `foreground` over
+/// `background` at `opacity`. Button fill, border, and text are separate
+/// display-list commands, so the filled-primary disabled label uses this
+/// to reproduce whole-control opacity without blending a translucent
+/// glyph through the already-muted fill a second time.
+fn compositeOver(foreground: Color, background: Color, opacity: f32) Color {
+    const foreground_alpha = std.math.clamp(opacity, 0, 1) * std.math.clamp(foreground.a, 0, 1);
+    const background_alpha = std.math.clamp(background.a, 0, 1);
+    const output_alpha = foreground_alpha + background_alpha * (1 - foreground_alpha);
+    if (output_alpha <= 0) return transparentColor();
+    const background_weight = background_alpha * (1 - foreground_alpha);
+    return Color.rgba(
+        (foreground.r * foreground_alpha + background.r * background_weight) / output_alpha,
+        (foreground.g * foreground_alpha + background.g * background_weight) / output_alpha,
+        (foreground.b * foreground_alpha + background.b * background_weight) / output_alpha,
+        output_alpha,
+    );
 }
 
 /// Whether this widget is a button-group member rendering in the
@@ -429,10 +502,12 @@ pub fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
 /// keeping full corners. Never true under the house register's default
 /// tokens, so no-pack rendering cannot take this path.
 pub fn buttonInDetachedGroup(widget: Widget, tokens: DesignTokens) bool {
+    if (widget.appearance_policy != null) return appearance.detached(widget, tokens);
     return widget.group_segment != .none and tokens.controls.button_group_style == .detached;
 }
 
 pub fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .button);
     // A detached-register group member wears the group's own control
     // table — the chip treatment replaces variant chrome, so the strip
     // reads as ONE exclusive-choice affordance rather than a row of
@@ -448,6 +523,11 @@ pub fn buttonControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVi
     };
     if (widget.kind == .toggle_button or widget.kind == .toggle) return controlVisualTokensWithFallback(tokens.controls.toggle_button, variant);
     return variant;
+}
+
+pub fn selectControlVisualTokensForWidget(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .select);
+    return selectControlVisualTokens(tokens);
 }
 
 pub fn selectControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
@@ -487,6 +567,7 @@ pub fn controlStateBackground(visual: ControlVisualTokens, pressed: bool, active
 }
 
 pub fn textInputControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .text_input);
     return switch (widget.kind) {
         .input => controlVisualTokensWithFallback(tokens.controls.input, tokens.controls.text_field),
         .search_field => tokens.controls.search_field,
@@ -500,11 +581,21 @@ pub fn textInputControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn textInputFill(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Fill {
-    if (widget.state.disabled) return colorFill(visual.disabled_background orelse tokens.colors.disabled);
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, tokens, 10, visual, .{}));
+    if (widget.state.disabled) {
+        if (visual.disabled_background) |color| return colorFill(color);
+        const rest = restStateWidget(widget);
+        return colorFill(disabledWash(
+            widgetBackgroundColor(rest, buttonStateBackground(visual, false, false, tokens.colors.surface)),
+            true,
+            tokens.states.disabled_alpha,
+        ));
+    }
     return colorFill(widgetBackgroundColor(widget, buttonStateBackground(visual, false, washHovered(widget), tokens.colors.surface)));
 }
 
 pub fn textInputBorderFill(widget: Widget, visual: ControlVisualTokens, fallback: Color) Fill {
+    if (widget.appearance_policy != null) return colorFill(appearance.color(widget, DesignTokens{}, 11, visual, fallback));
     return colorFill(widgetBorderColor(widget, visual.border orelse fallback));
 }
 
@@ -537,6 +628,7 @@ pub fn sheetControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
 }
 
 pub fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .list);
     return switch (widget.kind) {
         .data_cell => controlVisualTokensWithFallback(tokens.controls.data_cell, tokens.controls.list_item),
         .menu_item => controlVisualTokensWithFallback(tokens.controls.menu_item, tokens.controls.list_item),
@@ -546,6 +638,7 @@ pub fn listItemControlVisualTokens(widget: Widget, tokens: DesignTokens) Control
 }
 
 pub fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .selection);
     return switch (widget.kind) {
         .segmented_control => tokens.controls.segmented_control,
         .checkbox => tokens.controls.checkbox,
@@ -558,6 +651,7 @@ pub fn selectionControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn surfaceControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .surface);
     return switch (widget.kind) {
         .accordion => accordionControlVisualTokens(tokens),
         .alert => alertControlVisualTokens(tokens),
@@ -581,6 +675,7 @@ pub fn resizableControlVisualTokens(tokens: DesignTokens) ControlVisualTokens {
 }
 
 pub fn componentControlVisualTokens(widget: Widget, tokens: DesignTokens) ControlVisualTokens {
+    if (widget.appearance_policy != null) return appearance.visual(widget, tokens, .component);
     return switch (widget.kind) {
         .avatar => tokens.controls.avatar,
         .badge => tokens.controls.badge,
@@ -592,17 +687,26 @@ pub fn componentControlVisualTokens(widget: Widget, tokens: DesignTokens) Contro
 }
 
 pub fn componentPillRadius(widget: Widget, visual: ControlVisualTokens, fallback: f32) Radius {
+    if (widget.appearance_policy != null) return Radius.all(appearance.scalar(widget, DesignTokens{}, 21, visual, fallback));
     if (widget.style.radius) |radius| return Radius.all(nonNegative(radius));
     if (visual.radius) |radius| return Radius.all(nonNegative(radius));
     return Radius.all(nonNegative(fallback));
 }
 
 pub fn badgeBackgroundColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
-    if (widget.state.disabled) return visual.disabled_background orelse tokens.colors.disabled;
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 5, visual, .{});
+    if (widget.state.disabled) {
+        if (visual.disabled_background) |color| return color;
+        return disabledWash(badgeBackgroundColor(restStateWidget(widget), tokens, visual), true, tokens.states.disabled_alpha);
+    }
     const hovered = washHovered(widget);
+    // Badges intentionally have one control table rather than the button
+    // register's per-variant tables. Variant identity therefore resolves
+    // from the shared palette plus local style channels; this does not
+    // invent themeable per-variant badge tokens.
     return switch (widget.variant) {
         .default, .primary => widgetAccentColor(widget, controlStateBackground(visual, widget.state.pressed, widget.state.pressed or widget.state.selected, hovered, tokens.colors.accent)),
-        .secondary => widgetBackgroundColor(widget, controlStateBackground(visual, widget.state.pressed, widget.state.pressed or widget.state.selected, hovered, tokens.colors.surface_subtle)),
+        .secondary => widgetAccentColor(widget, controlStateBackground(visual, widget.state.pressed, widget.state.pressed or widget.state.selected, hovered, tokens.colors.surface_subtle)),
         .outline, .ghost => widgetBackgroundColor(widget, controlStateBackground(visual, widget.state.pressed, widget.state.pressed or widget.state.selected, hovered, if (hovered or widget.state.pressed) tokens.colors.surface_subtle else transparentColor())),
         // The QUIET destructive chip: a translucent destructive wash
         // (`states.badge_destructive_wash_alpha`) under destructive
@@ -614,15 +718,22 @@ pub fn badgeBackgroundColor(widget: Widget, tokens: DesignTokens, visual: Contro
 }
 
 pub fn badgeBorderColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
-    return switch (widget.variant) {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 6, visual, tokens.colors.border);
+    const border = widget.style.border orelse switch (widget.variant) {
         .default, .primary => widgetAccentColor(widget, visual.border orelse tokens.colors.accent),
         .destructive => widgetAccentColor(widget, visual.border orelse tokens.colors.destructive),
-        else => widgetBorderColor(widget, visual.border orelse tokens.colors.border),
+        .secondary => widgetAccentColor(widget, visual.border orelse tokens.colors.border),
+        else => visual.border orelse tokens.colors.border,
     };
+    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
 }
 
 pub fn badgeTextColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Color {
-    if (widget.state.disabled) return visual.disabled_foreground orelse tokens.colors.text_muted;
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 7, visual, .{});
+    if (widget.state.disabled) {
+        if (visual.disabled_foreground) |color| return color;
+        return disabledWash(badgeTextColor(restStateWidget(widget), tokens, visual), true, tokens.states.disabled_alpha);
+    }
     return switch (widget.variant) {
         .default, .primary => widgetAccentForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.accent_text),
         // Ink on the quiet wash, not knockout text on a filled block.
@@ -632,6 +743,7 @@ pub fn badgeTextColor(widget: Widget, tokens: DesignTokens, visual: ControlVisua
 }
 
 pub fn badgeStrokeWidth(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, tokens, 25, visual, 0);
     if (widget.style.stroke_width) |width| return nonNegative(width);
     if (visual.stroke_width) |width| return nonNegative(width);
     // Only the outline variant wears a border; the filled and quiet
@@ -643,6 +755,7 @@ pub fn badgeStrokeWidth(widget: Widget, tokens: DesignTokens, visual: ControlVis
 }
 
 pub fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
+    if (widget.appearance_policy != null) return appearance.scalar(widget, tokens, 26, appearance.visual(widget, tokens, .button), 0);
     if (widget.style.stroke_width) |width| return nonNegative(width);
     const visual = buttonControlVisualTokens(widget, tokens);
     if (visual.stroke_width) |width| return nonNegative(width);
@@ -657,17 +770,42 @@ pub fn buttonStrokeWidth(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn listItemFillColor(widget: Widget, tokens: DesignTokens, state: WidgetState) Color {
+    if (widget.appearance_policy != null) {
+        var target = widget;
+        target.state = state;
+        return appearance.color(target, tokens, 8, appearance.visual(widget, tokens, .list), .{});
+    }
     const visual = listItemControlVisualTokens(widget, tokens);
     // The quiet-surface knob reads through the widget, not the caller's
     // state copy, so every row/cell path honors it identically.
     const hovered = state.hovered and !widget.style.quiet_hover;
-    const fallback = if (state.selected or state.pressed)
-        tokens.colors.surface_pressed
-    else if (hovered)
-        tokens.colors.surface_subtle
-    else
-        transparentColor();
-    return controlStateBackground(visual, state.pressed, state.selected or state.pressed, hovered, fallback);
+    if (state.pressed) return visual.pressed_background orelse visual.active_background orelse visual.hover_background orelse visual.background orelse tokens.colors.surface_pressed;
+    if (state.selected) return visual.active_background orelse visual.hover_background orelse visual.background orelse tokens.colors.surface_pressed;
+    if (hovered) return visual.hover_background orelse visual.background orelse tokens.colors.surface_subtle;
+    // Local authored chrome is the rest rung. A theme's shared row
+    // background remains the fallback for rows without one, while its
+    // state-specific channels above still own interaction feedback.
+    return widget.style.background orelse visual.background orelse transparentColor();
+}
+
+/// Surface chrome uses the same neutral feedback ladder as an actionable
+/// row when its theme does not state state-specific colors: surface at
+/// rest, subtle on hover, pressed on selection/press. A themed active or
+/// hover fill remains authoritative, and a locally authored background is
+/// the surface's explicit all-state override.
+pub fn surfaceStateBackground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 9, visual, .{});
+    const active = widget.state.pressed or widget.state.selected;
+    const hovered = washHovered(widget);
+    // A local background is an explicit all-state override. The theme
+    // table's background is only the REST rung: letting it participate in
+    // the state fallbacks would mask the standard subtle/pressed washes
+    // whenever a custom theme stated only its surface color.
+    if (widget.style.background) |background| return background;
+    if (widget.state.pressed) return visual.pressed_background orelse visual.active_background orelse visual.hover_background orelse tokens.colors.surface_pressed;
+    if (active) return visual.active_background orelse visual.hover_background orelse tokens.colors.surface_pressed;
+    if (hovered) return visual.hover_background orelse tokens.colors.surface_subtle;
+    return visual.background orelse tokens.colors.surface;
 }
 
 pub fn transparentColor() Color {
@@ -676,4 +814,44 @@ pub fn transparentColor() Color {
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+/// Callback-aware state ladder; drawing callers retain their explicit state facts.
+pub fn buttonStateBackgroundForWidget(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, active: bool, hovered: bool, fallback: Color) Color {
+    if (widget.appearance_policy == null) return buttonStateBackground(visual, active, hovered, fallback);
+    var target = widget;
+    target.state = .{ .selected = active, .hovered = hovered };
+    target.style.quiet_hover = false;
+    return appearance.color(target, tokens, 32, visual, fallback);
+}
+pub fn controlStateBackgroundForWidget(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, pressed: bool, active: bool, hovered: bool, fallback: Color) Color {
+    if (widget.appearance_policy == null) return controlStateBackground(visual, pressed, active, hovered, fallback);
+    var target = widget;
+    target.state = .{ .pressed = pressed, .selected = active, .hovered = hovered };
+    target.style.quiet_hover = false;
+    return appearance.color(target, tokens, 33, visual, fallback);
+}
+pub fn selectionDisabledColor(widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, rest: Color, channel: u8) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 34 + channel, visual, rest);
+    if (!widget.state.disabled) return rest;
+    if (channel == 0) {
+        if (visual.disabled_background) |color| return color;
+    }
+    if (channel == 1) {
+        if (visual.disabled_foreground) |color| return color;
+    }
+    return disabledWash(rest, visual.disabled_background == null and visual.disabled_foreground == null, tokens.states.disabled_alpha);
+}
+pub fn alertBackgroundColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 37, visual, .{});
+    if (widget.variant != .destructive) return surfaceStateBackground(widget, visual, tokens);
+    if (widget.style.background) |color| return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
+    const hue = widget.style.accent orelse tokens.colors.destructive;
+    const wash = colorWithAlpha(hue, if (widget.state.pressed) tokens.states.destructive_wash_pressed_alpha else if (washHovered(widget)) tokens.states.destructive_wash_hover_alpha else tokens.states.destructive_wash_alpha);
+    return disabledWash(wash, widget.state.disabled, tokens.states.disabled_alpha);
+}
+pub fn alertBorderColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
+    if (widget.appearance_policy != null) return appearance.color(widget, tokens, 38, visual, tokens.colors.border);
+    const border = widget.style.border orelse if (widget.variant == .destructive) colorWithAlpha(widget.style.accent orelse tokens.colors.destructive, 0.5) else visual.border orelse tokens.colors.border;
+    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
 }

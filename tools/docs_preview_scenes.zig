@@ -12,7 +12,7 @@
 //! Scenes are retained widget trees. Most are stateless: the runtime
 //! owns hover, focus, toggle, text-edit, slider, and scroll state, which
 //! is exactly the interactivity those previews expose. Scenes whose
-//! honest demo needs MODEL-owned state (accordion expansion, tab panel
+//! interactive demo needs MODEL-owned state (accordion expansion, tab panel
 //! switching, dialog dismiss/reopen, the select's anchored dropdown)
 //! declare a tiny shared mini-model (`SceneModel`) and build from it;
 //! the wasm host routes the REAL widget event dispatch (press, toggle,
@@ -152,6 +152,7 @@ pub const scenes = [_]Scene{
     .{ .name = "alert", .height = 220, .build = stateless(buildAlert) },
     .{ .name = "accordion", .height = 240, .build = buildAccordion, .model = .{ .flags = .{ true, false, false, false } } },
     .{ .name = "tabs", .height = 230, .build = buildTabs },
+    .{ .name = "segmented-control", .height = 160, .build = buildSegmentedControl },
     .{ .name = "menu", .height = 280, .build = stateless(buildMenu) },
     .{ .name = "tooltip", .height = 160, .build = stateless(buildTooltip), .hover = .{ .kind = .button } },
     .{ .name = "bubble", .height = 300, .build = stateless(buildBubble) },
@@ -171,7 +172,11 @@ pub const scenes = [_]Scene{
     .{ .name = "resizable", .height = 240, .build = stateless(buildResizable) },
     .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
+    .{ .name = "code", .height = 300, .build = stateless(buildCode) },
+    .{ .name = "code-diff", .height = 220, .build = stateless(buildCodeDiff) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
+    .{ .name = "media-surface", .height = 280, .build = stateless(buildMediaSurface) },
+    .{ .name = "video", .height = 300, .build = stateless(buildVideo) },
     .{ .name = "icon", .height = 150, .build = stateless(buildIconHero) },
     .{ .name = "chart", .height = 260, .build = stateless(buildChart) },
     .{ .name = "chart-bar", .height = 260, .build = stateless(buildChartBar) },
@@ -196,6 +201,7 @@ pub const scenes = [_]Scene{
     heroScene("chart-hero", buildChartHero),
     heroScene("checkbox-hero", buildCheckboxHero),
     heroScene("combobox-hero", buildComboboxHero),
+    heroScene("code-hero", buildCodeHero),
     heroScene("dialog-hero", buildDialogHero),
     heroScene("drawer-hero", buildDrawerHero),
     heroScene("dropdown-menu-hero", buildDropdownMenuHero),
@@ -204,6 +210,8 @@ pub const scenes = [_]Scene{
     heroScene("input-group-hero", buildInputGroupHero),
     heroScene("list-hero", buildListHero),
     heroScene("markdown-hero", buildMarkdownHero),
+    heroScene("media-surface-hero", buildMediaSurfaceHero),
+    heroScene("video-hero", buildVideoHero),
     heroScene("pagination-hero", buildPaginationHero),
     heroScene("panel-hero", buildPanelHero),
     heroScene("progress-hero", buildProgressHero),
@@ -211,6 +219,7 @@ pub const scenes = [_]Scene{
     heroScene("resizable-hero", buildResizableHero),
     heroScene("scroll-hero", buildScrollHero),
     .{ .name = "select-hero", .width = hero_tile_width, .height = hero_tile_height, .build = buildSelectHero, .model = .{ .open = true } },
+    heroScene("segmented-control-hero", buildSegmentedControlHero),
     heroScene("separator-hero", buildSeparatorHero),
     heroScene("sheet-hero", buildSheetHero),
     heroScene("skeleton-hero", buildSkeletonHero),
@@ -576,6 +585,65 @@ fn buildAvatar(ui: *Ui) Node {
     });
 }
 
+fn buildMediaSurface(ui: *Ui) Node {
+    // The docs previews render through the deterministic reference
+    // renderer, so this shows exactly what goldens show: the surface's
+    // id-derived placeholder. Producer frames exist only on live GPU
+    // hosts — presentation chrome by policy.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 340 }, .{
+            ui.mediaSurface(.{
+                .image = 7,
+                .height = 180,
+                .style_tokens = .{ .radius = .md },
+                .semantics = .{ .label = "Camera preview" },
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Awaiting producer frames"),
+        }),
+    });
+}
+
+fn buildVideo(ui: *Ui) Node {
+    // Docs previews render through the deterministic reference
+    // renderer: the surface shows its placeholder and the house chrome
+    // its idle (no playback loaded) state — exactly what goldens show.
+    return tile(ui, .{
+        ui.column(.{ .gap = 10, .width = 360 }, .{
+            ui.video(.{
+                .src = "assets/clips/launch.mp4",
+                .controls = true,
+                .height = 200,
+                .label = "Launch clip",
+            }),
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "House transport chrome under the picture"),
+        }),
+    });
+}
+
+fn buildVideoHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.video(.{
+            .src = "assets/clips/launch.mp4",
+            .controls = true,
+            .width = 300,
+            .height = 168,
+            .label = "Video",
+        }),
+    });
+}
+
+fn buildMediaSurfaceHero(ui: *Ui) Node {
+    return tile(ui, .{
+        ui.mediaSurface(.{
+            .image = 7,
+            .width = 300,
+            .height = 150,
+            .style_tokens = .{ .radius = .md },
+            .semantics = .{ .label = "Media surface" },
+        }),
+    });
+}
+
 fn buildCard(ui: *Ui) Node {
     // No hand-added inset: the card composite carries the house 24px
     // content padding by default.
@@ -675,6 +743,17 @@ fn buildTabs(ui: *Ui, model: *const SceneModel) Node {
                     ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, tab_bodies[active]),
                 }),
             }),
+        }),
+    });
+}
+
+fn buildSegmentedControl(ui: *Ui, model: *const SceneModel) Node {
+    const active = @min(model.index, 2);
+    return tile(ui, .{
+        ui.row(.{ .gap = 8, .cross = .center }, .{
+            ui.el(.segmented_control, .{ .text = "Day", .selected = active == 0, .on_press = .{ .select_index = 0 } }, .{}),
+            ui.el(.segmented_control, .{ .text = "Week", .selected = active == 1, .icon = "settings", .on_press = .{ .select_index = 1 } }, .{}),
+            ui.el(.segmented_control, .{ .text = "Month", .selected = active == 2, .on_press = .{ .select_index = 2 } }, .{}),
         }),
     });
 }
@@ -914,7 +993,7 @@ fn buildDialog(ui: *Ui, model: *const SceneModel) Node {
 
 fn buildDrawer(ui: *Ui) Node {
     return tileStart(ui, .{
-        ui.el(.drawer, .{ .text = "Filters", .width = 260, .height = 230, .padding = 24 }, .{
+        ui.el(.drawer, .{ .text = "Filters", .height = 230, .padding = 24 }, .{
             ui.column(.{ .gap = 12 }, .{
                 surfaceTitleSpacer(ui),
                 ui.checkbox(.{ .text = "Only unread", .checked = true }),
@@ -927,7 +1006,7 @@ fn buildDrawer(ui: *Ui) Node {
 
 fn buildSheet(ui: *Ui) Node {
     return tile(ui, .{
-        ui.el(.sheet, .{ .text = "Share", .width = 380, .height = 190, .padding = 24 }, .{
+        ui.el(.sheet, .{ .text = "Share", .width = 380, .padding = 24 }, .{
             ui.column(.{ .gap = 12 }, .{
                 surfaceTitleSpacer(ui),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
@@ -992,6 +1071,50 @@ const markdown_sample =
     \\const doc = try fx.readFile("notes.md");
     \\```
 ;
+
+const code_sample =
+    \\<Accordion defaultValue={["item-1"]}>
+    \\  <AccordionItem value="item-1">
+    \\    <AccordionTrigger>Is it accessible?</AccordionTrigger>
+    \\    <AccordionContent>
+    \\      Yes. It follows the WAI-ARIA design pattern.
+    \\    </AccordionContent>
+    \\  </AccordionItem>
+    \\</Accordion>
+;
+
+const code_diff_sample =
+    \\module.exports = {
+    \\  experimental: {
+    \\    appDir: true,
+    \\  },
+    \\  appDir: true,
+    \\}
+;
+
+fn buildCode(ui: *Ui) Node {
+    return tileStart(ui, .{
+        ui.code(.{
+            .language = .html,
+            .line_numbers = true,
+            .wrap = false,
+            .width = 496,
+        }, code_sample),
+    });
+}
+
+fn buildCodeDiff(ui: *Ui) Node {
+    return tileStart(ui, .{
+        ui.code(.{
+            .language = .javascript,
+            .line_numbers = true,
+            .added_lines = &.{5},
+            .removed_lines = &.{ 2, 3, 4 },
+            .wrap = false,
+            .width = 496,
+        }, code_diff_sample),
+    });
+}
 
 fn buildMarkdown(ui: *Ui) Node {
     return tileStart(ui, .{
@@ -1269,7 +1392,7 @@ fn buildDialogHero(ui: *Ui) Node {
 
 fn buildDrawerHero(ui: *Ui) Node {
     return heroTile(ui, .{
-        ui.el(.drawer, .{ .text = "Filters", .width = 220, .height = 155, .padding = 18 }, .{
+        ui.el(.drawer, .{ .text = "Filters", .height = 155, .padding = 18 }, .{
             ui.column(.{ .gap = 10 }, .{
                 surfaceTitleSpacer(ui),
                 ui.checkbox(.{ .text = "Only unread", .checked = true }),
@@ -1327,6 +1450,22 @@ const markdown_hero_sample =
     \\`inline code`, and [links](https://native-sdk.dev) — through
     \\native widgets.
 ;
+
+fn buildCodeHero(ui: *Ui) Node {
+    return heroTileStart(ui, .{
+        ui.code(.{
+            .language = .html,
+            .line_numbers = true,
+            .wrap = false,
+            .width = 320,
+        },
+            \\<Button variant="primary"
+            \\  onPress={() => save()}>
+            \\  Save changes
+            \\</Button>
+        ),
+    });
+}
 
 fn buildMarkdownHero(ui: *Ui) Node {
     return heroTileStart(ui, .{
@@ -1445,7 +1584,7 @@ fn buildSeparatorHero(ui: *Ui) Node {
 
 fn buildSheetHero(ui: *Ui) Node {
     return heroTile(ui, .{
-        ui.el(.sheet, .{ .text = "Share", .width = 300, .height = 158, .padding = 14 }, .{
+        ui.el(.sheet, .{ .text = "Share", .width = 300, .padding = 14 }, .{
             ui.column(.{ .gap = 10 }, .{
                 surfaceTitleSpacer(ui),
                 ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Anyone with the link can view this board."),
@@ -1565,6 +1704,16 @@ fn buildTabsHero(ui: *Ui) Node {
                     ui.text(.{ .wrap = true, .style_tokens = .{ .foreground = .text_muted } }, "Make changes to your account here."),
                 }),
             }),
+        }),
+    });
+}
+
+fn buildSegmentedControlHero(ui: *Ui) Node {
+    return heroTile(ui, .{
+        ui.row(.{ .gap = 6, .cross = .center }, .{
+            ui.el(.segmented_control, .{ .text = "Day", .selected = true }, .{}),
+            ui.el(.segmented_control, .{ .text = "Week", .icon = "settings" }, .{}),
+            ui.el(.segmented_control, .{ .text = "Month" }, .{}),
         }),
     });
 }

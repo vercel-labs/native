@@ -2,11 +2,19 @@
     .id = "dev.native_sdk.kanban",
     .name = "kanban",
     .display_name = "Kanban",
-    .description = "A kanban board with todo, doing, and done columns.",
+    .description = "A TypeScript kanban board where native file drops become todo cards.",
     .version = "0.1.0",
     .platforms = .{"macos"},
     .permissions = .{ "view", "command" },
     .capabilities = .{ "native_views", "gpu_surfaces" },
+    // Agent avatars rasterized from the OpenAI and Claude AI marks in SVGL.
+    // The ImageIds are stored on each card and bound by the markup avatar.
+    .assets = .{
+        .images = .{
+            .{ .id = 1, .path = "assets/logos/openai-svgl.png" },
+            .{ .id = 2, .path = "assets/logos/claude-svgl.png" },
+        },
+    },
     .shell = .{
         .windows = .{
             .{
@@ -19,7 +27,6 @@
                 // (proven by the layout audit sweep).
                 .min_width = 840,
                 .min_height = 560,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 .titlebar = "hidden_inset_tall",
                 .views = .{

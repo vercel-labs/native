@@ -1,12 +1,13 @@
 const std = @import("std");
+const lifecycle = @import("window_lifecycle_policy.zig");
 const geometry = @import("geometry");
 const validation = @import("validation.zig");
 const shell_layout = @import("shell_layout.zig");
 const runtime_state = @import("state.zig");
+const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 
-const validateWindowFrame = validation.validateWindowFrame;
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const copySourceInto = runtime_state.copySourceInto;
 const RuntimeShellLayout = shell_layout.RuntimeShellLayout;
@@ -23,6 +24,15 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         const Self = @This();
 
         pub fn createWindow(self: *Runtime, options: platform.WindowCreateOptions) anyerror!platform.WindowInfo {
+            // A transparent imperative window with no EXPLICIT source is
+            // the canvas-overlay shape. Do not inherit the app's loaded
+            // WebView source: Windows layered windows cannot host that
+            // child HWND, and hot reload must not materialize one later.
+            // Explicit sources keep the established WebView-window path
+            // on backends that can composite them.
+            if (options.transparent and options.source == null) {
+                return Self.createWindowWithSourceMode(self, options, false, .never_source);
+            }
             return Self.createWindowWithSourceMode(self, options, options.source == null, .require_source);
         }
 
@@ -35,9 +45,33 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         pub fn focusWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return @import("window_views.zig").RuntimeWindowViews(Runtime).executeWindowCapability(self, policy, .focus, window_id);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
+            // Liveness before the platform call, like showWindow: a
+            // closed window keeps its table slot until the id or label
+            // is re-created, and close clears `hidden` with `open`, so
+            // a dead slot would skip the hidden-routing below and reach
+            // the platform's focus verb directly — the CEF host retains
+            // browser-bearing windows past their close and would order
+            // the closed window back front. Dead slots answer
+            // WindowNotFound, the runtime's one answer for them.
+            if (!self.windows[index].info.open) return error.WindowNotFound;
+            // Focus implies visibility: a window hidden by its .hide
+            // close policy must leave the hidden state through the REAL
+            // show verb before it takes key. The hosts' focus paths
+            // order a window forward without touching their
+            // policy-hidden bookkeeping (macOS would report hidden=true
+            // on a window standing on the glass; Windows never shows an
+            // SW_HIDE'd window at all, leaving focused=true on an
+            // invisible one), while their show paths clear that
+            // bookkeeping and emit the state — and the runtime's
+            // showWindow flips its own hidden flag with rollback on
+            // platform failure. One rule, at this seam, so every focus
+            // ingress (the app verb, the JS bridge's window.focus)
+            // resolves hidden-then-focus the same way.
+            if (self.windows[index].info.hidden) try self.showWindow(window_id);
             try self.options.platform.services.focusWindow(window_id);
-            Self.setFocusedIndex(self, index);
+            try Self.setFocusedIndex(self, index);
             self.invalidated = true;
         }
 
@@ -62,18 +96,47 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 }
             }
             const id = if (options.id != 0) options.id else Self.allocateWindowId(self);
-            try validateWindowFrame(options.default_frame);
+            try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 1, options.default_frame);
+            // `.hide` needs a host that can keep a closed-by-the-user
+            // window alive and re-show it; refusing here is the loud
+            // teaching (GTK: no status item exists to bring the window
+            // back, declare .quit — the default — instead). NEVER a
+            // silent no-op that strands a hidden window.
+            if (options.close_policy == .hide and !self.options.platform.supports(.window_hide_on_close)) {
+                return error.UnsupportedWindowClosePolicy;
+            }
             if (Self.findWindowIndexById(self, id) != null) return error.DuplicateWindowId;
             if (Self.findWindowIndexByLabel(self, label) != null) return error.DuplicateWindowLabel;
-            const index = try Self.reserveWindow(self, id, label, options.title, source, source_reloads_from_app);
+            const index = try Self.reserveWindow(self, id, label, options.title, source, source_reloads_from_app, source_policy);
+            self.windows[index].activate_on_show = options.activate_on_show;
             var native_created = false;
             errdefer Self.removeWindowAt(self, index);
             errdefer if (native_created) self.options.platform.services.closeWindow(id) catch {};
 
-            const window_options = options.windowOptions(id, self.windows[index].info.label);
+            // Materializing a window source means creating its main
+            // webview — refused before the native window exists when the
+            // build has no web layer, so the error names the real cause.
+            if (self.windows[index].source != null and !self.options.web_layer) return error.WebViewLayerNotBuilt;
+
+            var window_options = options.windowOptions(id, self.windows[index].info.label);
+            // Startup windows are restored by the app runner before the
+            // platform exists. Windows materialized later (scene secondary
+            // windows, model-declared windows, imperative calls, and the JS
+            // bridge) first exist here, so this is the one layer that can
+            // perform their label-keyed lookup. A miss or read failure keeps
+            // the authored explicit/default placement unchanged; only an
+            // actual record can claim the `.restored` reason.
+            if (window_options.restore_state) {
+                if (self.options.window_state_store) |store| {
+                    if (store.loadWindow(window_options.label, &self.window_state_read_scratch) catch null) |saved| {
+                        window_options.default_frame = saved.frame;
+                        window_options.initial_placement = .restored;
+                    }
+                }
+            }
             const native_info = try self.options.platform.services.createWindow(window_options);
             native_created = true;
-            Self.applyNativeInfo(self, index, native_info);
+            try Self.applyNativeInfo(self, index, native_info);
             if (self.windows[index].source) |window_source| {
                 try self.options.platform.services.loadWindowWebView(id, window_source);
             }
@@ -81,7 +144,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             return self.windows[index].info;
         }
 
-        pub fn reserveWindow(self: *Runtime, id: platform.WindowId, label: []const u8, title: []const u8, source: ?platform.WebViewSource, source_reloads_from_app: bool) !usize {
+        pub fn reserveWindow(self: *Runtime, id: platform.WindowId, label: []const u8, title: []const u8, source: ?platform.WebViewSource, source_reloads_from_app: bool, source_policy: WindowSourcePolicy) !usize {
             if (self.window_count >= platform.max_windows) return error.WindowLimitReached;
             if (label.len == 0) return error.InvalidWindowOptions;
             const index = self.window_count;
@@ -98,6 +161,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.windows[index].main_view_id = Self.allocateViewId(self);
             self.windows[index].source = if (source) |source_value| try Self.copySource(self, index, source_value) else null;
             self.windows[index].source_reloads_from_app = source_reloads_from_app;
+            self.windows[index].source_policy = source_policy;
             self.windows[index].main_frame = geometry.RectF.init(0, 0, self.windows[index].info.frame.width, self.windows[index].info.frame.height);
             self.windows[index].main_frame_set = false;
             self.windows[index].main_layer = 0;
@@ -114,6 +178,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.window_count) : (cursor += 1) {
                 self.windows[cursor] = self.windows[cursor + 1];
+                self.windows[cursor].rebindStorage();
             }
             self.window_count -= 1;
         }
@@ -126,30 +191,54 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             return copySourceInto(&self.loaded_source_storage, source);
         }
 
-        pub fn applyNativeInfo(self: *Runtime, index: usize, native_info: platform.WindowInfo) void {
+        pub fn applyNativeInfo(self: *Runtime, index: usize, native_info: platform.WindowInfo) anyerror!void {
             self.windows[index].info.frame = native_info.frame;
             self.windows[index].info.scale_factor = native_info.scale_factor;
-            self.windows[index].info.open = native_info.open;
-            self.windows[index].info.focused = native_info.focused;
+            if (self.window_lifecycle_policy == null) {
+                self.windows[index].info.open = native_info.open;
+                self.windows[index].info.hidden = native_info.hidden;
+            }
+            if (self.window_lifecycle_policy) |policy| {
+                const program = lifecycle.plan(policy, self, .host, .{ .cursor = index, .saved = @as(u32, @intFromBool(native_info.open)) | (@as(u32, @intFromBool(native_info.focused)) << 1) | (@as(u32, @intFromBool(native_info.hidden)) << 2), .frame = native_info.frame });
+                program.apply(&self.windows[index].info);
+                if (program.has(128)) self.windows[index].main_frame = program.frame;
+                if (program.has(4)) try Self.setFocusedIndex(self, index);
+                if (program.has(16)) try Self.setWindowFocused(self, index, false);
+                return;
+            }
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, native_info.frame.width, native_info.frame.height);
             }
-            if (native_info.focused) Self.setFocusedIndex(self, index);
+            if (native_info.focused)
+                try Self.setFocusedIndex(self, index)
+            else
+                try Self.setWindowFocused(self, index, false);
         }
 
         pub fn updateWindowState(self: *Runtime, state: platform.WindowState) !void {
             const existing_index = Self.findWindowIndexById(self, state.id);
-            const index = existing_index orelse try Self.reserveWindow(self, state.id, state.label, state.title, null, true);
-            var info = self.windows[index].info;
-            info.frame = state.frame;
-            info.scale_factor = state.scale_factor;
-            info.open = state.open;
-            info.focused = state.focused;
-            self.windows[index].info = info;
+            const index = existing_index orelse try Self.reserveWindow(self, state.id, state.label, state.title, null, true, .allow_source_less);
+            self.windows[index].info.frame = state.frame;
+            self.windows[index].info.scale_factor = state.scale_factor;
+            if (self.window_lifecycle_policy == null) {
+                self.windows[index].info.open = state.open;
+                self.windows[index].info.hidden = state.hidden;
+            }
+            if (self.window_lifecycle_policy) |policy| {
+                const program = lifecycle.plan(policy, self, .host, .{ .cursor = index, .saved = @as(u32, @intFromBool(state.open)) | (@as(u32, @intFromBool(state.focused)) << 1) | (@as(u32, @intFromBool(state.hidden)) << 2), .frame = state.frame });
+                program.apply(&self.windows[index].info);
+                if (program.has(128)) self.windows[index].main_frame = program.frame;
+                if (program.has(4)) try Self.setFocusedIndex(self, index);
+                if (program.has(16)) try Self.setWindowFocused(self, index, false);
+                return;
+            }
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, state.frame.width, state.frame.height);
             }
-            if (state.focused) Self.setFocusedIndex(self, index);
+            if (state.focused)
+                try Self.setFocusedIndex(self, index)
+            else
+                try Self.setWindowFocused(self, index, false);
         }
 
         pub fn runtimeWindowStateForPersistence(self: *const Runtime, state: platform.WindowState) platform.WindowState {
@@ -188,6 +277,20 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         pub fn bindShellViews(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView) !void {
+            if (self.shell_coordination_policy) |policy| {
+                const c = @import("shell_coordination_policy.zig");
+                var request: [64 + 16 * 8]u8 = @splat(0);
+                request[0..64].* = c.request(.bind, 0, @intCast(self.shell_layout_count), 0);
+                std.mem.writeInt(u64, request[16..24], window_id, .little);
+                for (self.shell_layouts[0..self.shell_layout_count], 0..) |layout, i| std.mem.writeInt(u64, request[64 + i * 8 ..][0..8], layout.window_id, .little);
+                const program = c.plan(policy, request[0 .. 64 + self.shell_layout_count * 8]);
+                try program.admit();
+                const slot = program.selected.?;
+                if (program.decisions != 0) self.shell_layouts[slot].window_id = window_id;
+                try self.shell_layouts[slot].copyViews(views);
+                if (program.decisions != 0) self.shell_layout_count += 1;
+                return;
+            }
             if (Self.findShellLayoutIndex(self, window_id)) |index| {
                 try self.shell_layouts[index].copyViews(views);
                 return;
@@ -215,13 +318,129 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.shell_layout_count) : (cursor += 1) {
                 self.shell_layouts[cursor] = self.shell_layouts[cursor + 1];
+                self.shell_layouts[cursor].rebindStorage();
             }
             self.shell_layout_count -= 1;
         }
 
-        pub fn setFocusedIndex(self: *Runtime, focused_index: usize) void {
-            for (self.windows[0..self.window_count], 0..) |*window, index| {
-                window.info.focused = index == focused_index;
+        /// THE window-key seam: every path that moves key-window status
+        /// — the platform's `window_focused` event, a frame-change echo
+        /// carrying `focused`, the app's own `focusWindow`, and native
+        /// adoption at creation — lands here, so the key-LOSS
+        /// consequence cannot be skipped by feeding only one ingress.
+        /// A window that transitions focused→unfocused drops the
+        /// tooltip conversation in all of its canvas views (the
+        /// `.view_blur` contract: focus-shown and pointer-owned alike
+        /// hide and re-stamp hidden); `view.focused` itself is
+        /// deliberately untouched so per-window focus memory survives
+        /// and the re-key restores focus where it was without revealing
+        /// anything.
+        pub fn setFocusedIndex(self: *Runtime, focused_index: usize) anyerror!void {
+            var first_error: ?anyerror = null;
+            for (0..self.window_count) |index| {
+                const focused = if (self.window_lifecycle_policy) |policy| lifecycle.plan(policy, self, .focused_index, .{ .cursor = index, .target = focused_index }).active else index == focused_index;
+                Self.setWindowFocused(self, index, focused) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+            }
+            if (first_error) |err| return err;
+        }
+
+        /// The ONE writer of a tracked window's `focused` flag: the
+        /// key-LOSS consequence fires on the flag's own focused→
+        /// unfocused edge, HERE, so it cannot depend on which platform
+        /// event carried the loss or in what order. macOS announces a
+        /// key change as one GAIN (`window_focused`), and the dethroning
+        /// loop in `setFocusedIndex` observes the old window's edge —
+        /// but Windows and GTK announce the LOSS first (a state echo
+        /// carrying `focused = false` for the window the user left,
+        /// before any gain for the next one), and a loss written past
+        /// this seam would leave the later gain nothing to observe:
+        /// the tooltip stayed painted, and a11y-visible, in the
+        /// inactive window. Callers pass the flag they were told;
+        /// the transition logic lives only here.
+        ///
+        /// The two writes that deliberately stay OUTSIDE the seam:
+        /// `reserveWindow`'s creation-time init (a fresh slot has no
+        /// prior state — no edge exists) and `closeWindow`'s
+        /// transactional flip in window_views.zig (its views are
+        /// removed with the window on success, so there is no tooltip
+        /// left to reset, and its rollback on platform failure must
+        /// not have fired one).
+        pub fn setWindowFocused(self: *Runtime, index: usize, focused: bool) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| {
+                const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+                const program = lifecycle.plan(policy, self, .focus, .{ .cursor = index, .value = focused });
+                program.apply(&self.windows[index].info);
+                var first_error: ?anyerror = null;
+                for (self.views[0..self.view_count], 0..) |_, view_index| {
+                    const keyboard = lifecycle.plan(policy, self, .keyboard, .{ .cursor = view_index, .target = index, .value = focused });
+                    if (keyboard.has(1)) Self.applyKeyboardActive(self, view_index, keyboard.active) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                }
+                if (program.has(32)) CanvasWidgetEventMethods.resetCanvasTooltipIntentForWindowKeyLoss(self, self.windows[index].info.id) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+                if (first_error) |err| return err;
+                return;
+            }
+            const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+            const window = &self.windows[index];
+            const was_focused = window.info.focused;
+            window.info.focused = focused;
+            var first_error: ?anyerror = null;
+            for (self.views[0..self.view_count], 0..) |*view, view_index| {
+                if (view.window_id != window.info.id) continue;
+                Self.setViewKeyboardActive(self, view_index, self.app_active and focused) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+            }
+            if (was_focused and !focused) {
+                CanvasWidgetEventMethods.resetCanvasTooltipIntentForWindowKeyLoss(self, window.info.id) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+            }
+            if (first_error) |err| return err;
+        }
+
+        /// Move the application-active register and project it into every
+        /// view's keyboard gate without disturbing per-window focus
+        /// memory. A deactivated app owns no keyboard focus; activation
+        /// reopens the gate only in the key window.
+        pub fn setAppActive(self: *Runtime, active: bool) anyerror!void {
+            self.app_active = active;
+            var first_error: ?anyerror = null;
+            for (self.views[0..self.view_count], 0..) |*view, view_index| {
+                if (self.window_lifecycle_policy) |policy| {
+                    const program = lifecycle.plan(policy, self, .keyboard, .{ .cursor = view_index, .variant = 1, .app_active = active });
+                    if (program.has(1)) Self.applyKeyboardActive(self, view_index, program.active) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                    continue;
+                }
+                const window_index = Self.findWindowIndexById(self, view.window_id);
+                const window_focused = if (window_index) |index| self.windows[index].info.focused else false;
+                Self.setViewKeyboardActive(self, view_index, active and window_focused) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+            }
+            if (first_error) |err| return err;
+        }
+
+        fn setViewKeyboardActive(self: *Runtime, view_index: usize, active: bool) anyerror!void {
+            if (self.views[view_index].keyboard_active == active) return;
+            try Self.applyKeyboardActive(self, view_index, active);
+        }
+
+        fn applyKeyboardActive(self: *Runtime, view_index: usize, active: bool) anyerror!void {
+            const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+            const view = &self.views[view_index];
+            const previous_state = view.canvasWidgetRenderState();
+            view.keyboard_active = active;
+            const next_state = view.canvasWidgetRenderState();
+            if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
+                try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
             }
         }
 

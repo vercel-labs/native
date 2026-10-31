@@ -1,7 +1,13 @@
+const authorization = @import("authorization_policy.zig");
 const std = @import("std");
+const credentials_store = @import("credentials_store.zig");
 const json = @import("json");
 const validation = @import("validation.zig");
+const admission = @import("system_admission_policy.zig");
+const command_policy = @import("command_policy.zig");
+const status_validation = @import("status_validation.zig");
 const bridge_payload = @import("bridge_payload.zig");
+const bridge_descriptors = @import("bridge_descriptor_policy.zig");
 const bridge_responses = @import("bridge_responses.zig");
 const bridge = @import("../bridge/root.zig");
 const platform = @import("../platform/root.zig");
@@ -9,23 +15,21 @@ const security = @import("../security/root.zig");
 
 const jsonStringField = bridge_payload.jsonStringField;
 const jsonBoolField = bridge_payload.jsonBoolField;
-const platformFeatureFromString = bridge_payload.platformFeatureFromString;
+const platformFeatureFromString = bridge_descriptors.platformFeatureFromString;
 const writeBoolJson = bridge_responses.writeBoolJson;
 const writeTrueJson = bridge_responses.writeTrueJson;
 
-const validateClipboardData = validation.validateClipboardData;
-const validateClipboardMimeType = validation.validateClipboardMimeType;
 const validateCredential = validation.validateCredential;
 const validateCredentialKey = validation.validateCredentialKey;
-const validateMessageDialogOptions = validation.validateMessageDialogOptions;
-const validateNotificationOptions = validation.validateNotificationOptions;
-const validateOpenDialogOptions = validation.validateOpenDialogOptions;
-const validateRecentDocumentPath = validation.validateRecentDocumentPath;
-const validateRevealPath = validation.validateRevealPath;
-const validateSaveDialogOptions = validation.validateSaveDialogOptions;
 const validateTrayMenuItems = validation.validateTrayMenuItems;
 const validateTrayOptions = validation.validateTrayOptions;
+const validateTrayShell = validation.validateTrayShell;
 const validateTrayTitle = validation.validateTrayTitle;
+
+fn optionalNotificationString(payload: []const u8, field: []const u8, storage: *json.StringStorage) ![]const u8 {
+    if (json.fieldValue(payload, field) == null) return "";
+    return jsonStringField(payload, field, storage) orelse error.InvalidNotificationOptions;
+}
 
 pub fn RuntimeSystemServices(comptime Runtime: type) type {
     return struct {
@@ -38,12 +42,12 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn readClipboardData(self: *Runtime, mime_type: []const u8, buffer: []u8) anyerror![]const u8 {
-            try validateClipboardMimeType(mime_type);
+            try admission.mime(self.system_admission_policy, mime_type);
             return self.options.platform.services.readClipboardData(mime_type, buffer);
         }
 
         pub fn writeClipboardData(self: *Runtime, data: platform.ClipboardData) anyerror!void {
-            try validateClipboardData(data);
+            try admission.clipboard(self.system_admission_policy, data);
             try self.options.platform.services.writeClipboardData(data);
         }
 
@@ -53,12 +57,12 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn revealPath(self: *Runtime, path: []const u8) anyerror!void {
-            try validateRevealPath(path);
+            try admission.reveal(self.system_admission_policy, path);
             try self.options.platform.services.revealPath(path);
         }
 
         pub fn addRecentDocument(self: *Runtime, path: []const u8) anyerror!void {
-            try validateRecentDocumentPath(path);
+            try admission.recent(self.system_admission_policy, path);
             try self.options.platform.services.addRecentDocument(path);
         }
 
@@ -67,97 +71,217 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn showOpenDialog(self: *Runtime, options: platform.OpenDialogOptions, buffer: []u8) anyerror!platform.OpenDialogResult {
-            try validateOpenDialogOptions(options, buffer);
+            try admission.open(self.system_admission_policy, options, buffer);
             return self.options.platform.services.showOpenDialog(options, buffer);
         }
 
         pub fn showSaveDialog(self: *Runtime, options: platform.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
-            try validateSaveDialogOptions(options, buffer);
+            try admission.save(self.system_admission_policy, options, buffer);
             return self.options.platform.services.showSaveDialog(options, buffer);
         }
 
         pub fn showMessageDialog(self: *Runtime, options: platform.MessageDialogOptions) anyerror!platform.MessageDialogResult {
-            try validateMessageDialogOptions(options);
+            try admission.message(self.system_admission_policy, options);
             return self.options.platform.services.showMessageDialog(options);
         }
 
         pub fn showNotification(self: *Runtime, options: platform.NotificationOptions) anyerror!void {
-            try validateNotificationOptions(options);
+            try admission.notification(self.system_admission_policy, options);
             try self.options.platform.services.showNotification(options);
         }
 
         pub fn setCredential(self: *Runtime, credential: platform.Credential) anyerror!void {
             try validateCredential(credential);
-            try self.options.platform.services.setCredential(credential);
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = credential.service,
+                .permitted = true,
+            }, .set, credential.account, credential.secret, &.{});
+            try credentialOutcome(execution.outcome);
         }
 
         pub fn getCredential(self: *Runtime, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
             try validateCredentialKey(key);
-            return self.options.platform.services.getCredential(key, buffer) catch |err| switch (err) {
-                error.CredentialNotFound => null,
-                else => |e| return e,
-            };
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = key.service,
+                .permitted = true,
+            }, .get, key.account, "", buffer);
+            if (execution.outcome == .miss) return null;
+            try credentialOutcome(execution.outcome);
+            return buffer[0..execution.len];
         }
 
         pub fn deleteCredential(self: *Runtime, key: platform.CredentialKey) anyerror!bool {
             try validateCredentialKey(key);
-            self.options.platform.services.deleteCredential(key) catch |err| switch (err) {
-                error.CredentialNotFound => return false,
-                else => |e| return e,
-            };
+            const execution = credentials_store.execute(.{
+                .services = &self.options.platform.services,
+                .service = key.service,
+                .permitted = true,
+            }, .delete, key.account, "", &.{});
+            if (execution.outcome == .miss) return false;
+            try credentialOutcome(execution.outcome);
             return true;
         }
 
+        fn credentialOutcome(outcome: credentials_store.Outcome) anyerror!void {
+            return switch (outcome) {
+                .ok => {},
+                .miss => error.CredentialNotFound,
+                .locked => error.UnsupportedService,
+                .denied => error.PermissionDenied,
+                .over_bound => error.CredentialFieldTooLarge,
+                .io_failed, .rejected => error.CredentialStoreFailed,
+            };
+        }
+
+        pub fn formatLocalTime(self: *Runtime, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+            return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
+        }
+
+        pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.options(policy, options) else try validateTrayOptions(options);
+            const status_item = try statusItemSlot(self, status_item_id);
+            const was_active = status_item.active;
+            try self.options.platform.services.createStatusItem(status_item_id, options);
+            try storeTrayItems(status_item, options.items);
+            const title = if (options.presentation.title.len > 0) options.presentation.title else options.title;
+            status_item.title = try copyInto(&status_item.title_storage, title);
+            status_item.id = status_item_id;
+            status_item.active = true;
+            status_item.visible = options.visible;
+            if (!was_active) self.status_item_count += 1;
+        }
+
         pub fn createTray(self: *Runtime, options: platform.TrayOptions) anyerror!void {
-            try validateTrayOptions(options);
-            try self.options.platform.services.createTray(options);
-            try storeTrayItems(self, options.items);
-            self.tray_title = try copyInto(&self.tray_title_storage, options.title);
-            self.tray_created = true;
+            return self.createStatusItem(platform.primary_status_item_id, options);
+        }
+
+        pub fn updateStatusItemShell(self: *Runtime, status_item_id: platform.StatusItemId, shell: platform.TrayShell) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.shell(policy, shell) else try validateTrayShell(shell);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemShell(status_item_id, shell);
+            status_item.visible = shell.visible;
+        }
+
+        pub fn updateStatusItemMenu(self: *Runtime, status_item_id: platform.StatusItemId, items: []const platform.TrayMenuItem) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.menu(policy, items) else try validateTrayMenuItems(items);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemMenu(status_item_id, items);
+            try storeTrayItems(status_item, items);
         }
 
         pub fn updateTrayMenu(self: *Runtime, items: []const platform.TrayMenuItem) anyerror!void {
-            try validateTrayMenuItems(items);
-            try self.options.platform.services.updateTrayMenu(items);
-            try storeTrayItems(self, items);
+            return self.updateStatusItemMenu(platform.primary_status_item_id, items);
         }
 
         /// Retitle the live status-bar button without re-creating the
         /// status item (a model-driven badge like "3 open" in the menu
         /// bar rides this seam). Platforms without the
         /// title seam report `UnsupportedService`; the menu keeps working.
+        pub fn updateStatusItemTitle(self: *Runtime, status_item_id: platform.StatusItemId, title: []const u8) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.title(policy, title) else try validateTrayTitle(title);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemTitle(status_item_id, title);
+            status_item.title = try copyInto(&status_item.title_storage, title);
+        }
+
         pub fn updateTrayTitle(self: *Runtime, title: []const u8) anyerror!void {
-            try validateTrayTitle(title);
-            try self.options.platform.services.updateTrayTitle(title);
-            self.tray_title = try copyInto(&self.tray_title_storage, title);
+            return self.updateStatusItemTitle(platform.primary_status_item_id, title);
+        }
+
+        pub fn updateStatusItemPresentation(self: *Runtime, status_item_id: platform.StatusItemId, presentation: platform.TrayPresentation) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.presentation(policy, presentation) else try validation.validateTrayPresentation(presentation);
+            const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
+            try self.options.platform.services.updateStatusItemPresentation(status_item_id, presentation);
+            status_item.title = try copyInto(&status_item.title_storage, presentation.title);
+        }
+
+        pub fn updateTrayPresentation(self: *Runtime, presentation: platform.TrayPresentation) anyerror!void {
+            return self.updateStatusItemPresentation(platform.primary_status_item_id, presentation);
+        }
+
+        pub fn removeStatusItem(self: *Runtime, status_item_id: platform.StatusItemId) anyerror!void {
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            const status_item = findStatusItem(self, status_item_id) orelse return;
+            try self.options.platform.services.removeStatusItem(status_item_id);
+            status_item.* = .{};
+            self.status_item_count -= 1;
         }
 
         pub fn removeTray(self: *Runtime) anyerror!void {
-            try self.options.platform.services.removeTray();
-            self.tray_item_count = 0;
-            self.tray_created = false;
-            self.tray_title = "";
+            return self.removeStatusItem(platform.primary_status_item_id);
         }
 
-        pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
-            for (self.tray_items[0..self.tray_item_count]) |item| {
+        pub fn statusItemExists(self: *const Runtime, status_item_id: platform.StatusItemId) bool {
+            return findStatusItemConst(self, status_item_id) != null;
+        }
+
+        pub fn statusItemMenuItemExists(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).exists;
+            for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id) return true;
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| if (option.id == item_id) return true;
+                }
             }
             return false;
         }
 
-        pub fn trayCommandNameForItem(self: *const Runtime, item_id: platform.TrayItemId) []const u8 {
-            for (self.tray_items[0..self.tray_item_count]) |item| {
+        /// Whether automation may invoke this row exactly as a user can.
+        /// Disabled native menu items and segmented choices cannot emit a
+        /// platform action, so the automation seam must reject them too.
+        pub fn statusItemMenuItemActionable(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).actionable;
+            for (status_item.items[0..status_item.item_count]) |item| {
+                if (item.id == item_id) return !item.separator and item.enabled and (item.role == .command or item.role == .agent);
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| {
+                        if (option.id == item_id) return option.enabled;
+                    }
+                }
+            }
+            return false;
+        }
+
+        pub fn trayItemExists(self: *const Runtime, item_id: platform.TrayItemId) bool {
+            return self.statusItemMenuItemExists(platform.primary_status_item_id, item_id);
+        }
+
+        pub fn statusItemCommandNameForItem(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) []const u8 {
+            const status_item = findStatusItemConst(self, status_item_id) orelse return "tray.action";
+            if (self.command_policy) |policy| {
+                const selection = command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id);
+                const row = selection.row orelse return "tray.action";
+                return if (selection.option) |option| status_item.items[row].segmented.?.options[option].command else status_item.items[row].command;
+            }
+            for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id and item.command.len > 0) return item.command;
+                if (item.segmented) |segmented| {
+                    for (segmented.options) |option| {
+                        if (option.id == item_id) return option.command;
+                    }
+                }
             }
             return "tray.action";
+        }
+
+        pub fn trayCommandNameForItem(self: *const Runtime, item_id: platform.TrayItemId) []const u8 {
+            return self.statusItemCommandNameForItem(platform.primary_status_item_id, item_id);
         }
 
         pub fn supportsFeatureFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
             var scratch: [64]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const feature_name = jsonStringField(payload, "feature", &storage) orelse jsonStringField(payload, "name", &storage) orelse return error.InvalidPlatformFeature;
-            const feature = platformFeatureFromString(feature_name) orelse return error.InvalidPlatformFeature;
+            const feature = platformFeatureFromString(self.bridge_descriptor_policy, feature_name) orelse return error.InvalidPlatformFeature;
             return writeBoolJson(self.supports(feature), output);
         }
 
@@ -235,12 +359,21 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         pub fn showNotificationFromJson(self: *Runtime, payload: []const u8, output: []u8) ![]const u8 {
             var storage = json.StringStorage.init(output);
             const title = jsonStringField(payload, "title", &storage) orelse return error.InvalidNotificationOptions;
-            const subtitle = jsonStringField(payload, "subtitle", &storage) orelse "";
-            const body = jsonStringField(payload, "body", &storage) orelse jsonStringField(payload, "message", &storage) orelse "";
+            const subtitle = try optionalNotificationString(payload, "subtitle", &storage);
+            const body = if (json.fieldValue(payload, "body") != null)
+                try optionalNotificationString(payload, "body", &storage)
+            else
+                try optionalNotificationString(payload, "message", &storage);
+            const notification_id = try optionalNotificationString(payload, "id", &storage);
+            const action_label = try optionalNotificationString(payload, "actionLabel", &storage);
+            const action_command = try optionalNotificationString(payload, "actionCommand", &storage);
             try self.showNotification(.{
+                .id = notification_id,
                 .title = title,
                 .subtitle = subtitle,
                 .body = body,
+                .action_label = action_label,
+                .action_command = action_command,
             });
             return writeTrueJson(output);
         }
@@ -363,26 +496,97 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
     };
 }
 
-fn storeTrayItems(self: anytype, items: []const platform.TrayMenuItem) !void {
-    self.tray_item_count = 0;
+fn storeTrayItems(status_item: anytype, items: []const platform.TrayMenuItem) !void {
+    status_item.item_count = 0;
     for (items, 0..) |item, index| {
-        self.tray_items[index].id = item.id;
-        self.tray_items[index].command = try copyInto(&self.tray_items[index].command_storage, item.command);
-        self.tray_items[index].label = try copyInto(&self.tray_items[index].label_storage, item.label);
-        self.tray_items[index].separator = item.separator;
-        self.tray_items[index].enabled = item.enabled;
+        status_item.items[index].id = item.id;
+        status_item.items[index].command = try copyInto(&status_item.items[index].command_storage, item.command);
+        status_item.items[index].label = try copyInto(&status_item.items[index].label_storage, item.label);
+        status_item.items[index].detail = try copyInto(&status_item.items[index].detail_storage, item.detail);
+        status_item.items[index].separator = item.separator;
+        status_item.items[index].enabled = item.enabled;
+        status_item.items[index].role = item.role;
+        status_item.items[index].key = try copyInto(&status_item.items[index].key_storage, item.key);
+        status_item.items[index].modifiers = item.modifiers;
+        status_item.items[index].segmented = null;
+        status_item.items[index].segment_option_count = 0;
+        if (item.segmented) |segmented| {
+            for (segmented.options, 0..) |option, option_index| {
+                const stored = &status_item.items[index].segment_options[option_index];
+                stored.id = option.id;
+                stored.label = try copyInto(&status_item.items[index].segment_option_label_storage[option_index], option.label);
+                stored.command = try copyInto(&status_item.items[index].segment_option_command_storage[option_index], option.command);
+                stored.selected = option.selected;
+                stored.enabled = option.enabled;
+            }
+            status_item.items[index].segment_option_count = segmented.options.len;
+            const stored = &status_item.items[index];
+            stored.segmented = .{ .options = stored.segment_options[0..stored.segment_option_count] };
+        }
+        status_item.items[index].metric = null;
+        if (item.metric) |metric| {
+            status_item.items[index].metric = .{
+                .primary_text = try copyInto(&status_item.items[index].metric_primary_storage, metric.primary_text),
+                .secondary_text = try copyInto(&status_item.items[index].metric_secondary_storage, metric.secondary_text),
+                .accessibility_label = try copyInto(&status_item.items[index].metric_accessibility_storage, metric.accessibility_label),
+            };
+        }
+        status_item.items[index].chart = null;
+        if (item.chart) |chart| {
+            @memcpy(status_item.items[index].chart_values[0..chart.values.len], chart.values);
+            const leading_caption = try copyInto(&status_item.items[index].chart_leading_caption_storage, chart.leading_caption);
+            const trailing_summary = try copyInto(&status_item.items[index].chart_trailing_summary_storage, chart.trailing_summary);
+            const accessibility_label = try copyInto(&status_item.items[index].chart_accessibility_label_storage, chart.accessibility_label);
+            status_item.items[index].chart = .{
+                .values = status_item.items[index].chart_values[0..chart.values.len],
+                .min_value = chart.min_value,
+                .max_value = chart.max_value,
+                .leading_caption = leading_caption,
+                .trailing_summary = trailing_summary,
+                .accessibility_label = accessibility_label,
+            };
+        }
     }
-    self.tray_item_count = items.len;
+    status_item.item_count = items.len;
+}
+
+fn findStatusItem(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, false, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else null;
+    }
+    for (&self.status_items) |*status_item| {
+        if (status_item.active and status_item.id == status_item_id) return status_item;
+    }
+    return null;
+}
+
+fn findStatusItemConst(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, false, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else null;
+    }
+    for (&self.status_items) |*status_item| {
+        if (status_item.active and status_item.id == status_item_id) return status_item;
+    }
+    return null;
+}
+
+fn statusItemSlot(self: anytype, status_item_id: platform.StatusItemId) !@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, true, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else error.InvalidTrayOptions;
+    }
+    if (findStatusItem(self, status_item_id)) |status_item| return status_item;
+    if (self.status_item_count >= self.status_items.len) return error.InvalidTrayOptions;
+    for (&self.status_items) |*status_item| {
+        if (!status_item.active) return status_item;
+    }
+    return error.InvalidTrayOptions;
 }
 
 fn validateExternalUrl(self: anytype, url: []const u8) !void {
-    if (url.len == 0) return error.InvalidExternalUrl;
-    if (url.len > platform.max_external_url_bytes) return error.ExternalUrlTooLarge;
-    if (!std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "http://")) return error.InvalidExternalUrl;
-    for (url) |ch| {
-        if (ch <= 0x20 or ch == 0x7f) return error.InvalidExternalUrl;
-    }
-    if (!security.allowsExternalUrl(self.options.security.navigation.external_links, url)) return error.NavigationDenied;
+    return authorization.validateExternalUrl(self.authorization_policy, self.options.security.navigation.external_links, url);
 }
 
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {

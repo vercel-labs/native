@@ -68,6 +68,7 @@
 package dev.native_sdk.host;
 
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -80,8 +81,12 @@ import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.security.keystore.UserNotAuthenticatedException;
 import android.text.InputType;
 import android.util.LruCache;
+import android.util.Base64;
 import android.view.Choreographer;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -98,12 +103,20 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 public final class NativeSdkActivity extends Activity implements SurfaceHolder.Callback, Choreographer.FrameCallback {
+    private static final int MAX_DECODED_IMAGE_DIMENSION = 8192;
     private static final int TOUCH_MODE_IDLE = 0;
     // Touch down seen, under slop: undecided between tap / drag / scroll.
     private static final int TOUCH_MODE_PENDING = 1;
@@ -231,11 +244,22 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         // section below.
         nativeSetAudioService(nativeApp);
 
+        // Tier-4 secure storage: AndroidKeyStore holds the non-exportable
+        // AES key; app-private preferences hold only authenticated
+        // ciphertext. Register before start so boot credential effects can
+        // run without ever putting a token in Model state.
+        nativeSetCredentialService(nativeApp);
+
         // The platform image decoder (registered before start, so a
         // boot-effect fx.registerImageBytes already decodes): the
         // BitmapFactory codec behind the embed image seam — see the image
         // section below.
         nativeSetImageService(nativeApp);
+
+        // `getFilesDir()` is app_dirs `.data` on Android. Store-capability
+        // builds open store.db here before start; other builds accept the
+        // same stable host call as a capability-shed no-op.
+        nativeSetDataRoot(nativeApp, getFilesDir().getAbsolutePath());
 
         // Verification harness: `am start --ez native-sdk-automation true`
         // publishes snapshot.txt into the app's files dir, same protocol
@@ -431,6 +455,112 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
         return Typeface.DEFAULT;
     }
 
+    // --------------------------------------------------------- credentials
+
+    private static final String CREDENTIAL_KEY_ALIAS = "native-sdk.credentials.v1";
+    private static final String CREDENTIAL_PREFS = "native-sdk.credentials";
+
+    private synchronized SecretKey credentialEncryptionKey() throws GeneralSecurityException {
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+        try {
+            store.load(null);
+        } catch (java.io.IOException e) {
+            throw new GeneralSecurityException(e);
+        }
+        java.security.Key existing = store.getKey(CREDENTIAL_KEY_ALIAS, null);
+        if (existing instanceof SecretKey) return (SecretKey)existing;
+        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        generator.init(new KeyGenParameterSpec.Builder(
+            CREDENTIAL_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setRandomizedEncryptionRequired(true)
+            .build());
+        return generator.generateKey();
+    }
+
+    private String credentialEntryKey(byte[] service, byte[] account) throws GeneralSecurityException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        digest.update(service);
+        digest.update((byte)0);
+        digest.update(account);
+        return Base64.encodeToString(digest.digest(), Base64.NO_WRAP | Base64.URL_SAFE);
+    }
+
+    private SharedPreferences credentialPreferences() {
+        return getSharedPreferences(CREDENTIAL_PREFS, MODE_PRIVATE);
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int credentialSet(byte[] service, byte[] account, byte[] secret) {
+        try {
+            String entryKey = credentialEntryKey(service, account);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, credentialEncryptionKey());
+            cipher.updateAAD(entryKey.getBytes(StandardCharsets.UTF_8));
+            byte[] iv = cipher.getIV();
+            byte[] ciphertext = cipher.doFinal(secret);
+            if (iv.length > 255) return -5;
+            ByteBuffer packed = ByteBuffer.allocate(1 + iv.length + ciphertext.length);
+            packed.put((byte)iv.length).put(iv).put(ciphertext);
+            boolean committed = credentialPreferences().edit()
+                .putString(entryKey,
+                           Base64.encodeToString(packed.array(), Base64.NO_WRAP))
+                .commit();
+            return committed ? 1 : -5;
+        } catch (UserNotAuthenticatedException e) {
+            return -2;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return -5;
+        }
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    long credentialGet(byte[] service, byte[] account, ByteBuffer output) {
+        try {
+            String entryKey = credentialEntryKey(service, account);
+            String encoded = credentialPreferences().getString(entryKey, null);
+            if (encoded == null) return -1;
+            byte[] packed = Base64.decode(encoded, Base64.NO_WRAP);
+            if (packed.length < 2) return -5;
+            int ivLength = packed[0] & 0xff;
+            if (ivLength == 0 || 1 + ivLength >= packed.length) return -5;
+            byte[] iv = java.util.Arrays.copyOfRange(packed, 1, 1 + ivLength);
+            byte[] ciphertext = java.util.Arrays.copyOfRange(packed, 1 + ivLength, packed.length);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, credentialEncryptionKey(), new GCMParameterSpec(128, iv));
+            cipher.updateAAD(entryKey.getBytes(StandardCharsets.UTF_8));
+            byte[] secret = cipher.doFinal(ciphertext);
+            if (secret.length > output.capacity()) return -4;
+            output.position(0);
+            output.put(secret);
+            return secret.length;
+        } catch (UserNotAuthenticatedException e) {
+            return -2;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return -5;
+        }
+    }
+
+    @SuppressWarnings("unused") // called from android_host.c
+    int credentialDelete(byte[] service, byte[] account) {
+        try {
+            String key = credentialEntryKey(service, account);
+            SharedPreferences preferences = credentialPreferences();
+            if (!preferences.contains(key)) return 0;
+            return preferences.edit().remove(key).commit() ? 1 : -5;
+        } catch (SecurityException e) {
+            return -3;
+        } catch (GeneralSecurityException e) {
+            return -5;
+        }
+    }
+
     // -------------------------------------------------------------- images
     //
     // The platform image decoder behind the embed image service — the
@@ -449,9 +579,42 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     // size[0]/size[1]), -1 when the decoded pixels do not fit the buffer,
     // 0 undecodable — the embed image service contract.
     @SuppressWarnings("unused") // called from android_host.c
-    int imageDecode(byte[] encoded, ByteBuffer pixels, long[] size) {
-        if (encoded == null || encoded.length == 0 || pixels == null || size == null || size.length < 2) return 0;
+    int imageDecode(byte[] encoded, ByteBuffer pixels, long maxPixels, long[] size) {
+        if (encoded == null || encoded.length == 0 || pixels == null || maxPixels <= 0 || size == null || size.length < 2) return 0;
         BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(encoded, 0, encoded.length, options);
+        int sourceWidth = options.outWidth;
+        int sourceHeight = options.outHeight;
+        if (sourceWidth <= 0 || sourceHeight <= 0) return 0;
+        long sourcePixels = (long)sourceWidth * sourceHeight;
+        int targetWidth = sourceWidth;
+        int targetHeight = sourceHeight;
+        if (sourcePixels > maxPixels || sourceWidth > MAX_DECODED_IMAGE_DIMENSION || sourceHeight > MAX_DECODED_IMAGE_DIMENSION) {
+            double areaScale = Math.sqrt((double)maxPixels / (double)sourcePixels);
+            double axisScale = (double)MAX_DECODED_IMAGE_DIMENSION / Math.max(sourceWidth, sourceHeight);
+            double scale = Math.min(1.0, Math.min(areaScale, axisScale));
+            targetWidth = Math.max(1, (int)Math.floor(sourceWidth * scale));
+            targetHeight = Math.max(1, (int)Math.floor(sourceHeight * scale));
+            while ((long)targetWidth * targetHeight > maxPixels) {
+                if (targetWidth > 1 && (targetHeight == 1 || targetWidth > targetHeight)) targetWidth--;
+                else targetHeight--;
+            }
+        }
+        int sampleSize = 1;
+        while (sampleSize <= (1 << 28)) {
+            int nextSampleSize = sampleSize << 1;
+            // BitmapFactory rounds a sampled dimension up rather than
+            // collapsing a one-pixel side to zero. Mirror that here so a
+            // panorama can still use the largest safe power-of-two decode
+            // sample before the exact resize below.
+            int sampledWidth = (sourceWidth - 1) / nextSampleSize + 1;
+            int sampledHeight = (sourceHeight - 1) / nextSampleSize + 1;
+            if (sampledWidth < targetWidth || sampledHeight < targetHeight) break;
+            sampleSize = nextSampleSize;
+        }
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = sampleSize;
         options.inPreferredConfig = Bitmap.Config.ARGB_8888;
         // Straight alpha, matching the desktop decoders: the canvas
         // pipeline un-premultiplies nothing downstream.
@@ -474,8 +637,19 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
             }
             long width = bitmap.getWidth();
             long height = bitmap.getHeight();
-            // The dimension ceiling mirrors the iOS/macOS decode callback.
-            if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return 0;
+            if (width <= 0 || height <= 0) return 0;
+            if (width != targetWidth || height != targetHeight) {
+                Bitmap fitted = Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true);
+                bitmap.recycle();
+                if (fitted == null) return 0;
+                bitmap = fitted;
+                width = targetWidth;
+                height = targetHeight;
+            }
+            // Validate the final registered geometry, not BitmapFactory's
+            // intermediate power-of-two sample. In particular, 8193x1 must
+            // be allowed to reach the exact 8192x1 fit above.
+            if (width > MAX_DECODED_IMAGE_DIMENSION || height > MAX_DECODED_IMAGE_DIMENSION || width > maxPixels / height) return 0;
             size[0] = width;
             size[1] = height;
             long byteLen = width * height * 4;
@@ -1361,9 +1535,11 @@ public final class NativeSdkActivity extends Activity implements SurfaceHolder.C
     private native boolean nativeTextInputState(long app, long[] widgetId, float[] frame);
     private native boolean nativeScrollableWidgetAt(long app, float x, float y);
     private native void nativeSetAssetRoot(long app, String path);
+    private native void nativeSetDataRoot(long app, String path);
     private native void nativeSetAutomationDir(long app, String path);
     private native void nativeSetTextMeasure(long app);
     private native void nativeSetAudioService(long app);
+    private native void nativeSetCredentialService(long app);
     private native void nativeSetImageService(long app);
     private native void nativeAudioEvent(long app, int kind, long positionMs, long durationMs, int playing, int buffering);
     private native String nativeLastError(long app);

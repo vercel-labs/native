@@ -1,3 +1,5 @@
+const compiled_cache = @import("text_cache_policy.zig");
+const compiled_atlas = @import("glyph_atlas_policy.zig");
 const std = @import("std");
 const canvas = @import("root.zig");
 const text_interaction = @import("text_interaction.zig");
@@ -49,6 +51,11 @@ pub const GlyphAtlasPlan = struct {
         var planner = GlyphAtlasCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index, retention_frames);
     }
+    pub fn cachePlanWithPolicy(self: GlyphAtlasPlan, policy: ?compiled_cache.Policy, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, entries: []GlyphAtlasCacheEntry, actions: []GlyphAtlasCacheAction) Error!GlyphAtlasCachePlan {
+        var planner = GlyphAtlasCachePlanner.init(entries, actions);
+        if (policy) |owner| return planner.buildCompiled(self, previous, frame_index, retention_frames, owner);
+        return planner.build(self, previous, frame_index, retention_frames);
+    }
 };
 
 pub const GlyphAtlasPlanner = struct {
@@ -79,17 +86,101 @@ pub const GlyphAtlasPlanner = struct {
         }
         const use_index = estimated_glyphs >= plan_key_index.min_entries_for_index and
             plan_key_index.fitsHashSlots(glyph_atlas_index_slots, self.entries.len);
-        if (use_index) glyph_atlas_plan_index.reset();
+        const plan_index: ?*GlyphAtlasIndex = if (use_index) &glyph_atlas_index_scratch.get().plan else null;
+        if (plan_index) |index| index.reset();
         for (display_list.commands, 0..) |command, command_index| {
             switch (command) {
-                .draw_text => |value| try self.consumeText(value, command_index, use_index),
+                .draw_text => |value| try self.consumeText(value, command_index, plan_index),
                 else => {},
             }
         }
         return .{ .entries = self.entries[0..self.len] };
     }
 
-    fn consumeText(self: *GlyphAtlasPlanner, text: anytype, command_index: usize, use_index: bool) Error!void {
+    /// Copy raw draw facts into the portable owner. Native supplies storage
+    /// and proves returned source indices before publishing the plan.
+    pub fn buildCompiled(self: *GlyphAtlasPlanner, display_list: anytype, policy: compiled_atlas.Policy) Error!GlyphAtlasPlan {
+        self.reset();
+        var runs: usize = 0;
+        var payload_size: usize = 0;
+        for (display_list.commands) |command| switch (command) {
+            .draw_text => |text| {
+                runs += 1;
+                const glyph_size = std.math.mul(usize, text.glyphs.len, 24) catch @panic("glyph atlas request too large");
+                payload_size = std.math.add(usize, payload_size, glyph_size) catch @panic("glyph atlas request too large");
+                payload_size = std.math.add(usize, payload_size, text.text.len) catch @panic("glyph atlas request too large");
+            },
+            else => {},
+        };
+        const records_size = std.math.mul(usize, runs, 40) catch @panic("glyph atlas request too large");
+        const data_start = std.math.add(usize, 16, records_size) catch @panic("glyph atlas request too large");
+        const request_size = std.math.add(usize, data_start, payload_size) catch @panic("glyph atlas request too large");
+        const result_size = std.math.add(usize, 16, std.math.mul(usize, self.entries.len, 32) catch @panic("glyph atlas result too large")) catch @panic("glyph atlas result too large");
+        const request = std.heap.page_allocator.alloc(u8, request_size) catch @panic("glyph atlas request allocation failed");
+        defer std.heap.page_allocator.free(request);
+        const result = std.heap.page_allocator.alloc(u8, result_size) catch @panic("glyph atlas result allocation failed");
+        defer std.heap.page_allocator.free(result);
+        @memset(request, 0);
+        request[0] = 61;
+        request[1] = 1;
+        compiled_atlas.put(request, 4, runs);
+        compiled_atlas.put(request, 8, self.entries.len);
+        var run: usize = 0;
+        var payload = data_start;
+        for (display_list.commands, 0..) |command, command_index| switch (command) {
+            .draw_text => |text| {
+                const at = 16 + run * 40;
+                compiled_atlas.put(request, at, command_index);
+                compiled_atlas.integer(request, at + 8, text.font_id);
+                compiled_atlas.float(request, at + 16, text.size);
+                compiled_atlas.float(request, at + 20, text.origin.x);
+                compiled_atlas.float(request, at + 24, text.origin.y);
+                compiled_atlas.put(request, at + 28, text.glyphs.len);
+                compiled_atlas.put(request, at + 32, text.text.len);
+                for (text.glyphs) |glyph| {
+                    compiled_atlas.put(request, payload, glyph.id);
+                    compiled_atlas.integer(request, payload + 8, glyph.font_id);
+                    compiled_atlas.float(request, payload + 16, glyph.x);
+                    compiled_atlas.float(request, payload + 20, glyph.y);
+                    payload += 24;
+                }
+                @memcpy(request[payload..][0..text.text.len], text.text);
+                payload += text.text.len;
+                run += 1;
+            },
+            else => {},
+        };
+        const length = policy(request, result);
+        if (length > result.len or !compiled_atlas.resultValid(result[0..length], self.entries.len)) @panic("invalid compiled glyph atlas result");
+        const count: usize = compiled_atlas.word(result, 0);
+        for (0..count) |i| {
+            const at = 16 + i * 32;
+            const command_index: usize = compiled_atlas.word(result, at + 24);
+            const glyph_index: usize = compiled_atlas.word(result, at + 28);
+            if (command_index >= display_list.commands.len) @panic("invalid compiled glyph atlas command");
+            const text = switch (display_list.commands[command_index]) {
+                .draw_text => |text| text,
+                else => @panic("invalid compiled glyph atlas source"),
+            };
+            if (glyph_index >= (if (text.glyphs.len > 0) text.glyphs.len else text.text.len)) @panic("invalid compiled glyph atlas glyph");
+            self.entries[i] = .{
+                .key = .{
+                    .font_id = std.mem.readInt(u64, result[at + 8 ..][0..8], .little),
+                    .glyph_id = compiled_atlas.word(result, at + 4),
+                    .size = compiled_atlas.readFloat(result, at),
+                    .subpixel_x = @intCast(compiled_atlas.word(result, at + 16)),
+                    .subpixel_y = @intCast(compiled_atlas.word(result, at + 20)),
+                },
+                .command_index = command_index,
+                .glyph_index = glyph_index,
+            };
+        }
+        self.len = count;
+        if (compiled_atlas.word(result, 4) == 1) return error.GlyphAtlasListFull;
+        return .{ .entries = self.entries[0..count] };
+    }
+
+    fn consumeText(self: *GlyphAtlasPlanner, text: anytype, command_index: usize, plan_index: ?*GlyphAtlasIndex) Error!void {
         if (text.glyphs.len > 0) {
             for (text.glyphs, 0..) |glyph, glyph_index| {
                 const key = GlyphAtlasKey{
@@ -99,7 +190,7 @@ pub const GlyphAtlasPlanner = struct {
                     .subpixel_x = subpixelBucket(text.origin.x + glyph.x),
                     .subpixel_y = subpixelBucket(text.origin.y + glyph.y),
                 };
-                try self.appendUnique(key, command_index, glyph_index, use_index);
+                try self.appendUnique(key, command_index, glyph_index, plan_index);
             }
             return;
         }
@@ -121,15 +212,15 @@ pub const GlyphAtlasPlanner = struct {
                 .subpixel_x = subpixelBucket(text.origin.x + @as(f32, @floatFromInt(scalar_index)) * text.size * 0.5),
                 .subpixel_y = subpixelBucket(text.origin.y),
             };
-            try self.appendUnique(key, command_index, scalar_index, use_index);
+            try self.appendUnique(key, command_index, scalar_index, plan_index);
         }
     }
 
-    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize, use_index: bool) Error!void {
+    fn appendUnique(self: *GlyphAtlasPlanner, key: GlyphAtlasKey, command_index: usize, glyph_index: usize, plan_index: ?*GlyphAtlasIndex) Error!void {
         var probe: GlyphAtlasIndex.Probe = undefined;
-        if (use_index) {
+        if (plan_index) |index| {
             probe = GlyphAtlasIndex.probe(glyphAtlasKeyHash(key));
-            while (glyph_atlas_plan_index.next(&probe)) |candidate| {
+            while (index.next(&probe)) |candidate| {
                 if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return;
             }
         } else {
@@ -144,7 +235,7 @@ pub const GlyphAtlasPlanner = struct {
             .glyph_index = glyph_index,
         };
         self.len += 1;
-        if (use_index) glyph_atlas_plan_index.insert(probe, @intCast(self.len - 1));
+        if (plan_index) |index| index.insert(probe, @intCast(self.len - 1));
     }
 };
 
@@ -225,22 +316,23 @@ pub const GlyphAtlasCachePlanner = struct {
             previous.len >= plan_key_index.min_entries_for_index) and
             plan_key_index.fitsHashSlots(glyph_atlas_cache_index_slots, previous.len) and
             plan_key_index.fitsHashSlots(glyph_atlas_cache_index_slots, plan.entries.len + previous.len);
-        if (use_index) {
-            glyph_atlas_cache_previous_index.reset();
+        const index_scratch: ?*GlyphAtlasIndexScratch = if (use_index) glyph_atlas_index_scratch.get() else null;
+        if (index_scratch) |scratch| {
+            scratch.cache_previous.reset();
             for (previous, 0..) |entry, index| {
                 var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
-                while (glyph_atlas_cache_previous_index.next(&p)) |_| {}
-                glyph_atlas_cache_previous_index.insert(p, @intCast(index));
+                while (scratch.cache_previous.next(&p)) |_| {}
+                scratch.cache_previous.insert(p, @intCast(index));
             }
-            glyph_atlas_cache_entry_index.reset();
+            scratch.cache_entry.reset();
         }
 
         for (plan.entries, 0..) |entry, atlas_index| {
             const previous_index = blk: {
-                if (use_index) {
+                if (index_scratch) |scratch| {
                     const key_hash = glyphAtlasKeyHash(entry.key);
-                    if (self.entryIndexProbe(entry.key, key_hash)) |_| continue;
-                    break :blk findGlyphAtlasCacheEntryIndexed(previous, entry.key, key_hash);
+                    if (self.entryIndexProbe(&scratch.cache_entry, entry.key, key_hash)) |_| continue;
+                    break :blk findGlyphAtlasCacheEntryIndexed(&scratch.cache_previous, previous, entry.key, key_hash);
                 }
                 if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) continue;
                 break :blk findGlyphAtlasCacheEntry(previous, entry.key);
@@ -248,7 +340,7 @@ pub const GlyphAtlasCachePlanner = struct {
             try self.appendEntryMaybeIndexed(.{
                 .key = entry.key,
                 .last_used_frame = frame_index,
-            }, use_index);
+            }, if (index_scratch) |scratch| &scratch.cache_entry else null);
             try self.appendAction(.{
                 .kind = if (previous_index == null) .upload else .retain,
                 .key = entry.key,
@@ -258,13 +350,13 @@ pub const GlyphAtlasCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, previous_index| {
-            if (use_index) {
-                if (self.entryIndexProbe(entry.key, glyphAtlasKeyHash(entry.key))) |_| continue;
+            if (index_scratch) |scratch| {
+                if (self.entryIndexProbe(&scratch.cache_entry, entry.key, glyphAtlasKeyHash(entry.key))) |_| continue;
             } else if (findGlyphAtlasCacheEntry(self.entries[0..self.entry_len], entry.key) != null) {
                 continue;
             }
             if (shouldRetainUnusedCacheEntry(frame_index, entry.last_used_frame, retention_frames) and self.hasEntryCapacity()) {
-                try self.appendEntryMaybeIndexed(entry, use_index);
+                try self.appendEntryMaybeIndexed(entry, if (index_scratch) |scratch| &scratch.cache_entry else null);
                 try self.appendAction(.{
                     .kind = .retain,
                     .key = entry.key,
@@ -285,23 +377,46 @@ pub const GlyphAtlasCachePlanner = struct {
         };
     }
 
+    pub fn buildCompiled(self: *GlyphAtlasCachePlanner, plan: GlyphAtlasPlan, previous: []const GlyphAtlasCacheEntry, frame_index: u64, retention_frames: u64, policy: compiled_cache.Policy) Error!GlyphAtlasCachePlan {
+        self.reset();
+        const current = plan.entries;
+        var decision = compiled_cache.Plan.init(true, current.len, previous.len, self.entries.len, self.actions.len, frame_index, retention_frames);
+        defer decision.deinit();
+        for (current, 0..) |entry, i| decision.fact(i, entry.key, 0, 0);
+        for (previous, 0..) |entry, i| decision.fact(current.len + i, entry.key, 0, entry.last_used_frame);
+        decision.run(policy);
+        for (0..decision.entry_count) |i| {
+            const source = decision.source(i);
+            self.entries[i] = if (source < current.len) .{ .key = current[source].key, .last_used_frame = frame_index } else previous[source - current.len];
+        }
+        self.entry_len = decision.entry_count;
+        for (0..decision.action_count) |i| {
+            const action = decision.action(i);
+            const source = action.source;
+            self.actions[i] = .{ .kind = @enumFromInt(action.kind), .key = if (source < current.len) current[source].key else previous[source - current.len].key, .atlas_index = if (source < current.len) source else null, .cache_index = action.cache };
+        }
+        self.action_len = decision.action_count;
+        if (decision.failed) return error.GlyphAtlasCacheListFull;
+        return .{ .entries = self.entries[0..self.entry_len], .actions = self.actions[0..self.action_len] };
+    }
+
     /// First appended entry equal to `key`, walking the entry index's
     /// probe chain — the indexed equivalent of scanning
     /// `self.entries[0..self.entry_len]`.
-    fn entryIndexProbe(self: *GlyphAtlasCachePlanner, key: GlyphAtlasKey, key_hash: u64) ?usize {
+    fn entryIndexProbe(self: *GlyphAtlasCachePlanner, entry_index: *const GlyphAtlasCacheIndex, key: GlyphAtlasKey, key_hash: u64) ?usize {
         var p = GlyphAtlasCacheIndex.probe(key_hash);
-        while (glyph_atlas_cache_entry_index.next(&p)) |candidate| {
+        while (entry_index.next(&p)) |candidate| {
             if (glyphAtlasKeysEqual(self.entries[candidate].key, key)) return candidate;
         }
         return null;
     }
 
-    fn appendEntryMaybeIndexed(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry, use_index: bool) Error!void {
+    fn appendEntryMaybeIndexed(self: *GlyphAtlasCachePlanner, entry: GlyphAtlasCacheEntry, entry_index: ?*GlyphAtlasCacheIndex) Error!void {
         try self.appendEntry(entry);
-        if (use_index) {
+        if (entry_index) |index| {
             var p = GlyphAtlasCacheIndex.probe(glyphAtlasKeyHash(entry.key));
-            while (glyph_atlas_cache_entry_index.next(&p)) |_| {}
-            glyph_atlas_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+            while (index.next(&p)) |_| {}
+            index.insert(p, @intCast(self.entry_len - 1));
         }
     }
 
@@ -366,13 +481,19 @@ const glyph_atlas_index_slots = 16384;
 const glyph_atlas_cache_index_slots = 32768;
 const GlyphAtlasIndex = plan_key_index.HashSlots(glyph_atlas_index_slots);
 const GlyphAtlasCacheIndex = plan_key_index.HashSlots(glyph_atlas_cache_index_slots);
-threadlocal var glyph_atlas_plan_index: GlyphAtlasIndex = .{};
-threadlocal var glyph_atlas_cache_previous_index: GlyphAtlasCacheIndex = .{};
-threadlocal var glyph_atlas_cache_entry_index: GlyphAtlasCacheIndex = .{};
+// Lazily heap-allocated per thread (320 KiB of probe tables): reset per
+// build, so first-use init on the planning thread is the only contract —
+// threads that never plan glyphs never allocate it.
+const GlyphAtlasIndexScratch = struct {
+    plan: GlyphAtlasIndex = .{},
+    cache_previous: GlyphAtlasCacheIndex = .{},
+    cache_entry: GlyphAtlasCacheIndex = .{},
+};
+const glyph_atlas_index_scratch = @import("lazy_tls.zig").LazyTls(GlyphAtlasIndexScratch);
 
-fn findGlyphAtlasCacheEntryIndexed(previous: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey, key_hash: u64) ?usize {
+fn findGlyphAtlasCacheEntryIndexed(previous_index: *const GlyphAtlasCacheIndex, previous: []const GlyphAtlasCacheEntry, key: GlyphAtlasKey, key_hash: u64) ?usize {
     var p = GlyphAtlasCacheIndex.probe(key_hash);
-    while (glyph_atlas_cache_previous_index.next(&p)) |candidate| {
+    while (previous_index.next(&p)) |candidate| {
         if (glyphAtlasKeysEqual(previous[candidate].key, key)) return candidate;
     }
     return null;

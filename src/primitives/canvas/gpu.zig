@@ -2,6 +2,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
+const text_metrics = @import("text_metrics.zig");
 const render_model = @import("render.zig");
 
 const Error = canvas.Error;
@@ -170,6 +171,9 @@ pub const CanvasGpuText = struct {
     color: Color = .{},
     text: []const u8 = "",
     glyphs: []const Glyph = &.{},
+    /// Process-local measurement context used while deriving packet lines.
+    /// It never crosses the wire.
+    measure: ?*const text_metrics.TextMeasureProvider = null,
     text_layout: ?TextLayoutOptions = null,
 };
 
@@ -236,6 +240,8 @@ pub const CanvasGpuCommand = struct {
 };
 
 pub const CanvasGpuPacket = struct {
+    /// Process-local portable packet preparation; never serialized or hashed.
+    preparation_policy: ?@import("gpu_packet_preparation_policy.zig").Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     /// Retained-command-state generation stamped into the binary wire
@@ -378,6 +384,10 @@ pub const RenderEncoderPlanner = struct {
         return .{ .commands = self.commands[0..self.len] };
     }
 
+    pub fn buildCompiled(self: *RenderEncoderPlanner, pass: canvas.CanvasRenderPass, policy: @import("gpu_planning_policy.zig").Policy) Error!RenderEncoderPlan {
+        return @import("gpu_planning_policy.zig").encoder(self, pass, policy);
+    }
+
     fn append(self: *RenderEncoderPlanner, command: RenderEncoderCommand) Error!void {
         if (self.len >= self.commands.len) return error.RenderEncoderListFull;
         self.commands[self.len] = command;
@@ -448,6 +458,10 @@ pub const CanvasGpuPacketPlanner = struct {
             .text_layout_action_count = pass.textLayoutActionCount(),
             .unsupported_command_count = self.unsupported_count,
         };
+    }
+
+    pub fn buildCompiled(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass, policy: @import("gpu_planning_policy.zig").Policy) Error!CanvasGpuPacket {
+        return @import("gpu_planning_policy.zig").packet(self, pass, policy);
     }
 
     fn append(self: *CanvasGpuPacketPlanner, command: CanvasGpuCommand) Error!void {
@@ -552,6 +566,12 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
             packet_command.uses_resource = true;
         },
         .draw_text => |value| {
+            // DirectWrite glyph indices are UINT16. A larger author-supplied
+            // id cannot ride the positioned-glyph wire faithfully, so keep
+            // the packet negotiation truthful and select the pixel path.
+            for (value.glyphs) |glyph| {
+                if (glyph.id > 65535) return packet_command;
+            }
             packet_command.kind = .draw_text;
             packet_command.pipeline = .glyph_run;
             packet_command.paint = .{ .color = value.color };
@@ -562,6 +582,7 @@ pub fn canvasGpuCommandFromRenderCommand(command: RenderCommand, command_index: 
                 .color = value.color,
                 .text = value.text,
                 .glyphs = value.glyphs,
+                .measure = value.measure,
                 .text_layout = value.text_layout,
             };
             packet_command.uses_resource = true;

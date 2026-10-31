@@ -391,17 +391,19 @@ const Decoder = struct {
     }
 };
 
-/// Decode an NSUI document. Refuses unknown versions and codes loudly
-/// (never a silent skip) and hostile depth/length input safely. The
-/// result is CANONICALIZED (typed values stamped), ready for either
-/// engine or further tooling; line/column positions are derived from the
-/// carried spans when present.
+/// Decode an NSUI document. Schema v1 migrates structurally to v2: the
+/// wire layout is unchanged, and every v1-valid checkbox/radio remains
+/// valid after those elements gain optional text content. Other unknown
+/// versions and codes refuse loudly (never a silent skip), and hostile
+/// depth/length input stays bounded. The result is CANONICALIZED (typed
+/// values stamped), ready for either engine or further tooling;
+/// line/column positions are derived from the carried spans when present.
 pub fn decode(arena: std.mem.Allocator, bytes: []const u8, diagnostic: *CodecDiagnostic) DecodeError!markup.MarkupDocument {
     var decoder = Decoder{ .arena = arena, .bytes = bytes, .diagnostic = diagnostic };
     const header = try decoder.take(magic.len);
     if (!std.mem.eql(u8, header, magic)) return decoder.fail(bad_magic_message);
     const version = try decoder.int(u16);
-    if (version != schema.schema_version) return decoder.fail(bad_version_message);
+    if (version != 1 and version != schema.schema_version) return decoder.fail(bad_version_message);
     const flags = try decoder.int(u16);
     decoder.spans = flags & flag_spans != 0;
     decoder.provenance = flags & flag_provenance != 0;
@@ -419,7 +421,10 @@ pub fn decode(arena: std.mem.Allocator, bytes: []const u8, diagnostic: *CodecDia
     for (templates) |*template_node| {
         template_node.* = try decoder.node(0);
     }
-    var document = markup.MarkupDocument{ .templates = templates };
+    // `source_bytes` sizes the tree for quota scaling; the artifact
+    // carries every node's text/names/attrs, so its length is the honest
+    // stand-in for the source this document no longer has.
+    var document = markup.MarkupDocument{ .templates = templates, .source_bytes = bytes.len };
     if (try decoder.byte() != 0) {
         document.root = try decoder.node(0);
     }

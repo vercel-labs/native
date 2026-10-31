@@ -1,8 +1,11 @@
+const builtin_coordination = @import("builtin_coordination_policy.zig");
+const authorization = @import("authorization_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const json = @import("json");
 const validation = @import("validation.zig");
 const bridge_payload = @import("bridge_payload.zig");
+const bridge_descriptors = @import("bridge_descriptor_policy.zig");
 const bridge_responses = @import("bridge_responses.zig");
 const runtime_api = @import("api.zig");
 const runtime_system_services = @import("system_services.zig");
@@ -13,20 +16,20 @@ const security = @import("../security/root.zig");
 
 const max_command_id_bytes = validation.max_command_id_bytes;
 const isMainWebViewLabel = validation.isMainWebViewLabel;
-const validateWebViewLabel = validation.validateWebViewLabel;
-const validateChildWebViewLabel = validation.validateChildWebViewLabel;
+
 const jsonStringField = bridge_payload.jsonStringField;
 const jsonNumberField = bridge_payload.jsonNumberField;
 const jsonIntegerField = bridge_payload.jsonIntegerField;
 const jsonBoolField = bridge_payload.jsonBoolField;
-const webViewWindowIdFromJson = bridge_payload.webViewWindowIdFromJson;
-const viewWindowIdFromJson = bridge_payload.viewWindowIdFromJson;
-const viewKindFromString = bridge_payload.viewKindFromString;
-const gpuSurfaceOptionsFromJson = bridge_payload.gpuSurfaceOptionsFromJson;
-const viewFrameFromJson = bridge_payload.viewFrameFromJson;
-const viewLayerFromJson = bridge_payload.viewLayerFromJson;
-const webViewFrameFromJson = bridge_payload.webViewFrameFromJson;
-const webViewLayerFromJson = bridge_payload.webViewLayerFromJson;
+const webViewWindowIdFromJson = bridge_descriptors.webViewWindowIdFromJson;
+const viewWindowIdFromJson = bridge_descriptors.viewWindowIdFromJson;
+const viewKindFromString = bridge_descriptors.viewKindFromString;
+const windowTitlebarStyleFromString = bridge_descriptors.windowTitlebarStyleFromString;
+const gpuSurfaceOptionsFromJson = bridge_descriptors.gpuSurfaceOptionsFromJson;
+const viewFrameFromJson = bridge_descriptors.viewFrameFromJson;
+const viewLayerFromJson = bridge_descriptors.viewLayerFromJson;
+const webViewFrameFromJson = bridge_descriptors.webViewFrameFromJson;
+const webViewLayerFromJson = bridge_descriptors.webViewLayerFromJson;
 const writeWindowJson = bridge_responses.writeWindowJson;
 const writeWebViewJson = bridge_responses.writeWebViewJson;
 const writeViewJson = bridge_responses.writeViewJson;
@@ -53,7 +56,132 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
     return struct {
         const Self = @This();
 
+        fn writeCompiledBuiltinError(self: *Runtime, id: []const u8, err: anyerror, output: []u8) []const u8 {
+            const plan = builtin_coordination.errorInfo(self.builtin_coordination_policy.?, err);
+            return bridge.writeErrorResponse(output, id, plan.errorCode(), plan.message());
+        }
+
+        fn dispatchCompiledCommandBridgeCommand(self: *Runtime, app: App, request: bridge.Request, source_window_id: platform.WindowId, source_view_label: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .command, request.command);
+            const result = switch (plan.verb()) {
+                .command_invoke => Self.invokeCommandFromJson(self, app, request.payload, source_window_id, source_view_label, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .command_list => Self.writeCommandListJson(self, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledPlatformBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .platform, request.command);
+            const result = switch (plan.verb()) {
+                .platform_supports => SystemServiceMethods.supportsFeatureFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledWindowBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .window, request.command);
+            const result = switch (plan.verb()) {
+                .window_list => Self.writeWindowListJson(self, result_buffer) catch return Self.writeCompiledBuiltinError(self, request.id, error.BuiltinWindowListFailed, response_buffer),
+                .window_create => Self.createWindowFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .window_focus => Self.focusWindowFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .window_close => Self.closeWindowFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .view, request.command);
+            const result = switch (plan.verb()) {
+                .view_create => Self.createViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_list => Self.writeViewListJson(self, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_update => Self.updateViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_setFrame => Self.setViewFrameFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_setVisible => Self.setViewVisibleFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_focus => Self.focusViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_focusNext => Self.focusNextViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_focusPrevious => Self.focusPreviousViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .view_close => Self.closeViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (!self.options.web_layer) return Self.writeCompiledBuiltinError(self, request.id, error.WebViewLayerNotBuilt, response_buffer);
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .webview, request.command);
+            const result = switch (plan.verb()) {
+                .webview_create => Self.createWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_list => WindowViewMethods.writeWebViewListJson(self, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_setFrame => Self.setWebViewFrameFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_navigate => Self.navigateWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_setZoom => Self.setWebViewZoomFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_setLayer => Self.setWebViewLayerFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .webview_close => Self.closeWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledDialogBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .dialog, request.command);
+            const result = switch (plan.verb()) {
+                .dialog_openFile => SystemServiceMethods.openFileDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .dialog_saveFile => SystemServiceMethods.saveFileDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .dialog_showMessage => SystemServiceMethods.showMessageDialogFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .os, request.command);
+            if (plan.verb() == .os_showNotification) {
+                var action_scratch: [platform.max_notification_action_command_bytes]u8 = undefined;
+                var action_storage = json.StringStorage.init(&action_scratch);
+                const action_command = jsonStringField(request.payload, "actionCommand", &action_storage) orelse "";
+                const allowed = if (action_command.len > 0) Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command) else false;
+                const admission = builtin_coordination.notification(self.builtin_coordination_policy.?, action_command.len > 0, allowed);
+                if (admission.notificationDenied()) return bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, admission.message());
+            }
+            const result = switch (plan.verb()) {
+                .os_openUrl => SystemServiceMethods.openExternalUrlFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .os_showNotification => SystemServiceMethods.showNotificationFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .os_revealPath => SystemServiceMethods.revealPathFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .os_addRecentDocument => SystemServiceMethods.addRecentDocumentFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .os_clearRecentDocuments => SystemServiceMethods.clearRecentDocumentsFromJson(self, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledCredentialBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .credentials, request.command);
+            const result = switch (plan.verb()) {
+                .credentials_set => SystemServiceMethods.setCredentialFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .credentials_get => SystemServiceMethods.getCredentialFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .credentials_delete => SystemServiceMethods.deleteCredentialFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
+        fn dispatchCompiledClipboardBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .clipboard, request.command);
+            const result = switch (plan.verb()) {
+                .clipboard_readText => SystemServiceMethods.readClipboardTextFromJson(self, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .clipboard_writeText => SystemServiceMethods.writeClipboardTextFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .clipboard_read => SystemServiceMethods.readClipboardDataFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                .clipboard_write => SystemServiceMethods.writeClipboardDataFromJson(self, request.payload, result_buffer) catch |err| return Self.writeCompiledBuiltinError(self, request.id, err, response_buffer),
+                else => return bridge.writeErrorResponse(response_buffer, request.id, .unknown_command, plan.unknownMessage()),
+            };
+            return bridge.writeSuccessResponse(response_buffer, request.id, result);
+        }
+
         pub fn allowsBuiltinBridgeCommand(self: *Runtime, command: []const u8, origin: []const u8, js_permission: ?[]const u8) bool {
+            if (self.authorization_policy) |compiled| return authorization.builtinAllows(compiled, self.options.builtin_bridge, self.options.security, self.options.js_window_api, command, origin, js_permission);
             var policy = self.options.builtin_bridge;
             if (self.options.security.permissions.len > 0) policy.permissions = self.options.security.permissions;
             if (policy.enabled) return policy.allows(command, origin);
@@ -66,6 +194,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchCommandBridgeCommand(self: *Runtime, app: App, request: bridge.Request, source_window_id: platform.WindowId, source_view_label: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledCommandBridgeCommand(self, app, request, source_window_id, source_view_label, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.command.invoke"))
                 Self.invokeCommandFromJson(self, app, request.payload, source_window_id, source_view_label, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.command.list"))
@@ -76,6 +205,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchPlatformBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledPlatformBridgeCommand(self, request, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.platform.supports"))
                 SystemServiceMethods.supportsFeatureFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else
@@ -84,6 +214,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchWindowBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledWindowBridgeCommand(self, request, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.window.list"))
                 Self.writeWindowListJson(self, result_buffer) catch return bridge.writeErrorResponse(response_buffer, request.id, .internal_error, "Failed to list windows")
             else if (std.mem.eql(u8, request.command, "native-sdk.window.create"))
@@ -101,7 +232,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [max_command_id_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const name = jsonStringField(payload, "name", &storage) orelse jsonStringField(payload, "id", &storage) orelse return error.InvalidCommand;
-            const view_label = if (std.mem.eql(u8, source_view_label, "main")) "" else source_view_label;
+            const view_label = if (self.command_policy) |policy| @import("command_policy.zig").bridgeLabel(policy, source_view_label) else if (std.mem.eql(u8, source_view_label, "main")) "" else source_view_label;
             const event: CommandEvent = .{
                 .name = name,
                 .source = .bridge,
@@ -124,6 +255,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledViewBridgeCommand(self, request, source_window_id, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.view.create"))
                 Self.createViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.view.list"))
@@ -148,6 +280,13 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchWebViewBridgeCommand(self: *Runtime, request: bridge.Request, source_window_id: platform.WindowId, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledWebViewBridgeCommand(self, request, source_window_id, result_buffer, response_buffer);
+            // A native-only build has no webviews to command (and no page
+            // to command them from); every webview verb answers with the
+            // teaching error instead of a misleading not-found.
+            if (!self.options.web_layer) {
+                return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(error.WebViewLayerNotBuilt), builtinBridgeErrorMessage(error.WebViewLayerNotBuilt));
+            }
             const result = if (std.mem.eql(u8, request.command, "native-sdk.webview.create"))
                 Self.createWebViewFromJson(self, request.payload, source_window_id, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.webview.list"))
@@ -168,6 +307,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchDialogBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledDialogBridgeCommand(self, request, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.dialog.openFile"))
                 SystemServiceMethods.openFileDialogFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.dialog.saveFile"))
@@ -179,7 +319,18 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             return bridge.writeSuccessResponse(response_buffer, request.id, result);
         }
 
-        pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+        pub fn dispatchOsBridgeCommand(self: *Runtime, request: bridge.Request, origin: []const u8, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledOsBridgeCommand(self, request, origin, result_buffer, response_buffer);
+            if (std.mem.eql(u8, request.command, "native-sdk.os.showNotification")) {
+                var action_scratch: [platform.max_notification_action_command_bytes]u8 = undefined;
+                var action_storage = json.StringStorage.init(&action_scratch);
+                const action_command = jsonStringField(request.payload, "actionCommand", &action_storage) orelse "";
+                if (action_command.len > 0 and
+                    !Self.allowsBuiltinBridgeCommand(self, "native-sdk.command.invoke", origin, security.permission_command))
+                {
+                    return bridge.writeErrorResponse(response_buffer, request.id, .permission_denied, "Notification actions require command invoke permission");
+                }
+            }
             const result = if (std.mem.eql(u8, request.command, "native-sdk.os.openUrl"))
                 SystemServiceMethods.openExternalUrlFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.os.showNotification"))
@@ -196,6 +347,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchCredentialBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledCredentialBridgeCommand(self, request, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.credentials.set"))
                 SystemServiceMethods.setCredentialFromJson(self, request.payload, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.credentials.get"))
@@ -208,6 +360,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn dispatchClipboardBridgeCommand(self: *Runtime, request: bridge.Request, result_buffer: []u8, response_buffer: []u8) []const u8 {
+            if (self.builtin_coordination_policy != null) return Self.dispatchCompiledClipboardBridgeCommand(self, request, result_buffer, response_buffer);
             const result = if (std.mem.eql(u8, request.command, "native-sdk.clipboard.readText"))
                 SystemServiceMethods.readClipboardTextFromJson(self, result_buffer) catch |err| return bridge.writeErrorResponse(response_buffer, request.id, builtinBridgeErrorCode(err), builtinBridgeErrorMessage(err))
             else if (std.mem.eql(u8, request.command, "native-sdk.clipboard.writeText"))
@@ -227,14 +380,26 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             const title = jsonStringField(payload, "title", &storage) orelse "";
             const width = jsonNumberField(payload, "width") orelse 720;
             const height = jsonNumberField(payload, "height") orelse 480;
-            const x = jsonNumberField(payload, "x") orelse 0;
-            const y = jsonNumberField(payload, "y") orelse 0;
+            const requested_x = jsonNumberField(payload, "x");
+            const requested_y = jsonNumberField(payload, "y");
+            const x = requested_x orelse 0;
+            const y = requested_y orelse 0;
             const source = if (jsonStringField(payload, "url", &storage)) |url| platform.WebViewSource.url(url) else null;
+            const titlebar = if (jsonStringField(payload, "titlebar", &storage)) |value|
+                windowTitlebarStyleFromString(self.bridge_descriptor_policy, value) orelse return error.InvalidWindowOptions
+            else
+                .standard;
             const info = try self.createWindow(.{
                 .label = label,
                 .title = title,
                 .default_frame = geometry.RectF.init(x, y, width, height),
                 .restore_state = jsonBoolField(payload, "restoreState") orelse true,
+                .initial_placement = if (requested_x != null or requested_y != null) .explicit else .default,
+                .titlebar = titlebar,
+                .transparent = jsonBoolField(payload, "transparent") orelse false,
+                .always_on_top = jsonBoolField(payload, "alwaysOnTop") orelse false,
+                .click_through = jsonBoolField(payload, "clickThrough") orelse false,
+                .activate_on_show = jsonBoolField(payload, "activateOnShow") orelse true,
                 .source = source,
             });
             return writeWindowJson(info, output);
@@ -245,8 +410,8 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
             const kind_str = jsonStringField(payload, "kind", &storage) orelse return error.InvalidViewOptions;
-            const kind = viewKindFromString(kind_str) orelse return error.UnsupportedViewKind;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const kind = viewKindFromString(self.bridge_descriptor_policy, kind_str) orelse return error.UnsupportedViewKind;
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             const role = jsonStringField(payload, "role", &storage) orelse "";
             const accessibility_label = jsonStringField(payload, "accessibilityLabel", &storage) orelse jsonStringField(payload, "accessibility_label", &storage) orelse "";
             const text = jsonStringField(payload, "text", &storage) orelse "";
@@ -258,8 +423,8 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
                 .label = label,
                 .kind = kind,
                 .parent = parent,
-                .frame = (try viewFrameFromJson(payload, kind == .webview)) orelse geometry.RectF.init(0, 0, 0, 0),
-                .layer = try viewLayerFromJson(payload) orelse 0,
+                .frame = (try viewFrameFromJson(self.bridge_descriptor_policy, payload, kind == .webview)) orelse geometry.RectF.init(0, 0, 0, 0),
+                .layer = try viewLayerFromJson(self.bridge_descriptor_policy, payload) orelse 0,
                 .visible = jsonBoolField(payload, "visible") orelse true,
                 .enabled = jsonBoolField(payload, "enabled") orelse true,
                 .role = role,
@@ -269,7 +434,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
                 .url = url,
                 .transparent = jsonBoolField(payload, "transparent") orelse false,
                 .bridge_enabled = jsonBoolField(payload, "bridge") orelse false,
-                .gpu_surface = try gpuSurfaceOptionsFromJson(payload, &storage),
+                .gpu_surface = try gpuSurfaceOptionsFromJson(self.bridge_descriptor_policy, payload, &storage),
             });
             return writeViewJson(info, output);
         }
@@ -278,10 +443,10 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_view_label_bytes + platform.max_view_role_bytes + platform.max_view_accessibility_label_bytes + platform.max_view_text_bytes + platform.max_view_command_bytes + platform.max_webview_url_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             const patch: platform.ViewPatch = .{
-                .frame = try viewFrameFromJson(payload, false),
-                .layer = try viewLayerFromJson(payload),
+                .frame = try viewFrameFromJson(self.bridge_descriptor_policy, payload, false),
+                .layer = try viewLayerFromJson(self.bridge_descriptor_policy, payload),
                 .visible = jsonBoolField(payload, "visible"),
                 .enabled = jsonBoolField(payload, "enabled"),
                 .role = jsonStringField(payload, "role", &storage),
@@ -298,8 +463,8 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_view_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
-            const info = try self.updateView(window_id, label, .{ .frame = try viewFrameFromJson(payload, true) });
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
+            const info = try self.updateView(window_id, label, .{ .frame = try viewFrameFromJson(self.bridge_descriptor_policy, payload, true) });
             return writeViewJson(info, output);
         }
 
@@ -308,7 +473,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
             const visible = jsonBoolField(payload, "visible") orelse return error.InvalidViewOptions;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             const info = try self.updateView(window_id, label, .{ .visible = visible });
             return writeViewJson(info, output);
         }
@@ -317,7 +482,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_view_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             try self.focusView(window_id, label);
             var views_buffer: [platform.max_views + platform.max_webviews + 1]platform.ViewInfo = undefined;
             for (self.listViews(window_id, &views_buffer)) |view| {
@@ -327,13 +492,13 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
         }
 
         pub fn focusNextViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             const info = try self.focusNextView(window_id);
             return writeViewJson(info, output);
         }
 
         pub fn focusPreviousViewFromJson(self: *Runtime, payload: []const u8, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             const info = try self.focusPreviousView(window_id);
             return writeViewJson(info, output);
         }
@@ -342,7 +507,7 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_view_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse return error.InvalidViewOptions;
-            const window_id = try viewWindowIdFromJson(payload, source_window_id);
+            const window_id = try viewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             var views_buffer: [platform.max_views + platform.max_webviews + 1]platform.ViewInfo = undefined;
             for (self.listViews(window_id, &views_buffer)) |view| {
                 if (std.mem.eql(u8, view.label, label)) {
@@ -376,13 +541,13 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse "webview";
             const url = jsonStringField(payload, "url", &storage) orelse return error.MissingWebViewUrl;
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
-            const webview_frame = try webViewFrameFromJson(payload);
-            const layer = try webViewLayerFromJson(payload);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
+            const webview_frame = try webViewFrameFromJson(self.bridge_descriptor_policy, payload);
+            const layer = try webViewLayerFromJson(self.bridge_descriptor_policy, payload);
             const transparent = jsonBoolField(payload, "transparent") orelse false;
             const bridge_enabled = jsonBoolField(payload, "bridge") orelse false;
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateChildWebViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 2, label);
             try WindowViewMethods.validateWebViewUrl(self, url);
             if (WindowViewMethods.findWebViewIndex(self, window_id, label) != null) return error.DuplicateWebViewLabel;
             if (WindowViewMethods.viewLabelExists(self, window_id, label)) return error.DuplicateViewLabel;
@@ -414,10 +579,10 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_webview_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse "webview";
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
-            const webview_frame = try webViewFrameFromJson(payload);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
+            const webview_frame = try webViewFrameFromJson(self.bridge_descriptor_policy, payload);
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateWebViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 1, label);
             if (isMainWebViewLabel(label)) {
                 const window_index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
                 try self.options.platform.services.setWebViewFrame(window_id, label, webview_frame);
@@ -439,9 +604,9 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse "webview";
             const url = jsonStringField(payload, "url", &storage) orelse return error.MissingWebViewUrl;
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateWebViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 1, label);
             try WindowViewMethods.validateWebViewUrl(self, url);
             if (isMainWebViewLabel(label)) return error.InvalidWebViewOptions;
             const webview_index = WindowViewMethods.findWebViewIndex(self, window_id, label) orelse return error.WebViewNotFound;
@@ -457,9 +622,9 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             const zoom_f32 = jsonNumberField(payload, "zoom") orelse return error.InvalidWebViewOptions;
             const zoom: f64 = @floatCast(zoom_f32);
             if (zoom < 0.25 or zoom > 5.0) return error.InvalidWebViewOptions;
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateWebViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 1, label);
             if (isMainWebViewLabel(label)) {
                 const window_index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
                 try self.options.platform.services.setWebViewZoom(window_id, label, zoom);
@@ -476,10 +641,10 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_webview_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse "webview";
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateWebViewLabel(label);
-            const layer = try webViewLayerFromJson(payload);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 1, label);
+            const layer = try webViewLayerFromJson(self.bridge_descriptor_policy, payload);
             if (isMainWebViewLabel(label)) {
                 const window_index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
                 try self.options.platform.services.setWebViewLayer(window_id, label, layer);
@@ -496,9 +661,9 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var scratch: [platform.max_webview_label_bytes]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const label = jsonStringField(payload, "label", &storage) orelse "webview";
-            const window_id = try webViewWindowIdFromJson(payload, source_window_id);
+            const window_id = try webViewWindowIdFromJson(self.bridge_descriptor_policy, payload, source_window_id);
             try WindowViewMethods.validateWebViewParent(self, window_id);
-            try validateWebViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 1, label);
             if (isMainWebViewLabel(label)) return error.InvalidWebViewOptions;
             const webview_index = WindowViewMethods.findWebViewIndex(self, window_id, label) orelse return error.WebViewNotFound;
             var closed_info = self.webviews[webview_index];
@@ -524,11 +689,16 @@ pub fn RuntimeBuiltinBridge(comptime Runtime: type) type {
             var storage = json.StringStorage.init(output);
             const window_id = try Self.resolveWindowSelector(self, payload, &storage);
             const index = WindowViewMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
-            var info = self.windows[index].info;
-            info.open = false;
-            info.focused = false;
             try self.closeWindow(window_id);
-            return writeWindowJson(info, output);
+            // The response serializes the TABLE state after the close,
+            // never a hand-cleared copy: closeWindow owns which flags a
+            // close clears (open, focused, AND hidden — a closed
+            // policy-hidden window is gone, not "hidden"), and a copy
+            // maintained here field-by-field silently drifts every time
+            // that set grows. The index stays valid: a closed window
+            // keeps its table slot — slots only compact inside window
+            // create, when a dead slot's id or label is re-used.
+            return writeWindowJson(self.windows[index].info, output);
         }
 
         pub fn resolveWindowSelector(self: *Runtime, payload: []const u8, storage: *json.StringStorage) !platform.WindowId {

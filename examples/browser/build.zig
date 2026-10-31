@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
@@ -61,6 +62,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "trace", @tagName(trace_option));
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
     options.addOption(bool, "automation", automation_enabled);
+    options.addOption(?bool, "webview_inspection", webview_inspection);
     const options_mod = options.createModule();
 
     const runner_mod = localModule(b, target, optimize, "src/runner.zig");
@@ -74,6 +76,14 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
+        // Zig 0.16.0's self-hosted x86_64 backend (the Debug default)
+        // miscompiles the SysV C calling convention for the long
+        // mixed-argument signatures the platform hosts use, shifting
+        // stack-passed pointers by one slot (a Debug run on x86_64 Linux
+        // crashes creating its first shell view). Force LLVM there,
+        // mirroring the Native SDK build graph; Release modes already
+        // use LLVM, so only Debug changes.
+        .use_llvm = useLlvmWorkaround(target),
     });
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
@@ -196,9 +206,15 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             },
         }
         if (b.sysroot) |sysroot| app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/capture_info_plist.c"), .flags = &.{} });
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("CoreMedia", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{ .weak = true });
+        // CVPixelBuffer for the video frame path (the AppKit host's
+        // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
+        app_mod.linkFramework("CoreVideo", .{});
         // Spectrum analysis of the app's own playback: the MediaToolbox
         // audio tap hands the player's PCM to the host, and Accelerate
         // (vDSP) turns it into band magnitudes.
@@ -267,10 +283,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
             },
         }
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
         app_mod.linkSystemLibrary("c", .{});
         app_mod.linkSystemLibrary("c++", .{});
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("gdi32", .{});
+        app_mod.linkSystemLibrary("d2d1", .{});
+        app_mod.linkSystemLibrary("dwrite", .{});
         app_mod.linkSystemLibrary("imm32", .{});
         app_mod.linkSystemLibrary("comctl32", .{});
         app_mod.linkSystemLibrary("ole32", .{});
@@ -339,4 +358,15 @@ fn defaultCefDir(platform: PlatformOption, configured: []const u8) []const u8 {
         .windows => "third_party/cef/windows",
         else => configured,
     };
+}
+
+// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
+// convention for long mixed int/pointer/double signatures (the platform
+// hosts' view-create calls) and f32-heavy ones (the embed viewport ABI):
+// stack-passed arguments arrive shifted, so a Debug x86_64 build crashes
+// at the first platform call that passes strings on the stack. Force the
+// LLVM backend on x86_64 until the upstream backend is fixed; Release
+// modes already default to LLVM, so this only changes Debug builds.
+fn useLlvmWorkaround(target: std.Build.ResolvedTarget) ?bool {
+    return if (target.result.cpu.arch == .x86_64) true else null;
 }

@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -54,6 +55,11 @@ pub const RenderResourcePlan = struct {
         var planner = RenderResourceCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index);
     }
+    pub fn cachePlanWithWorkspace(self: RenderResourcePlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderResourceCacheEntry, frame_index: u64, entries: []RenderResourceCacheEntry, actions: []RenderResourceCacheAction) Error!RenderResourceCachePlan {
+        var planner = RenderResourceCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
+        return planner.build(self, previous, frame_index);
+    }
 };
 
 pub const RenderResourcePlanner = struct {
@@ -66,6 +72,10 @@ pub const RenderResourcePlanner = struct {
 
     pub fn reset(self: *RenderResourcePlanner) void {
         self.len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderResourcePlanner, plan: anytype, policy: @import("render_resource_policy.zig").Policy) Error!RenderResourcePlan {
+        return @import("render_resource_policy.zig").resources(self, plan, policy);
     }
 
     pub fn build(self: *RenderResourcePlanner, display_list: anytype) Error!RenderResourcePlan {
@@ -220,6 +230,10 @@ pub const RenderResourceCachePlanner = struct {
         self.action_len = 0;
     }
 
+    pub fn buildCompiled(self: *RenderResourceCachePlanner, plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderResourceCachePlan {
+        return compiled_cache.build(.resource, RenderResourceCachePlan, self, plan.resources, previous, frame_index, workspace, renderResourceKey, renderResourceKeyHash, error.RenderResourceCacheListFull);
+    }
+
     pub fn build(self: *RenderResourceCachePlanner, resource_plan: RenderResourcePlan, previous: []const RenderResourceCacheEntry, frame_index: u64) Error!RenderResourceCachePlan {
         self.reset();
         // Keyed lookups ride the probe-table index whenever the inputs
@@ -231,30 +245,31 @@ pub const RenderResourceCachePlanner = struct {
             previous.len >= plan_key_index.min_entries_for_index) and
             plan_key_index.fitsHashSlots(resource_cache_index_slots, previous.len) and
             plan_key_index.fitsHashSlots(resource_cache_index_slots, resource_plan.resources.len);
-        if (use_index) {
-            resource_cache_previous_index.reset();
+        const index_scratch: ?*ResourceCacheIndexScratch = if (use_index) resource_cache_index_scratch.get() else null;
+        if (index_scratch) |scratch| {
+            scratch.previous.reset();
             for (previous, 0..) |entry, index| {
                 var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
-                while (resource_cache_previous_index.next(&p)) |_| {}
-                resource_cache_previous_index.insert(p, @intCast(index));
+                while (scratch.previous.next(&p)) |_| {}
+                scratch.previous.insert(p, @intCast(index));
             }
-            resource_cache_entry_index.reset();
+            scratch.entry.reset();
         }
 
         for (resource_plan.resources, 0..) |resource, resource_index| {
             const key = renderResourceKey(resource);
             const key_hash = if (use_index) renderResourceKeyHash(key) else 0;
-            if (use_index) {
+            if (index_scratch) |scratch| {
                 var p = ResourceCacheIndex.probe(key_hash);
                 var duplicate = false;
-                while (resource_cache_entry_index.next(&p)) |candidate| {
+                while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, key)) {
                         duplicate = true;
                         break;
                     }
                 }
                 if (duplicate) continue;
-                const previous_index = findRenderResourceCacheEntryIndexed(previous, key, key_hash);
+                const previous_index = findRenderResourceCacheEntryIndexed(&scratch.previous, previous, key, key_hash);
                 try self.appendAction(.{
                     .kind = if (previous_index == null) .upload else .retain,
                     .key = key,
@@ -265,7 +280,7 @@ pub const RenderResourceCachePlanner = struct {
                     .key = key,
                     .last_used_frame = frame_index,
                 });
-                resource_cache_entry_index.insert(p, @intCast(self.entry_len - 1));
+                scratch.entry.insert(p, @intCast(self.entry_len - 1));
                 continue;
             }
             if (findRenderResourceCacheEntry(self.entries[0..self.entry_len], key) != null) continue;
@@ -284,10 +299,10 @@ pub const RenderResourceCachePlanner = struct {
         }
 
         for (previous, 0..) |entry, cache_index| {
-            if (use_index) {
+            if (index_scratch) |scratch| {
                 var p = ResourceCacheIndex.probe(renderResourceKeyHash(entry.key));
                 var kept = false;
-                while (resource_cache_entry_index.next(&p)) |candidate| {
+                while (scratch.entry.next(&p)) |candidate| {
                     if (renderResourceKeysEqual(self.entries[candidate].key, entry.key)) {
                         kept = true;
                         break;
@@ -346,14 +361,20 @@ fn findRenderResourceCacheEntry(entries: []const RenderResourceCacheEntry, key: 
 /// half-full bound; bigger inputs fall back to the linear scans.
 const resource_cache_index_slots = 4096;
 const ResourceCacheIndex = plan_key_index.HashSlots(resource_cache_index_slots);
-threadlocal var resource_cache_previous_index: ResourceCacheIndex = .{};
-threadlocal var resource_cache_entry_index: ResourceCacheIndex = .{};
+// Lazily heap-allocated per thread (32 KiB of probe tables): reset per
+// build, so first-use init on the planning thread is the only contract —
+// threads that never plan resources never allocate it.
+const ResourceCacheIndexScratch = struct {
+    previous: ResourceCacheIndex = .{},
+    entry: ResourceCacheIndex = .{},
+};
+const resource_cache_index_scratch = @import("lazy_tls.zig").LazyTls(ResourceCacheIndexScratch);
 
 /// The chain's first equal candidate is the lowest-index equal entry —
 /// the exact value the linear scan returned.
-fn findRenderResourceCacheEntryIndexed(previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
+fn findRenderResourceCacheEntryIndexed(previous_index: *const ResourceCacheIndex, previous: []const RenderResourceCacheEntry, key: RenderResourceKey, key_hash: u64) ?usize {
     var p = ResourceCacheIndex.probe(key_hash);
-    while (resource_cache_previous_index.next(&p)) |candidate| {
+    while (previous_index.next(&p)) |candidate| {
         if (renderResourceKeysEqual(previous[candidate].key, key)) return candidate;
     }
     return null;

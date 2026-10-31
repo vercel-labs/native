@@ -1,32 +1,29 @@
+const authorization = @import("authorization_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const validation = @import("validation.zig");
 const runtime_api = @import("api.zig");
-const bridge_payload = @import("bridge_payload.zig");
+const bridge_descriptors = @import("bridge_descriptor_policy.zig");
 const bridge_responses = @import("bridge_responses.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_state = @import("state.zig");
+const runtime_view = @import("view.zig");
 const runtime_window_storage = @import("window_storage.zig");
+const view_coordination = @import("view_coordination_policy.zig");
 const platform = @import("../platform/root.zig");
-const security = @import("../security/root.zig");
 
 const isMainWebViewLabel = validation.isMainWebViewLabel;
-const validateChildWebViewLabel = validation.validateChildWebViewLabel;
-const validateViewOptions = validation.validateViewOptions;
-const validateViewLabel = validation.validateViewLabel;
-const validateViewFrame = validation.validateViewFrame;
-const isValidWebViewFrame = validation.isValidWebViewFrame;
+
 const validateCommandName = validation.validateCommandName;
 
-const webViewUrlOrigin = bridge_payload.webViewUrlOrigin;
+const webViewUrlOrigin = bridge_descriptors.webViewUrlOrigin;
 const writeWebViewJsonToWriter = bridge_responses.writeWebViewJsonToWriter;
 const viewInfoFromWebView = bridge_responses.viewInfoFromWebView;
 const RuntimeWebView = runtime_state.RuntimeWebView;
 const FocusTraversalDirection = runtime_state.FocusTraversalDirection;
 const sourceWebViewUrl = runtime_state.sourceWebViewUrl;
-const nowNanoseconds = runtime_clock.nowNanoseconds;
-const timestampToU64 = runtime_clock.timestampToU64;
+const monotonicNanoseconds = runtime_clock.monotonicNanoseconds;
 const CommandSource = runtime_api.CommandSource;
 
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
@@ -48,7 +45,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn createView(self: *Runtime, options: platform.ViewOptions) anyerror!platform.ViewInfo {
             try Self.validateViewParent(self, options.window_id);
-            try validateViewOptions(options);
+            try @import("shell_admission_policy.zig").runtimeView(self.shell_admission_policy, options);
             if (Self.viewLabelExists(self, options.window_id, options.label)) return error.DuplicateViewLabel;
             try Self.validateViewParentLink(self, options.window_id, options.label, options.parent);
             if (options.kind == .webview) return Self.createWebViewView(self, options);
@@ -70,19 +67,23 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn updateView(self: *Runtime, window_id: platform.WindowId, label: []const u8, patch: platform.ViewPatch) anyerror!platform.ViewInfo {
             try Self.validateViewParent(self, window_id);
-            try validateViewLabel(label);
-            if (patch.frame) |view_frame| try validateViewFrame(view_frame);
-            if (patch.role) |role| {
-                if (role.len > platform.max_view_role_bytes) return error.ViewRoleTooLarge;
-            }
-            if (patch.accessibility_label) |accessibility_label| {
-                if (accessibility_label.len > platform.max_view_accessibility_label_bytes) return error.ViewAccessibilityLabelTooLarge;
-            }
-            if (patch.text) |text| {
-                if (text.len > platform.max_view_text_bytes) return error.ViewTextTooLarge;
-            }
-            if (patch.command) |command| {
-                if (command.len > 0) try validateCommandName(command);
+            if (self.shell_admission_policy) |policy| {
+                try @import("shell_admission_policy.zig").runtimePatch(policy, label, patch);
+            } else {
+                try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
+                if (patch.frame) |view_frame| try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 0, view_frame);
+                if (patch.role) |role| {
+                    if (role.len > platform.max_view_role_bytes) return error.ViewRoleTooLarge;
+                }
+                if (patch.accessibility_label) |accessibility_label| {
+                    if (accessibility_label.len > platform.max_view_accessibility_label_bytes) return error.ViewAccessibilityLabelTooLarge;
+                }
+                if (patch.text) |text| {
+                    if (text.len > platform.max_view_text_bytes) return error.ViewTextTooLarge;
+                }
+                if (patch.command) |command| {
+                    if (command.len > 0) try validateCommandName(command);
+                }
             }
             if (patch.url != null and !isMainWebViewLabel(label) and Self.findWebViewIndex(self, window_id, label) == null) return error.InvalidViewOptions;
 
@@ -110,7 +111,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn closeView(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!void {
             try Self.validateViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (isMainWebViewLabel(label)) return error.InvalidViewOptions;
 
             if (Self.findWebViewIndex(self, window_id, label)) |webview_index| {
@@ -134,6 +135,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn listViews(self: *const Runtime, window_id: platform.WindowId, output: []platform.ViewInfo) []const platform.ViewInfo {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .list, .{ .window_id = window_id, .capacity = output.len });
+                for (program.selections[0..program.count], 0..) |selected, i| output[i] = Self.selectedViewInfo(self, selected);
+                return output[0..program.count];
+            }
             const window_index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return output[0..0];
             if (!self.windows[window_index].info.open) return output[0..0];
 
@@ -159,7 +165,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn focusView(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!void {
             try Self.validateViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (!Self.viewLabelExists(self, window_id, label)) return error.ViewNotFound;
             try self.options.platform.services.focusView(window_id, label);
             try Self.setFocusedView(self, window_id, label);
@@ -176,7 +182,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         /// (`supports(.view_surface_adoption)` is the honest pre-check).
         pub fn adoptViewSurface(self: *Runtime, window_id: platform.WindowId, label: []const u8, surface_handle: *anyopaque) anyerror!void {
             try Self.validateViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (isMainWebViewLabel(label) or Self.findWebViewIndex(self, window_id, label) != null) return error.InvalidViewOptions;
             if (Self.findViewIndex(self, window_id, label) == null) return error.ViewNotFound;
             try self.options.platform.services.adoptViewSurface(window_id, label, surface_handle);
@@ -187,7 +193,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         /// platform view stays alive for the caller to reuse.
         pub fn releaseViewSurface(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!void {
             try Self.validateViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (Self.findViewIndex(self, window_id, label) == null) return error.ViewNotFound;
             try self.options.platform.services.releaseViewSurface(window_id, label);
             self.invalidateFor(.command, null);
@@ -210,8 +216,8 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             if (url.len == 0) return error.MissingWebViewUrl;
             if (url.len > platform.max_webview_url_bytes) return error.WebViewUrlTooLarge;
             var origin_buffer: [512]u8 = undefined;
-            const origin = try webViewUrlOrigin(url, &origin_buffer);
-            if (!security.allowsOrigin(self.options.security.navigation.allowed_origins, origin)) return error.NavigationDenied;
+            const origin = try webViewUrlOrigin(self.bridge_descriptor_policy, url, &origin_buffer);
+            if (!authorization.allowsOrigin(self.authorization_policy, self.options.security.navigation.allowed_origins, origin)) return error.NavigationDenied;
         }
 
         pub fn writeWebViewListJson(self: *Runtime, source_window_id: platform.WindowId, output: []u8) ![]const u8 {
@@ -321,9 +327,10 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn createWebViewView(self: *Runtime, options: platform.ViewOptions) !platform.ViewInfo {
-            try validateChildWebViewLabel(options.label);
+            if (!self.options.web_layer) return error.WebViewLayerNotBuilt;
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 2, options.label);
             try Self.validateWebViewUrl(self, options.url);
-            if (!isValidWebViewFrame(options.frame)) return error.InvalidWebViewOptions;
+            try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 2, options.frame);
             if (self.webview_count >= platform.max_webviews) return error.WebViewLimitReached;
             var platform_options = options;
             platform_options.frame = try Self.platformFrameForView(self, options.window_id, options.parent, options.frame);
@@ -352,7 +359,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 const window_index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
                 if (patch.url != null) return error.InvalidViewOptions;
                 if (patch.frame) |view_frame| {
-                    if (!isValidWebViewFrame(view_frame)) return error.InvalidWebViewOptions;
+                    try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 2, view_frame);
                     if (self.windows[window_index].source != null) {
                         try self.options.platform.services.setWebViewFrame(window_id, label, view_frame);
                     }
@@ -372,7 +379,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
             const webview_index = Self.findWebViewIndex(self, window_id, label) orelse return error.WebViewNotFound;
             if (patch.frame) |view_frame| {
-                if (!isValidWebViewFrame(view_frame)) return error.InvalidWebViewOptions;
+                try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 2, view_frame);
                 const platform_frame = try Self.platformFrameForView(self, window_id, self.webviews[webview_index].parent, view_frame);
                 try self.options.platform.services.setWebViewFrame(window_id, label, platform_frame);
                 self.webviews[webview_index].local_frame = view_frame;
@@ -393,17 +400,30 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn validateViewParent(self: *const Runtime, window_id: platform.WindowId) !void {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .window, .{ .window_id = window_id });
+                return program.admitted();
+            }
             const index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             if (!self.windows[index].info.open) return error.WindowNotFound;
         }
 
         pub fn validateViewParentLink(self: *const Runtime, window_id: platform.WindowId, label: []const u8, parent: ?[]const u8) !void {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .parent, .{ .window_id = window_id, .label = label, .parent = parent });
+                return program.admitted();
+            }
             const parent_label = parent orelse return;
             if (std.mem.eql(u8, parent_label, label)) return error.InvalidViewOptions;
             if (!Self.viewLabelExists(self, window_id, parent_label)) return error.ViewNotFound;
         }
 
         pub fn platformFrameForView(self: *const Runtime, window_id: platform.WindowId, parent: ?[]const u8, base_frame: geometry.RectF) !geometry.RectF {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .platform_frame, .{ .window_id = window_id, .parent = parent, .frame = base_frame });
+                try program.admitted();
+                return program.frame;
+            }
             var platform_frame = base_frame;
             if (parent) |parent_label| {
                 const parent_frame = try Self.absoluteViewFrame(self, window_id, parent_label, 0);
@@ -414,6 +434,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn localFrameForView(self: *const Runtime, window_id: platform.WindowId, parent: ?[]const u8, base_frame: geometry.RectF) !geometry.RectF {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .local_frame, .{ .window_id = window_id, .parent = parent, .frame = base_frame });
+                try program.admitted();
+                return program.frame;
+            }
             var local_frame = base_frame;
             if (parent) |parent_label| {
                 const parent_frame = try Self.absoluteViewFrame(self, window_id, parent_label, 0);
@@ -424,6 +449,11 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn absoluteViewFrame(self: *const Runtime, window_id: platform.WindowId, label: []const u8, depth: usize) !geometry.RectF {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .absolute, .{ .window_id = window_id, .label = label, .depth = depth });
+                try program.admitted();
+                return program.frame;
+            }
             if (depth >= platform.max_views + platform.max_webviews + 1) return error.InvalidViewOptions;
             if (isMainWebViewLabel(label)) {
                 const window_index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
@@ -449,6 +479,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn relayoutDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
+            if (self.view_coordination_policy) |policy| return Self.executeCompiledDescendants(self, policy, window_id, parent_label, depth, 0);
             if (depth >= platform.max_views + platform.max_webviews) return;
             for (self.views[0..self.view_count]) |*view| {
                 if (view.window_id != window_id) continue;
@@ -482,6 +513,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .transparent = options.transparent,
                 .bridge_enabled = options.bridge_enabled,
                 .gpu_size = if (options.kind == .gpu_surface) options.frame.size() else geometry.SizeF.init(0, 0),
+                .gpu_requested_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_pixel_format = if (options.kind == .gpu_surface) options.gpu_surface.pixel_format else .none,
                 .gpu_present_mode = if (options.kind == .gpu_surface) options.gpu_surface.present_mode else .none,
@@ -489,10 +521,13 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .gpu_color_space = if (options.kind == .gpu_surface) options.gpu_surface.color_space else .none,
                 .gpu_vsync = options.kind == .gpu_surface and options.gpu_surface.vsync,
                 .gpu_status = if (options.kind == .gpu_surface) .ready else .unavailable,
-                .gpu_surface_created_timestamp_ns = if (options.kind == .gpu_surface) timestampToU64(nowNanoseconds()) else 0,
+                .gpu_surface_created_timestamp_ns = if (options.kind == .gpu_surface) monotonicNanoseconds() else 0,
                 .focused = false,
+                .keyboard_active = windowKeyboardActive(self, options.window_id),
                 .open = true,
             };
+            self.views[index].widget_text_bytes = &self.views[index].widget_text_inline_bytes;
+            self.views[index].canvas_widget_text_history_bytes = &self.views[index].canvas_widget_text_history_inline_bytes;
             self.views[index].label = try copyInto(&self.views[index].label_storage, options.label);
             self.views[index].parent = if (options.parent) |parent| try copyInto(&self.views[index].parent_storage, parent) else null;
             self.views[index].role = try copyInto(&self.views[index].role_storage, options.role);
@@ -500,6 +535,12 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
             self.views[index].text = try copyInto(&self.views[index].text_storage, options.text);
             self.views[index].command = try copyInto(&self.views[index].command_storage, options.command);
             self.view_count += 1;
+        }
+
+        fn windowKeyboardActive(self: *const Runtime, window_id: platform.WindowId) bool {
+            if (!self.app_active) return false;
+            const window_index = WindowStorageMethods.findWindowIndexById(self, window_id) orelse return false;
+            return self.windows[window_index].info.focused;
         }
 
         pub fn findViewIndex(self: *const Runtime, window_id: platform.WindowId, label: []const u8) ?usize {
@@ -510,6 +551,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn commandSourceForNativeView(self: *const Runtime, window_id: platform.WindowId, label: []const u8) CommandSource {
+            if (self.command_policy) |policy| return if (@import("command_policy.zig").nativeViewSource(policy, self.views[0..self.view_count], window_id, label)) .toolbar else .native_view;
             const index = Self.findViewIndex(self, window_id, label) orelse return .native_view;
             // Walk by POINTER: a View embeds its widget storage, so a
             // by-value copy here is megabytes of stack — more than a
@@ -527,16 +569,27 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn setFocusedView(self: *Runtime, window_id: platform.WindowId, label: []const u8) anyerror!void {
+            if (self.view_coordination_policy) |policy| return Self.applyCompiledFocus(self, policy, window_id, label, false);
             if (WindowStorageMethods.findWindowIndexById(self, window_id)) |window_index| {
                 self.windows[window_index].main_focused = std.mem.eql(u8, label, "main");
             }
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = std.mem.eql(u8, view.label, label);
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // A view losing focus drops its tooltip state and
+                // re-stamps hidden — no stale tooltip may keep floating
+                // in a view the keyboard just left — and its IME grace
+                // dies with the blur (the shared hygiene every
+                // focus-mutation path applies).
+                if (was_focused and !view.focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
+                    runtime_view.clearImeGraceOnViewBlur(self, view);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
@@ -545,16 +598,24 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn clearFocusedView(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.view_coordination_policy) |policy| return Self.applyCompiledFocus(self, policy, window_id, "", true);
             if (WindowStorageMethods.findWindowIndexById(self, window_id)) |window_index| {
                 self.windows[window_index].main_focused = false;
             }
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
                 if (view.window_id != window_id) continue;
                 const previous_state = view.canvasWidgetRenderState();
+                const was_focused = view.focused;
                 view.focused = false;
                 const next_state = view.canvasWidgetRenderState();
                 if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
                     try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, next_state);
+                }
+                // Window-level focus loss blurs every view: same tooltip
+                // reset and IME-grace hygiene as a per-view focus move.
+                if (was_focused) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, view_index);
+                    runtime_view.clearImeGraceOnViewBlur(self, view);
                 }
             }
             for (self.webviews[0..self.webview_count]) |*webview| {
@@ -563,6 +624,18 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn ensureFocusableViewFocused(self: *Runtime, window_id: platform.WindowId) void {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .repair, .{ .window_id = window_id });
+                switch (program.decision) {
+                    0 => {},
+                    1 => Self.clearFocusedView(self, window_id) catch {},
+                    2 => Self.focusView(self, window_id, Self.selectedViewInfo(self, program.selected).label) catch {
+                        Self.clearFocusedView(self, window_id) catch {};
+                    },
+                    else => unreachable,
+                }
+                return;
+            }
             var views_buffer: [platform.max_views + platform.max_webviews + 1]platform.ViewInfo = undefined;
             const views = Self.listViews(self, window_id, &views_buffer);
             var first_focusable: ?[]const u8 = null;
@@ -581,6 +654,14 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn focusAdjacentView(self: *Runtime, window_id: platform.WindowId, direction: FocusTraversalDirection) anyerror!platform.ViewInfo {
+            if (self.view_coordination_policy) |policy| {
+                const program = view_coordination.plan(policy, self, .adjacent, .{ .window_id = window_id, .variant = if (direction == .next) 0 else 1 });
+                try program.admitted();
+                var target = Self.selectedViewInfo(self, program.selected);
+                try Self.focusView(self, window_id, target.label);
+                target.focused = true;
+                return target;
+            }
             try Self.validateViewParent(self, window_id);
 
             var views_buffer: [platform.max_views + platform.max_webviews + 1]platform.ViewInfo = undefined;
@@ -615,12 +696,45 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
 
         pub fn removeViewAt(self: *Runtime, index: usize) void {
             if (index >= self.view_count) return;
+            // A target-less IME composition owned by this view dies with
+            // it: a later view REUSING the same window+label must not
+            // inherit the stale sequence (its first composition update
+            // would be mistaken for a continuation and bypass its own
+            // focused editor) NOR the cancel-to-commit grace (whose
+            // trailing text would leak target-less into the new
+            // surface — cancellation zeroes the preedit length before
+            // arming the grace, so both states gate the clear). The
+            // buffer stays allocated; only the ownership state clears.
+            const composition = @import("input_composition_policy.zig");
+            const view = &self.views[index];
+            const input = platform.GpuSurfaceInputEvent{ .window_id = view.window_id, .label = view.label, .kind = .ime_cancel_composition };
+            if (composition.plan(view.canvas_widget_surface_scope_policy, .retire, input, composition.observations(self, view))) |program| {
+                if (program.has(512)) self.targetless_ime_preedit_len = 0;
+                if (program.has(2048)) self.targetless_ime_commit_grace = false;
+            } else if ((self.targetless_ime_preedit_len > 0 or self.targetless_ime_commit_grace) and
+                self.targetless_ime_preedit_window == self.views[index].window_id and
+                std.mem.eql(
+                    u8,
+                    self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
+                    self.views[index].label,
+                ))
+            {
+                self.targetless_ime_preedit_len = 0;
+                self.targetless_ime_commit_grace = false;
+            }
             var cursor = index;
             while (cursor + 1 < self.view_count) : (cursor += 1) {
                 const next = &self.views[cursor + 1];
                 self.views[cursor].copyRuntimeStateFrom(next, &self.canvas_widget_copy_scratch);
             }
             self.view_count -= 1;
+            const released = &self.views[self.view_count];
+            if (released.widget_text_bytes_heap_owned) self.owned_allocator.free(released.widget_text_bytes);
+            if (released.canvas_widget_text_history_bytes_heap_owned) self.owned_allocator.free(released.canvas_widget_text_history_bytes);
+            released.widget_text_bytes = &.{};
+            released.widget_text_bytes_heap_owned = false;
+            released.canvas_widget_text_history_bytes = &.{};
+            released.canvas_widget_text_history_bytes_heap_owned = false;
         }
 
         pub fn removeViewsForWindow(self: *Runtime, window_id: platform.WindowId) void {
@@ -681,6 +795,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn closeDescendantWebViewBackendsDepth(self: *Runtime, window_id: platform.WindowId, parent_label: []const u8, depth: usize) !void {
+            if (self.view_coordination_policy) |policy| return Self.executeCompiledDescendants(self, policy, window_id, parent_label, depth, 1);
             if (depth >= platform.max_views + platform.max_webviews) return;
             for (self.views[0..self.view_count]) |*view| {
                 if (view.window_id != window_id) continue;
@@ -704,6 +819,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
         }
 
         pub fn viewTreeHasFocusedDepth(self: *const Runtime, window_id: platform.WindowId, label: []const u8, depth: usize) bool {
+            if (self.view_coordination_policy) |policy| return view_coordination.plan(policy, self, .subtree, .{ .window_id = window_id, .label = label, .depth = depth }).decision == 1;
             if (depth >= platform.max_views + platform.max_webviews) return false;
             if (Self.findViewIndex(self, window_id, label)) |index| {
                 if (self.views[index].focused) return true;
@@ -722,6 +838,60 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 if (std.mem.eql(u8, parent, label) and Self.viewTreeHasFocusedDepth(self, window_id, webview.label, depth + 1)) return true;
             }
             return false;
+        }
+
+        fn selectedViewInfo(self: *const Runtime, selected: view_coordination.Selection) platform.ViewInfo {
+            return switch (selected.kind) {
+                .main => viewInfoFromWebView(Self.mainWebViewInfo(self, selected.slot)),
+                .native => self.views[selected.slot].info(),
+                .webview => viewInfoFromWebView(self.webviews[selected.slot]),
+                .none => @panic("missing compiled view selection"),
+            };
+        }
+
+        fn applyCompiledFocus(self: *Runtime, policy: view_coordination.Policy, window_id: platform.WindowId, label: []const u8, clear: bool) anyerror!void {
+            const main = view_coordination.plan(policy, self, .mutation, .{ .window_id = window_id, .label = label, .clear = clear, .variant = 1 });
+            if (main.decision & 1 != 0) self.windows[main.selected.slot].main_focused = main.decision & 2 != 0;
+            // Observe each live slot at its original mutation stage. Invalidation
+            // and blur can fail after an earlier prefix has already committed.
+            for (self.views[0..self.view_count], 0..) |*view, i| {
+                const program = view_coordination.plan(policy, self, .mutation, .{ .window_id = window_id, .label = label, .clear = clear, .variant = 2, .cursor = i });
+                if (program.decision & 1 == 0) continue;
+                const previous_state = view.canvasWidgetRenderState();
+                view.focused = program.decision & 2 != 0;
+                const next_state = view.canvasWidgetRenderState();
+                if (!CanvasWidgetEventMethods.canvasWidgetRenderStatesEqual(previous_state, next_state)) {
+                    try CanvasWidgetEventMethods.invalidateForCanvasWidgetRenderStateChange(self, i, previous_state, next_state);
+                }
+                if (program.decision & 4 != 0) {
+                    try CanvasWidgetEventMethods.resetCanvasTooltipIntentForViewBlur(self, i);
+                    runtime_view.clearImeGraceOnViewBlur(self, view);
+                }
+            }
+            for (self.webviews[0..self.webview_count], 0..) |*webview, i| {
+                const program = view_coordination.plan(policy, self, .mutation, .{ .window_id = window_id, .label = label, .clear = clear, .variant = 3, .cursor = i });
+                if (program.decision & 1 != 0) webview.focused = program.decision & 2 != 0;
+            }
+        }
+
+        fn executeCompiledDescendants(self: *Runtime, policy: view_coordination.Policy, window_id: platform.WindowId, parent_label: []const u8, depth: usize, variant: u8) !void {
+            // Match the reference's per-table loop snapshots and per-slot
+            // observations, including mutations made by capability callbacks.
+            for (self.views[0..self.view_count], 0..) |*view, i| {
+                const program = view_coordination.plan(policy, self, .children, .{ .window_id = window_id, .label = parent_label, .depth = depth, .variant = variant, .cursor = i + 1 });
+                if (program.count != 0) try Self.executeCompiledDescendants(self, policy, window_id, view.label, depth + 1, variant);
+            }
+            for (self.webviews[0..self.webview_count], 0..) |webview, i| {
+                const program = view_coordination.plan(policy, self, .children, .{ .window_id = window_id, .label = parent_label, .depth = depth, .variant = variant, .cursor = i + 33 });
+                if (program.count == 0) continue;
+                if (program.decision == 1) {
+                    const frame = try Self.platformFrameForView(self, window_id, webview.parent, webview.local_frame);
+                    try self.options.platform.services.setWebViewFrame(window_id, webview.label, frame);
+                    self.webviews[i].frame = frame;
+                }
+                try Self.executeCompiledDescendants(self, policy, window_id, webview.label, depth + 1, variant);
+                if (program.decision == 2) try self.options.platform.services.closeWebView(window_id, webview.label);
+            }
         }
     };
 }

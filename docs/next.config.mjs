@@ -1,40 +1,40 @@
-import createMDX from "@next/mdx";
-import { createRequire } from "node:module";
+import { createGeistdocs } from "@vercel/geistdocs/next";
+import { readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-// Resolve the plugin to an absolute path (still a string, so the config
-// stays serializable for Turbopack). A bare "remark-gfm" is require()d
-// from the MDX loader's own package context, which under pnpm's strict
-// module isolation cannot see this app's dependencies — production
-// builds resolved it, the Turbopack dev server did not.
-const require = createRequire(import.meta.url);
+const withGeistdocs = createGeistdocs();
+const contentDir = fileURLToPath(new URL("./content/docs", import.meta.url));
 
-const withMDX = createMDX({
-  options: {
-    // GFM is what gives .mdx pages pipe tables (plus autolinks and
-    // strikethrough) — without it, table markdown renders as a plain
-    // paragraph of pipes.
-    remarkPlugins: [[require.resolve("remark-gfm")]],
-  },
-});
+function docsSlugs(dir = contentDir, segments = []) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.isDirectory()) return docsSlugs(path.join(dir, entry.name), [...segments, entry.name]);
+    if (!entry.name.endsWith(".mdx")) return [];
+    const name = entry.name.slice(0, -4);
+    return [[...segments, ...(name === "index" ? [] : [name])].join("/")];
+  });
+}
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  pageExtensions: ["ts", "tsx", "md", "mdx"],
-  // CI-style builds set NEXT_DIST_DIR so `pnpm check` never shares .next
-  // with a running dev server (a shared dist dir corrupts the dev cache).
+  agentRules: false,
+  allowedDevOrigins: ["127.0.0.1"],
+  images: { qualities: [75, 90] },
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  // The gate builds into .next-gate INSIDE this dir; without an ignore,
-  // the dev watcher sees every one of those build files land and
-  // recompiles continuously whenever a gate runs.
-  watchOptions: {
-    ignored: ["**/.next-gate/**", "**/.next-check/**"],
-  },
+  skipProxyUrlNormalize: true,
   async redirects() {
     return [
-      // The Philosophy page became the Introduction, the opening page of the docs.
-      { source: "/philosophy", destination: "/introduction", permanent: true },
+      { source: "/philosophy", destination: "/docs/introduction", permanent: true },
+      { source: "/docs", destination: "/docs/introduction", permanent: true },
+      { source: "/docs.md", destination: "/docs/introduction.md", permanent: true },
+      ...docsSlugs().flatMap((slug) => [
+        { source: `/${slug}`, destination: `/docs/${slug}`, permanent: true },
+        { source: `/${slug}.md`, destination: `/docs/${slug}.md`, permanent: true },
+        { source: `/md/${slug}`, destination: `/docs/${slug}.md`, permanent: true },
+      ]),
     ];
   },
+  outputFileTracingIncludes: { "/og/[...slug]": ["./public/*.ttf"], "/og": ["./public/*.ttf"] },
 };
 
-export default withMDX(nextConfig);
+export default withGeistdocs(nextConfig);

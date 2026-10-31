@@ -67,6 +67,7 @@ const git_merge = builtin("git-merge");
 const git_pull_request = builtin("git-pull-request");
 const info = builtin("info");
 const menu = builtin("menu");
+const mic = builtin("mic");
 const moon = builtin("moon");
 const music = builtin("music");
 const panel_left = builtin("panel-left");
@@ -121,6 +122,7 @@ pub const entries = [_]Entry{
     .{ .name = "git-pull-request", .icon = &git_pull_request },
     .{ .name = "info", .icon = &info },
     .{ .name = "menu", .icon = &menu },
+    .{ .name = "mic", .icon = &mic },
     .{ .name = "moon", .icon = &moon },
     .{ .name = "music", .icon = &music },
     .{ .name = "panel-left", .icon = &panel_left },

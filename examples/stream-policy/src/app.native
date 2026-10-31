@@ -1,0 +1,47 @@
+<column gap="16" padding="24">
+  <row gap="12" cross="center">
+    <column gap="4" grow="1">
+      <text size="heading">Stream Desk</text>
+      <text foreground="text_muted">Run a process. Follow each line. Keep its final result.</text>
+    </column>
+    <button variant="ghost" on-press="reset">Reset</button>
+  </row>
+  <separator/>
+  <row gap="12">
+    <panel grow="1" padding="16">
+      <column gap="4">
+        <text foreground="text_muted">LINES RECEIVED</text>
+        <text size="heading">{lines}</text>
+      </column>
+    </panel>
+    <panel grow="1" padding="16">
+      <column gap="4">
+        <text foreground="text_muted">PROCESS EXITS</text>
+        <text size="heading">{exits}</text>
+      </column>
+    </panel>
+  </row>
+  <row gap="8">
+    <button variant="primary" on-press="start">Start process</button>
+    <button on-press="collect">Collect output</button>
+    <button on-press="quiet">Exit only</button>
+    <button variant="secondary" on-press="cancel">Cancel source</button>
+  </row>
+  <row gap="8">
+    <button on-press="pair">Independent pair</button>
+    <button on-press="fetch">Stream response</button>
+    <button variant="ghost" on-press="stamp">Stamp</button>
+  </row>
+  <panel padding="16" grow="1">
+    <column gap="12">
+      <text foreground="text_muted">LATEST LINE</text>
+      <text>{lastLine}</text>
+      <separator/>
+      <text foreground="text_muted">COLLECTED OUTPUT</text>
+      <text>{output}</text>
+      <text foreground="text_muted">Exit code: {exitCode} / HTTP status: {httpStatus}</text>
+    </column>
+  </panel>
+  <status-bar>{status}</status-bar>
+  <text foreground="text_muted">Recorded time: {stampedMs}</text>
+</column>

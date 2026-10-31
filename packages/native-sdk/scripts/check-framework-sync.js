@@ -18,7 +18,26 @@ const mirrors = [
   { source: 'LICENSE', target: 'LICENSE' },
   { source: 'skills', target: 'skills' },
   { source: 'skill-data', target: 'skill-data' },
+  { source: 'apps/schema/public/app/v1.json', target: 'schemas/app.schema.json' },
   { source: 'third_party/webview2', target: 'third_party/webview2' },
+  { source: 'third_party/sqlite', target: 'third_party/sqlite' },
+  // corewire: the mirror/facade/profile generator every TypeScript-core
+  // build compiles from the dependency.
+  { source: 'tools/corewire', target: 'tools/corewire' },
+  // The @native-sdk/core closure TypeScript app builds resolve from the
+  // installed package: the frontend, the SDK library modules (also the
+  // editor package), the external-compile staging surface and its
+  // driver scripts, and the manifest + lockfile that make `npm ci` work
+  // inside packages/core on the npm-installed layout. Entry-by-entry on
+  // purpose — test/ is repo-dev surface and must NOT ship, so the
+  // whole-directory comparison stays off.
+  { source: 'packages/core/src', target: 'packages/core/src' },
+  { source: 'packages/core/sdk', target: 'packages/core/sdk' },
+  { source: 'packages/core/testing', target: 'packages/core/testing' },
+  { source: 'packages/core/compile-surface', target: 'packages/core/compile-surface' },
+  { source: 'packages/core/scripts', target: 'packages/core/scripts' },
+  { source: 'packages/core/package.json', target: 'packages/core/package.json' },
+  { source: 'packages/core/package-lock.json', target: 'packages/core/package-lock.json' },
 ];
 
 const errors = [];

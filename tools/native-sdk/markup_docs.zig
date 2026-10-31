@@ -27,12 +27,13 @@ pub const element_docs = [_]Doc{
     .{ .name = "list", .doc = "Vertical stack of items; supports virtualized and virtual-item-extent." },
     .{ .name = "grid", .doc = "Cell grid container." },
     .{ .name = "split", .doc = "Two-pane horizontal splitter with a draggable divider between exactly two element children. value binds the model-owned first-pane fraction (0 lays out at 0.5), on-resize dispatches the applied fraction (echo it back into value), min-width on the panes bounds the drag; gap sets the divider band thickness. Nest splits for more panes." },
-    .{ .name = "tree", .doc = "Disclosure-tree container (vertical flow): descendant rows carrying role=\"treeitem\" form one roving keyboard focus set — Up/Down walk visible rows (selection follows focus via each row's on-press), Left collapses or moves to the parent row, Right expands or moves to the first child row, Home/End jump to the edges. Expandable rows bind expanded and on-toggle; the model owns both states." },
+    .{ .name = "tree", .doc = "Disclosure-tree container (vertical flow): descendant rows carrying role=\"treeitem\" form one roving keyboard focus set — Up/Down walk visible rows (selection follows focus via on-change when bound, otherwise on-press), Left collapses or moves to the parent row, Right expands or moves to the first child row, Home/End jump to the edges. Nested rows derive hierarchy structurally; flat rows declare tree-level. Expandable rows bind expanded and on-toggle; the model owns both states." },
     .{ .name = "text", .doc = "Text leaf; content supports {} interpolation. Line policy via wrap: wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line. size takes the typography rungs heading|display for section headings and hero stats." },
     .{ .name = "badge", .doc = "Text leaf badge; content supports {} interpolation." },
     .{ .name = "button", .doc = "Text-bearing control; the label is the text content. Dispatch with on-press. icon draws a vector icon inline before the label (icon-only when the content is empty; give it a label) — one hit target, one enabled/disabled tint." },
-    .{ .name = "checkbox", .doc = "Value control; bind checked, dispatch with on-toggle." },
-    .{ .name = "radio", .doc = "Value control; bind checked or selected, dispatch with on-toggle." },
+    .{ .name = "segmented-control", .doc = "Standalone exclusive-choice trigger; the label is the text content, selected marks the active item, and icon may add a vector icon. Compose items with ordinary markup, for, or a template." },
+    .{ .name = "checkbox", .doc = "Text-bearing value control; the visible label is text content (or text=), bind checked, dispatch with on-toggle." },
+    .{ .name = "radio", .doc = "Text-bearing single-choice value control; the visible label is text content (or text=), bind checked or selected. Selection dispatches on-change when bound, then on-toggle, then on-press for compatibility." },
     .{ .name = "toggle", .doc = "Text-bearing toggle control; the label is the text content." },
     .{ .name = "slider", .doc = "Value control; bind value, dispatch with on-change." },
     .{ .name = "progress", .doc = "Value control; bind value." },
@@ -47,30 +48,34 @@ pub const element_docs = [_]Doc{
     .{ .name = "breadcrumb", .doc = "Row container for a breadcrumb trail; children flow horizontally." },
     .{ .name = "button-group", .doc = "Row container grouping buttons; children flow horizontally." },
     .{ .name = "pagination", .doc = "Row container for pagination controls; children flow horizontally." },
-    .{ .name = "radio-group", .doc = "Row container grouping radio controls; children flow horizontally." },
+    .{ .name = "radio-group", .doc = "Logical radiogroup: descendant radios at any nesting depth share one Tab stop and selection; arrows plus Home/End move focus and selection across the scope." },
     .{ .name = "tabs", .doc = "Row container for a tab strip; children (buttons with selected) flow horizontally." },
     .{ .name = "toggle-group", .doc = "Row container grouping toggle-buttons; children flow horizontally." },
     .{ .name = "table", .doc = "Vertical table container; children are table-row elements." },
-    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table, children are table-cells." },
+    .{ .name = "data-grid", .doc = "Data-grid container; children are table-row elements with table-cell children." },
+    .{ .name = "popover", .doc = "Overlay surface; children stack. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "menu-surface", .doc = "Vertical menu surface. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table or data-grid, children are table-cells." },
     .{ .name = "table-cell", .doc = "Table cell text leaf; only allowed inside a table-row, dispatch with on-press." },
     .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements. anchor=\"below|above\" floats it against its parent (put it beside its trigger in a stack): late z-pass above the whole tree, window-clipped, auto-flipping at the edges. Pair with on-dismiss so Escape/click-outside close model-side." },
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
     .{ .name = "alert", .doc = "Alert surface; title via the text attribute, children stack inside." },
     .{ .name = "bubble", .doc = "Bubble surface (chat message); children stack inside. Hugs its message up to 80% of the thread's width (ghost is exempt; an explicit width wins). A <reactions> child docks the reaction pill on its bottom edge; text does nothing here (that channel belongs to the pill — use label for an accessible name)." },
-    .{ .name = "dialog", .doc = "Modal dialog surface rendered in place; title via text, wrap in an if to show conditionally." },
-    .{ .name = "drawer", .doc = "Drawer surface rendered in place; title via text, wrap in an if to show conditionally." },
-    .{ .name = "sheet", .doc = "Sheet surface rendered in place; title via text, wrap in an if to show conditionally." },
+    .{ .name = "dialog", .doc = "Root-relative modal centered in the viewport and unaffected by ancestor scroll or clipping; title via text, wrap in an if to show conditionally." },
+    .{ .name = "drawer", .doc = "Root-relative modal spanning the viewport width and docked to its bottom; title via text, wrap in an if to show conditionally." },
+    .{ .name = "sheet", .doc = "Root-relative modal spanning the viewport height and docked to its right edge; title via text, wrap in an if to show conditionally." },
     .{ .name = "resizable", .doc = "Resizable panel with an engine-managed drag handle; width sets the initial width." },
     .{ .name = "avatar", .doc = "Avatar leaf; the text content renders as initials, image takes one {binding} to a runtime-registered ImageId (0 keeps the initials)." },
     .{ .name = "select", .doc = "Select trigger only (no options attribute): content is the current value, placeholder while empty, on-press opens. Compose the options as an ANCHORED dropdown-menu of menu-items under an if, beside the trigger in a stack (anchor=\"below\" + on-dismiss; model-owned open state)." },
     .{ .name = "switch", .doc = "Switch control; label is the text content, bind checked, dispatch with on-toggle." },
     .{ .name = "toggle-button", .doc = "Pressed-state toggle button; label is the text content, dispatch with on-toggle." },
-    .{ .name = "tooltip", .doc = "Tooltip text leaf; content supports {} interpolation." },
+    .{ .name = "tooltip", .doc = "Tooltip text leaf; content supports {} interpolation. anchor=\"above|below\" floats it against its parent (put it beside its trigger in a stack) and hands visibility to the RUNTIME: it shows after the trigger has been hovered tooltip-delay milliseconds (default 600; a shared 400ms warm window after a pointer-hovered tooltip hides on leave shows the next one instantly), shows immediately when the trigger gains keyboard focus, and hides on pointer leave, focus departure, Escape, or a press of the trigger (only the pointer-leave hide warms) - the model never hears hover. Without anchor it stays a static leaf that paints whenever the view renders it." },
     .{ .name = "input", .doc = "Single-line text entry; text and placeholder bindings, edits via on-input, enter via on-submit." },
     .{ .name = "combobox", .doc = "Text entry with menu affordance (no options attribute); edits via on-input, open via on-press — compose the options like select's anchored dropdown-menu pattern (filter the for-each source from the model as the user types)." },
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
     .{ .name = "spinner", .doc = "Indeterminate progress spinner leaf." },
     .{ .name = "icon", .doc = "Vector icon leaf: name selects a curated built-in stroke icon (comptime-validated), an app-registered app:<name> (canvas.icons.registerAppIcons; native check verifies the name against the model contract), or one {binding} resolving to such a name. Tint via foreground, size with width/height or size." },
+    .{ .name = "code", .doc = "Bare highlighted source content with no background, border, radius, shadow, or padding. source is one required text {binding}; language is a literal lexer name. Wraps by default, line-numbers opts into logical line numbers, added-lines/removed-lines add Geist-style diff rows, wrap=\"false\" keeps lines intact, and a definite height makes overflow scrollable. Wrap in a panel or card when chrome is wanted." },
     .{ .name = "markdown", .doc = "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base." },
     .{ .name = "stepper", .doc = "Stage stepper: step children joined by connectors; active names the current step index (earlier steps render completed, later ones pending)." },
     .{ .name = "step", .doc = "One stepper stage; only allowed inside a stepper, the label is the text content (supports {} interpolation), state derives from the stepper's active index." },
@@ -83,19 +88,46 @@ pub const element_docs = [_]Doc{
     .{ .name = "input-group-actions", .doc = "The input-group's accessory row (only inside input-group, after its textarea): leading/trailing controls on one bottom row inside the group's border — put a <spacer grow=\"1\"/> between the leading controls and the trailing send. Children are ordinary elements (if/else/for work). Takes gap, key, global-key." },
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
+    .{ .name = "media-surface", .doc = "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers." },
+    .{ .name = "image", .doc = "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. Photo-size encoded sources decode aspect-preservingly to the app's fixed pixel budget (1 MiB default; app.zon images may raise it through 8 MiB), and load results report the registered dimensions. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). source-x/source-y/source-width/source-height optionally select one atlas region in decoded-image pixel coordinates. Display-only; size it with width/height or grow; label it." },
+    .{ .name = "video", .doc = "The video leaf: plays the app's single platform-decoded video into the framework-owned media-surface (macOS decodes with AVFoundation; hosts without a decoder deliver one explicit failed event). src declares the source — an app-assets path or an http(s) URL, resolved local-first exactly like audio; autoplay (default true), loop, and muted shape the fresh playback; controls composes the house transport chrome (play/pause, scrub bar, time readout) under the picture, and without it the element is the surface alone — compose your own controls from the video command vocabulary. Until a decoded frame arrives (and in every golden, screenshot, and replay) the surface shows its deterministic placeholder: pixels are presentation chrome, transport is the journaled truth. Size it with width/height or grow (no intrinsic size); label it for screen readers." },
+    .{ .name = "terminal", .doc = "The terminal leaf: renders the framework-owned emulator session behind a model-owned pty effect key — the grid as real text with geometric box drawing, a theme-derived ANSI palette, selection, cursor, and scrollback — and routes keys, IME text, and wheel scrollback to it when focused. pty is one {binding} to the u64 key the app's ptySpawn named (required; keys are model data, never markup literals; 0 renders the empty surface); scrollback echoes the app-visible offset back under the scroll value source-wins rule, and on-terminal delivers the post-change view state. The grid derives its cols/rows from the frame the layout resolves (the runtime pushes them to the pty), so size it like a leaf: grow or a definite width/height. An interactive control: give it a label." },
 };
 
 pub const structure_docs = [_]Doc{
+    .{ .name = "virtual-window", .doc = "Declare one retained virtual range around a single root; its as name exposes the complete range to children, and exactly one virtual-list consumes it." },
+    .{ .name = "virtual-list", .doc = "Render the enclosing virtual window through a Model-first range query. Each returned row has one keyed root; ordinary scroll styles and reach events apply." },
     .{ .name = "for", .doc = "Structure tag: repeats its element children over each (elements, use, if/else, nested for); requires each and as, key names an item field. A directly following else renders when the iterable is empty." },
     .{ .name = "if", .doc = "Structure tag: renders children when test={binding} or {a == b} is true." },
     .{ .name = "else", .doc = "Structure tag: must directly follow an if (renders when the test is false) or a for (renders when the iterable is empty)." },
     .{ .name = "template", .doc = "Top-level template definition (before the view root): name, optional args (name or name=default; defaults are literals), exactly one element child, at most one <slot/>." },
-    .{ .name = "use", .doc = "Expands a template in place: template names an earlier definition, other attributes must match its args exactly (defaulted args may be omitted). Children are slot content: built in the consumer's scope and inserted at the template's <slot/>." },
+    .{ .name = "use", .doc = "Expands a template in place: template names an earlier definition, value attributes must match its args exactly (defaulted args may be omitted), and on-press may forward a typed message to the expanded root. Children are slot content: built in the consumer's scope and inserted at the template's <slot/>." },
     .{ .name = "import", .doc = "Top of the file, before templates: <import src=\"components/cards.native\"/> splices a component file's templates (transitively) before this file's own. Paths resolve relative to this file, under the markup root." },
     .{ .name = "slot", .doc = "Template bodies only, at most one: marks where use-site children are inserted. Attribute-less leaf; a use with no children renders it empty." },
 };
 
+pub const virtual_window_attr_docs = [_]Doc{
+    .{ .name = "id", .doc = "Stable retained-list identity, unique within the view." },
+    .{ .name = "as", .doc = "Local name exposing the complete virtual range, including visible and rendered bounds, content extent, offset, and row extent." },
+    .{ .name = "item-count", .doc = "Total number of available rows, a literal or one model binding." },
+    .{ .name = "item-extent", .doc = "Fixed row extent in points." },
+    .{ .name = "extent-estimate", .doc = "Exported Model-first numeric index helper returning a row extent; its identity survives view rebuilds." },
+    .{ .name = "gap", .doc = "Space between rows; included in the virtual content extent." },
+    .{ .name = "overscan", .doc = "Number of extra rows rendered before and after the visible range." },
+    .{ .name = "viewport-fallback", .doc = "Viewport extent before the retained scroll widget has reported its actual size." },
+    .{ .name = "index-base", .doc = "Global starting index for the virtual range; defaults to zero." },
+    .{ .name = "anchor", .doc = "leading or trailing virtual-list anchor; defaults to leading." },
+};
+
+pub const virtual_list_attr_docs = [_]Doc{
+    .{ .name = "window", .doc = "Enclosing virtual-window as name; each declaration is consumed exactly once." },
+    .{ .name = "each", .doc = "Exported Model-first query taking the complete virtual range and returning exactly one record per rendered index." },
+    .{ .name = "as", .doc = "Local row binding used by the single keyed child template." },
+};
+
 pub const attribute_docs = [_]Doc{
+    .{ .name = "backdrop-blur", .doc = "Backdrop blur token: none, sm, or md. Resolves against the current design tokens." },
+    .{ .name = "command", .doc = "Command name retained with a widget and dispatched by the runtime when the control activates; a literal or one {binding}. Message handlers remain independent." },
     .{ .name = "text", .doc = "Text value for text-bearing elements; a literal or one {binding}." },
     .{ .name = "placeholder", .doc = "Hint text shown while a text entry is empty." },
     .{ .name = "value", .doc = "Value for slider/progress/text entry; a literal or one {binding}." },
@@ -121,23 +153,31 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "role", .doc = "Accessibility role (listitem, treeitem, button, ...). treeitem also makes the row part of its tree's roving keyboard focus set." },
     .{ .name = "min-width", .doc = "Width floor (plain number) without width's definite max: the element may grow past it but never shrink below. On split panes it bounds the divider drag." },
+    .{ .name = "max-width", .doc = "Width ceiling (plain number) without width's definite min: the element still shrinks with a narrow parent. Use a growing child inside a centered row for a responsive content column." },
     .{ .name = "expanded", .doc = "Tree rows (role=\"treeitem\"): disclosure state (true/false or a {binding}). Omit on leaves; expanded rows collapse on Left, collapsed ones expand on Right, both through on-toggle - the model owns the state." },
+    .{ .name = "tree-level", .doc = "Flat sibling rows with role=\"treeitem\": one-based logical depth used by Left/Right to resolve parents and first children. Omit it when tree rows are structurally nested." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
-    .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item: vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot): a built-in name (comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name>, or one {binding} resolving to such a name. Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
+    .{ .name = "submit-on-enter", .doc = "textarea only: true makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; Cmd/Ctrl+Enter still submits. False or absent keeps the multiline default where Enter inserts and submission uses the primary chord." },
+    .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item, segmented-control: vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot): a built-in name (comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name>, or one {binding} resolving to such a name. Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
     .{ .name = "icon-placement", .doc = "Icon slot side on label-bearing buttons/toggle-buttons: leading (default) draws the icon before the label, trailing after it — the next-page chevron. Icon-only buttons center the glyph regardless." },
     .{ .name = "window-drag", .doc = "Marks the element as a window-drag surface (the hidden-titlebar pattern): pressing its background - or plain text/icons inside - moves the window; double-click zooms per the OS convention. Buttons and other press-claiming children inside stay clickable. macOS-only; elsewhere the press is dead space." },
     .{ .name = "overscroll", .doc = "scroll only: edge behavior of the region. none pins scrolling at the content edges (the shipped default via the ScrollPhysics.overscroll token), rubber_band lets this region bounce past them, default follows the token. Honored by the engine's scroll physics and the native OS scroller alike." },
+    .{ .name = "axis", .doc = "scroll only: which axes the region scrolls - vertical (the default), horizontal, or both. Horizontal grants opt the region into wheel/trackpad delta-x, the bottom-edge scrollbar, and the horizontal keymap; in a nested tree each wheel axis routes independently to the nearest ancestor scrolling that axis. Virtualized scrolls stay vertical (a horizontal grant there is a teaching error)." },
+    .{ .name = "value-x", .doc = "scroll only, beside axis=\"horizontal\" or axis=\"both\": the horizontal scroll offset - the sideways counterpart of value, following the same source-wins reconcile rule (echo on-scroll's offset_x back to keep user scrolling; move it model-side to scroll programmatically). Without a horizontal axis grant it is a teaching error (it would be silently inert)." },
     .{ .name = "resize-duration", .doc = "split only: layout-tween duration in milliseconds (a plain number or one {binding}). Nonzero makes the bound value a TARGET - a rebuild that moves it lays both panes out at the target ONCE, then the runtime slides the rendered boundary there one presented frame at a time under the panes' clips (content never re-wraps mid-flight), dispatching ONE on-resize echo at settle with the applied fraction. 0 (and absent) snaps, today's behavior. A divider DRAG keeps live per-step reflow and echoes. Reduced-motion appearances snap automatically - apps declare nothing extra." },
     .{ .name = "resize-easing", .doc = "split only, beside a nonzero resize-duration: easing curve of the layout tween - linear, standard (the default), emphasized, or spring. Easing without a duration is a teaching error (it would be silently inert)." },
     .{ .name = "resize-origin", .doc = "split only, beside a nonzero resize-duration: the fraction a freshly MOUNTED split's pane boundary slides in from toward its declared value (children keep the value's layout; the pane clips reveal them) - a pane expanding out of an unmounted collapsed state slides in instead of popping. An origin without a duration is a teaching error (it would be silently inert)." },
+    .{ .name = "quiet-hover", .doc = "Pressable (hit-target) elements only: the quiet-surface knob for image-forward content tiles - the pointer resting on the element paints NO hover wash (the wash belongs to acting controls like rows, menu items, and buttons). Only the hover fill goes quiet: press and selection fills, the focus ring, cursor intent, and hit testing keep their own channels." },
+    .{ .name = "tooltip-delay", .doc = "tooltip only, beside anchor: hover-intent show delay in milliseconds (a plain number or one {binding}) - the runtime shows the anchored tooltip after its trigger has been hovered this long on the recorded frame clock. 0 shows the instant the trigger is hovered; absent follows the 600ms token default. A shared 400ms warm window after a pointer-hovered tooltip hides on leave skips the delay on the next trigger (no other hide cause warms); keyboard-focus reveals are always immediate. A delay without an anchor is a teaching error (it would be silently inert)." },
     .{ .name = "background", .doc = "Background color token (literal ColorTokens field name: background, surface, surface_subtle, ...)." },
     .{ .name = "foreground", .doc = "Foreground/text color token (literal ColorTokens field name, e.g. text, text_muted, success, warning, info)." },
     .{ .name = "accent", .doc = "Accent color token (literal ColorTokens field name, e.g. accent, destructive, success, warning, info)." },
     .{ .name = "accent-foreground", .doc = "Accent foreground color token (literal ColorTokens field name, e.g. accent_text)." },
     .{ .name = "border-color", .doc = "Border color token (literal ColorTokens field name, e.g. border)." },
     .{ .name = "focus-ring", .doc = "Focus ring color token (literal ColorTokens field name, e.g. focus_ring)." },
-    .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl)." },
+    .{ .name = "focusable", .doc = "Whether the widget participates in keyboard focus (true/false); overrides its ordinary focusability, including on interactive list items." },
+    .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)." },
 };
 
 pub const template_attr_docs = [_]Doc{
@@ -159,10 +199,28 @@ pub const if_attr_docs = [_]Doc{
 
 pub const markdown_attr_docs = [_]Doc{
     .{ .name = "source", .doc = "markdown: one {binding} producing the markdown text (a []const u8 field or fn; arena fns work). Required." },
+    .{ .name = "images", .doc = "markdown: one {binding} producing []const canvas.markdown.ResolvedImage (arena fns work). Each mapping pairs a leading image source with an image id already loaded and registered through fx.loadImage plus its decoded dimensions; views never perform image I/O." },
     .{ .name = "on-link", .doc = "markdown: bare Msg tag dispatched on link press; its payload is the URL ([]const u8 variant)." },
     .{ .name = "on-details", .doc = "markdown: bare Msg tag dispatched on a <details> summary press; its payload is the block index (usize variant)." },
     .{ .name = "details-expanded", .doc = "markdown: {binding} naming a []const bool iterable of expanded flags, in details-block document order." },
     .{ .name = "issue-link-base", .doc = "markdown: literal URL prefix or one {binding}; '#123' refs become links to base ++ number (ghissue:// or https://github.com/owner/repo/issues/)." },
+};
+
+pub const code_attr_docs = [_]Doc{
+    .{ .name = "source", .doc = "code: one required {binding} producing source text (a []const u8 field or fn; arena fns work)." },
+    .{ .name = "language", .doc = "code: literal lexer name. Supports Zig, JavaScript/TypeScript, JSX/TSX, JSON, YAML, shell, Python, Rust, C-family, Go, HTML/XML/SVG, CSS-family, SQL, and Markdown; unknown names are a validation error." },
+    .{ .name = "editable", .doc = "code: true enables text editing while retaining syntax highlighting; pair it with on-input to apply TextInputEvent updates. Read-only by default." },
+    .{ .name = "line-numbers", .doc = "code: opt into muted logical line numbers. Off by default; a wrapped logical line stays paired with its number." },
+    .{ .name = "added-lines", .doc = "code: one-based comma/range spec (for example 5 or 5, 9-11), or one text {binding}; applies Geist's green full-line wash and renderer-owned + without changing copied source. Lines 1-128." },
+    .{ .name = "removed-lines", .doc = "code: one-based comma/range spec (for example 2-4), or one text {binding}; applies Geist's red full-line wash and renderer-owned - without changing copied source. Lines 1-128." },
+    .{ .name = "wrap", .doc = "code: true by default. false preserves logical lines and puts the highlighted content in one horizontal scroll region." },
+    .{ .name = "width", .doc = "Definite width (plain number)." },
+    .{ .name = "height", .doc = "code: definite height (plain number). Overflow scrolls vertically; with wrap=false the region scrolls on both axes." },
+    .{ .name = "min-width", .doc = "Width floor without a definite maximum." },
+    .{ .name = "grow", .doc = "Flex grow factor." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
+    .{ .name = "label", .doc = "Accessible name for the code group." },
 };
 
 pub const stepper_attr_docs = [_]Doc{
@@ -170,7 +228,7 @@ pub const stepper_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_attr_docs = [_]Doc{
@@ -179,7 +237,7 @@ pub const timeline_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_item_attr_docs = [_]Doc{
@@ -196,7 +254,31 @@ pub const timeline_item_attr_docs = [_]Doc{
 };
 
 pub const avatar_attr_docs = [_]Doc{
-    .{ .name = "image", .doc = "avatar: one {binding} to a u64 ImageId the app registered at runtime (fx.registerImageBytes); 0 renders the initials fallback." },
+    .{ .name = "image", .doc = "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); encoded photos decode-to-fit the app's pixel budget and results carry the registered dimensions. 0 draws nothing (an avatar falls back to its initials). Required on the image leaf." },
+    .{ .name = "source-x", .doc = "avatar and image: left edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-y", .doc = "avatar and image: top edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-width", .doc = "avatar and image: width of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-height", .doc = "avatar and image: height of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+};
+
+pub const media_surface_attr_docs = [_]Doc{
+    .{ .name = "surface", .doc = "media-surface: one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer). Required; surface ids are model data, never markup literals; 0 leaves the surface unbound and it draws nothing, and usable ids are nonzero values below bit 63 — the reserved media-surface texture namespace, which the producer acquire refuses." },
+    .{ .name = "pty", .doc = "terminal: one {binding} to the model-owned u64 pty effect key whose session the terminal renders (the key ptySpawn named). Required; pty keys are model data, never markup literals; 0 leaves the terminal unbound and it renders the empty surface." },
+    .{ .name = "scrollback", .doc = "terminal only: the scrollback offset in rows above the live screen (0 is pinned to the bottom). Follows the scroll value source-wins reconcile rule - echo on-terminal's scrollback back to keep user scrollback across rebuilds; move it model-side to scroll programmatically." },
+};
+
+pub const video_attr_docs = [_]Doc{
+    .{ .name = "src", .doc = "video: the source string — an app-assets path (tried first as a local file) or an http(s) URL (streamed progressively when the local file is absent), a literal or one {binding}. Declaring it loads the app's SINGLE video player (a changed src replaces the playback whole); omit it to render the surface alone over a playback your update code drives." },
+    .{ .name = "controls", .doc = "video: composes the house transport chrome under the picture — play/pause, a scrub slider, and elapsed/duration readouts, runtime-driven so the model carries no transport state. Omit it for the bare surface and compose your own controls from the video command vocabulary." },
+    .{ .name = "autoplay", .doc = "video: start playing as soon as the load lands (the default). false loads paused at the first frame — the poster shape; play resumes it." },
+    .{ .name = "loop", .doc = "video: wrap from the natural end back to the start and keep playing. A looping playback never delivers a completed event — it never ends." },
+    .{ .name = "muted", .doc = "video: start with the audio track muted (a reversible switch, independent of the remembered volume)." },
+    .{ .name = "width", .doc = "Definite width (plain number): the element is exactly this wide (no intrinsic size)." },
+    .{ .name = "height", .doc = "Definite height (plain number): the element is exactly this tall (no intrinsic size)." },
+    .{ .name = "grow", .doc = "Flex grow factor." },
+    .{ .name = "label", .doc = "Accessible name for the picture (the image rule: unnamed video degrades to an unnamed image for screen readers; label=\"\" marks it decorative)." },
+    .{ .name = "key", .doc = "Sibling-scoped identity key." },
+    .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
 };
 
 pub const chart_attr_docs = [_]Doc{
@@ -254,22 +336,27 @@ pub const reactions_attr_docs = [_]Doc{
 };
 
 pub const anchor_attr_docs = [_]Doc{
-    .{ .name = "anchor", .doc = "dropdown-menu: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the dropdown beside its trigger inside a stack." },
-    .{ .name = "anchor-alignment", .doc = "dropdown-menu (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
-    .{ .name = "anchor-offset", .doc = "dropdown-menu (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
+    .{ .name = "anchor", .doc = "dropdown-menu, tooltip, popover, and menu-surface: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
+    .{ .name = "anchor-alignment", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
+    .{ .name = "anchor-offset", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
 };
 
 pub const event_docs = [_]Doc{
     .{ .name = "on-press", .doc = "Dispatch a Msg on press: tag or tag:{payload}. Legal on any element — a bound press handler makes it pressable, and presses on plain text/icons inside it fall through to it (dragging still selects text)." },
+    .{ .name = "on-double-press", .doc = "Dispatch a Msg on the second release of a double click: tag or tag:{payload}. The first release still dispatches on-press; the second dispatches this in place of another press. Legal on any element and makes it pressable, like on-press." },
+    .{ .name = "on-drag", .doc = "Make an element draggable and dispatch during motion, release, and cancellation. Write tag:{sourceId}; the Msg arm must carry exactly the numeric fields sourceId, phase, x, y, viewWidth, and viewHeight. phase is 0 for change, 1 for end, and 2 for cancel; update can preview an insertion during change, commit on end, and restore on cancel." },
     .{ .name = "on-toggle", .doc = "Dispatch a Msg on toggle: tag or tag:{payload}. Hit-target elements only (checkbox, toggle, toggle-button, switch, accordion, ...)." },
-    .{ .name = "on-change", .doc = "Dispatch a Msg on change: tag or tag:{payload}. Hit-target elements only (slider, ...)." },
+    .{ .name = "on-change", .doc = "Dispatch a Msg on change: tag or tag:{payload}. Hit-target elements only. On a treeitem, Up/Down/Left/Right/Home/End focus movement prefers on-change over on-press, separating keyboard selection from pointer activation." },
     .{ .name = "on-submit", .doc = "Dispatch a Msg on submit: tag or tag:{payload}. Enter in a text field, primary+enter in a textarea; on a list-item, plain Enter dispatches it as the row's primary action while Space keeps the row's select (on-press)." },
     .{ .name = "on-input", .doc = "Names a Msg variant with canvas.TextInputEvent payload; delivers each text edit." },
-    .{ .name = "on-scroll", .doc = "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll offset/viewport/content extents after wheel, kinetic, keyboard, and accessibility scrolls." },
-    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
+    .{ .name = "on-scroll", .doc = "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll two-axis state (offset_x/offset_y, velocity_x/velocity_y, viewport_extent_x/viewport_extent_y, content_extent_x/content_extent_y) after wheel, kinetic, keyboard, and accessibility scrolls." },
+    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu, popover, menu-surface): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
     .{ .name = "on-hold", .doc = "Press-and-hold Msg: a pointer held ~350 ms dispatches it and the release then presses nothing; a quick click dispatches on-press as usual. A right/ctrl-click with no context menu on the route dispatches it immediately. Like on-press, binding it makes any element pressable." },
     .{ .name = "on-resize", .doc = "split element only: names a Msg variant with f32 payload; delivers the applied first-pane fraction after every divider drag, keyboard adjustment, and assistive increment/decrement. Echo it back into value - the delivered fraction never fights the reconcile." },
+    .{ .name = "on-terminal", .doc = "terminal element only: names a bare Msg variant with canvas.TerminalState payload; delivers the post-change view state (scrollback, history, cols, rows) after every runtime-applied change - wheel and keyboard scrollback, and the layout-derived grid resize. Echo scrollback back into the attribute - the delivered state never fights the reconcile." },
     .{ .name = "on-reach-end", .doc = "scroll element only: Msg (tag or tag:{payload}) dispatched when a user scroll comes within one viewport of the content end - the infinite-scroll fetch signal. Fires once per approach with hysteresis: it re-arms only after the offset retreats past 1.5 viewports, which appending a batch causes on its own by growing the extent." },
+    .{ .name = "on-hover-enter", .doc = "Dispatch a Msg when the pointer enters the element's hit region: tag or tag:{payload} - a discrete containment edge, never per-move. Legal on any element: binding it makes the element hover-hittable the way a bound press makes it pressable, without claiming presses or painting a hover wash. Mouse/trackpad only; touch never synthesizes hover." },
+    .{ .name = "on-hover-leave", .doc = "The paired exit edge for on-hover-enter: dispatched when the pointer leaves the element's hit region - by moving off, leaving the window, the element unmounting, or content scrolling/reflowing out from under a stationary pointer (the hover wash's exact resolution). Every enter is answered by exactly one eventual leave; the leave Msg is captured while the element stands (kept fresh across rebuilds), so it survives the element's removal." },
 };
 
 pub fn elementDoc(name: []const u8) ?[]const u8 {
@@ -279,14 +366,19 @@ pub fn elementDoc(name: []const u8) ?[]const u8 {
 
 pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&attribute_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_window_attr_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
     if (findDoc(&event_docs, name)) |doc| return doc;
     if (findDoc(&for_attr_docs, name)) |doc| return doc;
     if (findDoc(&template_attr_docs, name)) |doc| return doc;
     if (findDoc(&markdown_attr_docs, name)) |doc| return doc;
+    if (findDoc(&code_attr_docs, name)) |doc| return doc;
     if (findDoc(&stepper_attr_docs, name)) |doc| return doc;
     if (findDoc(&timeline_attr_docs, name)) |doc| return doc;
     if (findDoc(&timeline_item_attr_docs, name)) |doc| return doc;
     if (findDoc(&avatar_attr_docs, name)) |doc| return doc;
+    if (findDoc(&media_surface_attr_docs, name)) |doc| return doc;
+    if (findDoc(&video_attr_docs, name)) |doc| return doc;
     if (findDoc(&anchor_attr_docs, name)) |doc| return doc;
     if (findDoc(&chart_attr_docs, name)) |doc| return doc;
     if (findDoc(&series_attr_docs, name)) |doc| return doc;
@@ -294,6 +386,22 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&input_group_actions_attr_docs, name)) |doc| return doc;
     if (findDoc(&span_attr_docs, name)) |doc| return doc;
     return findDoc(&if_attr_docs, name);
+}
+
+/// Resolve an attribute in its element context before falling back to the
+/// shared registry. Composite elements intentionally reuse names such as
+/// `source`, so context-free lookup cannot choose the right authoring help.
+pub fn attributeDocForElement(element: []const u8, name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, element, "virtual-window")) {
+        return findDoc(&virtual_window_attr_docs, name);
+    } else if (std.mem.eql(u8, element, "virtual-list")) {
+        if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
+    } else if (std.mem.eql(u8, element, "markdown")) {
+        if (findDoc(&markdown_attr_docs, name)) |doc| return doc;
+    } else if (std.mem.eql(u8, element, "code")) {
+        if (findDoc(&code_attr_docs, name)) |doc| return doc;
+    }
+    return attributeDoc(name);
 }
 
 fn findDoc(list: []const Doc, name: []const u8) ?[]const u8 {

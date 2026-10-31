@@ -1,0 +1,32 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/app.json", "destination": "/app/v1.json" }
+  ],
+  "redirects": [
+    {
+      "source": "/((?!app(?:\\.json|/v1\\.json)$).*)",
+      "destination": "https://native-sdk.dev",
+      "statusCode": 302
+    }
+  ],
+  "headers": [
+    {
+      "source": "/app/v1.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/schema+json; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    },
+    {
+      "source": "/app.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/schema+json; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=300, s-maxage=300, stale-while-revalidate=86400" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    }
+  ]
+}

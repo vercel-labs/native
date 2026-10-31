@@ -29,17 +29,26 @@ const max_recent_document_path_bytes = types.max_recent_document_path_bytes;
 const max_notification_title_bytes = types.max_notification_title_bytes;
 const max_notification_subtitle_bytes = types.max_notification_subtitle_bytes;
 const max_notification_body_bytes = types.max_notification_body_bytes;
+const max_notification_id_bytes = types.max_notification_id_bytes;
+const max_notification_action_label_bytes = types.max_notification_action_label_bytes;
+const max_notification_action_command_bytes = types.max_notification_action_command_bytes;
 const max_clipboard_mime_type_bytes = types.max_clipboard_mime_type_bytes;
 const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
 const max_credential_account_bytes = types.max_credential_account_bytes;
 const max_credential_secret_bytes = types.max_credential_secret_bytes;
+const max_local_time_text_bytes = types.max_local_time_text_bytes;
+const max_status_items = types.max_status_items;
 const max_tray_items = types.max_tray_items;
 const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 const max_tray_title_bytes = types.max_tray_title_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
 const max_tray_item_label_bytes = types.max_tray_item_label_bytes;
 const max_tray_item_command_bytes = types.max_tray_item_command_bytes;
+const max_tray_segment_options = types.max_tray_segment_options;
+const max_tray_segment_label_bytes = types.max_tray_segment_label_bytes;
+const max_tray_chart_values = types.max_tray_chart_values;
+const max_tray_chart_text_bytes = types.max_tray_chart_text_bytes;
 const max_drop_paths_bytes = types.max_drop_paths_bytes;
 const max_drop_paths = types.max_drop_paths;
 const max_window_event_name_bytes = types.max_window_event_name_bytes;
@@ -71,6 +80,7 @@ const validateMenus = types.validateMenus;
 const validateMenuItem = types.validateMenuItem;
 const isValidShortcutKey = types.isValidShortcutKey;
 const WindowRestorePolicy = types.WindowRestorePolicy;
+const WindowInitialPlacement = types.WindowInitialPlacement;
 const WindowOptions = types.WindowOptions;
 const WindowState = types.WindowState;
 const WindowInfo = types.WindowInfo;
@@ -110,11 +120,17 @@ const MessageDialogOptions = types.MessageDialogOptions;
 const NotificationOptions = types.NotificationOptions;
 const CredentialKey = types.CredentialKey;
 const Credential = types.Credential;
+const LocalTimeStyle = types.LocalTimeStyle;
+const StatusItemId = types.StatusItemId;
+const TrayShell = types.TrayShell;
 const TrayItemId = types.TrayItemId;
 const TrayOptions = types.TrayOptions;
+const TrayPresentation = types.TrayPresentation;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TrayCommandEvent = types.TrayCommandEvent;
+const Event = types.Event;
 const TimerEvent = types.TimerEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
@@ -125,6 +141,7 @@ const GpuSurfaceInputEvent = types.GpuSurfaceInputEvent;
 const GpuSurfacePixels = types.GpuSurfacePixels;
 const GpuSurfacePacket = types.GpuSurfacePacket;
 const GpuSurfaceImagePixels = types.GpuSurfaceImagePixels;
+const GpuSurfaceFontData = types.GpuSurfaceFontData;
 const max_gpu_surface_scroll_drivers = types.max_gpu_surface_scroll_drivers;
 const GpuSurfaceScrollDriver = types.GpuSurfaceScrollDriver;
 const max_context_menu_items = types.max_context_menu_items;
@@ -140,7 +157,6 @@ const WidgetAccessibilityActionEvent = types.WidgetAccessibilityActionEvent;
 const ClipboardData = types.ClipboardData;
 const ColorScheme = types.ColorScheme;
 const Appearance = types.Appearance;
-const Event = types.Event;
 const splitDropPaths = types.splitDropPaths;
 const EventHandler = types.EventHandler;
 const PlatformServices = types.PlatformServices;
@@ -159,6 +175,20 @@ pub const NullGpuSurfaceImage = struct {
     height: usize = 0,
     byte_len: usize = 0,
     sample_rgba: [4]u8 = .{ 0, 0, 0, 0 },
+};
+
+/// Matches the runtime font registry's slot count
+/// (`canvas_limits.max_registered_canvas_fonts`).
+pub const max_gpu_surface_fonts: usize = 16;
+
+/// One mirrored host font registration (see `gpu_surface_fonts`): the
+/// id-keyed record a stateful host retains per registered face, plus the
+/// ownership token the register call reported for it — the shape of the
+/// AppKit host's descriptor-and-token tables, minus the CoreText.
+pub const NullGpuSurfaceFont = struct {
+    id: u64 = 0,
+    token: u64 = 0,
+    byte_len: usize = 0,
 };
 
 pub const NullTimer = struct {
@@ -194,6 +224,59 @@ pub const max_null_audio_cached_urls: usize = 8;
 /// (not a local file and not a fake-cache hit) — completing a streamed
 /// track flips its URL into the fake cache, so the next `audioLoadUrl`
 /// of the same URL resolves `.cache` deterministically.
+/// Metadata table entries for the fake video player (see
+/// `setVideoMeta`): a loaded source whose tail matches `suffix` reports
+/// `duration_ms` and `width`x`height`. A table instead of real decoding
+/// keeps tests hermetic — no video files, no codecs, still honest
+/// dimensions and durations.
+pub const max_null_video_metas: usize = 8;
+
+pub const NullVideoMeta = struct {
+    suffix: [128]u8 = undefined,
+    suffix_len: usize = 0,
+    duration_ms: u64 = 0,
+    width: u64 = 0,
+    height: u64 = 0,
+};
+
+/// Every loaded video source without a table entry reports these.
+pub const default_null_video_duration_ms: u64 = 60_000;
+pub const default_null_video_width: u64 = 640;
+pub const default_null_video_height: u64 = 360;
+
+/// The fake video player's whole state: what a deterministic host would
+/// know. Position never advances on its own — tests move it explicitly
+/// with `advanceVideo`, mirroring `advanceAudio`. Frames never decode on
+/// their own either: tests push synthetic RGBA8 through the captured
+/// sink with `pushVideoFrame`, standing in for a real decode callback.
+/// A looping player wraps at the end instead of completing.
+pub const NullVideo = struct {
+    loaded: bool = false,
+    /// The engine-minted load token this playback echoes in every
+    /// event it emits (the real hosts' contract — see
+    /// `platform.VideoEvent.token`).
+    token: u64 = 0,
+    playing: bool = false,
+    streaming: bool = false,
+    looping: bool = false,
+    muted: bool = false,
+    position_ms: u64 = 0,
+    duration_ms: u64 = 0,
+    width: u64 = 0,
+    height: u64 = 0,
+    volume: f32 = 1.0,
+    /// The frame sink the last load handed over — where a real host's
+    /// decode callback would push pixels. Kept across pause (a paused
+    /// player keeps its claim); cleared by stop.
+    sink: types.VideoFrameSink = .{},
+    path_storage: [types.max_video_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+
+    pub fn path(self: *const NullVideo) []const u8 {
+        return self.path_storage[0..self.path_len];
+    }
+};
+
 pub const NullAudio = struct {
     loaded: bool = false,
     playing: bool = false,
@@ -212,6 +295,59 @@ pub const NullAudio = struct {
     pub fn path(self: *const NullAudio) []const u8 {
         return self.path_storage[0..self.path_len];
     }
+};
+
+pub const NullAudioCapture = struct {
+    active: bool = false,
+    format: types.AudioCaptureFormat = .{},
+    sink: types.AudioCaptureSink = .{},
+    start_count: usize = 0,
+    stop_count: usize = 0,
+};
+
+const NullStatusItem = struct {
+    id: StatusItemId = 0,
+    active: bool = false,
+    visible: bool = true,
+    icon_path: [max_tray_icon_path_bytes]u8 = undefined,
+    icon_path_len: usize = 0,
+    title: [max_tray_title_bytes]u8 = undefined,
+    title_len: usize = 0,
+    tooltip: [max_tray_tooltip_bytes]u8 = undefined,
+    tooltip_len: usize = 0,
+    activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    activation_command_len: usize = 0,
+    alternate_activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    alternate_activation_command_len: usize = 0,
+    open_command: [max_tray_item_command_bytes]u8 = undefined,
+    open_command_len: usize = 0,
+    presentation: TrayPresentation = .{},
+    items: [max_tray_items]TrayMenuItem = undefined,
+    item_label_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    item_command_storage: [max_tray_items][max_tray_item_command_bytes]u8 = undefined,
+    item_detail_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    item_key_storage: [max_tray_items][types.max_menu_key_bytes]u8 = undefined,
+    segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
+    segment_option_label_storage: [max_tray_items * max_tray_segment_options][max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [max_tray_items * max_tray_segment_options][max_tray_item_command_bytes]u8 = undefined,
+    metric_primary_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_values: [max_tray_items * max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    item_count: usize = 0,
+};
+
+const max_null_notifications: usize = 16;
+
+const NullNotification = struct {
+    active: bool = false,
+    id: [max_notification_id_bytes]u8 = undefined,
+    id_len: usize = 0,
+    action_command: [max_notification_action_command_bytes]u8 = undefined,
+    action_command_len: usize = 0,
 };
 
 pub const NullPlatform = struct {
@@ -251,6 +387,8 @@ pub const NullPlatform = struct {
     shortcut_count: usize = 0,
     window_sources: [max_windows]?WebViewSource = [_]?WebViewSource{null} ** max_windows,
     windows: [max_windows]WindowInfo = undefined,
+    window_label_storage: [max_windows][max_window_label_bytes]u8 = undefined,
+    window_title_storage: [max_windows][max_window_title_bytes]u8 = undefined,
     /// Captured `WindowOptions.resizable` per created window, indexed
     /// like `windows` — `WindowInfo` does not carry it, and tests need
     /// to assert the flag survives to the platform seam (the macOS host
@@ -260,11 +398,42 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    window_color_scheme: [max_windows]types.WindowColorScheme = @splat(.system),
+    /// Source-less test harnesses have an implicit primary window rather
+    /// than a createWindow entry, just like the main canvas surface.
+    main_window_color_scheme: types.WindowColorScheme = .system,
+    /// Captured independently from `restore_state`: persistence opt-in does
+    /// not mean a frame was actually found and restored.
+    window_placement: [max_windows]WindowInitialPlacement = [_]WindowInitialPlacement{.default} ** max_windows,
+    window_restore_policy: [max_windows]WindowRestorePolicy = [_]WindowRestorePolicy{.clamp_to_visible_screen} ** max_windows,
+    window_transparent: [max_windows]bool = [_]bool{false} ** max_windows,
+    window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
+    window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
+    window_activate_on_show: [max_windows]bool = [_]bool{true} ** max_windows,
+    window_allows_fullscreen: [max_windows]bool = [_]bool{true} ** max_windows,
     /// Minimize calls per window (`minimize_window_fn`), indexed like
     /// `windows`: the observable seam for app-drawn minimize controls —
     /// the null platform has no Dock to genie into, so the count IS the
     /// behavior tests pin.
     window_minimize_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    window_hide_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Show calls per window (`show_window_fn`), indexed like `windows`
+    /// — the counterpart seam (tray "Open", the un-hide verb).
+    window_show_count: [max_windows]u32 = [_]u32{0} ** max_windows,
+    /// Graceful-quit requests (`quit_app_fn`). The real hosts QUEUE
+    /// the stop onto their run loop (macOS dispatch_async, GTK
+    /// g_idle_add, Windows PostQuitMessage) so `app_shutdown` emits
+    /// only on the NEXT loop turn, after the dispatch that requested
+    /// the quit has returned — a recorded command that quits commits
+    /// to the session journal before the shutdown record seals it.
+    /// The modeled host mirrors that shape: `quitApp` only records the
+    /// request, and `takeQueuedQuit` hands the test the deferred
+    /// shutdown event to dispatch as its own loop turn.
+    quit_request_count: u32 = 0,
+    /// The queued stop `quitApp` armed and `takeQueuedQuit` has not
+    /// yet drained — the modeled twin of the hosts' pending idle/queue
+    /// entry (exactly-once, like their did-shutdown latches).
+    quit_pending: bool = false,
     /// Modeled occlusion per window, indexed like `windows`: true while
     /// the modeled window does not reach the glass (minimized, or a
     /// test covered it via `setWindowOccluded`). Drives the
@@ -277,6 +446,30 @@ pub const NullPlatform = struct {
     /// Captured `WindowOptions.show` per created window: the
     /// present-before-show policy that must survive to the create seam.
     window_show: [max_windows]types.WindowShowMode = [_]types.WindowShowMode{.immediate} ** max_windows,
+    /// Captured `WindowOptions.close_policy` per created window — the
+    /// seam-regression capture (like `window_resizable`) AND the
+    /// modeled behavior: `userCloseWindow` consults it exactly like the
+    /// real hosts' close delegates, hiding instead of closing under
+    /// `.hide`.
+    window_close_policy: [max_windows]types.WindowClosePolicy = [_]types.WindowClosePolicy{.quit} ** max_windows,
+    /// Test seam: refuse one OS create without retaining a window identity.
+    fail_next_create_window: bool = false,
+    /// Test seam: make the NEXT `close_window_fn` call fail with
+    /// `error.CloseFailed` (the real hosts' refusal), consuming the
+    /// flag — the injection runtime rollback tests use to assert
+    /// `closeWindow` restores every flag it flipped optimistically
+    /// (open, focused, hidden).
+    fail_next_close_window: bool = false,
+    /// Test seam: make the NEXT `show_window_fn` call fail with
+    /// `error.ShowFailed`, consuming the flag — the injection the
+    /// runtime's `showWindow` rollback test uses to assert a refused
+    /// show restores hidden and moves no focus.
+    fail_next_show_window: bool = false,
+    fail_next_hide_window: bool = false,
+    dock_visible: bool = true,
+    dock_presence_count: u32 = 0,
+    launch_at_login_status: types.LaunchAtLoginStatus = .disabled,
+    launch_at_login_set_count: u32 = 0,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -339,7 +532,15 @@ pub const NullPlatform = struct {
     notification_subtitle_len: usize = 0,
     notification_body: [max_notification_body_bytes]u8 = undefined,
     notification_body_len: usize = 0,
+    notification_id: [max_notification_id_bytes]u8 = undefined,
+    notification_id_len: usize = 0,
+    notification_action_label: [max_notification_action_label_bytes]u8 = undefined,
+    notification_action_label_len: usize = 0,
+    notification_action_command: [max_notification_action_command_bytes]u8 = undefined,
+    notification_action_command_len: usize = 0,
+    notifications: [max_null_notifications]NullNotification = [_]NullNotification{.{}} ** max_null_notifications,
     notification_count: usize = 0,
+    notification_replacement_count: usize = 0,
     clipboard_mime_type: [max_clipboard_mime_type_bytes]u8 = undefined,
     clipboard_mime_type_len: usize = 0,
     clipboard_data: [max_clipboard_data_bytes]u8 = undefined,
@@ -349,20 +550,23 @@ pub const NullPlatform = struct {
     credential_service_len: usize = 0,
     credential_account: [max_credential_account_bytes]u8 = undefined,
     credential_account_len: usize = 0,
-    credential_secret: [max_credential_secret_bytes]u8 = undefined,
-    credential_secret_len: usize = 0,
+    /// Hermetic process-local keychain. Real credential effects use four
+    /// worker threads, so the fake must be synchronized too; one old
+    /// bridge-era "last secret" buffer silently lost distinct keys.
+    credential_mutex: std.atomic.Mutex = .unlocked,
+    credential_entries: std.StringHashMapUnmanaged([]u8) = .empty,
+    credential_last_secret: ?[]const u8 = null,
     credential_set_count: usize = 0,
     credential_delete_count: usize = 0,
+    /// Deterministic local-zone model for tests. Real hosts consult the OS
+    /// zone (including DST at the requested instant); the null host uses this
+    /// fixed offset so suites can pin exact output without ambient state.
+    local_time_offset_minutes: i16 = 0,
     webview_navigate_count: usize = 0,
-    tray_icon_path: [max_tray_icon_path_bytes]u8 = undefined,
-    tray_icon_path_len: usize = 0,
-    tray_title: [max_tray_title_bytes]u8 = undefined,
-    tray_title_len: usize = 0,
-    tray_tooltip: [max_tray_tooltip_bytes]u8 = undefined,
-    tray_tooltip_len: usize = 0,
-    tray_items: [max_tray_items]TrayMenuItem = undefined,
-    tray_item_count: usize = 0,
+    status_items: [max_status_items]NullStatusItem = [_]NullStatusItem{.{}} ** max_status_items,
+    status_item_count: usize = 0,
     tray_create_count: usize = 0,
+    tray_shell_update_count: usize = 0,
     tray_update_count: usize = 0,
     tray_title_update_count: usize = 0,
     tray_remove_count: usize = 0,
@@ -433,6 +637,40 @@ pub const NullPlatform = struct {
     gpu_surface_image_upload_byte_len: usize = 0,
     gpu_surface_image_upload_sample_rgba: [4]u8 = .{ 0, 0, 0, 0 },
     gpu_surface_image_remove_id: u64 = 0,
+    /// Host-font mirror for the registration seam, default OFF: the null
+    /// platform models a platform without host-side text, whose register
+    /// seam is null (engine-side registration is the whole story there,
+    /// and the runtime records ownership token 0 — nothing installed).
+    /// Tests modelling a stateful host (macOS's per-process descriptor
+    /// and token tables) enable this before taking `platform()`: the
+    /// mirror then accepts registrations id-keyed and last-wins, mints a
+    /// monotonic ownership token per registration exactly like the
+    /// AppKit host, and honors the token guard at unregister — so the
+    /// shared-id lifecycle (an older runtime's deinit must leave a newer
+    /// runtime's re-registration intact) is assertable without CoreText.
+    /// Per-instance where the real host tables are per-process: tests
+    /// model "one process" by pointing every runtime at ONE instance.
+    gpu_surface_font_registrations: bool = false,
+    gpu_surface_fonts: [max_gpu_surface_fonts]NullGpuSurfaceFont = [_]NullGpuSurfaceFont{.{}} ** max_gpu_surface_fonts,
+    gpu_surface_font_count: usize = 0,
+    gpu_surface_font_register_count: usize = 0,
+    /// The mirror's monotonic token counter, pre-incremented per
+    /// registration so 0 is never a live token — the AppKit host's
+    /// counter discipline, which is what makes a stale (or 0) token
+    /// provably match nothing.
+    gpu_surface_font_token_counter: u64 = 0,
+    /// Font-unregister recorder for the host-teardown seam Runtime.deinit
+    /// drives. Present even with the mirror off: the null platform then
+    /// has no register seam (no host-side text — engine-side registration
+    /// is the whole story), but it still accepts and records the teardown
+    /// call, so embed tests can pin that deinit returns the host-side
+    /// registration on platforms that do retain per-id font state
+    /// (macOS's CoreText descriptor and caches). The recorded token is
+    /// exactly what the call carried — 0 when the runtime captured no
+    /// register-time token, the minted stamp when the mirror is on.
+    gpu_surface_font_unregister_count: usize = 0,
+    gpu_surface_font_unregister_id: u64 = 0,
+    gpu_surface_font_unregister_token: u64 = 0,
     timers: [max_null_timers]NullTimer = [_]NullTimer{.{}} ** max_null_timers,
     timer_count: usize = 0,
     timer_start_count: usize = 0,
@@ -485,11 +723,56 @@ pub const NullPlatform = struct {
     audio_stop_count: usize = 0,
     audio_seek_count: usize = 0,
     audio_volume_count: usize = 0,
+    microphone_capture: bool = true,
+    system_audio_capture: bool = true,
+    audio_captures: [2]NullAudioCapture = [_]NullAudioCapture{.{}} ** 2,
+    /// Whether this modeled host has a video decoder. On by default (the
+    /// fake below stands in for AVFoundation); tests modelling a staged
+    /// host (Windows/Linux today) set it false BEFORE `platform()` so
+    /// every video service fn is absent, exactly like the real hosts.
+    video_playback: bool = true,
+    /// Whether the modeled filesystem holds the local video files apps
+    /// name in `videoLoad`. On by default; false models the
+    /// assets-absent machine: every local load answers
+    /// `error.VideoSourceNotFound`, which is what sends the source
+    /// cascade to the URL.
+    video_local_files: bool = true,
+    /// The deterministic fake video player: services mutate it, tests
+    /// read it and synthesize the events a live host would deliver
+    /// (`takeVideoLoaded`, `advanceVideo`), and push synthetic frames
+    /// through its captured sink (`pushVideoFrame`).
+    video: NullVideo = .{},
+    /// A `.loaded` acknowledgment waiting to be taken — set by a
+    /// successful video load, consumed by `takeVideoLoaded`.
+    video_loaded_pending: bool = false,
+    video_metas: [max_null_video_metas]NullVideoMeta = [_]NullVideoMeta{.{}} ** max_null_video_metas,
+    video_meta_count: usize = 0,
+    video_load_count: usize = 0,
+    video_load_url_count: usize = 0,
+    video_play_count: usize = 0,
+    video_pause_count: usize = 0,
+    video_stop_count: usize = 0,
+    video_seek_count: usize = 0,
+    video_volume_count: usize = 0,
+    video_muted_count: usize = 0,
+    video_loop_count: usize = 0,
     /// Pending cross-thread wake requests. Incremented atomically because
     /// `wake_fn` is the one service worker threads call; tests and the
     /// embed host drain it on their own thread via `takeWake` and then
     /// dispatch the `.wake` platform event themselves.
     wake_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    /// Latched when effects teardown abandons an in-flight platform call
+    /// (a channel wake or blocking credential operation): the stale call
+    /// still holds this platform as its context, so `deinit` must skip
+    /// destruction and leak the host, process-lived — the reference model
+    /// of the real hosts' destroy gate, and the seam channel teardown
+    /// tests observe.
+    channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Whether `deinit` actually ran its destruction (the null platform
+    /// holds no OS resources, so "destruction" is this flag): stays false
+    /// when `channel_wake_abandoned` forced the deliberate leak. The
+    /// observation seam the abandon tests assert against.
+    destroyed: bool = false,
     /// Pending cross-thread frame requests (`request_frame_fn`), counted
     /// atomically like `wake_count`: the automation arrival watcher calls
     /// it from its own thread, and a scripted run loop (or test) drains
@@ -509,9 +792,12 @@ pub const NullPlatform = struct {
     scroll_driver_label_len: usize = 0,
     scroll_drivers: [max_gpu_surface_scroll_drivers]GpuSurfaceScrollDriver = undefined,
     scroll_driver_count: usize = 0,
+    scroll_occluders: [types.max_gpu_surface_scroll_occluders]types.GpuSurfaceScrollOccluder = undefined,
+    scroll_occluder_count: usize = 0,
     scroll_driver_set_count: usize = 0,
-    /// Lifetime count of driver entries pushed with `set_offset = true`
-    /// (the runtime forcing its offset into the native scroller).
+    /// Lifetime count of driver entries pushed with a set-offset flag
+    /// on EITHER axis (the runtime forcing an offset into the native
+    /// scroller).
     scroll_driver_set_offset_count: usize = 0,
     /// Whether this modeled host presents native context menus. On by
     /// default (the recorder below stands in for the OS menu); tests
@@ -519,6 +805,11 @@ pub const NullPlatform = struct {
     /// path) set it false, which nulls the service AND the feature
     /// report — the same shape as a real host without a presenter.
     context_menus: bool = true,
+    /// Whether this modeled host can hide-on-close and re-show (the
+    /// `close_policy = .hide` shape). On by default, modeling
+    /// macOS/Windows; tests modeling a host without the affordance
+    /// (GTK) set it false and pin the runtime's create-time refusal.
+    window_hide_on_close: bool = true,
     /// Native context-menu recorder: presentations record the request and
     /// return; tests then feed the selection back as a
     /// `.context_menu_action` platform event.
@@ -542,7 +833,71 @@ pub const NullPlatform = struct {
     }
 
     pub fn initWithOptions(surface_value: Surface, web_engine: WebEngine, app_info: AppInfo) NullPlatform {
-        return .{ .surface_value = surface_value, .web_engine = web_engine, .app_info = app_info };
+        return .{
+            .surface_value = surface_value,
+            .web_engine = web_engine,
+            .app_info = app_info,
+            .dock_visible = app_info.dock_visible,
+        };
+    }
+
+    /// Heap-allocate the wrapper (process allocator) and initialize it
+    /// in place — the reference model of the real hosts'
+    /// `createWithOptions`. Runners must use this over a stack
+    /// `initWithOptions` value: `platform().services.context` is this
+    /// wrapper's ADDRESS, worker threads dereference it inside the
+    /// channel wake path (the null wake counts into `wake_count`, a
+    /// wrapper field), and a wake call teardown abandons may do so at
+    /// any later time — after a runner's stack frame would have
+    /// unwound. Pair with `destroy`, the latch-gated free. Tests that
+    /// own the wrapper's lifetime themselves keep using the stack
+    /// initializers.
+    pub fn createWithOptions(surface_value: Surface, web_engine: WebEngine, app_info: AppInfo) std.mem.Allocator.Error!*NullPlatform {
+        const self = try std.heap.page_allocator.create(NullPlatform);
+        self.* = initWithOptions(surface_value, web_engine, app_info);
+        return self;
+    }
+
+    /// `deinit` plus the wrapper's own storage, gated by the same
+    /// latch: an abandoned channel wake call dereferences this wrapper
+    /// (its context) the moment it resumes, so on abandon the storage
+    /// is leaked, process-lived — deinit-gating extended to
+    /// lifetime-gating, the reference model of the real hosts'
+    /// `destroy`. No cross-thread race on the gate: the latch is set
+    /// synchronously on the loop thread during effects teardown, which
+    /// runs before the runner's deferred destroy.
+    pub fn destroy(self: *NullPlatform) void {
+        self.deinit();
+        if (self.channel_wake_abandoned.load(.seq_cst)) return;
+        std.heap.page_allocator.destroy(self);
+    }
+
+    /// The reference model of the real hosts' destroy gate (`MacPlatform`
+    /// / `LinuxPlatform` / `WindowsPlatform` `deinit`): destruction is
+    /// SKIPPED — the platform deliberately leaked, process-lived, with
+    /// one loud line — while an abandoned channel wake call may still
+    /// enter this host (see `channel_wake_abandoned`); otherwise the
+    /// `destroyed` flag records that destruction ran. The null platform
+    /// holds no OS resources, so the flag is the whole destruction —
+    /// which is exactly what makes the gate observable in tests.
+    pub fn deinit(self: *NullPlatform) void {
+        if (self.channel_wake_abandoned.load(.seq_cst)) {
+            std.debug.print("null platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it, process-lived, so the stale call stays safe\n", .{});
+            return;
+        }
+        if (self.destroyed) return;
+        self.lockCredentials();
+        var credentials = self.credential_entries.iterator();
+        while (credentials.next()) |entry| {
+            @memset(entry.value_ptr.*, 0);
+            std.heap.page_allocator.free(entry.value_ptr.*);
+            std.heap.page_allocator.free(entry.key_ptr.*);
+        }
+        self.credential_entries.deinit(std.heap.page_allocator);
+        self.credential_entries = .empty;
+        self.credential_last_secret = null;
+        self.credential_mutex.unlock();
+        self.destroyed = true;
     }
 
     pub fn platform(self: *NullPlatform) Platform {
@@ -567,8 +922,15 @@ pub const NullPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
+                .show_window_fn = showWindow,
+                .set_dock_presence_fn = setDockPresence,
+                .launch_at_login_status_fn = launchAtLoginStatus,
+                .set_launch_at_login_fn = setLaunchAtLogin,
+                .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
+                .set_window_color_scheme_fn = setWindowColorScheme,
                 .set_window_drag_regions_fn = setWindowDragRegions,
                 .create_view_fn = createView,
                 .update_view_fn = updateView,
@@ -590,9 +952,13 @@ pub const NullPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .note_blocking_call_abandoned_fn = noteChannelWakeAbandoned,
+                .format_local_time_fn = formatLocalTime,
                 .create_tray_fn = createTray,
+                .update_tray_shell_fn = updateTrayShell,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
+                .update_tray_presentation_fn = updateTrayPresentation,
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
@@ -611,7 +977,19 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .audio_capture_start_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStop else null,
+                .video_load_fn = if (self.video_playback) videoLoad else null,
+                .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
+                .video_play_fn = if (self.video_playback) videoPlay else null,
+                .video_pause_fn = if (self.video_playback) videoPause else null,
+                .video_stop_fn = if (self.video_playback) videoStop else null,
+                .video_seek_fn = if (self.video_playback) videoSeek else null,
+                .video_set_volume_fn = if (self.video_playback) videoSetVolume else null,
+                .video_set_muted_fn = if (self.video_playback) videoSetMuted else null,
+                .video_set_loop_fn = if (self.video_playback) videoSetLoop else null,
                 .wake_fn = wakeService,
+                .note_channel_wake_abandoned_fn = noteChannelWakeAbandoned,
                 .request_frame_fn = requestFrameService,
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
@@ -619,6 +997,8 @@ pub const NullPlatform = struct {
                 .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
                 .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
                 .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
+                .register_gpu_surface_font_fn = if (self.gpu_surface_font_registrations) registerGpuSurfaceFont else null,
+                .unregister_gpu_surface_font_fn = unregisterGpuSurfaceFont,
                 .decode_image_fn = decodeImage,
                 .set_gpu_surface_scroll_drivers_fn = setGpuSurfaceScrollDrivers,
                 .show_context_menu_fn = if (self.context_menus) showContextMenu else null,
@@ -655,9 +1035,17 @@ pub const NullPlatform = struct {
             // app-owned platform view into — reporting support would be a
             // lie the first adopt call exposes.
             .view_surface_adoption => false,
+            // Models the macOS/Windows hosts by default: user closes
+            // honor the captured close policy and hidden windows
+            // re-show, so the runtime suites can pin the whole
+            // menu-bar-app loop. Tests flip it false to model GTK.
+            .window_hide_on_close => self.window_hide_on_close,
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
+            .microphone_capture => self.microphone_capture,
+            .system_audio_capture => self.system_audio_capture,
+            .video_playback => self.video_playback,
         };
     }
 
@@ -683,7 +1071,8 @@ pub const NullPlatform = struct {
                 .frame = window.default_frame,
                 .scale_factor = self.surface_value.scale_factor,
                 .open = true,
-                .focused = index == 0,
+                .focused = index == 0 and window.activate_on_show and window.show == .immediate,
+                .hidden = window.show == .hidden,
             } });
         }
         var frame: u32 = 0;
@@ -735,6 +1124,8 @@ pub const NullPlatform = struct {
                 .open = true,
                 .focused = true,
             };
+            self.windows[0].label = try copyInto(&self.window_label_storage[0], self.windows[0].label);
+            self.windows[0].title = try copyInto(&self.window_title_storage[0], self.windows[0].title);
             self.window_count = 1;
             break :blk 0;
         } else return error.WindowNotFound;
@@ -765,6 +1156,10 @@ pub const NullPlatform = struct {
 
     fn createWindow(context: ?*anyopaque, options: WindowOptions) anyerror!WindowInfo {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_create_window) {
+            self.fail_next_create_window = false;
+            return error.CreateFailed;
+        }
         // A CLOSED window releases its label and id for re-creation —
         // mirroring the real hosts, where a closed NSWindow is gone from
         // the host dictionaries. Model-driven windows reopen under one
@@ -783,19 +1178,33 @@ pub const NullPlatform = struct {
             if (window.id == options.id) return error.DuplicateWindowId;
             if (std.mem.eql(u8, window.label, options.label)) return error.DuplicateWindowLabel;
         }
+        const focused = options.activate_on_show and options.show == .immediate;
+        if (focused) {
+            for (self.windows[0..self.window_count]) |*window| window.focused = false;
+        }
         const info: WindowInfo = .{
             .id = options.id,
-            .label = options.label,
-            .title = options.resolvedTitle(self.app_info.app_name),
+            .label = try copyInto(&self.window_label_storage[self.window_count], options.label),
+            .title = try copyInto(&self.window_title_storage[self.window_count], options.resolvedTitle(self.app_info.app_name)),
             .frame = options.default_frame,
             .scale_factor = self.surface_value.scale_factor,
             .open = true,
-            .focused = false,
+            .focused = focused,
+            .hidden = options.show == .hidden,
         };
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
+        self.window_color_scheme[self.window_count] = .system;
+        self.window_placement[self.window_count] = options.initial_placement;
+        self.window_restore_policy[self.window_count] = options.restore_policy;
+        self.window_transparent[self.window_count] = options.transparent;
+        self.window_always_on_top[self.window_count] = options.always_on_top;
+        self.window_click_through[self.window_count] = options.click_through;
+        self.window_activate_on_show[self.window_count] = options.activate_on_show;
+        self.window_allows_fullscreen[self.window_count] = options.allows_fullscreen;
         self.window_show[self.window_count] = options.show;
+        self.window_close_policy[self.window_count] = options.close_policy;
         self.window_min_width[self.window_count] = options.min_width;
         self.window_min_height[self.window_count] = options.min_height;
         self.window_first_present_seq[self.window_count] = 0;
@@ -822,10 +1231,18 @@ pub const NullPlatform = struct {
             self.show_op_seq += 1;
             self.window_first_present_seq[index] = self.show_op_seq;
         }
-        if (!self.window_visible[index] and self.window_show[index] == .on_first_present) {
+        if (!self.windows[index].hidden and
+            !self.window_visible[index] and
+            self.window_show[index] == .on_first_present)
+        {
             self.window_visible[index] = true;
             self.show_op_seq += 1;
             self.window_shown_seq[index] = self.show_op_seq;
+            if (self.window_activate_on_show[index]) {
+                for (self.windows[0..self.window_count], 0..) |*window, cursor| {
+                    window.focused = cursor == index;
+                }
+            }
         }
     }
 
@@ -864,6 +1281,7 @@ pub const NullPlatform = struct {
         }
         // An explicit focus shows a still-deferred window (the macOS
         // host's makeKeyAndOrderFront override of present-before-show).
+        self.windows[focused_index].hidden = false;
         if (!self.window_visible[focused_index]) {
             self.window_visible[focused_index] = true;
             self.show_op_seq += 1;
@@ -877,9 +1295,19 @@ pub const NullPlatform = struct {
 
     fn closeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_close_window) {
+            self.fail_next_close_window = false;
+            return error.CloseFailed;
+        }
         const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
         self.windows[index].open = false;
         self.windows[index].focused = false;
+        // hidden clears WITH open, mirroring the real hosts' close
+        // paths (every macOS close exit leaves the policy-hidden set
+        // before its emit) and the runtime table's own close flip: a
+        // closed window is not "hidden", it is gone — a stale
+        // hidden=true here is exactly what lets a reopen resurrect it.
+        self.windows[index].hidden = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
     }
@@ -895,6 +1323,87 @@ pub const NullPlatform = struct {
         self.windows[index].focused = false;
         self.window_minimize_count[index] += 1;
         self.window_occluded[index] = true;
+    }
+
+    fn showWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_show_window) {
+            self.fail_next_show_window = false;
+            return error.ShowFailed;
+        }
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        // The un-hide verb: back on the glass with focus, exactly the
+        // real hosts' deminiaturize + order-front + activate. Clears a
+        // policy-hide, a minimize's occlusion, and a still-deferred
+        // present-before-show alike.
+        self.windows[index].hidden = false;
+        self.window_occluded[index] = false;
+        if (self.window_activate_on_show[index]) {
+            for (self.windows[0..self.window_count], 0..) |*window, cursor| {
+                window.focused = cursor == index;
+            }
+        }
+        if (!self.window_visible[index]) {
+            self.window_visible[index] = true;
+            self.show_op_seq += 1;
+            self.window_shown_seq[index] = self.show_op_seq;
+        }
+        self.window_show_count[index] += 1;
+    }
+
+    fn hideWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.fail_next_hide_window) {
+            self.fail_next_hide_window = false;
+            return error.HideFailed;
+        }
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        self.windows[index].hidden = true;
+        self.windows[index].focused = false;
+        self.window_visible[index] = false;
+        self.window_hide_count[index] += 1;
+    }
+
+    fn setDockPresence(context: ?*anyopaque, visible: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.dock_visible = visible;
+        self.dock_presence_count += 1;
+    }
+
+    fn launchAtLoginStatus(context: ?*anyopaque) anyerror!types.LaunchAtLoginStatus {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        return self.launch_at_login_status;
+    }
+
+    fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!types.LaunchAtLoginStatus {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.launch_at_login_set_count += 1;
+        self.launch_at_login_status = if (enabled) .enabled else .disabled;
+        return self.launch_at_login_status;
+    }
+
+    fn quitApp(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.quit_request_count += 1;
+        self.quit_pending = true;
+    }
+
+    /// Test seam: drain the stop the quit verb queued — the modeled
+    /// host echo, and the modeled NEXT LOOP TURN. Real hosts defer the
+    /// shutdown emit past the dispatch that requested it (see
+    /// `quit_request_count`); a test models that by dispatching the
+    /// returned event only after the quitting dispatch has returned,
+    /// exactly the `userCloseWindow` shape. The PRE-RUN quit rides the
+    /// same model: a quit requested before the hosts' run loop exists
+    /// (App.start's update, a boot command in the synchronous first
+    /// canvas frame) parks on the host and drains at top level after
+    /// the boot dispatch returns — arm here, drain here, identically.
+    /// Answers exactly once per armed quit; null while nothing is
+    /// queued.
+    pub fn takeQueuedQuit(self: *NullPlatform) ?Event {
+        if (!self.quit_pending) return null;
+        self.quit_pending = false;
+        return .app_shutdown;
     }
 
     fn createView(context: ?*anyopaque, options: ViewOptions) anyerror!void {
@@ -1025,6 +1534,7 @@ pub const NullPlatform = struct {
         webview.layer = options.layer;
         webview.transparent = options.transparent;
         webview.bridge_enabled = options.bridge_enabled;
+        webview.zoom = 1.0;
         webview.open = true;
         @memcpy(webview.label_storage[0..options.label.len], options.label);
         @memcpy(webview.url_storage[0..options.url.len], options.url);
@@ -1112,68 +1622,274 @@ pub const NullPlatform = struct {
         self.notification_title = undefined;
         self.notification_subtitle = undefined;
         self.notification_body = undefined;
+        self.notification_id = undefined;
+        self.notification_action_label = undefined;
+        self.notification_action_command = undefined;
         self.notification_title_len = (try copyInto(&self.notification_title, options.title)).len;
         self.notification_subtitle_len = (try copyInto(&self.notification_subtitle, options.subtitle)).len;
         self.notification_body_len = (try copyInto(&self.notification_body, options.body)).len;
+        self.notification_id_len = (try copyInto(&self.notification_id, options.id)).len;
+        self.notification_action_label_len = (try copyInto(&self.notification_action_label, options.action_label)).len;
+        self.notification_action_command_len = (try copyInto(&self.notification_action_command, options.action_command)).len;
+
+        if (options.id.len > 0) {
+            var selected: ?usize = null;
+            var free: ?usize = null;
+            for (&self.notifications, 0..) |*entry, index| {
+                if (!entry.active) {
+                    if (free == null) free = index;
+                    continue;
+                }
+                if (std.mem.eql(u8, entry.id[0..entry.id_len], options.id)) {
+                    selected = index;
+                    self.notification_replacement_count += 1;
+                    break;
+                }
+            }
+            const index = selected orelse free orelse (self.notification_count % max_null_notifications);
+            var entry = &self.notifications[index];
+            entry.* = .{ .active = true };
+            entry.id_len = (try copyInto(&entry.id, options.id)).len;
+            entry.action_command_len = (try copyInto(&entry.action_command, options.action_command)).len;
+        }
         self.notification_count += 1;
+    }
+
+    const max_credential_identity_bytes = max_credential_service_bytes + 1 + max_credential_account_bytes;
+
+    fn lockCredentials(self: *NullPlatform) void {
+        while (!self.credential_mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn credentialIdentity(buffer: *[max_credential_identity_bytes]u8, key: CredentialKey) anyerror![]const u8 {
+        if (key.service.len == 0 or key.service.len > max_credential_service_bytes or
+            key.account.len == 0 or key.account.len > max_credential_account_bytes)
+        {
+            return error.CredentialFieldTooLarge;
+        }
+        @memcpy(buffer[0..key.service.len], key.service);
+        buffer[key.service.len] = 0;
+        @memcpy(buffer[key.service.len + 1 ..][0..key.account.len], key.account);
+        return buffer[0 .. key.service.len + 1 + key.account.len];
     }
 
     fn setCredential(context: ?*anyopaque, credential: Credential) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (credential.secret.len > max_credential_secret_bytes) return error.CredentialFieldTooLarge;
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, .{
+            .service = credential.service,
+            .account = credential.account,
+        });
+
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const secret = try std.heap.page_allocator.dupe(u8, credential.secret);
+        errdefer std.heap.page_allocator.free(secret);
+        if (self.credential_entries.getPtr(identity)) |existing| {
+            @memset(existing.*, 0);
+            std.heap.page_allocator.free(existing.*);
+            existing.* = secret;
+        } else {
+            const owned_identity = try std.heap.page_allocator.dupe(u8, identity);
+            errdefer std.heap.page_allocator.free(owned_identity);
+            try self.credential_entries.put(std.heap.page_allocator, owned_identity, secret);
+        }
+
         self.credential_service = undefined;
         self.credential_account = undefined;
-        self.credential_secret = undefined;
-        self.credential_service_len = (try copyInto(&self.credential_service, credential.service)).len;
-        self.credential_account_len = (try copyInto(&self.credential_account, credential.account)).len;
-        self.credential_secret_len = (try copyInto(&self.credential_secret, credential.secret)).len;
+        @memcpy(self.credential_service[0..credential.service.len], credential.service);
+        @memcpy(self.credential_account[0..credential.account.len], credential.account);
+        self.credential_service_len = credential.service.len;
+        self.credential_account_len = credential.account.len;
+        self.credential_last_secret = secret;
         self.credential_set_count += 1;
     }
 
     fn getCredential(context: ?*anyopaque, key: CredentialKey, buffer: []u8) anyerror![]const u8 {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (self.credential_secret_len == 0) return error.CredentialNotFound;
-        if (!std.mem.eql(u8, key.service, self.lastCredentialService()) or !std.mem.eql(u8, key.account, self.lastCredentialAccount())) return error.CredentialNotFound;
-        return try copyInto(buffer, self.lastCredentialSecret());
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, key);
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const secret = self.credential_entries.get(identity) orelse return error.CredentialNotFound;
+        return try copyInto(buffer, secret);
     }
 
     fn deleteCredential(context: ?*anyopaque, key: CredentialKey) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (self.credential_secret_len == 0) return error.CredentialNotFound;
-        if (!std.mem.eql(u8, key.service, self.lastCredentialService()) or !std.mem.eql(u8, key.account, self.lastCredentialAccount())) return error.CredentialNotFound;
-        self.credential_secret_len = 0;
+        var identity_storage: [max_credential_identity_bytes]u8 = undefined;
+        const identity = try credentialIdentity(&identity_storage, key);
+        self.lockCredentials();
+        defer self.credential_mutex.unlock();
+        const removed = self.credential_entries.fetchRemove(identity) orelse return error.CredentialNotFound;
+        if (self.credential_last_secret) |last| {
+            if (last.ptr == removed.value.ptr) self.credential_last_secret = null;
+        }
+        @memset(removed.value, 0);
+        std.heap.page_allocator.free(removed.value);
+        std.heap.page_allocator.free(removed.key);
         self.credential_delete_count += 1;
     }
 
-    fn createTray(context: ?*anyopaque, options: TrayOptions) anyerror!void {
+    fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_icon_path = undefined;
-        self.tray_title = undefined;
-        self.tray_tooltip = undefined;
-        self.tray_icon_path_len = (try copyInto(&self.tray_icon_path, options.icon_path)).len;
-        self.tray_title_len = (try copyInto(&self.tray_title, options.title)).len;
-        self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
-        try updateTrayMenu(context, options.items);
+        const seconds = @divFloor(timestamp_ms, 1000) + @as(i64, self.local_time_offset_minutes) * 60;
+        const days = @divFloor(seconds, 86_400);
+        const second_of_day: u32 = @intCast(@mod(seconds, 86_400));
+        const parts = localCivilFromDays(days) orelse return error.InvalidTimestamp;
+        const hour = second_of_day / 3600;
+        const minute = (second_of_day % 3600) / 60;
+        const second = second_of_day % 60;
+        return switch (style) {
+            .date => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2}", .{ parts.year, parts.month, parts.day }),
+            .time => try std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }),
+            .datetime => try std.fmt.bufPrint(buffer, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ parts.year, parts.month, parts.day, hour, minute, second }),
+        };
+    }
+
+    const LocalCivilDate = struct { year: u32, month: u32, day: u32 };
+
+    fn localCivilFromDays(days: i64) ?LocalCivilDate {
+        const shifted = days + 719_468;
+        const era = @divFloor(shifted, 146_097);
+        const day_of_era: u32 = @intCast(shifted - era * 146_097);
+        const year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        const year = @as(i64, year_of_era) + era * 400;
+        const day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        const month_index = (5 * day_of_year + 2) / 153;
+        const day = day_of_year - (153 * month_index + 2) / 5 + 1;
+        const month = if (month_index < 10) month_index + 3 else month_index - 9;
+        const civil_year = if (month <= 2) year + 1 else year;
+        if (civil_year < 1 or civil_year > 9999) return null;
+        return .{ .year = @intCast(civil_year), .month = month, .day = day };
+    }
+
+    fn findStatusItem(self: *NullPlatform, status_item_id: StatusItemId) ?*NullStatusItem {
+        for (&self.status_items) |*item| {
+            if (item.active and item.id == status_item_id) return item;
+        }
+        return null;
+    }
+
+    fn findStatusItemConst(self: *const NullPlatform, status_item_id: StatusItemId) ?*const NullStatusItem {
+        for (&self.status_items) |*item| {
+            if (item.active and item.id == status_item_id) return item;
+        }
+        return null;
+    }
+
+    fn statusItemSlot(self: *NullPlatform, status_item_id: StatusItemId) anyerror!*NullStatusItem {
+        if (self.findStatusItem(status_item_id)) |item| return item;
+        for (&self.status_items) |*item| {
+            if (!item.active) {
+                item.* = .{ .id = status_item_id, .active = true };
+                self.status_item_count += 1;
+                return item;
+            }
+        }
+        return error.UnsupportedService;
+    }
+
+    fn copyTrayShell(item: *NullStatusItem, shell: TrayShell) anyerror!void {
+        item.icon_path_len = (try copyInto(&item.icon_path, shell.icon_path)).len;
+        item.tooltip_len = (try copyInto(&item.tooltip, shell.tooltip)).len;
+        item.activation_command_len = (try copyInto(&item.activation_command, shell.activation_command)).len;
+        item.alternate_activation_command_len = (try copyInto(&item.alternate_activation_command, shell.alternate_activation_command)).len;
+        item.open_command_len = (try copyInto(&item.open_command, shell.open_command)).len;
+        item.visible = shell.visible;
+    }
+
+    fn createTray(context: ?*anyopaque, status_item_id: StatusItemId, options: TrayOptions) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const item = try self.statusItemSlot(status_item_id);
+        try copyTrayShell(item, types.trayShell(options));
+        var presentation = options.presentation;
+        if (presentation.title.len == 0) presentation.title = options.title;
+        item.title_len = (try copyInto(&item.title, presentation.title)).len;
+        item.presentation = presentation;
+        item.presentation.title = item.title[0..item.title_len];
+        try updateTrayMenu(context, status_item_id, options.items);
         self.tray_create_count += 1;
     }
 
-    fn updateTrayMenu(context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void {
+    fn updateTrayShell(context: ?*anyopaque, status_item_id: StatusItemId, shell: TrayShell) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (items.len > self.tray_items.len) return error.InvalidTrayOptions;
-        for (items, 0..) |item, index| self.tray_items[index] = item;
-        self.tray_item_count = items.len;
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        try copyTrayShell(item, shell);
+        self.tray_shell_update_count += 1;
+    }
+
+    fn updateTrayMenu(context: ?*anyopaque, status_item_id: StatusItemId, items: []const TrayMenuItem) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const status_item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        if (items.len > status_item.items.len) return error.InvalidTrayOptions;
+        for (items, 0..) |item, index| {
+            status_item.items[index] = item;
+            status_item.items[index].label = try copyInto(&status_item.item_label_storage[index], item.label);
+            status_item.items[index].command = try copyInto(&status_item.item_command_storage[index], item.command);
+            status_item.items[index].detail = try copyInto(&status_item.item_detail_storage[index], item.detail);
+            status_item.items[index].key = try copyInto(&status_item.item_key_storage[index], item.key);
+            if (item.segmented) |segmented| {
+                const start = index * max_tray_segment_options;
+                for (segmented.options, 0..) |option, option_index| {
+                    const flat_index = start + option_index;
+                    status_item.segment_options[flat_index] = .{
+                        .id = option.id,
+                        .label = try copyInto(&status_item.segment_option_label_storage[flat_index], option.label),
+                        .command = try copyInto(&status_item.segment_option_command_storage[flat_index], option.command),
+                        .selected = option.selected,
+                        .enabled = option.enabled,
+                    };
+                }
+                status_item.items[index].segmented = .{ .options = status_item.segment_options[start .. start + segmented.options.len] };
+            }
+            if (item.metric) |metric| {
+                status_item.items[index].metric = .{
+                    .primary_text = try copyInto(&status_item.metric_primary_storage[index], metric.primary_text),
+                    .secondary_text = try copyInto(&status_item.metric_secondary_storage[index], metric.secondary_text),
+                    .accessibility_label = try copyInto(&status_item.metric_accessibility_storage[index], metric.accessibility_label),
+                };
+            }
+            if (item.chart) |chart| {
+                const start = index * max_tray_chart_values;
+                @memcpy(status_item.chart_values[start .. start + chart.values.len], chart.values);
+                status_item.items[index].chart = .{
+                    .values = status_item.chart_values[start .. start + chart.values.len],
+                    .min_value = chart.min_value,
+                    .max_value = chart.max_value,
+                    .leading_caption = try copyInto(&status_item.chart_leading_caption_storage[index], chart.leading_caption),
+                    .trailing_summary = try copyInto(&status_item.chart_trailing_summary_storage[index], chart.trailing_summary),
+                    .accessibility_label = try copyInto(&status_item.chart_accessibility_storage[index], chart.accessibility_label),
+                };
+            }
+        }
+        status_item.item_count = items.len;
         self.tray_update_count += 1;
     }
 
-    fn updateTrayTitle(context: ?*anyopaque, title: []const u8) anyerror!void {
+    fn updateTrayTitle(context: ?*anyopaque, status_item_id: StatusItemId, title: []const u8) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_title = undefined;
-        self.tray_title_len = (try copyInto(&self.tray_title, title)).len;
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        item.title_len = (try copyInto(&item.title, title)).len;
+        item.presentation.title = item.title[0..item.title_len];
         self.tray_title_update_count += 1;
     }
 
-    fn removeTray(context: ?*anyopaque) anyerror!void {
+    fn updateTrayPresentation(context: ?*anyopaque, status_item_id: StatusItemId, presentation: TrayPresentation) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_item_count = 0;
+        try updateTrayTitle(context, status_item_id, presentation.title);
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        item.presentation = presentation;
+        item.presentation.title = item.title[0..item.title_len];
+    }
+
+    fn removeTray(context: ?*anyopaque, status_item_id: StatusItemId) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const item = self.findStatusItem(status_item_id) orelse return;
+        item.active = false;
+        item.item_count = 0;
+        self.status_item_count -= 1;
         self.tray_remove_count += 1;
     }
 
@@ -1333,6 +2049,49 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.audio_volume_count += 1;
         self.audio.volume = volume;
+    }
+
+    fn audioCaptureStart(context: ?*anyopaque, source: types.AudioCaptureSource, format: types.AudioCaptureFormat, sink: types.AudioCaptureSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if ((source == .microphone and !self.microphone_capture) or
+            (source == .system and !self.system_audio_capture)) return error.UnsupportedService;
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        capture.active = true;
+        capture.format = format;
+        capture.sink = sink;
+        capture.start_count += 1;
+        _ = sink.push(.{ .kind = .started, .source = source, .format = format });
+    }
+
+    fn audioCaptureStop(context: ?*anyopaque, source: types.AudioCaptureSource) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        capture.active = false;
+        capture.sink = .{};
+        capture.stop_count += 1;
+    }
+
+    /// Push deterministic PCM through a live fake capture.
+    pub fn pushAudioCapture(self: *NullPlatform, source: types.AudioCaptureSource, timestamp_ns: u64, pcm_s16le: []const u8) types.AudioCapturePushResult {
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        if (!capture.active) return .closed;
+        const stride = @as(usize, capture.format.channels) * 2;
+        if (stride == 0 or pcm_s16le.len % stride != 0) return .dropped_oversized;
+        return capture.sink.push(.{
+            .kind = .data,
+            .source = source,
+            .format = capture.format,
+            .timestamp_ns = timestamp_ns,
+            .frames = @intCast(pcm_s16le.len / stride),
+            .pcm_s16le = pcm_s16le,
+        });
+    }
+
+    pub fn failAudioCapture(self: *NullPlatform, source: types.AudioCaptureSource) types.AudioCapturePushResult {
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        if (!capture.active) return .closed;
+        capture.active = false;
+        return capture.sink.push(.{ .kind = .failed, .source = source, .format = capture.format });
     }
 
     fn audioUrlHash(url: []const u8) u64 {
@@ -1495,9 +2254,243 @@ pub const NullPlatform = struct {
         return .{ .audio = .{ .kind = .failed } };
     }
 
+    fn videoLoad(context: ?*anyopaque, path: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_load_count += 1;
+        // Retire the previous player FIRST — the macOS host's ordering
+        // (videoStop before the file probe): a load that then refuses
+        // must not leave the replaced playback emitting frames and
+        // events under its old token.
+        const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
+        if (path.len > self.video.path_storage.len) return error.VideoPathTooLarge;
+        // Model the assets-absent machine: the local file is not there,
+        // exactly the synchronous refusal a real host's open gives.
+        if (!self.video_local_files) return error.VideoSourceNotFound;
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
+        @memcpy(self.video.path_storage[0..path.len], path);
+        self.video.path_len = path.len;
+        self.video.loaded = true;
+        self.applyVideoMeta(path);
+        self.video_loaded_pending = true;
+    }
+
+    fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: types.VideoFrameSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_load_url_count += 1;
+        // Retire-first, `videoLoad`'s ordering.
+        const volume = self.video.volume;
+        self.video = .{ .volume = volume };
+        self.video_loaded_pending = false;
+        if (url.len > self.video.path_storage.len) return error.VideoPathTooLarge;
+        self.video = .{ .volume = volume, .sink = sink, .token = token };
+        @memcpy(self.video.path_storage[0..url.len], url);
+        self.video.path_len = url.len;
+        self.video.loaded = true;
+        self.video.streaming = true;
+        self.applyVideoMeta(url);
+        self.video_loaded_pending = true;
+    }
+
+    fn videoPlay(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_play_count += 1;
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        self.video.playing = true;
+    }
+
+    fn videoPause(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_pause_count += 1;
+        self.video.playing = false;
+    }
+
+    fn videoStop(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_stop_count += 1;
+        self.video = .{ .volume = self.video.volume };
+        self.video_loaded_pending = false;
+    }
+
+    fn videoSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_seek_count += 1;
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        self.video.position_ms = @min(position_ms, self.video.duration_ms);
+    }
+
+    fn videoSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_volume_count += 1;
+        self.video.volume = volume;
+    }
+
+    fn videoSetMuted(context: ?*anyopaque, muted: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_muted_count += 1;
+        self.video.muted = muted;
+    }
+
+    fn videoSetLoop(context: ?*anyopaque, loop: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.video_loop_count += 1;
+        self.video.looping = loop;
+    }
+
+    fn applyVideoMeta(self: *NullPlatform, source: []const u8) void {
+        for (self.video_metas[0..self.video_meta_count]) |entry| {
+            const suffix = entry.suffix[0..entry.suffix_len];
+            if (suffix.len <= source.len and std.mem.eql(u8, source[source.len - suffix.len ..], suffix)) {
+                self.video.duration_ms = entry.duration_ms;
+                self.video.width = entry.width;
+                self.video.height = entry.height;
+                return;
+            }
+        }
+        self.video.duration_ms = default_null_video_duration_ms;
+        self.video.width = default_null_video_width;
+        self.video.height = default_null_video_height;
+    }
+
+    /// Test helper: register duration and dimensions for any loaded
+    /// video source ending in `suffix`. Sources without a match report
+    /// the `default_null_video_*` values.
+    pub fn setVideoMeta(self: *NullPlatform, suffix: []const u8, duration_ms: u64, width: u64, height: u64) !void {
+        if (suffix.len == 0 or suffix.len > 128) return error.InvalidVideoOptions;
+        if (self.video_meta_count >= max_null_video_metas) return error.InvalidVideoOptions;
+        var entry = &self.video_metas[self.video_meta_count];
+        @memcpy(entry.suffix[0..suffix.len], suffix);
+        entry.suffix_len = suffix.len;
+        entry.duration_ms = duration_ms;
+        entry.width = width;
+        entry.height = height;
+        self.video_meta_count += 1;
+    }
+
+    /// Consume the pending video `.loaded` acknowledgment — the platform
+    /// event a live host delivers after a successful load, carrying the
+    /// stream's dimensions and the player's duration readout. Dispatch
+    /// it through the runtime, like `takeAudioLoaded`.
+    pub fn takeVideoLoaded(self: *NullPlatform) ?Event {
+        if (!self.video_loaded_pending) return null;
+        self.video_loaded_pending = false;
+        return .{ .video = .{
+            .kind = .loaded,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = self.video.playing,
+            .width = self.video.width,
+            .height = self.video.height,
+        } };
+    }
+
+    /// Test helper: advance fake playback by `delta_ms` and synthesize
+    /// the event a live host's position timer would deliver — a
+    /// `.position` tick, or `.completed` when a non-looping video
+    /// reaches its end. A non-looping completion unloads the player
+    /// (retire-before-emit, the live hosts' teardown): a later
+    /// `videoPlay`/`videoSeek` refuses exactly as it would against a
+    /// torn-down AVPlayer, and no second completion can ever emit. A
+    /// LOOPING player wraps past the end and keeps ticking: no
+    /// completion, because the playback never ends. Returns null when
+    /// nothing is loaded or playing; position never advances on its own.
+    pub fn advanceVideo(self: *NullPlatform, delta_ms: u64) ?Event {
+        if (!self.video.loaded or !self.video.playing) return null;
+        // Widened, not saturated: a hostile or fuzzing advance past
+        // u64 completes (or wraps EXACTLY, for a looping player)
+        // instead of trapping — saturating before the loop modulo
+        // would land the wrapped position on the wrong residue.
+        const advanced = @as(u128, self.video.position_ms) + delta_ms;
+        if (advanced >= self.video.duration_ms and self.video.duration_ms > 0) {
+            if (self.video.looping) {
+                self.video.position_ms = @intCast(advanced % self.video.duration_ms);
+                return .{ .video = .{
+                    .kind = .position,
+                    .token = self.video.token,
+                    .position_ms = self.video.position_ms,
+                    .duration_ms = self.video.duration_ms,
+                    .playing = true,
+                } };
+            }
+            const token = self.video.token;
+            const duration_ms = self.video.duration_ms;
+            self.video = .{ .volume = self.video.volume };
+            self.video_loaded_pending = false;
+            return .{ .video = .{
+                .kind = .completed,
+                .token = token,
+                .position_ms = duration_ms,
+                .duration_ms = duration_ms,
+                .playing = false,
+            } };
+        }
+        // Below the duration, so it fits u64 again by construction —
+        // except under a zero duration (no end to reach), where the
+        // readout saturates like a real clock display would.
+        self.video.position_ms = if (advanced > std.math.maxInt(u64))
+            std.math.maxInt(u64)
+        else
+            @intCast(advanced);
+        return .{ .video = .{
+            .kind = .position,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = true,
+        } };
+    }
+
+    /// Test helper: synthesize a mid-stream stall — the `.position`
+    /// event a live host's tick delivers while the stream waits for
+    /// network bytes. Only a streaming playback can stall; local files
+    /// never buffer, so anything else answers null.
+    pub fn stallVideo(self: *NullPlatform) ?Event {
+        if (!self.video.loaded or !self.video.playing or !self.video.streaming) return null;
+        return .{ .video = .{
+            .kind = .position,
+            .token = self.video.token,
+            .position_ms = self.video.position_ms,
+            .duration_ms = self.video.duration_ms,
+            .playing = true,
+            .buffering = true,
+        } };
+    }
+
+    /// Test helper: synthesize an asynchronous decode/device failure,
+    /// the `.failed` event a live host would deliver. Unloads the
+    /// player like a real failure would.
+    pub fn failVideo(self: *NullPlatform) ?Event {
+        if (!self.video.loaded) return null;
+        const token = self.video.token;
+        self.video = .{ .volume = self.video.volume };
+        self.video_loaded_pending = false;
+        return .{ .video = .{ .kind = .failed, .token = token } };
+    }
+
+    /// Test helper: push one synthetic RGBA8 frame through the sink the
+    /// last load captured — the deterministic stand-in for a real
+    /// host's decode callback delivering a converted CVPixelBuffer.
+    /// Errors surface exactly as a real producer push would
+    /// (`error.MediaSurfaceReleased` after the claim ended,
+    /// `error.InvalidVideoOptions` when nothing is loaded).
+    pub fn pushVideoFrame(self: *NullPlatform, width: usize, height: usize, rgba8: []const u8) anyerror!void {
+        if (!self.video.loaded) return error.InvalidVideoOptions;
+        return self.video.sink.push(width, height, rgba8);
+    }
+
     fn wakeService(context: ?*anyopaque) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         _ = self.wake_count.fetchAdd(1, .release);
+    }
+
+    /// Teardown abandoned an in-flight channel wake call: latch the
+    /// flag `deinit` consults so this host is leaked rather than
+    /// destroyed (see `channel_wake_abandoned`).
+    fn noteChannelWakeAbandoned(context: ?*anyopaque) void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.channel_wake_abandoned.store(true, .seq_cst);
     }
 
     fn requestFrameService(context: ?*anyopaque) anyerror!void {
@@ -1508,11 +2501,11 @@ pub const NullPlatform = struct {
     /// Deterministic decode seam for tests (see `image_decode`): parses
     /// the strict PNG subset the canvas writer emits. Off by default so
     /// the null platform models codec-less hosts.
-    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!types.DecodedImage {
+    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!types.DecodedImage {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.image_decode) return error.UnsupportedService;
         self.image_decode_count += 1;
-        const decoded = canvas.png.decodeRgba8(bytes, buffer) catch |err| return switch (err) {
+        const decoded = canvas.png.decodeRgba8Fitted(bytes, buffer, max_pixels, types.max_decoded_image_dimension) catch |err| return switch (err) {
             error.PngPixelBufferTooSmall => error.ImageTooLarge,
             else => error.ImageDecodeFailed,
         };
@@ -1761,6 +2754,69 @@ pub const NullPlatform = struct {
         self.gpu_surface_image_count = last;
     }
 
+    /// The host-font mirror's register half (installed only when
+    /// `gpu_surface_font_registrations` is on — see that flag): id-keyed
+    /// and last-wins like the AppKit host's descriptor table, minting a
+    /// pre-incremented monotonic ownership token per registration and
+    /// returning it, so tests can assert the token lifecycle the real
+    /// host runs.
+    fn registerGpuSurfaceFont(context: ?*anyopaque, font: GpuSurfaceFontData) anyerror!u64 {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.gpu_surface_font_register_count += 1;
+        self.gpu_surface_font_token_counter += 1;
+        const token = self.gpu_surface_font_token_counter;
+        const index = self.findGpuSurfaceFontIndex(font.id) orelse blk: {
+            if (self.gpu_surface_font_count >= max_gpu_surface_fonts) return error.InvalidGpuSurfaceFont;
+            const index = self.gpu_surface_font_count;
+            self.gpu_surface_font_count += 1;
+            break :blk index;
+        };
+        self.gpu_surface_fonts[index] = .{
+            .id = font.id,
+            .token = token,
+            .byte_len = font.ttf.len,
+        };
+        return token;
+    }
+
+    /// Records every teardown call (see the recorder fields; unlike the
+    /// image seam this one is not gated on `gpu_surfaces` — Runtime.deinit
+    /// unregisters every registered font regardless of what the surface
+    /// renders through), then applies the mirror's token guard: the id's
+    /// entry comes out only while it still carries `token`, so a stale
+    /// owner (the id was re-registered since, last wins) removes nothing
+    /// — the guard an id-keyed removal would violate by letting an older
+    /// runtime's deinit delete a newer runtime's live registration. With
+    /// the mirror off the table is empty and this is the recording no-op
+    /// it always was: there is no host font state to drop.
+    fn unregisterGpuSurfaceFont(context: ?*anyopaque, id: u64, token: u64) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.gpu_surface_font_unregister_id = id;
+        self.gpu_surface_font_unregister_token = token;
+        self.gpu_surface_font_unregister_count += 1;
+        const index = self.findGpuSurfaceFontIndex(id) orelse return;
+        if (self.gpu_surface_fonts[index].token != token) return;
+        const last = self.gpu_surface_font_count - 1;
+        if (index != last) self.gpu_surface_fonts[index] = self.gpu_surface_fonts[last];
+        self.gpu_surface_fonts[last] = .{};
+        self.gpu_surface_font_count = last;
+    }
+
+    /// The mirrored host font registration for `id`, or null when the id
+    /// holds none (never registered, or returned at teardown) — what a
+    /// stateful host would resolve measurement and drawing through.
+    pub fn gpuSurfaceFont(self: *const NullPlatform, id: u64) ?NullGpuSurfaceFont {
+        const index = self.findGpuSurfaceFontIndex(id) orelse return null;
+        return self.gpu_surface_fonts[index];
+    }
+
+    fn findGpuSurfaceFontIndex(self: *const NullPlatform, id: u64) ?usize {
+        for (self.gpu_surface_fonts[0..self.gpu_surface_font_count], 0..) |font, index| {
+            if (font.id == id) return index;
+        }
+        return null;
+    }
+
     /// The recorded side-channel entry for `id`, or null when the id was
     /// never uploaded (or has been removed) — the store a packet host
     /// would consult on an upload cache action.
@@ -1851,13 +2907,34 @@ pub const NullPlatform = struct {
         self.view_count -= 1;
     }
 
-    /// Test seam: the USER closed a window. Real hosts' window
-    /// delegates tear the native window out of their records before
-    /// emitting the open=false frame event (macOS `windowWillClose`),
-    /// so the fake host mirrors that — remove the window and its views
-    /// here, then dispatch the returned event through the runtime.
+    /// Test seam: the USER closed a window. Under the default `.quit`
+    /// policy this models the real hosts' window delegates, which tear
+    /// the native window out of their records before emitting the
+    /// open=false frame event (macOS `windowWillClose`) — remove the
+    /// window and its views here, then dispatch the returned event
+    /// through the runtime. Under `close_policy = .hide` it models the
+    /// intercepting delegate instead (macOS `windowShouldClose`
+    /// answering NO + `orderOut`, Win32 `WM_CLOSE` answering with
+    /// `SW_HIDE`): the window and its views stay, only the glass loses
+    /// it, and the returned frame event carries open=true hidden=true.
     pub fn userCloseWindow(self: *NullPlatform, window_id: WindowId) ?Event {
         const index = self.findWindowIndex(window_id) orelse return null;
+        if (self.window_close_policy[index] == .hide) {
+            self.windows[index].hidden = true;
+            self.windows[index].focused = false;
+            self.window_occluded[index] = true;
+            const info = self.windows[index];
+            return .{ .window_frame_changed = .{
+                .id = info.id,
+                .label = info.label,
+                .title = info.title,
+                .frame = info.frame,
+                .scale_factor = info.scale_factor,
+                .open = true,
+                .focused = false,
+                .hidden = true,
+            } };
+        }
         const info = self.windows[index];
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
@@ -1873,11 +2950,83 @@ pub const NullPlatform = struct {
         } };
     }
 
+    /// Test seam: the user asked the app to come back with no window on
+    /// the glass (the macOS Dock-icon reopen). Models the host's
+    /// `applicationShouldHandleReopen:` — every window hidden by its
+    /// `.hide` close policy re-shows — and returns one frame event per
+    /// re-shown window (dispatch them through the runtime like any
+    /// platform event). Windows hidden some other way (minimized,
+    /// occluded) are the OS's to restore, exactly like the real host.
+    pub fn userReopenApp(self: *NullPlatform, output: []Event) []const Event {
+        var count: usize = 0;
+        for (self.windows[0..self.window_count], 0..) |*window, index| {
+            if (!window.hidden) continue;
+            // Liveness, not just the hidden flag: a closed window keeps
+            // its slot in this mirror, and the reopen must never
+            // resurrect one — even if a close path left the hidden flag
+            // stale, re-showing a window the app closed (hidden=false,
+            // focused=true, a frame event) is the exact bug the real
+            // hosts' set hygiene prevents.
+            if (!window.open) continue;
+            if (count >= output.len) break;
+            window.hidden = false;
+            window.focused = count == 0;
+            self.window_occluded[index] = false;
+            output[count] = .{ .window_frame_changed = .{
+                .id = window.id,
+                .label = window.label,
+                .title = window.title,
+                .frame = window.frame,
+                .scale_factor = window.scale_factor,
+                .open = true,
+                .focused = window.focused,
+                .hidden = false,
+            } };
+            count += 1;
+        }
+        return output[0..count];
+    }
+
+    /// Test seam: the captured close policy for a created window (the
+    /// create-seam regression observable, like `window_titlebar`).
+    pub fn closePolicyForWindow(self: *const NullPlatform, window_id: WindowId) ?types.WindowClosePolicy {
+        const index = self.findWindowIndex(window_id) orelse return null;
+        return self.window_close_policy[index];
+    }
+
     /// Test seam: minimize calls observed for a window (the null host
     /// has no Dock, so the count is the pinned behavior).
     pub fn minimizeCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
         const index = self.findWindowIndex(window_id) orelse return 0;
         return self.window_minimize_count[index];
+    }
+
+    pub fn hideCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_hide_count[index];
+    }
+
+    /// Test seam: show calls observed for a window (the un-hide verb's
+    /// pinned observable, like `minimizeCountForWindow`).
+    pub fn showCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_show_count[index];
+    }
+
+    fn setWindowColorScheme(context: ?*anyopaque, window_id: WindowId, scheme: types.WindowColorScheme) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse {
+            if (window_id != 1) return error.WindowNotFound;
+            self.main_window_color_scheme = scheme;
+            return;
+        };
+        if (!self.windows[index].open) return error.WindowNotFound;
+        self.window_color_scheme[index] = scheme;
+    }
+
+    pub fn windowColorScheme(self: *const NullPlatform, window_id: WindowId) ?types.WindowColorScheme {
+        const index = self.findWindowIndex(window_id) orelse return if (window_id == 1) self.main_window_color_scheme else null;
+        return self.window_color_scheme[index];
     }
 
     /// Test seam: model a window leaving or returning to the glass
@@ -1908,11 +3057,32 @@ pub const NullPlatform = struct {
         var cursor = index;
         while (cursor + 1 < self.window_count) : (cursor += 1) {
             self.windows[cursor] = self.windows[cursor + 1];
+            self.window_label_storage[cursor] = self.window_label_storage[cursor + 1];
+            self.window_title_storage[cursor] = self.window_title_storage[cursor + 1];
+            self.windows[cursor].label = self.window_label_storage[cursor][0..self.windows[cursor].label.len];
+            self.windows[cursor].title = self.window_title_storage[cursor][0..self.windows[cursor].title.len];
+            self.window_sources[cursor] = self.window_sources[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
+            self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
+            self.window_color_scheme[cursor] = self.window_color_scheme[cursor + 1];
+            self.window_placement[cursor] = self.window_placement[cursor + 1];
+            self.window_restore_policy[cursor] = self.window_restore_policy[cursor + 1];
+            self.window_transparent[cursor] = self.window_transparent[cursor + 1];
+            self.window_always_on_top[cursor] = self.window_always_on_top[cursor + 1];
+            self.window_click_through[cursor] = self.window_click_through[cursor + 1];
+            self.window_activate_on_show[cursor] = self.window_activate_on_show[cursor + 1];
+            self.window_allows_fullscreen[cursor] = self.window_allows_fullscreen[cursor + 1];
+            self.window_show[cursor] = self.window_show[cursor + 1];
+            self.window_visible[cursor] = self.window_visible[cursor + 1];
+            self.window_first_present_seq[cursor] = self.window_first_present_seq[cursor + 1];
+            self.window_shown_seq[cursor] = self.window_shown_seq[cursor + 1];
             self.window_min_width[cursor] = self.window_min_width[cursor + 1];
             self.window_min_height[cursor] = self.window_min_height[cursor + 1];
             self.window_minimize_count[cursor] = self.window_minimize_count[cursor + 1];
+            self.window_hide_count[cursor] = self.window_hide_count[cursor + 1];
+            self.window_show_count[cursor] = self.window_show_count[cursor + 1];
             self.window_occluded[cursor] = self.window_occluded[cursor + 1];
+            self.window_close_policy[cursor] = self.window_close_policy[cursor + 1];
         }
         self.window_count -= 1;
     }
@@ -2021,8 +3191,43 @@ pub const NullPlatform = struct {
         return self.notification_body[0..self.notification_body_len];
     }
 
+    pub fn lastNotificationId(self: *const NullPlatform) []const u8 {
+        return self.notification_id[0..self.notification_id_len];
+    }
+
+    pub fn lastNotificationActionLabel(self: *const NullPlatform) []const u8 {
+        return self.notification_action_label[0..self.notification_action_label_len];
+    }
+
+    pub fn lastNotificationActionCommand(self: *const NullPlatform) []const u8 {
+        return self.notification_action_command[0..self.notification_action_command_len];
+    }
+
+    /// Deterministically model a user activating the action on a named,
+    /// currently active notification. The returned event borrows this
+    /// platform's fixed storage until the next notification update.
+    pub fn activateNotification(self: *const NullPlatform, id: []const u8) ?Event {
+        for (&self.notifications) |*entry| {
+            if (!entry.active or !std.mem.eql(u8, entry.id[0..entry.id_len], id)) continue;
+            if (entry.action_command_len == 0) return null;
+            return .{ .notification_command = .{ .name = entry.action_command[0..entry.action_command_len] } };
+        }
+        return null;
+    }
+
+    /// Anonymous notifications have no replacement key; tests can still
+    /// activate the most recently delivered action through this seam.
+    pub fn activateLastNotification(self: *const NullPlatform) ?Event {
+        if (self.notification_action_command_len == 0) return null;
+        return .{ .notification_command = .{ .name = self.lastNotificationActionCommand() } };
+    }
+
     pub fn notificationCount(self: *const NullPlatform) usize {
         return self.notification_count;
+    }
+
+    pub fn notificationReplacementCount(self: *const NullPlatform) usize {
+        return self.notification_replacement_count;
     }
 
     pub fn lastClipboardMimeType(self: *const NullPlatform) []const u8 {
@@ -2046,7 +3251,7 @@ pub const NullPlatform = struct {
     }
 
     pub fn lastCredentialSecret(self: *const NullPlatform) []const u8 {
-        return self.credential_secret[0..self.credential_secret_len];
+        return self.credential_last_secret orelse "";
     }
 
     pub fn credentialSetCount(self: *const NullPlatform) usize {
@@ -2058,19 +3263,77 @@ pub const NullPlatform = struct {
     }
 
     pub fn lastTrayIconPath(self: *const NullPlatform) []const u8 {
-        return self.tray_icon_path[0..self.tray_icon_path_len];
+        return self.statusItemIconPath(types.primary_status_item_id);
     }
 
     pub fn lastTrayTitle(self: *const NullPlatform) []const u8 {
-        return self.tray_title[0..self.tray_title_len];
+        return self.statusItemTitle(types.primary_status_item_id);
     }
 
     pub fn lastTrayTooltip(self: *const NullPlatform) []const u8 {
-        return self.tray_tooltip[0..self.tray_tooltip_len];
+        return self.statusItemTooltip(types.primary_status_item_id);
+    }
+
+    pub fn lastTrayActivationCommand(self: *const NullPlatform) []const u8 {
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.activation_command[0..item.activation_command_len];
+    }
+
+    pub fn lastTrayAlternateActivationCommand(self: *const NullPlatform) []const u8 {
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.alternate_activation_command[0..item.alternate_activation_command_len];
+    }
+
+    pub fn lastTrayOpenCommand(self: *const NullPlatform) []const u8 {
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.open_command[0..item.open_command_len];
+    }
+
+    pub fn lastTrayPresentation(self: *const NullPlatform) TrayPresentation {
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return .{};
+        return item.presentation;
     }
 
     pub fn trayItems(self: *const NullPlatform) []const TrayMenuItem {
-        return self.tray_items[0..self.tray_item_count];
+        return self.statusItemMenu(types.primary_status_item_id);
+    }
+
+    pub fn statusItemCount(self: *const NullPlatform) usize {
+        return self.status_item_count;
+    }
+
+    pub fn statusItemExists(self: *const NullPlatform, status_item_id: StatusItemId) bool {
+        return self.findStatusItemConst(status_item_id) != null;
+    }
+
+    pub fn statusItemVisible(self: *const NullPlatform, status_item_id: StatusItemId) bool {
+        const item = self.findStatusItemConst(status_item_id) orelse return false;
+        return item.visible;
+    }
+
+    pub fn statusItemIconPath(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.icon_path[0..item.icon_path_len];
+    }
+
+    pub fn statusItemTitle(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.title[0..item.title_len];
+    }
+
+    pub fn statusItemTooltip(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.tooltip[0..item.tooltip_len];
+    }
+
+    pub fn statusItemActivationCommand(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.activation_command[0..item.activation_command_len];
+    }
+
+    pub fn statusItemMenu(self: *const NullPlatform, status_item_id: StatusItemId) []const TrayMenuItem {
+        const item = self.findStatusItemConst(status_item_id) orelse return &.{};
+        return item.items[0..item.item_count];
     }
 
     pub fn trayCreateCount(self: *const NullPlatform) usize {
@@ -2079,6 +3342,10 @@ pub const NullPlatform = struct {
 
     pub fn trayUpdateCount(self: *const NullPlatform) usize {
         return self.tray_update_count;
+    }
+
+    pub fn trayShellUpdateCount(self: *const NullPlatform) usize {
+        return self.tray_shell_update_count;
     }
 
     pub fn trayTitleUpdateCount(self: *const NullPlatform) usize {
@@ -2113,7 +3380,7 @@ pub const NullPlatform = struct {
         return self.menus[0..self.menu_count];
     }
 
-    fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver) anyerror!void {
+    fn setGpuSurfaceScrollDrivers(context: ?*anyopaque, window_id: WindowId, label: []const u8, drivers: []const GpuSurfaceScrollDriver, occluders: []const types.GpuSurfaceScrollOccluder) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.gpu_surface_scroll_drivers) return error.UnsupportedService;
         self.scroll_driver_set_count += 1;
@@ -2123,8 +3390,11 @@ pub const NullPlatform = struct {
         const count = @min(drivers.len, self.scroll_drivers.len);
         @memcpy(self.scroll_drivers[0..count], drivers[0..count]);
         self.scroll_driver_count = count;
+        const occluder_count = @min(occluders.len, self.scroll_occluders.len);
+        @memcpy(self.scroll_occluders[0..occluder_count], occluders[0..occluder_count]);
+        self.scroll_occluder_count = occluder_count;
         for (drivers) |driver| {
-            if (driver.set_offset) self.scroll_driver_set_offset_count += 1;
+            if (driver.set_offset_x or driver.set_offset_y) self.scroll_driver_set_offset_count += 1;
         }
     }
 

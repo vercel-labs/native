@@ -1,0 +1,65 @@
+{
+  "name": "@native-sdk/core",
+  "version": "0.11.0",
+  "description": "The TypeScript authoring tier: the app-core subset, its checker and contract frontend, the exact-pinned core compiler dependency, and the SDK module cores import",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel-labs/native.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://native-sdk.dev",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "types": "./sdk/core.ts",
+  "files": [
+    "sdk",
+    "compile-surface",
+    "testing",
+    "scripts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./sdk/core.ts",
+      "default": "./sdk/core.ts"
+    },
+    "./bytes": {
+      "types": "./sdk/bytes.ts",
+      "default": "./sdk/bytes.ts"
+    },
+    "./text": {
+      "types": "./sdk/text.ts",
+      "default": "./sdk/text.ts"
+    },
+    "./events": {
+      "types": "./sdk/events.ts",
+      "default": "./sdk/events.ts"
+    },
+    "./theme": {
+      "types": "./sdk/theme.ts",
+      "default": "./sdk/theme.ts"
+    },
+    "./testing": {
+      "types": "./testing/index.ts",
+      "default": "./testing/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\"",
+    "build:declarations": "node scripts/gen_declarations.mjs",
+    "toolchain:install": "node scripts/install_scriptc.mjs",
+    "postinstall": "node scripts/install_scriptc.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "@typescript/old": "npm:typescript@6.0.3"
+  },
+  "dependencies": {
+    "@scriptc/types": "0.3.2",
+    "tar": "7.5.22"
+  },
+  "nativeToolchain": {
+    "scriptc": "0.3.2"
+  }
+}

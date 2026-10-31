@@ -1,0 +1,12 @@
+<!-- The app launches without a Dock tile and with this window hidden;
+     the status item is the open/show path for the whole lifecycle. -->
+<column gap="12" padding="16" background="background">
+  <text size="lg">{trackTitle}</text>
+  <text foreground="text_muted">{playbackState}</text>
+  <row gap="8">
+    <button variant="primary" on-press="toggle_play">{playButtonLabel}</button>
+    <button on-press="next_track">Next</button>
+  </row>
+  <spacer grow="1" />
+  <status-bar>No Dock tile — closing hides this window behind the menu-bar extra.</status-bar>
+</column>

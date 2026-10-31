@@ -1,5 +1,6 @@
 const std = @import("std");
 const geometry = @import("geometry");
+const canvas = @import("canvas");
 const types = @import("types.zig");
 const null_backend = @import("null_platform.zig");
 const default_gpu_frame_interval_ns = types.default_gpu_frame_interval_ns;
@@ -30,6 +31,7 @@ const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
 const max_credential_account_bytes = types.max_credential_account_bytes;
 const max_credential_secret_bytes = types.max_credential_secret_bytes;
+const max_local_time_text_bytes = types.max_local_time_text_bytes;
 const max_tray_items = types.max_tray_items;
 const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
@@ -110,6 +112,7 @@ const TrayOptions = types.TrayOptions;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TrayCommandEvent = types.TrayCommandEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
 const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
@@ -161,6 +164,134 @@ test "null platform emits deterministic lifecycle events" {
     try std.testing.expectEqualStrings("app_shutdown", recorder.names[5]);
 }
 
+test "null platform reports hidden startup state" {
+    const Recorder = struct {
+        startup_hidden: ?bool = null,
+
+        fn handle(context: *anyopaque, event: Event) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event) {
+                .window_frame_changed => |window| self.startup_hidden = window.hidden,
+                else => {},
+            }
+        }
+    };
+
+    var null_platform = NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Hidden",
+        .main_window = .{ .show = .hidden },
+    });
+    var recorder: Recorder = .{};
+    try null_platform.platform().run(Recorder.handle, &recorder);
+
+    try std.testing.expectEqual(true, recorder.startup_hidden.?);
+}
+
+test "null platform captures fresh restored and explicit placement independently" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    _ = try services.createWindow(.{
+        .id = 1,
+        .label = "fresh",
+        .restore_state = true,
+        .initial_placement = .default,
+    });
+    _ = try services.createWindow(.{
+        .id = 2,
+        .label = "restored",
+        .initial_placement = .restored,
+    });
+    _ = try services.createWindow(.{
+        .id = 3,
+        .label = "explicit",
+        .default_frame = geometry.RectF.init(80, 120, 640, 480),
+        .initial_placement = .explicit,
+        .restore_policy = .center_on_primary,
+    });
+
+    try std.testing.expectEqual(types.WindowInitialPlacement.default, null_platform.window_placement[0]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.restored, null_platform.window_placement[1]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, null_platform.window_placement[2]);
+    try std.testing.expectEqual(types.WindowRestorePolicy.center_on_primary, null_platform.window_restore_policy[2]);
+}
+
+test "window option conversion preserves legacy nonzero origins as explicit" {
+    const runtime_options: types.WindowCreateOptions = .{
+        .default_frame = geometry.RectF.init(32, 48, 640, 480),
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, runtime_options.windowOptions(7, "runtime").initial_placement);
+
+    const app_info: types.AppInfo = .{
+        .main_window = .{ .default_frame = geometry.RectF.init(64, 96, 720, 480) },
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedMainWindow().initial_placement);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedStartupWindow(0).initial_placement);
+}
+
+test "null platform records accessory launch presence from app info" {
+    const null_platform = NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Menu Bar",
+        .dock_visible = false,
+    });
+
+    try std.testing.expect(!null_platform.app_info.dock_visible);
+    try std.testing.expect(!null_platform.dock_visible);
+    try std.testing.expectEqual(@as(u32, 0), null_platform.dock_presence_count);
+}
+
+test "null platform focus reveals a hidden window" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+    const window = try services.createWindow(.{
+        .id = 7,
+        .label = "panel",
+        .show = .hidden,
+    });
+
+    try std.testing.expect(window.hidden);
+    try std.testing.expect(!null_platform.window_visible[0]);
+    try services.focusWindow(window.id);
+    try std.testing.expect(!null_platform.windows[0].hidden);
+    try std.testing.expect(null_platform.windows[0].focused);
+    try std.testing.expect(null_platform.window_visible[0]);
+}
+
+test "the videoLoadUrl seam refuses non-http(s) schemes for every caller" {
+    // The streaming contract holds at the seam, not just behind the
+    // engine's own gated loads: hosts hand the URL to their media
+    // stack whole, and AVPlayer opens file: URLs happily.
+    var null_platform = NullPlatform.init(.{});
+    null_platform.video_playback = true;
+    const services = null_platform.platform().services;
+    const sink: types.VideoFrameSink = .{};
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("file:///tmp/clip.mp4", 1, sink));
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("ftp://media.example.test/clip.mp4", 1, sink));
+    try std.testing.expectError(error.InvalidVideoOptions, services.videoLoadUrl("not a url", 1, sink));
+    try std.testing.expectEqual(@as(usize, 0), null_platform.video_load_url_count);
+    try services.videoLoadUrl("https://media.example.test/clip.mp4", 2, sink);
+    try std.testing.expectEqual(@as(usize, 1), null_platform.video_load_url_count);
+}
+
+test "a refused video load retires the player it was replacing" {
+    // The macOS host stops the previous player before the file probe,
+    // so a load that then refuses leaves NO playback behind — the null
+    // platform must model the same ordering, or a replaced player
+    // keeps emitting frames and events under its old token.
+    var null_platform = NullPlatform.init(.{});
+    null_platform.video_playback = true;
+    const services = null_platform.platform().services;
+    const sink: types.VideoFrameSink = .{};
+    try services.videoLoad("a.mp4", 1, sink);
+    try services.videoPlay();
+    try std.testing.expect(null_platform.video.playing);
+    null_platform.video_local_files = false;
+    try std.testing.expectError(error.VideoSourceNotFound, services.videoLoad("b.mp4", 2, sink));
+    try std.testing.expect(!null_platform.video.loaded);
+    try std.testing.expect(null_platform.takeVideoLoaded() == null);
+    try std.testing.expect(null_platform.advanceVideo(500) == null);
+}
+
 test "null platform records loaded webview source" {
     var null_platform = NullPlatform.initWithOptions(.{}, .chromium, .{ .app_name = "Demo", .window_title = "Demo Window" });
     try null_platform.platform().services.loadWebView(WebViewSource.html("<h1>Hello</h1>"));
@@ -179,14 +310,104 @@ test "null platform records bridge response window routing" {
     try std.testing.expectEqualStrings("{\"ok\":true}", null_platform.lastBridgeResponse());
 }
 
+test "null platform preserves the tray title when presentation styles are set" {
+    var null_platform = NullPlatform.init(.{});
+    try null_platform.platform().services.createTray(.{
+        .title = "Jobs",
+        .presentation = .{ .width = 60, .tone = .warning },
+    });
+
+    try std.testing.expectEqualStrings("Jobs", null_platform.lastTrayTitle());
+    const presentation = null_platform.lastTrayPresentation();
+    try std.testing.expectEqualStrings("Jobs", presentation.title);
+    try std.testing.expectEqual(@as(f32, 60), presentation.width);
+    try std.testing.expectEqual(types.TrayTone.warning, presentation.tone);
+
+    try null_platform.platform().services.updateTrayTitle("Builds");
+    const retitled = null_platform.lastTrayPresentation();
+    try std.testing.expectEqualStrings("Builds", retitled.title);
+    try std.testing.expectEqual(@as(f32, 60), retitled.width);
+    try std.testing.expectEqual(types.TrayTone.warning, retitled.tone);
+}
+
+test "null platform owns retained rich tray row bytes" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+
+    var row_label = [_]u8{ 'O', 'p', 'e', 'n' };
+    var row_command = [_]u8{ 'o', 'p', 'e', 'n' };
+    var row_detail = [_]u8{ 'D', 'e', 't', 'a', 'i', 'l' };
+    var row_key = [_]u8{'o'};
+    var segment_label = [_]u8{ 'D', 'a', 'y' };
+    var segment_command = [_]u8{ 'r', 'a', 'n', 'g', 'e' };
+    var metric_primary = [_]u8{ '2', '4', '9', '4' };
+    var metric_secondary = [_]u8{ 'T', 'o', 'd', 'a', 'y' };
+    var metric_accessibility = [_]u8{ 'M', 'e', 't', 'r', 'i', 'c' };
+    var chart_caption = [_]u8{ 'C', 'P', 'U' };
+    var chart_summary = [_]u8{ '5', '0', '%' };
+    var chart_accessibility = [_]u8{ 'C', 'P', 'U', ' ', '5', '0' };
+    const chart_values = [_]f32{0.5};
+
+    try null_platform.platform().services.createTray(.{ .items = &.{
+        .{ .role = .segmented, .segmented = .{ .options = &.{.{
+            .id = 20,
+            .label = &segment_label,
+            .command = &segment_command,
+        }} } },
+        .{ .role = .hero, .metric = .{
+            .primary_text = &metric_primary,
+            .secondary_text = &metric_secondary,
+            .accessibility_label = &metric_accessibility,
+        } },
+        .{ .role = .chart, .chart = .{
+            .values = &chart_values,
+            .leading_caption = &chart_caption,
+            .trailing_summary = &chart_summary,
+            .accessibility_label = &chart_accessibility,
+        } },
+        .{ .id = 1, .label = &row_label, .command = &row_command, .detail = &row_detail, .key = &row_key, .role = .agent, .modifiers = .{ .primary = true } },
+    } });
+
+    @memset(&row_label, 'X');
+    @memset(&row_command, 'Y');
+    @memset(&row_detail, 'Z');
+    @memset(&row_key, 'k');
+    @memset(&segment_label, 'X');
+    @memset(&segment_command, 'Y');
+    @memset(&metric_primary, 'P');
+    @memset(&metric_secondary, 'S');
+    @memset(&metric_accessibility, 'A');
+    @memset(&chart_caption, 'Z');
+    @memset(&chart_summary, 'W');
+    @memset(&chart_accessibility, 'Q');
+
+    const items = null_platform.trayItems();
+    try std.testing.expectEqualStrings("Open", items[3].label);
+    try std.testing.expectEqualStrings("open", items[3].command);
+    try std.testing.expectEqualStrings("Detail", items[3].detail);
+    try std.testing.expectEqualStrings("o", items[3].key);
+    try std.testing.expectEqualStrings("Day", items[0].segmented.?.options[0].label);
+    try std.testing.expectEqualStrings("range", items[0].segmented.?.options[0].command);
+    try std.testing.expectEqualStrings("2494", items[1].metric.?.primary_text);
+    try std.testing.expectEqualStrings("Today", items[1].metric.?.secondary_text);
+    try std.testing.expectEqualStrings("Metric", items[1].metric.?.accessibility_label);
+    try std.testing.expectEqualStrings("CPU", items[2].chart.?.leading_caption);
+    try std.testing.expectEqualStrings("50%", items[2].chart.?.trailing_summary);
+    try std.testing.expectEqualStrings("CPU 50", items[2].chart.?.accessibility_label);
+}
+
 test "null platform records OS actions" {
     var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
     const services = null_platform.platform().services;
 
     try services.showNotification(.{
+        .id = "build-status",
         .title = "Build finished",
         .subtitle = "native-sdk",
         .body = "All checks passed.",
+        .action_label = "Open",
+        .action_command = "build.open",
     });
     try services.openExternalUrl("https://example.com/docs");
     try services.revealPath("/tmp/example.txt");
@@ -207,6 +428,11 @@ test "null platform records OS actions" {
     try std.testing.expectEqualStrings("Build finished", null_platform.lastNotificationTitle());
     try std.testing.expectEqualStrings("native-sdk", null_platform.lastNotificationSubtitle());
     try std.testing.expectEqualStrings("All checks passed.", null_platform.lastNotificationBody());
+    try std.testing.expectEqualStrings("build-status", null_platform.lastNotificationId());
+    try std.testing.expectEqualStrings("Open", null_platform.lastNotificationActionLabel());
+    try std.testing.expectEqualStrings("build.open", null_platform.lastNotificationActionCommand());
+    const notification_event = null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("build.open", notification_event.notification_command.name);
     try std.testing.expectEqualStrings("https://example.com/docs", null_platform.lastExternalUrl());
     try std.testing.expectEqualStrings("/tmp/example.txt", null_platform.lastRevealedPath());
     try std.testing.expectEqualStrings("/tmp/recent.txt", null_platform.lastRecentDocumentPath());
@@ -240,9 +466,19 @@ test "null platform records OS actions" {
     const secret = try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer);
     try std.testing.expectEqualStrings("secret-token", secret);
     try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
+    try services.setCredential(.{ .service = "dev.native-sdk.test", .account = "bob", .secret = "second-token" });
+    try std.testing.expectEqualStrings("secret-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer));
+    try std.testing.expectEqualStrings("second-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
     try services.deleteCredential(.{ .service = "dev.native-sdk.test", .account = "alice" });
     try std.testing.expectEqual(@as(usize, 1), null_platform.credentialDeleteCount());
     try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{ .service = "dev.native-sdk.test", .account = "alice" }, &credential_buffer));
+    try std.testing.expectEqualStrings("second-token", try services.getCredential(.{ .service = "dev.native-sdk.test", .account = "bob" }, &credential_buffer));
+
+    null_platform.local_time_offset_minutes = -360;
+    var local_time_buffer: [max_local_time_text_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("2024-01-01 21:04:05", try services.formatLocalTime(1_704_164_645_000, .datetime, &local_time_buffer));
+    try std.testing.expectEqualStrings("2024-01-01", try services.formatLocalTime(1_704_164_645_000, .date, &local_time_buffer));
+    try std.testing.expectEqualStrings("21:04:05", try services.formatLocalTime(1_704_164_645_000, .time, &local_time_buffer));
 
     try services.clearRecentDocuments();
     try std.testing.expectEqual(@as(usize, 1), null_platform.recentDocumentsClearedCount());
@@ -255,6 +491,37 @@ test "null platform records OS actions" {
     try services.removeTray();
     try std.testing.expectEqual(@as(usize, 1), null_platform.trayRemoveCount());
     try std.testing.expectEqual(@as(usize, 0), null_platform.trayItems().len);
+}
+
+test "null platform notification ids replace their action binding" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+    const services = null_platform.platform().services;
+
+    try services.showNotification(.{
+        .id = "sync",
+        .title = "Syncing",
+        .action_label = "Cancel",
+        .action_command = "sync.cancel",
+    });
+    try services.showNotification(.{
+        .id = "other",
+        .title = "Other",
+        .action_label = "Open",
+        .action_command = "other.open",
+    });
+    try services.showNotification(.{
+        .id = "sync",
+        .title = "Synced",
+        .action_label = "View",
+        .action_command = "sync.view",
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), null_platform.notificationCount());
+    try std.testing.expectEqual(@as(usize, 1), null_platform.notificationReplacementCount());
+    try std.testing.expectEqualStrings("sync.view", null_platform.activateNotification("sync").?.notification_command.name);
+    try std.testing.expectEqualStrings("other.open", null_platform.activateNotification("other").?.notification_command.name);
+    try std.testing.expect(null_platform.activateNotification("missing") == null);
 }
 
 test "null platform records configured shortcuts" {
@@ -355,6 +622,7 @@ test "OS actions require backend support" {
     try std.testing.expectError(error.UnsupportedService, services.setCredential(.{ .service = "service", .account = "account", .secret = "secret" }));
     try std.testing.expectError(error.UnsupportedService, services.getCredential(.{ .service = "service", .account = "account" }, &buffer));
     try std.testing.expectError(error.UnsupportedService, services.deleteCredential(.{ .service = "service", .account = "account" }));
+    try std.testing.expectError(error.UnsupportedService, services.formatLocalTime(0, .datetime, &buffer));
 }
 
 test "null platform records webview lifecycle" {
@@ -556,6 +824,45 @@ test "null platform records gpu surface image upload lifecycle" {
     // The seam can be disabled to model platforms without it.
     null_platform.gpu_surface_image_uploads = false;
     try std.testing.expectError(error.UnsupportedService, services.uploadGpuSurfaceImage(.{ .id = 7, .width = 1, .height = 1, .rgba8 = &red }));
+}
+
+test "gpu surface image upload bounds are honest per id namespace" {
+    var null_platform = NullPlatform.init(.{});
+    null_platform.gpu_surfaces = true;
+    const services = null_platform.platform().services;
+
+    // This validation is the one gate in front of EVERY host's upload
+    // seam (the AppKit store included — macos/root.zig forwards whatever
+    // passes here), so the bounds are pinned at this seam.
+    const media_bit = canvas.media_surface_image_id_bit;
+    const buffer = try std.testing.allocator.alloc(u8, types.max_gpu_surface_media_image_pixel_bytes + 4);
+    defer std.testing.allocator.free(buffer);
+    @memset(buffer, 128);
+
+    // Ordinary registered-image ids accept the registry's configurable
+    // ceiling: exactly 8 MiB (2048x1024 RGBA8) passes, one pixel past it
+    // is an engine bug and refuses loudly. Apps on the default 1 MiB tier
+    // still refuse earlier, at registration.
+    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 2048, .height = 1024, .rgba8 = buffer[0..types.max_gpu_surface_image_pixel_bytes] });
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{
+        .id = 7,
+        .width = types.max_gpu_surface_image_pixel_bytes / 4 + 1,
+        .height = 1,
+        .rgba8 = buffer[0 .. types.max_gpu_surface_image_pixel_bytes + 4],
+    }));
+
+    // Media-surface texture ids are video-scale: the flagship 1920x1080
+    // RGBA8 frame (8,294,400 bytes — 8x the ordinary bound) passes, the
+    // exact frame budget passes, one pixel past the budget refuses.
+    try services.uploadGpuSurfaceImage(.{ .id = media_bit | 5, .width = 1920, .height = 1080, .rgba8 = buffer[0 .. 1920 * 1080 * 4] });
+    try std.testing.expectEqual(@as(usize, 1920 * 1080 * 4), null_platform.gpu_surface_image_upload_byte_len);
+    try services.uploadGpuSurfaceImage(.{ .id = media_bit | 5, .width = 2048, .height = 1024, .rgba8 = buffer[0..types.max_gpu_surface_media_image_pixel_bytes] });
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{
+        .id = media_bit | 5,
+        .width = types.max_gpu_surface_media_image_pixel_bytes / 4 + 1,
+        .height = 1,
+        .rgba8 = buffer,
+    }));
 }
 
 test "null platform preserves shifted webview storage after close" {

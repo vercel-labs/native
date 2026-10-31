@@ -43,17 +43,42 @@ pub const max_widget_text_range_rects: usize = 4;
 pub const widgetControlHeight = widget_metrics.widgetControlHeight;
 pub const WidgetTextGeometry = widget_text_input.WidgetTextGeometry;
 pub const textSelectionForWidgetPoint = widget_text_input.textSelectionForWidgetPoint;
+pub const textCaretPositionForWidgetPoint = widget_text_input.textCaretPositionForWidgetPoint;
 pub const textOffsetForWidgetPoint = widget_text_input.textOffsetForWidgetPoint;
 pub const textInputViewportForWidget = widget_text_input.textInputViewportForWidget;
 pub const textInputClearButtonRect = widget_text_input.textInputClearButtonRect;
 pub const textInputClearButtonHitRect = widget_text_input.textInputClearButtonHitRect;
 pub const textInputContentExtentForWidget = widget_text_input.textInputContentExtentForWidget;
+pub const textInputContentWidthForWidget = widget_text_input.textInputContentWidthForWidget;
+pub const cacheTextInputContentWidthForWidget = widget_text_input.cacheTextInputContentWidthForWidget;
 pub const textInputMaxScrollOffsetForWidget = widget_text_input.textInputMaxScrollOffsetForWidget;
 pub const clampedTextInputScrollOffsetForWidget = widget_text_input.clampedTextInputScrollOffsetForWidget;
+pub const textInputMaxHorizontalScrollOffsetForWidget = widget_text_input.textInputMaxHorizontalScrollOffsetForWidget;
+pub const clampedTextInputHorizontalScrollOffsetForWidget = widget_text_input.clampedTextInputHorizontalScrollOffsetForWidget;
+pub const textInputCaretVisibleScrollOffsetForWidget = widget_text_input.textInputCaretVisibleScrollOffsetForWidget;
 pub const textGeometryForWidget = widget_text_input.textGeometryForWidget;
 
 pub const WidgetLayoutTree = struct {
     nodes: []const WidgetLayoutNode = &.{},
+    /// Viewport bounds that produced the layout. Kept on the tree instead
+    /// of every node so root-authored modals retain their window-space
+    /// contract without widening the hot node array.
+    root_bounds: ?geometry.RectF = null,
+    /// Portable observation policy; the retained node array stays unchanged.
+    semantic_policy: ?@import("surface_layout_policy.zig").Policy = null,
+    /// Explicit rule owner; independent of semantic and layout policies.
+    audit_policy: ?@import("widget_audit_policy.zig").Policy = null,
+
+    /// Explicit input owner, preserved by retained runtime views.
+    routing_policy: ?@import("widget_routing_policy.zig").Policy = null,
+    /// Explicit retained-change owner, independent of input routing.
+    change_policy: ?@import("widget_change_policy.zig").Policy = null,
+    retention_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Text decisions must reach reconciliation before display tokens arrive.
+    text_run_policy: ?@import("text_document_policy.zig").Policy = null,
+    paint_policy: ?@import("widget_paint_policy.zig").Policy = null,
+    presentation_policy: ?@import("widget_presentation_policy.zig").Policy = null,
+    paint_walk_policy: ?@import("widget_paint_walk_policy.zig").Policy = null,
 
     pub fn nodeCount(self: WidgetLayoutTree) usize {
         return self.nodes.len;
@@ -88,6 +113,18 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.hitTestWidgetLayout(self, point, tokens);
     }
 
+    /// The hover-Msg CONTAINMENT hit test: the interactive hit test's
+    /// resolution plus hover-Msg listeners (`HitTestPolicy.hover_msgs`).
+    /// Only enter/leave containment resolves through this — washes,
+    /// cursors, and presses never see hover-only listeners.
+    pub fn hitTestHover(self: WidgetLayoutTree, point: geometry.PointF) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, .{}, .hover_msgs);
+    }
+
+    pub fn hitTestHoverWithTokens(self: WidgetLayoutTree, point: geometry.PointF, tokens: DesignTokens) ?WidgetHit {
+        return widget_routing.hitTestWidgetLayoutWithPolicy(self, point, tokens, .hover_msgs);
+    }
+
     pub fn cursorForHit(self: WidgetLayoutTree, hit: ?WidgetHit) WidgetCursor {
         _ = self;
         return widget_access.cursorForWidgetHit(hit);
@@ -99,6 +136,17 @@ pub const WidgetLayoutTree = struct {
     pub fn hoverTargetForHit(self: WidgetLayoutTree, hit: ?WidgetHit) ?WidgetHit {
         const raw = hit orelse return null;
         return widget_routing.widgetHoverTargetForHit(self, raw);
+    }
+
+    /// The hover-Msg containment chain for a raw hit (see
+    /// `widget_routing.widgetHoverMsgChainFromNode`): every live
+    /// hover-listening widget on the hit path, outermost first. Null
+    /// (or an off-tree) hit yields the empty chain — the pointer
+    /// stands inside no listener.
+    pub fn hoverMsgChainForHit(self: WidgetLayoutTree, hit: ?WidgetHit, output: []ObjectId) []const ObjectId {
+        const raw = hit orelse return output[0..0];
+        if (raw.index >= self.nodes.len) return output[0..0];
+        return widget_routing.widgetHoverMsgChainFromNode(self, raw.index, output);
     }
 
     pub fn routePointerEvent(self: WidgetLayoutTree, event: WidgetPointerEvent, output: []WidgetEventRouteEntry) Error!WidgetEventRoute {
@@ -127,6 +175,15 @@ pub const WidgetLayoutTree = struct {
 
     pub fn focusTargetById(self: WidgetLayoutTree, id: ObjectId) ?WidgetFocusTarget {
         return widget_routing.focusWidgetTargetById(self, id, widgetScrollSemantics);
+    }
+
+    /// Native visible-focus capability; includes ancestor clipping.
+    pub fn focusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+        return widget_routing.focusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
+    }
+
+    pub fn logicalFocusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+        return widget_routing.logicalFocusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
     }
 
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
@@ -172,9 +229,10 @@ pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []Widget
 }
 
 pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens: DesignTokens, output: []WidgetLayoutNode) Error!WidgetLayoutTree {
+    const root_bounds = bounds.normalized();
     var len: usize = 0;
-    _ = try widget_layout.layoutWidgetDepth(widget, bounds.normalized(), null, 0, output, &len, tokens);
-    return .{ .nodes = output[0..len] };
+    _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
+    return .{ .nodes = output[0..len], .root_bounds = root_bounds, .semantic_policy = tokens.intrinsic_layout_policy, .audit_policy = tokens.widget_audit_policy, .routing_policy = tokens.widget_routing_policy, .change_policy = tokens.widget_change_policy, .retention_policy = tokens.widget_retention_policy, .text_run_policy = tokens.text_run_policy, .paint_policy = tokens.widget_paint_policy, .presentation_policy = tokens.widget_presentation_policy, .paint_walk_policy = tokens.widget_paint_walk_policy };
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {

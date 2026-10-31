@@ -54,7 +54,6 @@ pub const SigningConfig = struct {
     identity: ?[]const u8 = null,
     entitlements: ?[]const u8 = null,
     profile: ?[]const u8 = null,
-    team_id: ?[]const u8 = null,
 };
 
 pub const PackageOptions = struct {
@@ -62,13 +61,34 @@ pub const PackageOptions = struct {
     target: PackageTarget = .macos,
     optimize: []const u8 = "Debug",
     output_path: []const u8,
+    /// Project root used to resolve app.zon-relative packaging inputs such
+    /// as a custom DMG background. The CLI derives it from --manifest.
+    project_dir: []const u8 = ".",
     binary_path: ?[]const u8 = null,
+    /// Phase-1 TypeScript service host. Desktop packages place this next
+    /// to the app executable so the generated runner can resolve it by
+    /// sibling name and both executables enter the signing boundary.
+    service_binary_path: ?[]const u8 = null,
     assets_dir: []const u8 = "assets",
     frontend: ?manifest_tool.FrontendMetadata = null,
     web_engine: WebEngine = .system,
+    /// The `--web-layer` flag, when the caller passed one: beats app.zon's
+    /// `.webview_layer` the same way `-Dweb-layer` beats it in the build
+    /// graph. The standard build graphs always pass their RESOLVED layer
+    /// decision here (include|exclude), so a graph-driven package never
+    /// re-infers what the graph already compiled into the exe. Null means
+    /// the manifest field decides.
+    web_layer_setting: ?manifest_tool.WebViewLayerSetting = null,
     cef_dir: []const u8 = web_engine_tool.default_cef_dir,
     signing: SigningConfig = .{},
     archive: bool = false,
+    /// Submit the final macOS distribution artifact to Apple's notary service,
+    /// then staple and validate its ticket. Requires identity signing and a
+    /// notarytool Keychain profile in `signing.profile`.
+    notarize: bool = false,
+    /// Emit the ZIP consumed by the native updater. macOS only; unlike the
+    /// user-facing DMG, this archive contains exactly the packaged .app.
+    update_archive: bool = false,
     /// The process environment, when the caller has one (the CLI). The
     /// Android artifact probes it for the SDK/NDK toolchain to assemble
     /// the debug APK; without it the generated project is still complete
@@ -77,15 +97,102 @@ pub const PackageOptions = struct {
     env_map: ?*std.process.Environ.Map = null,
 };
 
+/// Whether the app source tree declares the TypeScript service class. This
+/// guards CLI auto-discovery so a stale installed helper is never added to a
+/// package after the app's services have been removed.
+pub fn projectHasTypeScriptServices(allocator: std.mem.Allocator, io: std.Io, project_dir: []const u8) !bool {
+    const services_path = try std.fs.path.join(allocator, &.{ project_dir, "src", "services" });
+    defer allocator.free(services_path);
+    var dir = std.Io.Dir.cwd().openDir(io, services_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".ts") and
+            !std.mem.endsWith(u8, entry.basename, ".d.ts")) return true;
+    }
+    return false;
+}
+
+/// Locate the service host installed by a normal `native build`. Explicit
+/// package inputs still win; this is the CLI's no-flag fallback twin of the
+/// main executable discovery.
+pub fn discoverInstalledServiceBinary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    project_dir: []const u8,
+    app_name: []const u8,
+    target: PackageTarget,
+) !?[]const u8 {
+    const suffix: []const u8 = if (target == .windows) ".exe" else "";
+    const file_name = try std.fmt.allocPrint(allocator, "{s}_services{s}", .{ app_name, suffix });
+    defer allocator.free(file_name);
+    const candidate = try std.fs.path.join(allocator, &.{ project_dir, "zig-out", "bin", file_name });
+    var file = std.Io.Dir.cwd().openFile(io, candidate, .{}) catch {
+        allocator.free(candidate);
+        return null;
+    };
+    file.close(io);
+    return candidate;
+}
+
+/// The Windows subsystem verdict the packaging posture check reaches:
+/// `gui` and `console` only when the PE optional header actually said
+/// so, `unknown` when the probe proved nothing — non-PE or truncated
+/// bytes, a headerless image, an `e_lfanew` past the header ceiling, a
+/// benign read error, or some other declared subsystem entirely
+/// (native, EFI, ...). No surface may claim a subsystem the parse
+/// never established.
+pub const WindowsSubsystem = enum { gui, console, unknown };
+
 pub const PackageStats = struct {
     path: []const u8,
     artifact_name: []const u8 = "",
     target: PackageTarget = .macos,
     signing_mode: SigningMode = .none,
+    /// True when a signing mode that claims to sign (adhoc or identity)
+    /// ran AND the result passed `codesign --verify --deep --strict`:
+    /// the proof behind the report's "signed, verified" line. A package
+    /// whose signing or verification fails never produces stats at all.
+    signing_verified: bool = false,
+    notarized: bool = false,
     asset_count: usize = 0,
     web_engine: WebEngine = .system,
+    web_layer: ?manifest_tool.WebLayer = null,
     archive_path: ?[]const u8 = null,
+    update_archive_path: ?[]const u8 = null,
+    /// The Windows subsystem verdict: `console` when the package
+    /// wrapped a CONSOLE-subsystem exe (the app will flash a terminal
+    /// window behind itself on every launch), `gui` for a GUI-subsystem
+    /// exe, `unknown` when the probe could not establish either, and
+    /// null when the check never ran (non-Windows target, or no binary
+    /// to probe). Release-shaped `native build` exes are GUI-subsystem,
+    /// so console only fires for stale or hand-supplied binaries — the
+    /// packager warns and the report carries the truth (pinned by tests
+    /// over a synthetic PE header).
+    windows_subsystem: ?WindowsSubsystem = null,
 };
+
+/// The web-layer verdict for a package, from the same declare-to-use
+/// inference the build graph runs — fed the RESOLVED engine
+/// (`--web-engine` orelse app.zon, resolved by the CLI before packaging)
+/// so a Chromium flag on a system manifest still ships the layer, and
+/// the RESOLVED layer setting (`--web-layer` orelse app.zon) so a
+/// flag-overridden exe is packaged under the decision it was built with.
+/// Metadata that cannot be inferred (invalid or contradictory
+/// `.webview_layer`) keeps the layer here — `createPackage` refuses
+/// those loudly up front, and the direct artifact helpers must not
+/// silently strip a layer on bad input.
+fn webLayerFor(options: PackageOptions) manifest_tool.WebLayer {
+    return manifest_tool.webLayerResolved(options.metadata, options.web_engine, options.web_layer_setting) catch .{ .enabled = true, .reason = .declared_include };
+}
+
+/// The verdict line's engine half: what web layer this artifact ships.
+fn webLayerEngineName(layer: manifest_tool.WebLayer, target: PackageTarget, web_engine: WebEngine) []const u8 {
+    if (!layer.enabled) return "none";
+    if (web_engine == .chromium) return "chromium";
+    return if (target == .windows) "webview2" else "system";
+}
 
 pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: PackageTarget, optimize: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{s}-{s}-{s}-{s}{s}", .{
@@ -98,20 +205,91 @@ pub fn artifactName(buffer: []u8, metadata: manifest_tool.Metadata, target: Pack
 }
 
 pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) !PackageStats {
+    // Keep the manifest's accessory-app safety invariant at the artifact
+    // boundary too. CLI package verbs and direct callers receive Metadata,
+    // not the typed manifest that `native validate` checks, so without this
+    // guard they could emit LSUIElement=true for an app with no status-item
+    // route back to its hidden windows.
+    if (!options.metadata.dock_visible and !metadataHasCapability(options.metadata, "tray")) {
+        std.debug.print("error: app.zon dock_visible = false requires the \"tray\" capability: an accessory app has no Dock/app-switcher route back to hidden windows - add \"tray\" to .capabilities and install a status item, or keep dock_visible = true (the default)\n", .{});
+        return error.MissingTrayCapability;
+    }
+    // The package boundary of the reject-conflicts contract: an exclude
+    // (from `--web-layer` or app.zon) against declared web content — or
+    // against a resolved Chromium engine — never becomes an artifact.
+    _ = manifest_tool.webLayerResolved(options.metadata, options.web_engine, options.web_layer_setting) catch |err| {
+        switch (err) {
+            error.WebViewLayerConflict => std.debug.print("error: {s}\n", .{if (options.web_layer_setting == .exclude) manifest_tool.web_layer_flag_conflict_message else manifest_tool.web_layer_conflict_message}),
+            error.InvalidWebViewLayer => std.debug.print("error: app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"\n", .{}),
+        }
+        return err;
+    };
     try validateWebEngineTarget(options.target, options.web_engine);
+    if (options.notarize) {
+        if (options.target != .macos) {
+            std.debug.print("error: notarization is supported only for macOS packages\n", .{});
+            return error.UnsupportedNotarizationTarget;
+        }
+        if (options.signing.mode != .identity) {
+            std.debug.print("error: --notarize requires --signing identity and a Developer ID Application certificate\n", .{});
+            return error.NotarizationRequiresIdentity;
+        }
+        if (options.signing.profile == null) {
+            std.debug.print("error: --notarize requires --notary-profile <name>; create it with `xcrun notarytool store-credentials <name>`\n", .{});
+            return error.MissingNotaryProfile;
+        }
+    }
+    if (options.metadata.updates.enabled() and options.target == .macos and options.web_engine == .chromium) {
+        std.debug.print("error: native updates currently require the system macOS host; package with --web-engine system or remove the updates block\n", .{});
+        return error.UnsupportedUpdateHost;
+    }
+    if (options.target == .macos and options.archive) {
+        manifest_tool.validateDmgPackageSettings(options.metadata) catch |err| {
+            std.debug.print("error: app.zon dmg settings are invalid ({s})\n", .{@errorName(err)});
+            return err;
+        };
+        if (try manifest_tool.checkDmgSources(allocator, io, options.project_dir, options.metadata.dmg)) |message| {
+            std.debug.print("error: {s}\n", .{message});
+            return error.InvalidDmgSource;
+        }
+    }
     var stats = switch (options.target) {
         .macos => try createMacosApp(allocator, io, options),
         .windows, .linux => try createDesktopArtifact(allocator, io, options),
         .ios => try createIosArtifact(allocator, io, options),
         .android => try createAndroidArtifact(allocator, io, options),
     };
+    if (options.notarize) {
+        try runNotarization(allocator, io, options.output_path, options.signing.profile.?, true);
+    }
     if (options.archive) {
         const archive_path = try createArchive(allocator, io, options);
         if (archive_path) |path| {
             stats.archive_path = path;
+            if (options.target == .macos and options.signing.mode == .identity) {
+                try signDistributionArtifact(allocator, io, path, options.signing.identity.?);
+            }
+            if (options.notarize) {
+                try runNotarization(allocator, io, path, options.signing.profile.?, false);
+            }
         }
     }
+    if (options.notarize) {
+        stats.notarized = true;
+    }
+    if (options.update_archive) {
+        if (options.target != .macos) return error.UnsupportedUpdateTarget;
+        if (!options.metadata.updates.enabled()) return error.UpdatesNotConfigured;
+        stats.update_archive_path = try createUpdateArchive(allocator, io, options);
+    }
     return stats;
+}
+
+fn metadataHasCapability(metadata: manifest_tool.Metadata, name: []const u8) bool {
+    for (metadata.capabilities) |capability| {
+        if (std.mem.eql(u8, capability, name)) return true;
+    }
+    return false;
 }
 
 fn validateWebEngineTarget(target: PackageTarget, web_engine: WebEngine) !void {
@@ -132,9 +310,45 @@ pub fn printDiagnostic(stats: PackageStats) void {
         .message = std.fmt.bufPrint(&message_buffer, "created {s} artifact at {s}", .{ @tagName(stats.target), stats.path }) catch "created package",
     }, &writer) catch return;
     std.debug.print("{s}\n", .{writer.buffered()});
+    if (stats.web_layer) |layer| {
+        std.debug.print("  web layer: {s} ({s})\n", .{ webLayerEngineName(layer, stats.target, stats.web_engine), layer.sourceText() });
+    }
+    if (stats.signing_verified) {
+        std.debug.print("  signing: {s} (signed, verified)\n", .{@tagName(stats.signing_mode)});
+    }
+    if (stats.notarized) {
+        std.debug.print("  notarization: accepted, stapled, validated\n", .{});
+    }
+    if (stats.windows_subsystem) |subsystem| {
+        switch (subsystem) {
+            .console => std.debug.print("  subsystem: console (a terminal window opens behind the app - rebuild with `native build`)\n", .{}),
+            .gui => std.debug.print("  subsystem: gui\n", .{}),
+            .unknown => std.debug.print("  subsystem: unknown (unrecognized executable format)\n", .{}),
+        }
+    }
     if (stats.archive_path) |archive| {
         std.debug.print("  archive: {s}\n", .{archive});
     }
+    if (stats.update_archive_path) |archive| {
+        std.debug.print("  update archive: {s}\n", .{archive});
+    }
+}
+
+fn createUpdateArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions) ![]const u8 {
+    const parent = std.fs.path.dirname(options.output_path) orelse ".";
+    const archive_name = try std.fmt.allocPrint(allocator, "{s}-{s}-macos-{s}-update.zip", .{ options.metadata.name, options.metadata.version, options.optimize });
+    defer allocator.free(archive_name);
+    const archive_path = try std.fs.path.join(allocator, &.{ parent, archive_name });
+    errdefer allocator.free(archive_path);
+    const app_path = try absolutePathAlloc(allocator, io, options.output_path);
+    defer allocator.free(app_path);
+    const archive_command_path = try absolutePathAlloc(allocator, io, archive_path);
+    defer allocator.free(archive_command_path);
+    if (!runArchiveCommand(io, &.{ "/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app_path, archive_command_path }, null)) {
+        std.debug.print("error: update archive creation failed for {s}\n", .{archive_path});
+        return error.UpdateArchiveFailed;
+    }
+    return archive_path;
 }
 
 pub fn createLocalPackage(io: std.Io, output_path: []const u8) !PackageStats {
@@ -167,6 +381,12 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     } else {
         try writeFile(package_dir, io, "Contents/MacOS/README.txt", "No app binary was supplied for this local package.\n");
     }
+    if (options.service_binary_path) |service_binary_path| {
+        const service_subpath = try std.fmt.allocPrint(allocator, "Contents/MacOS/{s}_services", .{executable_name});
+        defer allocator.free(service_subpath);
+        try copyFileToDir(allocator, io, package_dir, service_binary_path, service_subpath);
+        try makeExecutable(package_dir, io, service_subpath);
+    }
 
     const info_plist = try macosInfoPlist(allocator, options.metadata, executable_name);
     defer allocator.free(info_plist);
@@ -178,20 +398,22 @@ pub fn createMacosApp(allocator: std.mem.Allocator, io: std.Io, options: Package
     const bundle_stats = try assets_tool.bundle(allocator, io, options.assets_dir, assets_output);
     try copyMacosIcon(allocator, io, package_dir, options);
     try copyMacosDocumentIcons(allocator, io, package_dir, options.metadata);
-    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count);
+    try writeReport(allocator, package_dir, io, "Contents/Resources/package-manifest.zon", options, executable_name, bundle_stats.asset_count, null);
     if (options.web_engine == .chromium) {
         try cef.ensureLayout(io, options.cef_dir);
         try copyMacosCefRuntime(allocator, io, package_dir, options.cef_dir);
     }
-    try runSigning(allocator, io, package_dir, options);
+    const signing_verified = try runSigning(allocator, io, package_dir, options);
 
     return .{
         .path = options.output_path,
         .artifact_name = std.fs.path.basename(options.output_path),
         .target = .macos,
         .signing_mode = options.signing.mode,
+        .signing_verified = signing_verified,
         .asset_count = bundle_stats.asset_count,
         .web_engine = options.web_engine,
+        .web_layer = webLayerFor(options),
     };
 }
 
@@ -209,17 +431,73 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try allocator.dupe(u8, options.metadata.name);
     defer allocator.free(executable_name);
 
+    // Native-only apps ship no WebView2 loader: their host was compiled
+    // without the embedded web layer, so the loader would be dead bytes
+    // pretending the app can spawn a webview.
+    const wants_webview2_loader = options.target == .windows and options.web_engine == .system and webLayerFor(options).enabled;
+    // The package-time half of the web-layer audit (the build-time half
+    // is tools/audit_web_layer.zig): a Windows exe that references
+    // WebView2Loader.dll was compiled WITH the embedded web layer, so
+    // packaging it loaderless ships an app whose every webview call
+    // fails at runtime. Refuse the mismatch and teach the fix — this
+    // catches exes built under an override the packaging decision never
+    // saw (a stale zig-out binary, a hand-supplied --binary).
+    if (options.target == .windows and !wants_webview2_loader) {
+        if (options.binary_path) |binary_path| {
+            if (try peReferencesWebView2Loader(allocator, io, binary_path)) {
+                std.debug.print("error: {s} references WebView2Loader.dll but this package ships no web layer, so its webviews would fail to spawn - the exe was built with the embedded web layer (for example `zig build -Dweb-layer=include`)\n" ++
+                    "  package with `--web-layer include`, or rebuild the binary to match the packaging decision\n", .{binary_path});
+                return error.WebViewLayerMismatch;
+            }
+        }
+    }
+    // The Linux twin of that guard (the build-time half is the ELF scan
+    // in tools/audit_web_layer.zig): an executable that links WebKitGTK
+    // was compiled WITH the embedded web layer, so packaging it under a
+    // native-only decision ships an app that still demands libwebkitgtk
+    // on every user machine while its webviews would fail to spawn.
+    if (options.target == .linux and options.web_engine == .system and !webLayerFor(options).enabled) {
+        if (options.binary_path) |binary_path| {
+            if (try elfReferencesWebKitGtk(allocator, io, binary_path)) {
+                std.debug.print("error: {s} references WebKitGTK but this package ships no web layer, so its webviews would fail to spawn - the binary was built with the embedded web layer (for example `zig build -Dweb-layer=include`)\n" ++
+                    "  package with `--web-layer include`, or rebuild the binary to match the packaging decision\n", .{binary_path});
+                return error.WebViewLayerMismatch;
+            }
+        }
+    }
+    // The subsystem posture check: `native build` produces GUI-subsystem
+    // release exes on Windows, so a console-subsystem exe here is a stale
+    // zig-out binary or a hand-supplied --binary — packaged as-is it
+    // flashes a terminal window behind the app on every launch. Warn and
+    // carry the truth in the stats/report; the package still builds
+    // (the app works, it just looks unfinished). Null means the check
+    // never ran: a non-Windows target, or no binary to probe.
+    const windows_subsystem: ?WindowsSubsystem = if (options.target == .windows)
+        if (options.binary_path) |binary_path| try peSubsystemVerdictAtPath(allocator, io, binary_path) else null
+    else
+        null;
+    if (windows_subsystem == .console) {
+        std.debug.print("warning[package.console-subsystem]: {s} is a console-subsystem exe, so a terminal window will open behind the app on every launch\n" ++
+            "  rebuild with `native build` (release exes are GUI-subsystem) or pass a GUI-subsystem --binary\n", .{options.binary_path.?});
+    }
     if (options.binary_path) |binary_path| {
         const binary_subpath = try std.fmt.allocPrint(allocator, "bin/{s}", .{executable_name});
         defer allocator.free(binary_subpath);
         try copyFileToDir(allocator, io, dir, binary_path, binary_subpath);
-        if (options.target == .windows and options.web_engine == .system) {
+        if (wants_webview2_loader) {
             try copyWindowsWebView2Loader(allocator, io, dir, options, binary_path);
         }
-    } else if (options.target == .windows and options.web_engine == .system) {
+    } else if (wants_webview2_loader) {
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target, together with the WebView2Loader.dll for its architecture (vendored in the SDK under third_party/webview2/).\n");
     } else {
         try writeFile(dir, io, "bin/README.txt", "Build the app binary separately and place it here for this target.\n");
+    }
+    if (options.service_binary_path) |service_binary_path| {
+        const service_suffix: []const u8 = if (options.target == .windows) ".exe" else "";
+        const service_subpath = try std.fmt.allocPrint(allocator, "bin/{s}_services{s}", .{ options.metadata.name, service_suffix });
+        defer allocator.free(service_subpath);
+        try copyFileToDir(allocator, io, dir, service_binary_path, service_subpath);
+        try makeExecutable(dir, io, service_subpath);
     }
 
     const assets_output = try assetOutputPath(allocator, options.output_path, "resources", options);
@@ -257,8 +535,8 @@ fn createDesktopArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
         try cef.ensureLayoutFor(io, cef_platform, options.cef_dir);
         try copyDesktopCefRuntime(allocator, io, dir, options.target, options.cef_dir);
     }
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, executable_name, bundle_stats.asset_count, windows_subsystem);
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = options.target, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options), .windows_subsystem = windows_subsystem };
 }
 
 /// The iOS host tier: a COMPLETE Xcode project the user never edits —
@@ -307,6 +585,7 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     try dir.createDirPath(io, "Host");
     try writeFile(dir, io, "Host/" ++ ios_tool.host_source_name, ios_tool.host_source);
     try writeFile(dir, io, "Host/" ++ ios_tool.host_header_name, ios_tool.host_header);
+    try writeFile(dir, io, "Host/" ++ ios_tool.host_image_fit_header_name, ios_tool.host_image_fit_header);
     const info_plist = try ios_tool.infoPlistAlloc(allocator, options.metadata);
     defer allocator.free(info_plist);
     try writeFile(dir, io, "Host/Info.plist", info_plist);
@@ -329,8 +608,8 @@ fn createIosArtifact(allocator: std.mem.Allocator, io: std.Io, options: PackageO
     const readme = try iosProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
-    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
+    return .{ .path = options.output_path, .artifact_name = std.fs.path.basename(options.output_path), .target = .ios, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
 }
 
 fn iosProjectReadme(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
@@ -391,13 +670,13 @@ fn createAndroidArtifact(allocator: std.mem.Allocator, io: std.Io, options: Pack
     const readme = try androidProjectReadme(allocator, options.metadata);
     defer allocator.free(readme);
     try writeFile(dir, io, "README.md", readme);
-    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count);
+    try writeReport(allocator, dir, io, "package-manifest.zon", options, "libnative-sdk.a", bundle_stats.asset_count, null);
 
     var artifact_name: []const u8 = std.fs.path.basename(options.output_path);
     if (try assembleAndroidApk(allocator, io, options)) |apk_name| {
         artifact_name = apk_name;
     }
-    return .{ .path = options.output_path, .artifact_name = artifact_name, .target = .android, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine };
+    return .{ .path = options.output_path, .artifact_name = artifact_name, .target = .android, .asset_count = bundle_stats.asset_count, .web_engine = options.web_engine, .web_layer = webLayerFor(options) };
 }
 
 /// Assemble the debug APK inside the generated project when the caller
@@ -496,10 +775,10 @@ fn assetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, resour
 /// app-relative path — Resources/assets by default — so a relative asset
 /// path the app uses at runtime ("assets/music/track.mp3") names the
 /// same file inside the bundle that it names in a dev run: the packaged
-/// macOS host resolves relative asset paths against Resources. An
-/// absolute or parent-escaping --assets directory has no app-relative
-/// meaning a packaged process could resolve, so it keeps the flat
-/// Resources layout.
+/// generated runner and macOS host resolve relative asset paths against
+/// Resources. An absolute or parent-escaping --assets directory has no
+/// app-relative meaning a packaged process could resolve, so it keeps the
+/// flat Resources layout.
 fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
     if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "Contents/Resources", options);
     if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
@@ -539,6 +818,12 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
     defer allocator.free(document_types);
     const url_types = try macosUrlTypes(allocator, metadata);
     defer allocator.free(url_types);
+    const privacy_descriptions = try macosPrivacyUsageDescriptions(allocator, metadata);
+    defer allocator.free(privacy_descriptions);
+    const launch_policy = if (!metadata.dock_visible)
+        "  <key>LSUIElement</key>\n  <true/>\n"
+    else
+        "";
     // The About panel's bottom line in packaged bundles: the manifest
     // description rides NSHumanReadableCopyright, the plist key the
     // standard About panel renders as its footer text — the same line
@@ -575,11 +860,51 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\  <string>{s}</string>
         \\  <key>CFBundleVersion</key>
         \\  <string>{s}</string>
-        \\{s}{s}{s}
+        \\{s}{s}{s}{s}{s}
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, about_line, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, version, version, launch_policy, about_line, privacy_descriptions, document_types, url_types });
+}
+
+fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
+    for (metadata.permissions) |permission| {
+        if (std.mem.eql(u8, permission, name)) return true;
+    }
+    return false;
+}
+
+/// Privacy usage strings are generated from the manifest's explicit capture
+/// permissions. ScreenCaptureKit historically uses the screen-recording
+/// consent surface for desktop audio; newer macOS also recognizes the
+/// audio-only usage key, so system capture declares both.
+fn macosPrivacyUsageDescriptions(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+    const microphone = metadataHasPermission(metadata, "microphone");
+    const system_audio = metadataHasPermission(metadata, "system_audio");
+    if (!microphone and !system_audio) return allocator.dupe(u8, "");
+    const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
+    defer allocator.free(display_name);
+    if (microphone and system_audio) return std.fmt.allocPrint(allocator,
+        \\  <key>NSMicrophoneUsageDescription</key>
+        \\  <string>{s} captures microphone audio when you start recording.</string>
+        \\  <key>NSAudioCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\  <key>NSScreenCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\
+    , .{ display_name, display_name, display_name });
+    if (microphone) return std.fmt.allocPrint(allocator,
+        \\  <key>NSMicrophoneUsageDescription</key>
+        \\  <string>{s} captures microphone audio when you start recording.</string>
+        \\
+    , .{display_name});
+    return std.fmt.allocPrint(allocator,
+        \\  <key>NSAudioCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\  <key>NSScreenCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\
+    , .{ display_name, display_name });
 }
 
 /// The optional NSHumanReadableCopyright entry (with trailing newline)
@@ -961,6 +1286,182 @@ fn copyWindowsWebView2Loader(allocator: std.mem.Allocator, io: std.Io, dir: std.
     try copyFileToDir(allocator, io, dir, loader_path, "bin/WebView2Loader.dll");
 }
 
+/// Whether a Windows executable carries the embedded web layer: the host
+/// loads WebView2Loader.dll through LoadLibraryW, so the honest evidence
+/// is the loader's name in the binary — stored as UTF-16 in a web build
+/// and compiled out entirely (with the whole layer) in a native-only
+/// build. The same probe as the build-time auditor
+/// (tools/audit_web_layer.zig); a non-PE file proves nothing about the
+/// layer, so it scans as false rather than refusing the package.
+fn peReferencesWebView2Loader(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = try readPath(allocator, io, path);
+    defer allocator.free(bytes);
+    if (bytes.len < 0x40 or bytes[0] != 'M' or bytes[1] != 'Z') return false;
+    const pe_offset: usize = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
+    if (pe_offset + 4 > bytes.len) return false;
+    if (!std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return false;
+    const needle_ascii = "WebView2Loader.dll";
+    var needle_wide: [needle_ascii.len * 2]u8 = undefined;
+    for (needle_ascii, 0..) |ch, index| {
+        needle_wide[index * 2] = ch;
+        needle_wide[index * 2 + 1] = 0;
+    }
+    return std.mem.indexOf(u8, bytes, &needle_wide) != null or
+        std.mem.indexOf(u8, bytes, needle_ascii) != null;
+}
+
+/// The Windows subsystem a PE executable declares (IMAGE_OPTIONAL_HEADER
+/// Subsystem: 2 = GUI, 3 = console), or null when the file is not a PE
+/// with an optional header large enough to say. The packaging check
+/// reads this because a console-subsystem GUI app flashes a terminal
+/// window behind itself on every launch — `native build` produces
+/// GUI-subsystem release exes, so a console one here means a stale or
+/// hand-built binary.
+pub fn peSubsystem(bytes: []const u8) ?u16 {
+    if (bytes.len < 0x40 or bytes[0] != 'M' or bytes[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, bytes[0x3c..0x40], .little);
+    if (pe_offset + 24 > bytes.len) return null;
+    if (!std.mem.eql(u8, bytes[pe_offset..][0..4], "PE\x00\x00")) return null;
+    const optional_size = std.mem.readInt(u16, bytes[pe_offset + 20 ..][0..2], .little);
+    // Subsystem sits 68 bytes into the optional header (same offset in
+    // PE32 and PE32+).
+    if (optional_size < 70) return null;
+    const subsystem_offset = pe_offset + 24 + 68;
+    if (subsystem_offset + 2 > bytes.len) return null;
+    return std.mem.readInt(u16, bytes[subsystem_offset..][0..2], .little);
+}
+
+const pe_subsystem_gui: u16 = 2;
+const pe_subsystem_console: u16 = 3;
+
+/// The farthest into a file a real executable's PE header is allowed to
+/// start for the subsystem probe: linkers place `e_lfanew` right after
+/// the DOS stub (well under a page), so an offset past this ceiling is
+/// not a real Windows exe and proves nothing about the subsystem —
+/// exactly like non-PE bytes.
+const max_pe_header_offset: usize = 1024 * 1024;
+
+/// The Subsystem field's distance past the PE signature: 24 header
+/// bytes (signature + COFF), then 68 bytes into the optional header,
+/// plus the field's own 2 bytes.
+const pe_subsystem_span: usize = 24 + 70;
+
+/// `peSubsystem` over a file, reading ONLY the headers: the DOS header
+/// names where the PE header starts (`e_lfanew` at 0x3c), and the
+/// Subsystem field sits a fixed `pe_subsystem_span` past that — so
+/// `min(file size, e_lfanew + span)` bytes bound the read no matter how
+/// large the executable is. The whole-file slurp this replaces
+/// (`readPath`, capped at 128 MiB) allocated the entire binary to read
+/// 2 bytes and silently skipped exes over its cap.
+fn peSubsystemAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !?u16 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var read_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buffer);
+    var dos_header: [0x40]u8 = undefined;
+    if (try reader.interface.readSliceShort(&dos_header) < dos_header.len) return null;
+    if (dos_header[0] != 'M' or dos_header[1] != 'Z') return null;
+    const pe_offset: usize = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
+    if (pe_offset > max_pe_header_offset) return null;
+    const bytes = try allocator.alloc(u8, pe_offset + pe_subsystem_span);
+    defer allocator.free(bytes);
+    @memcpy(bytes[0..dos_header.len], &dos_header);
+    const rest = try reader.interface.readSliceShort(bytes[dos_header.len..]);
+    return peSubsystem(bytes[0 .. dos_header.len + rest]);
+}
+
+/// The posture check's verdict over a file: only a parsed Subsystem of
+/// GUI (2) or console (3) earns a named claim; everything else — a file
+/// the parse proves non-PE or headerless, an unreadable file, or a
+/// declared subsystem this check does not model (native, EFI, ...) —
+/// is honestly `unknown`. OutOfMemory still propagates: an allocation
+/// failure says nothing about the exe.
+fn peSubsystemVerdictAtPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !WindowsSubsystem {
+    const subsystem = peSubsystemAtPath(allocator, io, path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .unknown,
+    };
+    return switch (subsystem orelse return .unknown) {
+        pe_subsystem_gui => .gui,
+        pe_subsystem_console => .console,
+        else => .unknown,
+    };
+}
+
+/// Whether a Linux executable carries the embedded web layer: the GTK
+/// host links webkitgtk-6.0 directly, so the honest evidence is a
+/// libwebkitgtk/libjavascriptcoregtk DT_NEEDED entry or a webkit_*/jsc_*
+/// dynamic-symbol name — all removed by the WebKitGTK compile seam in a
+/// native-only build. The same probe as the build-time auditor
+/// (tools/audit_web_layer.zig), hand-rolled over the section headers;
+/// a non-ELF file (or one this minimal parse cannot walk) proves
+/// nothing about the layer, so it scans as false rather than refusing
+/// the package.
+fn elfReferencesWebKitGtk(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const bytes = try readPath(allocator, io, path);
+    defer allocator.free(bytes);
+    return elfBytesReferenceWebKitGtk(bytes);
+}
+
+fn elfBytesReferenceWebKitGtk(bytes: []const u8) bool {
+    // ELF64 little endian only — every Linux target this toolkit builds.
+    if (bytes.len < 0x40 or !std.mem.eql(u8, bytes[0..4], "\x7fELF")) return false;
+    if (bytes[4] != 2 or bytes[5] != 1) return false;
+    const sh_offset: u64 = std.mem.readInt(u64, bytes[0x28..0x30], .little);
+    const sh_entsize: u16 = std.mem.readInt(u16, bytes[0x3a..0x3c], .little);
+    const sh_count: u16 = std.mem.readInt(u16, bytes[0x3c..0x3e], .little);
+    if (sh_offset == 0 or sh_count == 0 or sh_entsize < 0x40) return false;
+
+    var index: u16 = 0;
+    while (index < sh_count) : (index += 1) {
+        const header = elfSectionSlice(bytes, sh_offset + @as(u64, index) * sh_entsize, 0x40) orelse return false;
+        const sh_type = std.mem.readInt(u32, header[0x04..0x08], .little);
+        const link = std.mem.readInt(u32, header[0x28..0x2c], .little);
+        const offset = std.mem.readInt(u64, header[0x18..0x20], .little);
+        const size = std.mem.readInt(u64, header[0x20..0x28], .little);
+        const entsize = std.mem.readInt(u64, header[0x38..0x40], .little);
+        // SHT_DYNAMIC = 6, SHT_DYNSYM = 11.
+        if (sh_type != 6 and sh_type != 11) continue;
+        if (link >= sh_count) continue;
+        const link_header = elfSectionSlice(bytes, sh_offset + @as(u64, link) * sh_entsize, 0x40) orelse return false;
+        const strtab = elfSectionSlice(bytes, std.mem.readInt(u64, link_header[0x18..0x20], .little), std.mem.readInt(u64, link_header[0x20..0x28], .little)) orelse return false;
+        const table = elfSectionSlice(bytes, offset, size) orelse return false;
+        if (sh_type == 6) {
+            var cursor: usize = 0;
+            while (cursor + 16 <= table.len) : (cursor += 16) {
+                const tag: i64 = @bitCast(std.mem.readInt(u64, table[cursor..][0..8], .little));
+                if (tag != 1) continue; // DT_NEEDED
+                const name = elfStringAt(strtab, std.mem.readInt(u64, table[cursor + 8 ..][0..8], .little)) orelse continue;
+                if (std.mem.indexOf(u8, name, "webkitgtk") != null or std.mem.indexOf(u8, name, "javascriptcoregtk") != null) return true;
+            }
+        } else {
+            const stride: usize = if (entsize >= 24) @intCast(entsize) else 24;
+            var cursor: usize = 0;
+            while (cursor + 24 <= table.len) : (cursor += stride) {
+                const name_offset: u32 = std.mem.readInt(u32, table[cursor..][0..4], .little);
+                if (name_offset == 0) continue;
+                const name = elfStringAt(strtab, name_offset) orelse continue;
+                if (std.mem.startsWith(u8, name, "webkit_") or std.mem.startsWith(u8, name, "jsc_")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn elfSectionSlice(bytes: []const u8, offset: u64, size: u64) ?[]const u8 {
+    if (offset > bytes.len) return null;
+    const start: usize = @intCast(offset);
+    if (size > bytes.len - start) return null;
+    return bytes[start .. start + @as(usize, @intCast(size))];
+}
+
+fn elfStringAt(strtab: []const u8, offset: u64) ?[]const u8 {
+    if (offset >= strtab.len) return null;
+    const start: usize = @intCast(offset);
+    const end = std.mem.indexOfScalarPos(u8, strtab, start, 0) orelse return null;
+    return strtab[start..end];
+}
+
 /// Whether a PE executable targets arm64, read from the COFF machine
 /// field. Anything unrecognized falls back to x64, the default Windows
 /// build target.
@@ -1002,11 +1503,13 @@ fn readPath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return reader.interface.allocRemaining(allocator, .limited(128 * 1024 * 1024));
 }
 
-fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize) !void {
+fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpath: []const u8, options: PackageOptions, executable_name: []const u8, asset_count: usize, windows_subsystem: ?WindowsSubsystem) !void {
     const capabilities = try capabilityLines(allocator, options.metadata.capabilities);
     defer allocator.free(capabilities);
     const frontend = try frontendLines(allocator, options.frontend);
     defer allocator.free(frontend);
+    const subsystem = try subsystemLine(allocator, windows_subsystem);
+    defer allocator.free(subsystem);
     const artifact = try zonStringAlloc(allocator, std.fs.path.basename(options.output_path));
     defer allocator.free(artifact);
     const target = try zonStringAlloc(allocator, @tagName(options.target));
@@ -1021,6 +1524,15 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
     defer allocator.free(optimize);
     const web_engine = try zonStringAlloc(allocator, @tagName(options.web_engine));
     defer allocator.free(web_engine);
+    // The web-layer verdict the artifact was staged under, in the same
+    // "engine (source)" shape the package diagnostic prints — e.g.
+    // "none (inferred: nothing in app.zon declares web use)" or
+    // "webview2 (declared: capabilities)".
+    const layer = webLayerFor(options);
+    const web_layer_value = try std.fmt.allocPrint(allocator, "{s} ({s})", .{ webLayerEngineName(layer, options.target, options.web_engine), layer.sourceText() });
+    defer allocator.free(web_layer_value);
+    const web_layer = try zonStringAlloc(allocator, web_layer_value);
+    defer allocator.free(web_layer);
     const signing = try zonStringAlloc(allocator, @tagName(options.signing.mode));
     defer allocator.free(signing);
     const report = try std.fmt.allocPrint(allocator,
@@ -1032,8 +1544,9 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         \\  .executable = {s},
         \\  .optimize = {s},
         \\  .web_engine = {s},
+        \\  .web_layer = {s},
         \\  .signing = {s},
-        \\  .asset_count = {d},
+        \\{s}  .asset_count = {d},
         \\{s}
         \\  .capabilities = .{{
         \\{s}
@@ -1048,7 +1561,9 @@ fn writeReport(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, subpat
         executable,
         optimize,
         web_engine,
+        web_layer,
         signing,
+        subsystem,
         asset_count,
         frontend,
         capabilities,
@@ -1068,6 +1583,18 @@ fn capabilityLines(allocator: std.mem.Allocator, capabilities: []const []const u
         try out.appendSlice(allocator, ",\n");
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// The report's subsystem-verdict line, present only when the posture
+/// check actually ran (a Windows package with a binary to probe): the
+/// durable twin of the transient warning[package.console-subsystem],
+/// in the same string style the report's other verdicts use.
+fn subsystemLine(allocator: std.mem.Allocator, windows_subsystem: ?WindowsSubsystem) ![]const u8 {
+    const subsystem = windows_subsystem orelse return allocator.dupe(u8, "");
+    return std.fmt.allocPrint(allocator,
+        \\  .subsystem = "{s}",
+        \\
+    , .{@tagName(subsystem)});
 }
 
 fn frontendLines(allocator: std.mem.Allocator, frontend: ?manifest_tool.FrontendMetadata) ![]const u8 {
@@ -1173,33 +1700,92 @@ fn copyTree(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, d
 /// the signature on the bundle is the proof it happened — and only a
 /// FAILED signing rewrites it, which is safe because a failed codesign
 /// leaves the bundle without a seal to break.
-fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !void {
+/// Returns true when the bundle was signed AND the signature verified —
+/// the value the report's "signed, verified" line states. A signing mode
+/// that claims to sign (adhoc or identity) either delivers a verified
+/// signature or fails the whole package with codesign's own reason:
+/// exiting 0 while shipping an unsigned bundle is the release-breaking
+/// failure this pipeline exists to prevent.
+fn runSigning(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: PackageOptions) !bool {
     const plan_path = "Contents/Resources/signing-plan.txt";
     switch (options.signing.mode) {
-        .none => try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n"),
+        .none => {
+            try writeFile(dir, io, plan_path, "signing=none\nunsigned local package\n");
+            return false;
+        },
         .adhoc => {
             try writeFile(dir, io, plan_path, "signing=adhoc\nad-hoc signed\n");
-            const result = codesign.signAdHoc(io, options.output_path) catch {
+            const result = try codesign.signAdHoc(allocator, io, options.output_path);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=adhoc\ncodesign --sign - failed; bundle is unsigned\n");
+                std.debug.print("error: ad-hoc code signing failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  fix what codesign reports above, or package with `--signing none` if an unsigned bundle is what you want\n", .{ options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
         .identity => {
             const identity = options.signing.identity orelse {
                 try writeFile(dir, io, plan_path, "signing=identity\nno identity provided; bundle is unsigned\n");
-                return;
+                std.debug.print("error: --signing identity needs the identity to sign with, so this package would ship unsigned - pass --identity \"Developer ID Application: Your Name (TEAMID)\"\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{});
+                return error.SigningFailed;
             };
             const plan_text = try std.fmt.allocPrint(allocator, "signing=identity\nsigned with {s}\n", .{identity});
             defer allocator.free(plan_text);
             try writeFile(dir, io, plan_path, plan_text);
-            const result = codesign.signIdentity(io, options.output_path, identity, options.signing.entitlements) catch {
+            const result = try codesign.signIdentity(allocator, io, options.output_path, identity, options.signing.entitlements);
+            defer allocator.free(result.message);
+            if (!result.ok) {
                 try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
-                return;
-            };
-            if (!result.ok) try writeFile(dir, io, plan_path, "signing=identity\ncodesign failed; bundle is unsigned\n");
+                std.debug.print("error: code signing with \"{s}\" failed for {s}, so this package would ship unsigned - codesign said:\n{s}\n  `security find-identity -v -p codesigning` lists the identities this machine can sign with\n", .{ identity, options.output_path, trimmedToolOutput(result.message) });
+                return error.SigningFailed;
+            }
         },
     }
+    // The signature just applied must actually hold — the same strict
+    // deep check an Apple silicon launch effectively runs. A bundle that
+    // signs but does not verify (a stale seal, unsigned nested code) is
+    // a packaging failure, not a report footnote.
+    const verified = try codesign.verify(allocator, io, options.output_path);
+    defer allocator.free(verified.message);
+    if (!verified.ok) {
+        std.debug.print("error: {s} was signed but failed `codesign --verify --deep --strict`, so it would be rejected at launch - codesign said:\n{s}\n  fix what codesign reports above and rerun `native package`\n", .{ options.output_path, trimmedToolOutput(verified.message) });
+        return error.SignatureVerificationFailed;
+    }
+    return true;
+}
+
+fn signDistributionArtifact(allocator: std.mem.Allocator, io: std.Io, path: []const u8, identity: []const u8) !void {
+    const signed = try codesign.signIdentityArtifact(allocator, io, path, identity);
+    defer allocator.free(signed.message);
+    if (!signed.ok) {
+        std.debug.print("error: code signing distribution artifact {s} with \"{s}\" failed:\n{s}\n", .{ path, identity, trimmedToolOutput(signed.message) });
+        return error.SigningFailed;
+    }
+    const verified = try codesign.verifyArtifact(allocator, io, path);
+    defer allocator.free(verified.message);
+    if (!verified.ok) {
+        std.debug.print("error: signed distribution artifact {s} failed strict codesign verification:\n{s}\n", .{ path, trimmedToolOutput(verified.message) });
+        return error.SignatureVerificationFailed;
+    }
+}
+
+fn runNotarization(allocator: std.mem.Allocator, io: std.Io, path: []const u8, profile: []const u8, app_bundle: bool) !void {
+    const result = if (app_bundle)
+        try codesign.notarizeApp(allocator, io, .{ .artifact_path = path, .keychain_profile = profile })
+    else
+        try codesign.notarizeArtifact(allocator, io, .{ .artifact_path = path, .keychain_profile = profile }, null);
+    defer allocator.free(result.message);
+    if (!result.ok) {
+        std.debug.print("error: notarization failed for {s}:\n{s}\n", .{ path, trimmedToolOutput(result.message) });
+        return error.NotarizationFailed;
+    }
+}
+
+/// codesign's output, trimmed of trailing newlines so the teaching
+/// message's fix line lands directly under it (the output itself stays
+/// verbatim).
+fn trimmedToolOutput(output: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, output, "\r\n");
 }
 
 fn hasRegistrationMetadata(metadata: manifest_tool.Metadata) bool {
@@ -1599,18 +2185,490 @@ fn createArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptio
     defer allocator.free(archive_command_path);
 
     const ok = switch (options.target) {
-        .macos => runArchiveCommand(io, &.{ "hdiutil", "create", "-volname", options.metadata.displayName(), "-srcfolder", options.output_path, "-ov", "-format", "UDZO", archive_command_path }, null),
+        .macos => try createMacosDmg(allocator, io, options, archive_command_path),
         .windows => runArchiveCommand(io, &.{ "zip", "-r", archive_command_path, "." }, options.output_path),
         .linux => runArchiveCommand(io, &.{ "tar", "czf", archive_command_path, "-C", options.output_path, "." }, null),
         .ios, .android => unreachable,
     };
 
     if (!ok) {
-        std.debug.print("warning: archive creation failed for {s}\n", .{archive_path});
-        allocator.free(archive_path);
-        return null;
+        std.debug.print("error: archive creation failed for {s}\n", .{archive_path});
+        return error.ArchiveCreationFailed;
     }
     return archive_path;
+}
+
+/// Build the familiar macOS drag-to-Applications image without introducing a
+/// package-time dependency. A writable image is populated first so Finder can
+/// persist its icon-view presentation, then converted to the compressed UDZO
+/// artifact users download. If Finder automation is unavailable (for example
+/// in a headless build worker), the Applications link and background still
+/// ship and only the saved window arrangement is omitted.
+fn createMacosDmg(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions, archive_path: []const u8) !bool {
+    const dmg = options.metadata.dmg;
+    const volume_name = dmg.volume_name orelse options.metadata.displayName();
+    var nonce_bytes: [8]u8 = undefined;
+    std.Io.random(io, &nonce_bytes);
+    const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
+    const work_path = try std.fmt.allocPrint(allocator, "{s}.native-work-{x}", .{ archive_path, nonce });
+    defer allocator.free(work_path);
+    const work_absolute = try absolutePathAlloc(allocator, io, work_path);
+    defer allocator.free(work_absolute);
+    const rw_image_path = try std.fs.path.join(allocator, &.{ work_absolute, "staging.dmg" });
+    defer allocator.free(rw_image_path);
+    const source_path = try std.fs.path.join(allocator, &.{ work_absolute, "source" });
+    defer allocator.free(source_path);
+    const mount_path = try std.fs.path.join(allocator, &.{ work_absolute, "mount" });
+    defer allocator.free(mount_path);
+    const app_path = try absolutePathAlloc(allocator, io, options.output_path);
+    defer allocator.free(app_path);
+
+    var cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, work_path);
+    var work_dir = try cwd.openDir(io, work_path, .{});
+    defer work_dir.close(io);
+    try work_dir.createDirPath(io, "source");
+    try work_dir.createDirPath(io, "mount");
+
+    var attached = false;
+    defer {
+        if (attached) {
+            if (runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", mount_path }, null) or
+                runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", "-force", mount_path }, null))
+            {
+                attached = false;
+            } else {
+                std.debug.print("warning: could not detach temporary DMG at {s}; leaving {s} for manual cleanup\n", .{ mount_path, work_path });
+            }
+        }
+        if (!attached) cwd.deleteTree(io, work_path) catch {};
+    }
+
+    const app_name = try dmgAppBundleNameAlloc(allocator, options.metadata);
+    defer allocator.free(app_name);
+    var source_dir = try cwd.openDir(io, source_path, .{});
+    defer source_dir.close(io);
+    try stageDmgItems(allocator, io, options, source_dir, source_path, app_path, app_name);
+
+    const retina_background_source = try dmgRetinaBackgroundSourceAlloc(allocator, io, options.project_dir, dmg.background);
+    defer if (retina_background_source) |path| allocator.free(path);
+    const background_name = try dmgBackgroundNameAlloc(allocator, dmg.background, retina_background_source != null);
+    defer allocator.free(background_name);
+    try stageDmgBackground(allocator, io, options, source_dir, source_path, background_name, retina_background_source);
+
+    // Finder persists portable window presentation in the volume's
+    // `.DS_Store` on HFS+. With hdiutil's current APFS default, the same
+    // successful AppleScript can leave no metadata in the image at all.
+    if (!runArchiveCommand(io, &.{ "hdiutil", "create", "-quiet", "-volname", volume_name, "-srcfolder", source_path, "-ov", "-format", "UDRW", "-fs", "HFS+", rw_image_path }, null)) return false;
+    if (!runArchiveCommand(io, &.{ "hdiutil", "attach", "-quiet", rw_image_path, "-mountpoint", mount_path, "-nobrowse", "-noverify", "-noautoopen" }, null)) return false;
+    attached = true;
+
+    const finder_script = try dmgFinderScriptAlloc(allocator, dmg, mount_path, app_name, background_name);
+    defer allocator.free(finder_script);
+    if (!runArchiveCommand(io, &.{ "osascript", "-e", finder_script }, null)) {
+        std.debug.print("warning: Finder could not save the DMG window layout; the image still includes its configured items and background\n", .{});
+    } else if (!try waitForDmgFinderMetadata(allocator, io, mount_path)) {
+        std.debug.print("warning: Finder returned success but did not persist the DMG window layout; the image still includes its configured items and background\n", .{});
+    }
+
+    if (!runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", mount_path }, null)) {
+        if (!runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", "-force", mount_path }, null)) return false;
+    }
+    attached = false;
+    return runArchiveCommand(io, &.{ "hdiutil", "convert", "-quiet", rw_image_path, "-ov", "-format", "UDZO", "-imagekey", "zlib-level=9", "-o", archive_path }, null);
+}
+
+fn dmgAppBundleNameAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]u8 {
+    var buffer: [255]u8 = undefined;
+    return allocator.dupe(u8, try manifest_tool.dmgAppBundleName(&buffer, metadata));
+}
+
+fn stageDmgItems(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: PackageOptions,
+    source_dir: std.Io.Dir,
+    source_path: []const u8,
+    app_path: []const u8,
+    app_name: []const u8,
+) !void {
+    const app_destination = try std.fs.path.join(allocator, &.{ source_path, app_name });
+    defer allocator.free(app_destination);
+    if (!runArchiveCommand(io, &.{ "ditto", app_path, app_destination }, null)) {
+        std.debug.print("error: packaged app could not be staged in the DMG\n", .{});
+        return error.DmgItemCopyFailed;
+    }
+
+    const dmg = options.metadata.dmg;
+    if (dmg.items.len == 0) {
+        if (dmg.applications_link) try source_dir.symLink(io, "/Applications", "Applications", .{ .is_directory = true });
+        return;
+    }
+
+    for (dmg.items) |item| switch (item.kind) {
+        .app => {},
+        .applications => try source_dir.symLink(io, "/Applications", "Applications", .{ .is_directory = true }),
+        .file => {
+            const item_path = item.path orelse return error.InvalidDmgItem;
+            const item_name = manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem;
+            if (std.ascii.eqlIgnoreCase(item_name, app_name)) {
+                std.debug.print("error: DMG item {s} conflicts with the packaged app name\n", .{item_name});
+                return error.DuplicateDmgItem;
+            }
+            const item_source = try std.fs.path.join(allocator, &.{ options.project_dir, item_path });
+            defer allocator.free(item_source);
+            const item_destination = try std.fs.path.join(allocator, &.{ source_path, item_name });
+            defer allocator.free(item_destination);
+            if (!runArchiveCommand(io, &.{ "ditto", item_source, item_destination }, null)) {
+                std.debug.print("error: DMG item {s} could not be copied from {s}\n", .{ item_name, item_source });
+                return error.DmgItemCopyFailed;
+            }
+        },
+        .link => {
+            const target = item.path orelse return error.InvalidDmgItem;
+            const item_name = manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem;
+            if (std.ascii.eqlIgnoreCase(item_name, app_name)) {
+                std.debug.print("error: DMG item {s} conflicts with the packaged app name\n", .{item_name});
+                return error.DuplicateDmgItem;
+            }
+            try source_dir.symLink(io, target, item_name, .{ .is_directory = true });
+        },
+    };
+}
+
+fn dmgRetinaBackgroundSourceAlloc(allocator: std.mem.Allocator, io: std.Io, project_dir: []const u8, background: ?[]const u8) !?[]const u8 {
+    const path = background orelse return null;
+    const retina_relative = (try manifest_tool.dmgRetinaRelativePathAlloc(allocator, path)) orelse return null;
+    defer allocator.free(retina_relative);
+    const retina_source = try std.fs.path.join(allocator, &.{ project_dir, retina_relative });
+    errdefer allocator.free(retina_source);
+    var file = std.Io.Dir.cwd().openFile(io, retina_source, .{}) catch {
+        allocator.free(retina_source);
+        return null;
+    };
+    file.close(io);
+    return retina_source;
+}
+
+fn stageDmgBackground(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: PackageOptions,
+    source_dir: std.Io.Dir,
+    source_path: []const u8,
+    background_name: []const u8,
+    retina_background_source: ?[]const u8,
+) !void {
+    const dmg = options.metadata.dmg;
+    try source_dir.createDirPath(io, ".background");
+    const output_path = try std.fs.path.join(allocator, &.{ source_path, ".background", background_name });
+    defer allocator.free(output_path);
+
+    if (dmg.background) |background| {
+        const background_source = try std.fs.path.join(allocator, &.{ options.project_dir, background });
+        defer allocator.free(background_source);
+        if (retina_background_source) |retina_source| {
+            const extension = std.fs.path.extension(background);
+            const one_x_name = try std.fmt.allocPrint(allocator, "background{s}", .{extension});
+            defer allocator.free(one_x_name);
+            const two_x_name = try std.fmt.allocPrint(allocator, "background@2x{s}", .{extension});
+            defer allocator.free(two_x_name);
+            const one_x_subpath = try std.fs.path.join(allocator, &.{ ".background", one_x_name });
+            defer allocator.free(one_x_subpath);
+            const two_x_subpath = try std.fs.path.join(allocator, &.{ ".background", two_x_name });
+            defer allocator.free(two_x_subpath);
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), background_source, source_dir, one_x_subpath, io, .{ .make_path = true, .replace = true });
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), retina_source, source_dir, two_x_subpath, io, .{ .make_path = true, .replace = true });
+            const one_x_path = try std.fs.path.join(allocator, &.{ source_path, one_x_subpath });
+            defer allocator.free(one_x_path);
+            const two_x_path = try std.fs.path.join(allocator, &.{ source_path, two_x_subpath });
+            defer allocator.free(two_x_path);
+            try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "custom");
+            try source_dir.deleteFile(io, one_x_subpath);
+            try source_dir.deleteFile(io, two_x_subpath);
+        } else {
+            const output_subpath = try std.fs.path.join(allocator, &.{ ".background", background_name });
+            defer allocator.free(output_subpath);
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), background_source, source_dir, output_subpath, io, .{ .make_path = true, .replace = true });
+        }
+        return;
+    }
+
+    const generated_1x = try defaultDmgBackgroundAtScale(allocator, dmg, 1);
+    defer allocator.free(generated_1x);
+    const generated_2x = try defaultDmgBackgroundAtScale(allocator, dmg, 2);
+    defer allocator.free(generated_2x);
+    try source_dir.writeFile(io, .{ .sub_path = ".background/background.png", .data = generated_1x });
+    try source_dir.writeFile(io, .{ .sub_path = ".background/background@2x.png", .data = generated_2x });
+    const one_x_path = try std.fs.path.join(allocator, &.{ source_path, ".background", "background.png" });
+    defer allocator.free(one_x_path);
+    const two_x_path = try std.fs.path.join(allocator, &.{ source_path, ".background", "background@2x.png" });
+    defer allocator.free(two_x_path);
+    try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "generated");
+    try source_dir.deleteFile(io, ".background/background.png");
+    try source_dir.deleteFile(io, ".background/background@2x.png");
+}
+
+fn assembleRetinaDmgBackground(io: std.Io, one_x_path: []const u8, two_x_path: []const u8, output_path: []const u8, kind: []const u8) !void {
+    if (!runArchiveCommandQuiet(io, &.{ "tiffutil", "-cathidpicheck", one_x_path, two_x_path, "-out", output_path }, null)) {
+        std.debug.print("error: could not assemble the {s} 1x/2x DMG background with tiffutil; the @2x image must be exactly twice the base image's dimensions\n", .{kind});
+        return error.DmgBackgroundAssemblyFailed;
+    }
+}
+
+fn dmgBackgroundNameAlloc(allocator: std.mem.Allocator, background: ?[]const u8, has_retina_sibling: bool) ![]const u8 {
+    const extension = if (background) |path| if (has_retina_sibling) ".tiff" else std.fs.path.extension(path) else ".tiff";
+    return std.fmt.allocPrint(allocator, "background{s}", .{extension});
+}
+
+fn defaultDmgBackground(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata) ![]u8 {
+    return defaultDmgBackgroundAtScale(allocator, dmg, 1);
+}
+
+fn defaultDmgBackgroundAtScale(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, scale: usize) ![]u8 {
+    std.debug.assert(scale > 0);
+    const width: usize = @as(usize, dmg.window_width) * scale;
+    const height: usize = @as(usize, dmg.window_height) * scale;
+    const pixels = try allocator.alloc(u8, width * height * 4);
+    defer allocator.free(pixels);
+
+    for (0..height) |y| {
+        const t = if (height > 1) @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(height - 1)) else 0;
+        const shade = [3]u8{
+            @intFromFloat(@round(249.0 - 11.0 * t)),
+            @intFromFloat(@round(250.0 - 11.0 * t)),
+            @intFromFloat(@round(252.0 - 10.0 * t)),
+        };
+        for (0..width) |x| {
+            const offset = (y * width + x) * 4;
+            pixels[offset + 0] = shade[0];
+            pixels[offset + 1] = shade[1];
+            pixels[offset + 2] = shade[2];
+            pixels[offset + 3] = 255;
+        }
+    }
+
+    if (dmgInstallPositions(dmg) != null) drawDmgArrow(pixels, width, height, dmg, scale);
+    return app_icon_tool.encodePng(allocator, pixels, width, height);
+}
+
+fn drawDmgArrow(pixels: []u8, width: usize, height: usize, dmg: manifest_tool.DmgMetadata, scale: usize) void {
+    const install_positions = dmgInstallPositions(dmg) orelse return;
+    const pixel_scale: f32 = @floatFromInt(scale);
+    const app_x = @as(f32, @floatFromInt(install_positions.app.x)) * pixel_scale;
+    const app_y = @as(f32, @floatFromInt(install_positions.app.y)) * pixel_scale;
+    const applications_x = @as(f32, @floatFromInt(install_positions.applications.x)) * pixel_scale;
+    const applications_y = @as(f32, @floatFromInt(install_positions.applications.y)) * pixel_scale;
+    const dx = applications_x - app_x;
+    const dy = applications_y - app_y;
+    const distance = @sqrt(dx * dx + dy * dy);
+    const app_margin = @as(f32, @floatFromInt(dmg.icon_size)) * pixel_scale * 0.64;
+    // Finder's Applications folder glyph is optically wider than a typical
+    // app glyph at the same icon-size setting. Give that end a little more
+    // breathing room so the arrow reads centered between visible edges.
+    const applications_margin = @as(f32, @floatFromInt(dmg.icon_size)) * pixel_scale * 0.71;
+    if (distance <= app_margin + applications_margin + 28.0 * pixel_scale) return;
+    const ux = dx / distance;
+    const uy = dy / distance;
+    const px = -uy;
+    const py = ux;
+    const start_x = app_x + ux * app_margin;
+    const start_y = app_y + uy * app_margin;
+    const end_x = applications_x - ux * applications_margin;
+    const end_y = applications_y - uy * applications_margin;
+    const head_length: f32 = @min(28.0 * pixel_scale, distance * 0.12);
+    const head_width: f32 = head_length * 0.62;
+    const head_x = end_x - ux * head_length;
+    const head_y = end_y - uy * head_length;
+
+    const segments = [3]DmgArrowSegment{
+        .{ .ax = start_x, .ay = start_y, .bx = end_x, .by = end_y },
+        .{ .ax = end_x, .ay = end_y, .bx = head_x + px * head_width, .by = head_y + py * head_width },
+        .{ .ax = end_x, .ay = end_y, .bx = head_x - px * head_width, .by = head_y - py * head_width },
+    };
+    var shadow_segments = segments;
+    for (&shadow_segments) |*segment| {
+        segment.ay += 2 * pixel_scale;
+        segment.by += 2 * pixel_scale;
+    }
+
+    const shadow = [3]u8{ 70, 74, 82 };
+    drawDmgArrowShape(pixels, width, height, &shadow_segments, 8 * pixel_scale, shadow, 0.10);
+
+    const arrow = [3]u8{ 105, 110, 120 };
+    drawDmgArrowShape(pixels, width, height, &segments, 5 * pixel_scale, arrow, 0.58);
+}
+
+const DmgInstallPositions = struct {
+    app: manifest_tool.DmgPosition,
+    applications: manifest_tool.DmgPosition,
+};
+
+fn dmgInstallPositions(dmg: manifest_tool.DmgMetadata) ?DmgInstallPositions {
+    if (dmg.items.len == 0) {
+        if (!dmg.applications_link) return null;
+        return .{ .app = dmg.app_position, .applications = dmg.applications_position };
+    }
+    var app: ?manifest_tool.DmgPosition = null;
+    var applications: ?manifest_tool.DmgPosition = null;
+    for (dmg.items) |item| switch (item.kind) {
+        .app => app = item.position,
+        .applications => applications = item.position,
+        .file, .link => {},
+    };
+    return .{ .app = app orelse return null, .applications = applications orelse return null };
+}
+
+const DmgArrowSegment = struct {
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+};
+
+/// Rasterize the union of rounded line segments and blend it once. Taking the
+/// maximum coverage prevents translucent joins from becoming darker, while
+/// the one-pixel analytic fringe keeps diagonal and rounded edges smooth.
+fn drawDmgArrowShape(pixels: []u8, width: usize, height: usize, segments: []const DmgArrowSegment, thickness: f32, color: [3]u8, alpha: f32) void {
+    if (segments.len == 0 or thickness <= 0 or alpha <= 0) return;
+    const radius = thickness * 0.5;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const fx = @as(f32, @floatFromInt(x)) + 0.5;
+            const fy = @as(f32, @floatFromInt(y)) + 0.5;
+            var nearest_squared = std.math.inf(f32);
+            for (segments) |segment| {
+                const dx = segment.bx - segment.ax;
+                const dy = segment.by - segment.ay;
+                const length_squared = dx * dx + dy * dy;
+                if (length_squared <= 0.001) continue;
+                const projection = std.math.clamp(((fx - segment.ax) * dx + (fy - segment.ay) * dy) / length_squared, 0.0, 1.0);
+                const distance_x = fx - (segment.ax + projection * dx);
+                const distance_y = fy - (segment.ay + projection * dy);
+                nearest_squared = @min(nearest_squared, distance_x * distance_x + distance_y * distance_y);
+            }
+            if (nearest_squared > (radius + 0.5) * (radius + 0.5)) continue;
+            const coverage = std.math.clamp(radius + 0.5 - @sqrt(@max(nearest_squared, 0)), 0.0, 1.0);
+            if (coverage <= 0) continue;
+            const offset = (y * width + x) * 4;
+            const pixel_alpha = alpha * coverage;
+            const inverse = 1.0 - pixel_alpha;
+            pixels[offset + 0] = @intFromFloat(@round(@as(f32, @floatFromInt(color[0])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 0])) * inverse));
+            pixels[offset + 1] = @intFromFloat(@round(@as(f32, @floatFromInt(color[1])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 1])) * inverse));
+            pixels[offset + 2] = @intFromFloat(@round(@as(f32, @floatFromInt(color[2])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 2])) * inverse));
+        }
+    }
+}
+
+fn dmgFinderScriptAlloc(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, mount_path: []const u8, app_name: []const u8, background_name: []const u8) ![]u8 {
+    const escaped_mount = try appleScriptStringAlloc(allocator, mount_path);
+    defer allocator.free(escaped_mount);
+    const background_path = try std.fs.path.join(allocator, &.{ mount_path, ".background", background_name });
+    defer allocator.free(background_path);
+    const escaped_background_path = try appleScriptStringAlloc(allocator, background_path);
+    defer allocator.free(escaped_background_path);
+    const position_lines = try dmgFinderPositionLinesAlloc(allocator, dmg, app_name);
+    defer allocator.free(position_lines);
+    const right = 100 + @as(u32, dmg.window_width);
+    // `bounds` includes Finder's title bar; the manifest dimensions describe
+    // the usable icon/background canvas so artwork stays exactly W×H.
+    const bottom = 100 + @as(u32, dmg.window_height) + 36;
+    const inset_right = right - 10;
+    const inset_bottom = bottom - 10;
+    // Capture the window opened from our mount path immediately. Asking
+    // Finder for the container window by disk name can select an older,
+    // read-only copy of the same app DMG that the developer still has mounted.
+    return std.fmt.allocPrint(allocator,
+        \\tell application "Finder"
+        \\  set dmgFolder to POSIX file "{s}" as alias
+        \\  open dmgFolder
+        \\  set dmgWindow to front window
+        \\  delay 1
+        \\  set current view of dmgWindow to icon view
+        \\  set toolbar visible of dmgWindow to false
+        \\  set statusbar visible of dmgWindow to false
+        \\  set pathbar visible of dmgWindow to false
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  set theViewOptions to the icon view options of dmgWindow
+        \\  set arrangement of theViewOptions to not arranged
+        \\  set icon size of theViewOptions to {d}
+        \\  set text size of theViewOptions to 13
+        \\  set label position of theViewOptions to bottom
+        \\  set background picture of theViewOptions to (POSIX file "{s}" as alias)
+        \\{s}  close dmgWindow
+        \\  open dmgFolder
+        \\  set dmgWindow to front window
+        \\  delay 1
+        \\  set statusbar visible of dmgWindow to false
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  delay 1
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  update dmgFolder without registering applications
+        \\  delay 1
+        \\  close dmgWindow
+        \\  delay 2
+        \\end tell
+    , .{ escaped_mount, right, bottom, dmg.icon_size, escaped_background_path, position_lines, inset_right, inset_bottom, right, bottom });
+}
+
+fn waitForDmgFinderMetadata(allocator: std.mem.Allocator, io: std.Io, mount_path: []const u8) !bool {
+    const ds_store_path = try std.fs.path.join(allocator, &.{ mount_path, ".DS_Store" });
+    defer allocator.free(ds_store_path);
+    const cwd = std.Io.Dir.cwd();
+    for (0..50) |_| {
+        const stat = cwd.statFile(io, ds_store_path, .{}) catch {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch return false;
+            continue;
+        };
+        if (stat.size > 0) return true;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch return false;
+    }
+    return false;
+}
+
+fn dmgFinderPositionLinesAlloc(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, app_name: []const u8) ![]u8 {
+    var lines: std.ArrayList(u8) = .empty;
+    defer lines.deinit(allocator);
+
+    if (dmg.items.len == 0) {
+        try appendDmgFinderPositionLine(allocator, &lines, app_name, dmg.app_position);
+        if (dmg.applications_link) try appendDmgFinderPositionLine(allocator, &lines, "Applications", dmg.applications_position);
+        return lines.toOwnedSlice(allocator);
+    }
+
+    for (dmg.items) |item| {
+        const name = switch (item.kind) {
+            .app => app_name,
+            .applications => "Applications",
+            .file, .link => manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem,
+        };
+        try appendDmgFinderPositionLine(allocator, &lines, name, item.position);
+    }
+    return lines.toOwnedSlice(allocator);
+}
+
+fn appendDmgFinderPositionLine(allocator: std.mem.Allocator, lines: *std.ArrayList(u8), name: []const u8, position: manifest_tool.DmgPosition) !void {
+    const escaped_name = try appleScriptStringAlloc(allocator, name);
+    defer allocator.free(escaped_name);
+    const line = try std.fmt.allocPrint(allocator, "  set position of item \"{s}\" of dmgFolder to {{{d}, {d}}}\n", .{ escaped_name, position.x, position.y });
+    defer allocator.free(line);
+    try lines.appendSlice(allocator, line);
+}
+
+fn appleScriptStringAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(allocator);
+    for (value) |byte| {
+        switch (byte) {
+            '\\', '"' => {
+                try escaped.append(allocator, '\\');
+                try escaped.append(allocator, byte);
+            },
+            '\n', '\r' => try escaped.append(allocator, ' '),
+            else => try escaped.append(allocator, byte),
+        }
+    }
+    return escaped.toOwnedSlice(allocator);
 }
 
 fn absolutePathAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
@@ -1628,6 +2686,22 @@ fn runArchiveCommand(io: std.Io, argv: []const []const u8, cwd: ?[]const u8) boo
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
+    }) catch return false;
+    const term = child.wait(io) catch return false;
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn runArchiveCommandQuiet(io: std.Io, argv: []const []const u8, cwd: ?[]const u8) bool {
+    const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = child_cwd,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
     }) catch return false;
     const term = child.wait(io) catch return false;
     return switch (term) {
@@ -1670,6 +2744,270 @@ test "archive path includes correct suffix per platform" {
     try std.testing.expect(std.mem.endsWith(u8, win_path, ".zip"));
 }
 
+test "default DMG background follows the configured window and draws the install arrow" {
+    const gpa = std.testing.allocator;
+    const dmg: manifest_tool.DmgMetadata = .{
+        .window_width = 420,
+        .window_height = 280,
+        .icon_size = 96,
+        .app_position = .{ .x = 110, .y = 140 },
+        .applications_position = .{ .x = 310, .y = 140 },
+    };
+    const encoded = try defaultDmgBackground(gpa, dmg);
+    defer gpa.free(encoded);
+    const header = app_icon_tool.pngHeader(encoded) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 420), header.width);
+    try std.testing.expectEqual(@as(usize, 280), header.height);
+
+    const retina = try defaultDmgBackgroundAtScale(gpa, dmg, 2);
+    defer gpa.free(retina);
+    const retina_header = app_icon_tool.pngHeader(retina) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 840), retina_header.width);
+    try std.testing.expectEqual(@as(usize, 560), retina_header.height);
+
+    const decoded = try app_icon_tool.decodePng(gpa, encoded);
+    defer decoded.deinit(gpa);
+    const arrow = (140 * decoded.width + 210) * 4;
+    const clear = (140 * decoded.width + 24) * 4;
+    try std.testing.expect(decoded.pixels[arrow] < decoded.pixels[clear]);
+    try std.testing.expect(decoded.pixels[arrow + 1] < decoded.pixels[clear + 1]);
+}
+
+test "DMG arrow unions translucent joins and antialiases rounded edges" {
+    var pixels: [20 * 20 * 4]u8 = @splat(255);
+    const segments = [_]DmgArrowSegment{
+        .{ .ax = 4, .ay = 10, .bx = 12, .by = 10 },
+        .{ .ax = 12, .ay = 10, .bx = 9, .by = 7 },
+        .{ .ax = 12, .ay = 10, .bx = 9, .by = 13 },
+    };
+    drawDmgArrowShape(&pixels, 20, 20, &segments, 5, .{ 0, 0, 0 }, 0.5);
+
+    const joined = (9 * 20 + 11) * 4;
+    try std.testing.expectEqual(@as(u8, 128), pixels[joined]);
+    try std.testing.expectEqual(pixels[joined], pixels[joined + 1]);
+    try std.testing.expectEqual(pixels[joined], pixels[joined + 2]);
+
+    const antialiased_edge = (7 * 20 + 6) * 4;
+    try std.testing.expect(pixels[antialiased_edge] > pixels[joined]);
+    try std.testing.expect(pixels[antialiased_edge] < 255);
+}
+
+test "DMG Finder script carries custom layout and escapes paths and names" {
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{
+        .window_width = 720,
+        .window_height = 440,
+        .icon_size = 144,
+        .app_position = .{ .x = 180, .y = 210 },
+        .applications_position = .{ .x = 540, .y = 210 },
+    }, "/Volumes/Demo \"Installer\"", "Demo \"App\".app", "background.jpeg");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "POSIX file \"/Volumes/Demo \\\"Installer\\\"\" as alias") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set the bounds of dmgWindow to {100, 100, 820, 576}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set the bounds of dmgWindow to {100, 100, 810, 566}") != null);
+    try std.testing.expect(std.mem.count(u8, script, "set the bounds of dmgWindow to {100, 100, 820, 576}") == 2);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, script, "set dmgWindow to front window"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, script, "close dmgWindow"));
+    try std.testing.expect(std.mem.indexOf(u8, script, "delay 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set pathbar visible of dmgWindow to false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set icon size of theViewOptions to 144") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "/Volumes/Demo \\\"Installer\\\"/.background/background.jpeg") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Demo \\\"App\\\".app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\"") != null);
+}
+
+test "DMG Finder script omits the Applications item when its link is disabled" {
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{ .applications_link = false }, "Demo", "Demo.app", "background.png");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\"") == null);
+}
+
+test "DMG Finder script positions the explicit visible item list" {
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 150, .y = 170 } },
+        .{ .kind = .applications, .position = .{ .x = 510, .y = 170 } },
+        .{ .kind = .file, .path = "docs/README.pdf", .name = "Read \"Me\".pdf", .position = .{ .x = 260, .y = 330 } },
+        .{ .kind = .link, .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 400, .y = 330 } },
+    };
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{ .items = &items }, "/Volumes/Demo", "Demo.app", "background.tiff");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Demo.app\" of dmgFolder to {150, 170}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\" of dmgFolder to {510, 170}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Read \\\"Me\\\".pdf\" of dmgFolder to {260, 330}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"QuickLook\" of dmgFolder to {400, 330}") != null);
+}
+
+test "DMG background discovers an adjacent retina source" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-retina";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = "fixture" });
+
+    const retina = (try dmgRetinaBackgroundSourceAlloc(std.testing.allocator, std.testing.io, root, "art/installer.png")).?;
+    defer std.testing.allocator.free(retina);
+    try std.testing.expectEqualStrings(root ++ "/art/installer@2x.png", retina);
+    const background_name = try dmgBackgroundNameAlloc(std.testing.allocator, "art/installer.png", true);
+    defer std.testing.allocator.free(background_name);
+    try std.testing.expectEqualStrings("background.tiff", background_name);
+}
+
+test "assembled DMG background does not retain source images" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-background-cleanup";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/source");
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{
+            .window_width = 320,
+            .window_height = 240,
+            .applications_link = false,
+        },
+    };
+    var source_dir = try cwd.openDir(std.testing.io, root ++ "/source", .{});
+    defer source_dir.close(std.testing.io);
+    try stageDmgBackground(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+    }, source_dir, root ++ "/source", "background.tiff", null);
+
+    var background = try cwd.openFile(std.testing.io, root ++ "/source/.background/background.tiff", .{});
+    background.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background.png", .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background@2x.png", .{}));
+}
+
+test "macOS archive rejects an invalid DMG background before staging the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-invalid-background";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = "not a png" });
+
+    try std.testing.expectError(error.InvalidDmgSource, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.demo",
+            .name = "demo",
+            .display_name = "Demo",
+            .version = "1.0.0",
+            .dmg = .{ .background = "art/installer.png" },
+        },
+        .target = .macos,
+        .output_path = root ++ "/Demo.app",
+        .project_dir = root,
+        .archive = true,
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Demo.app", .{}));
+}
+
+test "macOS archive rejects an app-name collision before staging the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-app-name-collision";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .link, .path = "/Applications", .name = "Demo.app", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.demo",
+            .name = "demo",
+            .display_name = "Demo",
+            .version = "1.0.0",
+            .dmg = .{ .items = &items },
+        },
+        .target = .macos,
+        .output_path = root ++ "/Demo.app",
+        .archive = true,
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Demo.app", .{}));
+}
+
+test "DMG app bundle uses the display name or explicit item override" {
+    const default_name = try dmgAppBundleNameAlloc(std.testing.allocator, .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo/Studio",
+        .version = "1.0.0",
+    });
+    defer std.testing.allocator.free(default_name);
+    try std.testing.expectEqualStrings("Demo-Studio.app", default_name);
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .name = "Branded Installer.app", .position = .{ .x = 170, .y = 182 } },
+    };
+    const overridden = try dmgAppBundleNameAlloc(std.testing.allocator, .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo Studio",
+        .version = "1.0.0",
+        .dmg = .{ .items = &items },
+    });
+    defer std.testing.allocator.free(overridden);
+    try std.testing.expectEqualStrings("Branded Installer.app", overridden);
+}
+
+test "DMG explicit items stage the branded app, project contents, and links" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-items";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/Demo.app/Contents");
+    try cwd.createDirPath(std.testing.io, root ++ "/project/Extras");
+    try cwd.createDirPath(std.testing.io, root ++ "/source");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/Demo.app/Contents/marker", .data = "app" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/project/README.pdf", .data = "readme" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/project/Extras/note.txt", .data = "bonus" });
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .name = "Branded Demo", .position = .{ .x = 150, .y = 170 } },
+        .{ .kind = .applications, .position = .{ .x = 510, .y = 170 } },
+        .{ .kind = .file, .path = "README.pdf", .name = "Read Me.pdf", .position = .{ .x = 220, .y = 330 } },
+        .{ .kind = .file, .path = "Extras", .name = "Bonus", .position = .{ .x = 330, .y = 330 } },
+        .{ .kind = .link, .path = "/Applications", .name = "System Applications", .position = .{ .x = 440, .y = 330 } },
+    };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &items },
+    };
+    try manifest_tool.validateDmgSettings(metadata.dmg);
+    const app_name = try dmgAppBundleNameAlloc(std.testing.allocator, metadata);
+    defer std.testing.allocator.free(app_name);
+    try std.testing.expectEqualStrings("Branded Demo.app", app_name);
+
+    var source_dir = try cwd.openDir(std.testing.io, root ++ "/source", .{});
+    defer source_dir.close(std.testing.io);
+    try stageDmgItems(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .project_dir = root ++ "/project",
+    }, source_dir, root ++ "/source", root ++ "/Demo.app", app_name);
+
+    var app_marker = try cwd.openFile(std.testing.io, root ++ "/source/Branded Demo.app/Contents/marker", .{});
+    app_marker.close(std.testing.io);
+    var readme = try cwd.openFile(std.testing.io, root ++ "/source/Read Me.pdf", .{});
+    readme.close(std.testing.io);
+    var bonus = try cwd.openFile(std.testing.io, root ++ "/source/Bonus/note.txt", .{});
+    bonus.close(std.testing.io);
+    var applications = try cwd.openDir(std.testing.io, root ++ "/source/Applications", .{});
+    applications.close(std.testing.io);
+    var system_applications = try cwd.openDir(std.testing.io, root ++ "/source/System Applications", .{});
+    system_applications.close(std.testing.io);
+}
+
 test "archive command reports nonzero exit" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     try std.testing.expect(!runArchiveCommand(std.testing.io, &.{ "sh", "-c", "exit 7" }, null));
@@ -1686,6 +3024,7 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_text_input_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_text_measure") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_asset_root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_data_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_widget_semantics_by_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "view.safeAreaInsets") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "_dyld_get_image_header_containing_address") != null);
@@ -1711,10 +3050,10 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_text_input_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_text_measure") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_asset_root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_data_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "ANativeWindow_fromSurface") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "WINDOW_FORMAT_RGBA_8888") != null);
 }
-
 
 test "mobile package artifacts use manifest identity metadata" {
     var cwd = std.Io.Dir.cwd();
@@ -1797,6 +3136,14 @@ test "mobile package artifacts use manifest identity metadata" {
     const packaged_activity = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/Host/NativeSdkActivity.java");
     defer std.testing.allocator.free(packaged_activity);
     try std.testing.expectEqualStrings(android_tool.host_activity_source, packaged_activity);
+    // Decode-to-fit must use ceiling-rounded power-of-two samples for
+    // one-pixel panoramas, then enforce the axis cap only after the exact
+    // resize. Checking the emitted host pins both the source asset and the
+    // ordering that keeps an 8193x1 source loadable as 8192x1.
+    try std.testing.expect(std.mem.indexOf(u8, packaged_activity, "int sampledHeight = (sourceHeight - 1) / nextSampleSize + 1;") != null);
+    const exact_fit_index = std.mem.indexOf(u8, packaged_activity, "Bitmap fitted = Bitmap.createScaledBitmap") orelse return error.TestUnexpectedResult;
+    const final_cap_index = std.mem.indexOf(u8, packaged_activity, "if (width > MAX_DECODED_IMAGE_DIMENSION || height > MAX_DECODED_IMAGE_DIMENSION || width > maxPixels / height)") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(exact_fit_index < final_cap_index);
     const packaged_bridge = try readPath(std.testing.allocator, std.testing.io, ".zig-cache/test-package-mobile-identity/android/Host/android_host.c");
     defer std.testing.allocator.free(packaged_bridge);
     try std.testing.expectEqualStrings(android_tool.host_bridge_source, packaged_bridge);
@@ -1935,6 +3282,66 @@ test "plist template includes identity executable and version" {
     const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
     defer std.testing.allocator.free(bare_plist);
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSHumanReadableCopyright") == null);
+}
+
+test "plist capture usage descriptions follow manifest permissions" {
+    const capture_permissions = [_][]const u8{ "microphone", "system_audio" };
+    const capture: manifest_tool.Metadata = .{
+        .id = "dev.example.recorder",
+        .name = "recorder",
+        .display_name = "Audio & Voice",
+        .version = "1.0.0",
+        .permissions = &capture_permissions,
+    };
+    const plist = try macosInfoPlist(std.testing.allocator, capture, "recorder");
+    defer std.testing.allocator.free(plist);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSMicrophoneUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSAudioCaptureUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSScreenCaptureUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "Audio &amp; Voice captures microphone audio") != null);
+
+    const bare: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
+    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
+    defer std.testing.allocator.free(bare_plist);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSMicrophoneUsageDescription") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSAudioCaptureUsageDescription") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSScreenCaptureUsageDescription") == null);
+}
+
+test "plist launch policy follows dock visibility" {
+    const accessory: manifest_tool.Metadata = .{
+        .id = "dev.example.menu",
+        .name = "menu",
+        .version = "1.0.0",
+        .dock_visible = false,
+    };
+    const accessory_plist = try macosInfoPlist(std.testing.allocator, accessory, "menu");
+    defer std.testing.allocator.free(accessory_plist);
+    try std.testing.expect(std.mem.indexOf(u8, accessory_plist, "<key>LSUIElement</key>\n  <true/>") != null);
+
+    const regular: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
+    const regular_plist = try macosInfoPlist(std.testing.allocator, regular, "demo");
+    defer std.testing.allocator.free(regular_plist);
+    try std.testing.expect(std.mem.indexOf(u8, regular_plist, "LSUIElement") == null);
+}
+
+test "package rejects accessory startup without a tray before staging an artifact" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-accessory-tray";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+
+    try std.testing.expectError(error.MissingTrayCapability, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.stranded",
+            .name = "stranded",
+            .version = "1.0.0",
+            .dock_visible = false,
+        },
+        .target = .macos,
+        .output_path = root ++ "/Stranded.app",
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Stranded.app", .{}));
 }
 
 test "plist template includes document and URL registrations" {
@@ -2109,6 +3516,64 @@ test "macOS app executable is marked executable" {
     try std.testing.expect((permissions.toMode() & 0o111) != 0);
 }
 
+test "desktop packages place the TypeScript service host beside the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-service-host";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = "app" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/service", .data = "service" });
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.service", .name = "service-demo", .version = "1.0.0" };
+    _ = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/linux",
+        .binary_path = root ++ "/app",
+        .service_binary_path = root ++ "/service",
+        .assets_dir = root ++ "/assets",
+    });
+    var linux_dir = try cwd.openDir(std.testing.io, root ++ "/linux", .{});
+    defer linux_dir.close(std.testing.io);
+    var linux_service = try linux_dir.openFile(std.testing.io, "bin/service-demo_services", .{});
+    linux_service.close(std.testing.io);
+
+    _ = try createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Service.app",
+        .binary_path = root ++ "/app",
+        .service_binary_path = root ++ "/service",
+        .assets_dir = root ++ "/assets",
+    });
+    var mac_dir = try cwd.openDir(std.testing.io, root ++ "/Service.app", .{});
+    defer mac_dir.close(std.testing.io);
+    var mac_service = try mac_dir.openFile(std.testing.io, "Contents/MacOS/service-demo_services", .{});
+    mac_service.close(std.testing.io);
+}
+
+test "normal build service host is discovered only for a service-bearing app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-service-discovery";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/src/services/nested");
+    try cwd.createDirPath(std.testing.io, root ++ "/zig-out/bin");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/zig-out/bin/service-demo_services", .data = "service" });
+
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/types.d.ts", .data = "export interface Ignored {}" });
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/nested/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
+    try std.testing.expect(try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    const discovered = (try discoverInstalledServiceBinary(std.testing.allocator, std.testing.io, root, "service-demo", .linux)).?;
+    defer std.testing.allocator.free(discovered);
+    try std.testing.expectEqualStrings(root ++ "/zig-out/bin/service-demo_services", discovered);
+
+    try cwd.deleteTree(std.testing.io, root ++ "/src/services");
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+}
+
 test "desktop chromium packages are rejected before CEF layout checks" {
     const metadata: manifest_tool.Metadata = .{
         .id = "dev.demo",
@@ -2143,13 +3608,684 @@ test "package report records target signing and assets" {
         .target = .linux,
         .output_path = ".zig-cache/test-package-report",
         .signing = .{ .mode = .none },
-    }, "demo", 2);
+    }, "demo", 2, null);
     var buffer: [512]u8 = undefined;
     var file = try dir.openFile(std.testing.io, "package-manifest.zon", .{});
     defer file.close(std.testing.io);
     const len = try file.readPositionalAll(std.testing.io, &buffer, 0);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".target = \"linux\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".asset_count = 2") != null);
+    // No subsystem check ran, so the report makes no subsystem claim.
+    try std.testing.expect(std.mem.indexOf(u8, buffer[0..len], ".subsystem") == null);
+}
+
+test "adhoc packaging into a spaced output path signs and verifies" {
+    // The reported release-breaker: `--output "<path with spaces>.app"`
+    // packaged, exited 0, and shipped an UNSIGNED bundle because the
+    // codesign command was a shell string the spaces split apart. The
+    // pipeline now execs argv arrays, so the spaced path must sign — and
+    // the strict deep verify (real codesign, darwin hosts only) is the
+    // proof.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package signed spaced";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.spaced-sign", .name = "spaced-demo", .version = "1.0.0" };
+    const app_path = root ++ "/My Spaced Demo.app";
+    const stats = try createMacosApp(gpa, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = app_path,
+        // A real Mach-O executable, so codesign has honest code to sign.
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .adhoc },
+    });
+    try std.testing.expectEqual(SigningMode.adhoc, stats.signing_mode);
+    try std.testing.expect(stats.signing_verified);
+
+    // Pin the claim with an independent codesign run, not just the flag.
+    const verified = try codesign.verify(gpa, std.testing.io, app_path);
+    defer gpa.free(verified.message);
+    try std.testing.expect(verified.ok);
+}
+
+test "a codesign failure fails packaging instead of shipping unsigned" {
+    // An identity codesign cannot resolve exits nonzero; packaging must
+    // surface that as an error (with codesign's reason printed), never
+    // as a created artifact. Real codesign run: darwin hosts only.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-failure";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.sign-fail", .name = "sign-fail-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Sign Fail Demo.app",
+        .binary_path = "/bin/ls",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity, .identity = "native-sdk-no-such-identity" },
+    }));
+}
+
+test "identity signing without an identity is a loud failure, not a silent unsigned bundle" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-signing-no-identity";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.no-identity", .name = "no-identity-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.SigningFailed, createMacosApp(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/NoIdentity.app",
+        .assets_dir = root ++ "/assets",
+        .signing = .{ .mode = .identity },
+    }));
+}
+
+test "notarization refuses unsigned non-macos and uncredentialed packages before artifact creation" {
+    const metadata: manifest_tool.Metadata = .{ .id = "dev.example.notarize", .name = "notarize-demo", .version = "1.0.0" };
+    try std.testing.expectError(error.NotarizationRequiresIdentity, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-notarize-unsigned.app",
+        .notarize = true,
+    }));
+    try std.testing.expectError(error.UnsupportedNotarizationTarget, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = ".zig-cache/test-notarize-linux",
+        .signing = .{ .mode = .identity, .identity = "Developer ID Application: Test" },
+        .notarize = true,
+    }));
+    try std.testing.expectError(error.MissingNotaryProfile, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-notarize-no-profile.app",
+        .signing = .{ .mode = .identity, .identity = "Developer ID Application: Test" },
+        .notarize = true,
+    }));
+}
+
+test "native-only windows package ships no WebView2 loader and reports web layer none" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-native-only-windows";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app-binary", .data = "not a real exe" });
+
+    // A canvas app shape: gpu capabilities, no frontend, no webview.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.canvas",
+        .name = "canvas-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app-binary",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!stats.web_layer.?.enabled);
+
+    // No loader staged next to the binary.
+    var dir = try cwd.openDir(std.testing.io, root ++ "/demo-windows", .{});
+    defer dir.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "bin/WebView2Loader.dll", .{}));
+
+    // No frontend dist directory (native-only packages bundle plain assets).
+    try std.testing.expectError(error.FileNotFound, dir.openDir(std.testing.io, "resources/dist", .{}));
+
+    // The report carries the verdict.
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"none (inferred: nothing in app.zon declares web use)\"") != null);
+}
+
+test "webview-declaring package reports the web layer as declared" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-declared";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    const capabilities = [_][]const u8{ "webview", "js_bridge" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.web",
+        .name = "web-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    // No binary: the loader copy is not exercised (it needs a framework
+    // root), but the report and stats still carry the declared verdict.
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
+    // No binary means the subsystem check never ran: no verdict to carry.
+    try std.testing.expectEqual(@as(?WindowsSubsystem, null), stats.windows_subsystem);
+
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"webview2 (declared: capabilities)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem") == null);
+}
+
+test "package refuses a manifest that excludes the web layer while declaring web content" {
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.conflict",
+        .name = "conflict-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+        .webview_layer = "exclude",
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = ".zig-cache/test-package-web-layer-conflict",
+    }));
+}
+
+test "package web layer follows the resolved engine, not the raw manifest" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-resolved-engine";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/assets/index.html", .data = "<h1>Web</h1>" });
+
+    // A system manifest with no web declarations, packaged with the
+    // engine the CLI resolved from `--web-engine chromium`: the layer
+    // ships, and the verdict names the engine as the cause.
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.resolved",
+        .name = "resolved-demo",
+        .version = "1.0.0",
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .ios,
+        .output_path = root ++ "/ios",
+        .assets_dir = root ++ "/assets",
+        .web_engine = .chromium,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.chromium_engine, stats.web_layer.?.reason);
+}
+
+test "package refuses an exclude against a resolved Chromium engine" {
+    // `.webview_layer = "exclude"` with `--web-engine chromium` is the
+    // same contradiction as exclude + a manifest web declaration: the
+    // package boundary rejects it exactly like build configure does.
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.exclude-chromium",
+        .name = "exclude-chromium-demo",
+        .version = "1.0.0",
+        .webview_layer = "exclude",
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .macos,
+        .output_path = ".zig-cache/test-package-web-layer-exclude-chromium",
+        .web_engine = .chromium,
+    }));
+}
+
+/// A minimal Windows executable for web-layer packaging tests: a valid
+/// PE header (so the loader-reference scan and the arch sniff both treat
+/// it as a real exe) followed by the UTF-16 loader name a web build
+/// carries. The COFF machine field stays zero, which the arch sniff
+/// reads as x64.
+fn testWebLayerPeBytes() [0x80 + "WebView2Loader.dll".len * 2]u8 {
+    var bytes = [_]u8{0} ** (0x80 + "WebView2Loader.dll".len * 2);
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 0x40, .little);
+    bytes[0x40] = 'P';
+    bytes[0x41] = 'E';
+    for ("WebView2Loader.dll", 0..) |ch, index| {
+        bytes[0x80 + index * 2] = ch;
+    }
+    return bytes;
+}
+
+/// A minimal Windows executable with a real optional header for the
+/// subsystem tests: MZ + PE + a COFF header declaring a 240-byte
+/// optional header, with the Subsystem field set as asked.
+fn testSubsystemPeBytes(subsystem: u16) [0x200]u8 {
+    var bytes = [_]u8{0} ** 0x200;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 0x40, .little);
+    bytes[0x40] = 'P';
+    bytes[0x41] = 'E';
+    // COFF SizeOfOptionalHeader (PE32+ is 240 bytes).
+    std.mem.writeInt(u16, bytes[0x54..0x56], 240, .little);
+    // Optional header starts at 0x58; Subsystem sits 68 bytes in.
+    std.mem.writeInt(u16, bytes[0x9c..0x9e], subsystem, .little);
+    return bytes;
+}
+
+test "peSubsystem reads the optional header and refuses non-PE bytes" {
+    const gui = testSubsystemPeBytes(2);
+    try std.testing.expectEqual(@as(?u16, 2), peSubsystem(&gui));
+    const console = testSubsystemPeBytes(3);
+    try std.testing.expectEqual(@as(?u16, 3), peSubsystem(&console));
+    // The loader-scan fixture has no optional header: no subsystem claim.
+    const headerless = testWebLayerPeBytes();
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem(&headerless));
+    try std.testing.expectEqual(@as(?u16, null), peSubsystem("not a pe"));
+}
+
+test "the subsystem probe reads only the headers, so an exe past the old slurp cap still warns" {
+    // A console-subsystem exe stretched past readPath's 128 MiB cap
+    // (sparse: valid headers, then a hole). The whole-file slurp this
+    // probe replaced hit the cap's StreamTooLong, swallowed it as
+    // false, and packaged the exe WITHOUT the promised console warning
+    // — the bounded header read answers from the first 94-ish bytes and
+    // never sees the far end of the file.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-huge";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    const console_bytes = testSubsystemPeBytes(3);
+    const path = root ++ "/huge-console.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &console_bytes });
+    {
+        var file = try cwd.openFile(std.testing.io, path, .{ .mode = .read_write });
+        defer file.close(std.testing.io);
+        try file.setLength(std.testing.io, 128 * 1024 * 1024 + 4096);
+    }
+    try std.testing.expectEqual(WindowsSubsystem.console, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, path));
+}
+
+test "a PE offset past the header ceiling proves nothing and allocates nothing" {
+    // An `e_lfanew` claiming the PE header sits 8 MiB into the file is
+    // not a real Windows exe (linkers put it right after the DOS stub):
+    // the probe answers null before sizing any buffer to the claimed
+    // offset — the failing allocator turns any allocation into a test
+    // failure — and packaging treats it like non-PE bytes: an unknown
+    // verdict, no warning, and never a gui claim.
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-offset";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    var bytes = [_]u8{0} ** 0x40;
+    bytes[0] = 'M';
+    bytes[1] = 'Z';
+    std.mem.writeInt(u32, bytes[0x3c..0x40], 8 * 1024 * 1024, .little);
+    const path = root ++ "/bogus-offset.exe";
+    try cwd.writeFile(std.testing.io, .{ .sub_path = path, .data = &bytes });
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.failing_allocator, std.testing.io, path));
+}
+
+test "windows package pins the exe's subsystem: GUI is quiet, console warns in the stats" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem",
+        .name = "subsystem-demo",
+        .version = "1.0.0",
+    };
+
+    // The exe `native build` installs: GUI subsystem, no console flash —
+    // the package carries no console finding.
+    const gui_bytes = testSubsystemPeBytes(2);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/gui.exe", .data = &gui_bytes });
+    const gui_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/gui-package",
+        .binary_path = root ++ "/gui.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .gui), gui_stats.windows_subsystem);
+    const gui_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/gui-package/package-manifest.zon");
+    defer std.testing.allocator.free(gui_report);
+    try std.testing.expect(std.mem.indexOf(u8, gui_report, ".subsystem = \"gui\"") != null);
+
+    // A stale or hand-built console-subsystem exe: packaged (the app
+    // still works), but the stats carry the finding the warning teaches.
+    const console_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/console.exe", .data = &console_bytes });
+    const console_stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/console-package",
+        .binary_path = root ++ "/console.exe",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expectEqual(@as(?WindowsSubsystem, .console), console_stats.windows_subsystem);
+    const console_report = try readPath(std.testing.allocator, std.testing.io, root ++ "/console-package/package-manifest.zon");
+    defer std.testing.allocator.free(console_report);
+    try std.testing.expect(std.mem.indexOf(u8, console_report, ".subsystem = \"console\"") != null);
+}
+
+test "a binary the probe proves nothing about reports subsystem unknown, never gui" {
+    // The parse failing is not evidence of a GUI exe: non-PE bytes and a
+    // PE truncated before its optional header both earn an honest
+    // "unknown" in the stats and report — the old bool verdict folded
+    // these into false and the report affirmatively claimed "gui".
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-subsystem-unknown";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.subsystem-unknown",
+        .name = "subsystem-unknown-demo",
+        .version = "1.0.0",
+    };
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/not-a-pe.exe", .data = "not a pe at all" });
+    const full_bytes = testSubsystemPeBytes(3);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/truncated.exe", .data = full_bytes[0..0x50] });
+    const fixtures = [_]struct { binary: []const u8, output: []const u8 }{
+        .{ .binary = root ++ "/not-a-pe.exe", .output = root ++ "/not-a-pe-package" },
+        .{ .binary = root ++ "/truncated.exe", .output = root ++ "/truncated-package" },
+    };
+    for (fixtures) |fixture| {
+        const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+            .metadata = metadata,
+            .target = .windows,
+            .output_path = fixture.output,
+            .binary_path = fixture.binary,
+            .assets_dir = root ++ "/assets",
+        });
+        try std.testing.expectEqual(@as(?WindowsSubsystem, .unknown), stats.windows_subsystem);
+        const report_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/package-manifest.zon", .{fixture.output});
+        defer std.testing.allocator.free(report_path);
+        const report = try readPath(std.testing.allocator, std.testing.io, report_path);
+        defer std.testing.allocator.free(report);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"unknown\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, report, ".subsystem = \"gui\"") == null);
+    }
+
+    // A subsystem the check does not model (1 = native) parses fine but
+    // still proves nothing about console-vs-GUI posture.
+    const native_bytes = testSubsystemPeBytes(1);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/native.exe", .data = &native_bytes });
+    try std.testing.expectEqual(WindowsSubsystem.unknown, try peSubsystemVerdictAtPath(std.testing.allocator, std.testing.io, root ++ "/native.exe"));
+}
+
+test "package --web-layer include on a canvas manifest stages the loader and names the flag" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-include-flag";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    // The exe a `zig build package -Dweb-layer=include` graph produces on
+    // a canvas manifest: a real PE that references the loader.
+    const exe_bytes = testWebLayerPeBytes();
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.exe", .data = &exe_bytes });
+
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.canvas",
+        .name = "canvas-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+
+    // The loader copy resolves the framework root from the environment.
+    var env_map = std.process.Environ.Map.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("NATIVE_SDK_PATH", ".");
+
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app.exe",
+        .assets_dir = root ++ "/assets",
+        .web_layer_setting = .include,
+        .env_map = &env_map,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.declared_include, stats.web_layer.?.reason);
+
+    // The loader is staged next to the binary, exactly like a manifest
+    // that declares web use.
+    var dir = try cwd.openDir(std.testing.io, root ++ "/demo-windows", .{});
+    defer dir.close(std.testing.io);
+    var loader = try dir.openFile(std.testing.io, "bin/WebView2Loader.dll", .{});
+    loader.close(std.testing.io);
+
+    // The report names the flag as the cause, not app.zon.
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-windows/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"webview2 (declared: --web-layer include)\"") != null);
+}
+
+test "package --web-layer exclude on a web manifest is the same refused conflict" {
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.flag-conflict",
+        .name = "flag-conflict-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerConflict, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = ".zig-cache/test-package-web-layer-flag-conflict",
+        .web_layer_setting = .exclude,
+    }));
+}
+
+test "package forwarded include on a web manifest keeps the manifest's reason" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-forwarded-include";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+
+    // The build graphs forward `--web-layer include` for every web app;
+    // the verdict must keep reporting the manifest's own declaration, so
+    // graph-driven and hand-run packages read identically.
+    const capabilities = [_][]const u8{"webview"};
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.forwarded",
+        .name = "forwarded-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .assets_dir = root ++ "/assets",
+        .web_layer_setting = .include,
+    });
+    try std.testing.expect(stats.web_layer.?.enabled);
+    try std.testing.expectEqual(manifest_tool.WebLayerReason.capability, stats.web_layer.?.reason);
+}
+
+test "package refuses to strip the loader from an exe that references it" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-mismatch";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const exe_bytes = testWebLayerPeBytes();
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.exe", .data = &exe_bytes });
+
+    // A loader-referencing exe (built with the web layer) packaged under
+    // a native-only decision would ship broken webviews: refused, with
+    // `--web-layer include` as the way out. Non-PE payloads (the other
+    // tests' fake binaries) prove nothing and stay packageable.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.mismatch",
+        .name = "mismatch-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerMismatch, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .windows,
+        .output_path = root ++ "/demo-windows",
+        .binary_path = root ++ "/app.exe",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+/// A minimal but structurally valid ELF64 executable for the WebKitGTK
+/// scan: one .dynstr, one .dynamic with a single DT_NEEDED naming
+/// `needed_lib`, and one .dynsym whose single real symbol is named
+/// `symbol_name` — the two evidence channels the Linux web-layer guard
+/// reads. Caller frees.
+fn testWebLayerElfBytes(gpa: std.mem.Allocator, needed_lib: []const u8, symbol_name: []const u8) ![]u8 {
+    const dynstr_offset: u64 = 0x100;
+    const dynamic_offset: u64 = 0x180;
+    const dynsym_offset: u64 = 0x1c0;
+    const shdr_offset: u64 = 0x200;
+    const bytes = try gpa.alloc(u8, 0x2c0);
+    @memset(bytes, 0);
+
+    // ELF header: magic, ELFCLASS64, little endian, section table.
+    @memcpy(bytes[0..4], "\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    std.mem.writeInt(u64, bytes[0x28..0x30], shdr_offset, .little);
+    std.mem.writeInt(u16, bytes[0x3a..0x3c], 0x40, .little);
+    std.mem.writeInt(u16, bytes[0x3c..0x3e], 3, .little);
+
+    // .dynstr: "\0<needed_lib>\0<symbol_name>\0".
+    const lib_name_offset: u64 = 1;
+    const symbol_name_offset: u64 = 1 + needed_lib.len + 1;
+    const dynstr_len: u64 = symbol_name_offset + symbol_name.len + 1;
+    @memcpy(bytes[@intCast(dynstr_offset + lib_name_offset)..][0..needed_lib.len], needed_lib);
+    @memcpy(bytes[@intCast(dynstr_offset + symbol_name_offset)..][0..symbol_name.len], symbol_name);
+
+    // .dynamic: DT_NEEDED -> needed_lib, then DT_NULL.
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset)..][0..8], 1, .little); // DT_NEEDED
+    std.mem.writeInt(u64, bytes[@intCast(dynamic_offset + 8)..][0..8], lib_name_offset, .little);
+
+    // .dynsym: the null symbol, then one named symbol.
+    std.mem.writeInt(u32, bytes[@intCast(dynsym_offset + 24)..][0..4], @intCast(symbol_name_offset), .little);
+
+    // Section headers: [0] .dynstr (SHT_STRTAB), [1] .dynamic, [2] .dynsym.
+    const shdr = struct {
+        fn write(buffer: []u8, base: u64, index: u64, sh_type: u32, link: u32, offset: u64, size: u64, entsize: u64) void {
+            const header = buffer[@intCast(base + index * 0x40)..][0..0x40];
+            std.mem.writeInt(u32, header[0x04..0x08], sh_type, .little);
+            std.mem.writeInt(u64, header[0x18..0x20], offset, .little);
+            std.mem.writeInt(u64, header[0x20..0x28], size, .little);
+            std.mem.writeInt(u32, header[0x28..0x2c], link, .little);
+            std.mem.writeInt(u64, header[0x38..0x40], entsize, .little);
+        }
+    };
+    shdr.write(bytes, shdr_offset, 0, 3, 0, dynstr_offset, dynstr_len, 0);
+    shdr.write(bytes, shdr_offset, 1, 6, 0, dynamic_offset, 32, 16);
+    shdr.write(bytes, shdr_offset, 2, 11, 0, dynsym_offset, 48, 24);
+    return bytes;
+}
+
+test "the linux web-layer scan reads DT_NEEDED and dynamic symbols" {
+    const gpa = std.testing.allocator;
+    // The library link is evidence on its own.
+    const linked = try testWebLayerElfBytes(gpa, "libwebkitgtk-6.0.so.4", "gtk_init");
+    defer gpa.free(linked);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(linked));
+    // So is a lone webkit_/jsc_ dynamic symbol (a hand-linked binary
+    // that dodged the DT_NEEDED entry still calls into WebKit).
+    const symboled = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "webkit_web_view_new");
+    defer gpa.free(symboled);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(symboled));
+    const jsc = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "jsc_value_to_string");
+    defer gpa.free(jsc);
+    try std.testing.expect(elfBytesReferenceWebKitGtk(jsc));
+    // A WebKit-free GTK binary scans clean, and a non-ELF payload
+    // proves nothing (stays packageable), mirroring the PE probe.
+    const clean = try testWebLayerElfBytes(gpa, "libgtk-4.so.1", "gtk_init");
+    defer gpa.free(clean);
+    try std.testing.expect(!elfBytesReferenceWebKitGtk(clean));
+    try std.testing.expect(!elfBytesReferenceWebKitGtk("not an executable"));
+}
+
+test "package refuses to strip WebKitGTK from a Linux binary that links it" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-mismatch";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libwebkitgtk-6.0.so.4", "webkit_web_view_new");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    // A WebKitGTK-linking binary (built with the web layer) packaged
+    // under a native-only decision would ship broken webviews AND a
+    // libwebkitgtk runtime requirement the package claims not to have:
+    // refused, with `--web-layer include` as the way out.
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-mismatch",
+        .name = "linux-mismatch-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    try std.testing.expectError(error.WebViewLayerMismatch, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    }));
+}
+
+test "native-only linux package accepts a WebKit-free ELF and reports web layer none" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-web-layer-linux-clean";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/assets");
+    const elf_bytes = try testWebLayerElfBytes(std.testing.allocator, "libgtk-4.so.1", "gtk_init");
+    defer std.testing.allocator.free(elf_bytes);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app", .data = elf_bytes });
+
+    const capabilities = [_][]const u8{ "native_views", "gpu_surfaces" };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.linux-clean",
+        .name = "linux-clean-demo",
+        .version = "1.0.0",
+        .capabilities = &capabilities,
+    };
+    const stats = try createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .target = .linux,
+        .output_path = root ++ "/demo-linux",
+        .binary_path = root ++ "/app",
+        .assets_dir = root ++ "/assets",
+    });
+    try std.testing.expect(!stats.web_layer.?.enabled);
+
+    const report = try readPath(std.testing.allocator, std.testing.io, root ++ "/demo-linux/package-manifest.zon");
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, ".web_layer = \"none (inferred: nothing in app.zon declares web use)\"") != null);
 }
 
 // ---------------------------------------------------------------------------

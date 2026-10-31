@@ -17,10 +17,68 @@ pub const WidgetPaintOrder = struct {
 pub fn widgetPaintLayer(widget: Widget, tokens: DesignTokens) i32 {
     if (widget.layer) |layer| return layer;
     return switch (widget.kind) {
+        .dialog, .drawer, .sheet => tokens.layer.modal,
         .popover, .menu_surface, .dropdown_menu => tokens.layer.overlay,
         .tooltip => tokens.layer.floating,
         else => tokens.layer.base,
     };
+}
+
+/// Window-surface ordering keeps anchored siblings in their established
+/// mount-order stack while lifting root-relative modals into the modal token
+/// stratum. An explicit widget layer always wins. Anchored tooltip/menu
+/// coexistence deliberately shares the overlay stratum here: their late-pass
+/// contract is last-mounted-on-top even though their ordinary in-tree token
+/// defaults differ.
+pub fn widgetWindowSurfaceLayer(widget: Widget, tokens: DesignTokens) i32 {
+    if (widget.layer) |layer| return layer;
+    if (widgetIsRootRelativeModal(widget)) return tokens.layer.modal;
+    if (widgetIsAnchored(widget)) return tokens.layer.overlay;
+    return widgetPaintLayer(widget, tokens);
+}
+
+/// Effective layer of a hoisted window surface in a laid tree. A surface
+/// without an explicit layer cannot fall beneath the window surface that
+/// contains it: a default dropdown/tooltip opened inside a modal therefore
+/// stays in the modal stratum, while an explicitly authored layer remains an
+/// intentional escape hatch.
+pub fn widgetLayoutWindowSurfaceLayer(layout: anytype, node_index: usize, tokens: DesignTokens) i32 {
+    const node = layout.nodes[node_index];
+    if (node.widget.layer) |layer| return layer;
+
+    var layer = widgetWindowSurfaceLayer(node.widget, tokens);
+    var current = node.parent_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len) break;
+        const ancestor = layout.nodes[index];
+        if (widgetEscapesAncestorClips(ancestor.widget)) {
+            layer = @max(layer, widgetWindowSurfaceLayer(ancestor.widget, tokens));
+        }
+        current = ancestor.parent_index;
+    }
+    return layer;
+}
+
+pub fn widgetLayoutWindowSurfaceOrder(layout: anytype, node_index: usize, tokens: DesignTokens) WidgetPaintOrder {
+    return .{
+        .layer = widgetLayoutWindowSurfaceLayer(layout, node_index, tokens),
+        .index = node_index,
+    };
+}
+
+/// Modal surfaces are placed in layout-root coordinates and never ride an
+/// ancestor scroll region's content translation.
+pub fn widgetIsRootRelativeModal(widget: Widget) bool {
+    return switch (widget.kind) {
+        .dialog, .drawer, .sheet => true,
+        else => false,
+    };
+}
+
+/// Surfaces whose layout, paint, routing, and visibility are resolved at
+/// the window level rather than through their authored ancestor clips.
+pub fn widgetEscapesAncestorClips(widget: Widget) bool {
+    return widgetIsAnchored(widget) or widgetIsRootRelativeModal(widget);
 }
 
 pub fn nextWidgetPaintChild(children: []const Widget, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
@@ -63,6 +121,36 @@ pub fn previousWidgetLayoutPaintChild(layout: anytype, parent_index: ?usize, tok
     return if (best) |order| order.index else null;
 }
 
+pub inline fn widgetLayoutWindowSurfaceCount(layout: anytype) usize {
+    var count: usize = 0;
+    for (layout.nodes) |node| {
+        if (widgetEscapesAncestorClips(node.widget)) count += 1;
+    }
+    return count;
+}
+
+pub fn nextWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
+    var best: ?WidgetPaintOrder = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (!widgetEscapesAncestorClips(node.widget)) continue;
+        const order = widgetLayoutWindowSurfaceOrder(layout, index, tokens);
+        if (!widgetPaintOrderAfter(order, previous)) continue;
+        if (best == null or widgetPaintOrderLess(order, best.?)) best = order;
+    }
+    return if (best) |order| order.index else null;
+}
+
+pub fn previousWidgetLayoutWindowSurface(layout: anytype, tokens: DesignTokens, previous: ?WidgetPaintOrder) ?usize {
+    var best: ?WidgetPaintOrder = null;
+    for (layout.nodes, 0..) |node, index| {
+        if (!widgetEscapesAncestorClips(node.widget)) continue;
+        const order = widgetLayoutWindowSurfaceOrder(layout, index, tokens);
+        if (!widgetPaintOrderBefore(order, previous)) continue;
+        if (best == null or widgetPaintOrderLess(best.?, order)) best = order;
+    }
+    return if (best) |order| order.index else null;
+}
+
 fn widgetPaintOrderAfter(order: WidgetPaintOrder, previous: ?WidgetPaintOrder) bool {
     const value = previous orelse return true;
     return order.layer > value.layer or (order.layer == value.layer and order.index > value.index);
@@ -73,7 +161,7 @@ fn widgetPaintOrderBefore(order: WidgetPaintOrder, previous: ?WidgetPaintOrder) 
     return order.layer < value.layer or (order.layer == value.layer and order.index < value.index);
 }
 
-fn widgetPaintOrderLess(a: WidgetPaintOrder, b: WidgetPaintOrder) bool {
+pub fn widgetPaintOrderLess(a: WidgetPaintOrder, b: WidgetPaintOrder) bool {
     return a.layer < b.layer or (a.layer == b.layer and a.index < b.index);
 }
 
@@ -112,6 +200,24 @@ pub fn widgetIsAnchored(widget: Widget) bool {
 /// the engine refuses to scroll them, byte-identically to before.
 pub fn widgetVirtualRuntimeScrolled(widget: Widget) bool {
     return widget.kind == .scroll_view and widget.layout.virtualized and widget.layout.virtual_item_count > 0;
+}
+
+/// Whether one widget scrolls on the named axis. This is THE axis
+/// capability predicate: wheel/trackpad routing resolves each axis
+/// against it independently, keyboard and semantic scroll intents pick
+/// their axis through it, and the scrollbar/driver emit only the axes
+/// it grants. Vertical: every scrollable kind (scroll views unless
+/// declared `horizontal`, textareas, the virtualized containers).
+/// Horizontal: a non-virtualized `.scroll_view` declared `horizontal` or
+/// `both`, plus an editable no-wrap code textarea. Virtualization is
+/// vertical machinery (windowed ranges price rows, not columns), so a
+/// virtualized region never grants the horizontal axis.
+pub fn widgetScrollsAxis(widget: Widget, axis: token_model.ScrollAxis) bool {
+    return switch (axis) {
+        .vertical => widget.kind != .scroll_view or widget.scroll_axes.scrollsVertically() or widget.layout.virtualized,
+        .horizontal => (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) or
+            (widget.kind == .textarea and widget.runtime_flags.code_editor and widget.text_no_wrap),
+    };
 }
 
 /// The effective scroll physics for one scroll region: the shared
@@ -168,16 +274,29 @@ pub fn widgetKindDisclosureAnimated(kind: widget_model.WidgetKind) bool {
 const disclosure_settle_slack: f32 = 0.5;
 
 /// The bottom edge the disclosure widget's content REACHES: the deepest
-/// maxY among its in-flow children's subtrees. Anchored children float
-/// outside the flow (window-positioned) and never count.
+/// maxY among its in-flow children's subtrees. Window-level surfaces float
+/// outside the flow and never count. A nested disclosure's own extent
+/// bounds its body, including concealed children laid out below its frame.
 pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
     const node = layout.nodes[node_index];
     var bottom = -std.math.inf(f32);
     var index = node_index + 1;
-    while (index < layout.nodes.len and layout.nodes[index].depth > node.depth) : (index += 1) {
+    while (index < layout.nodes.len and layout.nodes[index].depth > node.depth) {
         const child = layout.nodes[index];
-        if (widgetIsAnchored(child.widget)) continue;
+        if (widgetEscapesAncestorClips(child.widget)) {
+            const subtree_depth = child.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
         bottom = @max(bottom, child.frame.normalized().maxY());
+        if (widgetKindDisclosureAnimated(child.widget.kind)) {
+            const subtree_depth = child.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
+        index += 1;
     }
     return bottom;
 }
@@ -217,14 +336,26 @@ pub fn isWidgetConcealedByDisclosure(layout: anytype, node_index: usize) bool {
     return false;
 }
 
+/// The column count a grid lays out, measures, and reports: the DECLARED
+/// count when one is set — even when fewer children remain (a filtered
+/// grid keeps its column-slot geometry; children fill the leading slots
+/// and the trailing slots stay empty, they never stretch to fill missing
+/// columns) — and one column per child when unset (the single-row grid).
 pub fn gridColumnCount(child_count: usize, requested_columns: usize) usize {
     if (child_count == 0) return 0;
-    return if (requested_columns > 0) @min(requested_columns, child_count) else child_count;
+    return if (requested_columns > 0) requested_columns else child_count;
 }
 
+/// The row count those columns yield: ceil-division stated as
+/// `1 + (count - 1) / columns` rather than the additive
+/// `(count + columns - 1) / columns` — a declared column count is
+/// engine input (never validator-bounded), so `columns` may be any
+/// usize, including values where the additive form's sum overflows in
+/// safe builds. Both the layout and intrinsic-size paths share this
+/// helper.
 pub fn gridRowCount(child_count: usize, columns: usize) usize {
     if (child_count == 0 or columns == 0) return 0;
-    return (child_count + columns - 1) / columns;
+    return 1 + (child_count - 1) / columns;
 }
 
 pub fn saturatingU32(value: usize) u32 {

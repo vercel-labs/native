@@ -1,0 +1,248 @@
+<!-- The complete code-editor view. It is compiled into release builds and
+     watched for live reload in debug builds; Model/Msg state stays in Zig. -->
+<column background="background">
+  <!-- The custom titlebar is the window's drag surface. Matching traffic-light
+       and action slots keep the folder centered in the whole window while
+       the icon-only Save action occupies the trailing edge. -->
+  <row height="{titlebar_height}" padding="12" cross="center" background="background" window-drag="true" label="Code editor titlebar">
+    <spacer width="{chrome_leading}" />
+    <spacer width="32" />
+    <text grow="1" wrap="false" text-alignment="center">{rootName}</text>
+    <spacer width="{chrome_leading}" />
+    <button width="32" height="32" size="icon" variant="ghost" icon="save" label="Save" disabled="{saveDisabled}" on-press="save_file"></button>
+  </row>
+  <separator />
+
+  <stack grow="1">
+    <if test="{folderOpen}">
+      <column>
+      <!-- Both panes and the divider are declarative; the split value lives
+           in the model so resizing survives every rebuilt view. -->
+      <split grow="1" value="{sidebar_fraction}" on-resize="sidebar_resized">
+        <column min-width="220" background="background" label="Code editor sidebar">
+          <scroll grow="1" overscroll="none">
+            <!-- The split divider owns a 9px hit band after this pane, with
+                 its hairline centered in that band. Keep the tree flush to
+                 the pane's trailing edge so the visible hairline balances
+                 this 6px leading gutter instead of doubling it. -->
+            <column>
+              <spacer height="6" />
+              <row>
+                <spacer width="6" />
+                <tree grow="1" label="Files and folders">
+                  <for each="visible" key="relative_path" as="v">
+                    <if test="{v.directory}">
+                      <list-item height="32" gap="8" cross="center" selected="{v.selected}" expanded="{v.expanded}" tree-level="{v.tree_level}" focus-ring="background" on-press="select_entry:{v.index}" on-change="select_entry:{v.index}" on-toggle="toggle_entry:{v.index}" on-submit="begin_rename:{v.index}" role="treeitem" label="{v.name}">
+                        <spacer width="{v.indent}" />
+                        <if test="{v.renaming}">
+                          <text-field height="28" grow="1" text="{renameText}" autofocus="true" on-input="edit_rename" on-submit="commit_rename" label="Rename item" />
+                        </if>
+                        <else>
+                          <icon name="{v.icon}" width="16" height="16" />
+                          <text grow="1" wrap="false">{v.name}</text>
+                        </else>
+                      </list-item>
+                    </if>
+                    <else>
+                      <list-item height="32" gap="8" cross="center" selected="{v.selected}" tree-level="{v.tree_level}" focus-ring="background" on-press="preview_entry:{v.index}" on-change="select_entry:{v.index}" on-double-press="pin_entry:{v.index}" on-submit="begin_rename:{v.index}" role="treeitem" label="{v.name}">
+                        <spacer width="{v.indent}" />
+                        <if test="{v.renaming}">
+                          <text-field height="28" grow="1" text="{renameText}" autofocus="true" on-input="edit_rename" on-submit="commit_rename" label="Rename item" />
+                        </if>
+                        <else>
+                          <icon name="{v.icon}" width="16" height="16" />
+                          <text grow="1" wrap="false">{v.name}</text>
+                        </else>
+                      </list-item>
+                    </else>
+                  </for>
+                </tree>
+              </row>
+              <spacer height="6" />
+            </column>
+          </scroll>
+        </column>
+
+        <!-- A pane container keeps the split's direct-child contract while
+             swapping the editor empty/file states declaratively. -->
+        <stack min-width="360">
+          <if test="{selectedIsFile}">
+            <column>
+              <!-- App-authored flat editor tabs share one surface and height
+                   so labels stay fixed when selection moves. The baseline
+                   paints behind the tabs, while a single-click preview stays
+                   italic; double-clicking the tree row pins it as normal text. -->
+              <stack height="37" background="background" label="Editor tab strip">
+                <column grow="1">
+                  <spacer height="36" />
+                  <separator />
+                </column>
+                <!-- The runtime minimally reveals a newly selected tab. A
+                     stable scroll identity preserves the standing offset when
+                     the active tab is already fully visible. -->
+                <scroll grow="1" axis="horizontal" overscroll="none" label="Open file tabs">
+                  <row height="37">
+                    <for each="openTabs" key="relative_path" as="tab">
+                      <if test="{tab.selected}">
+                        <stack width="180" height="37" background="background" selected="true" role="tab" label="{tab.name}" on-press="activate_tab:{tab.index}" on-double-press="pin_entry:{tab.index}" on-hover-enter="hover_tab:{tab.index}" on-hover-leave="unhover_tab:{tab.index}">
+                          <row height="37" gap="6" cross="center">
+                            <spacer width="10" />
+                            <icon name="file-text" width="14" height="14" foreground="text_muted" />
+                            <if test="{tab.preview}">
+                              <text grow="1"><span italic="true">{tab.name}</span></text>
+                            </if>
+                            <else>
+                              <text grow="1" wrap="false">{tab.name}</text>
+                            </else>
+                            <if test="{tab.dirty}">
+                              <text foreground="accent">●</text>
+                            </if>
+                            <if test="{tab.show_close}">
+                              <button width="22" height="22" size="icon" variant="ghost" icon="x" label="Close tab" on-press="close_tab:{tab.index}"></button>
+                            </if>
+                            <else>
+                              <spacer width="22" />
+                            </else>
+                            <separator width="1" height="36" />
+                          </row>
+                          <context-menu>
+                            <menu-item on-press="close_tab:{tab.index}">Close</menu-item>
+                            <menu-item disabled="{tab.only_tab}" on-press="close_other_tabs:{tab.index}">Close Others</menu-item>
+                          </context-menu>
+                        </stack>
+                      </if>
+                      <else>
+                        <stack width="180" height="37" background="background" foreground="text_muted" role="tab" label="{tab.name}" on-press="activate_tab:{tab.index}" on-double-press="pin_entry:{tab.index}" on-hover-enter="hover_tab:{tab.index}" on-hover-leave="unhover_tab:{tab.index}">
+                          <row height="37" gap="6" cross="center">
+                            <spacer width="10" />
+                            <icon name="file-text" width="14" height="14" foreground="text_muted" />
+                            <if test="{tab.preview}">
+                              <text grow="1"><span italic="true">{tab.name}</span></text>
+                            </if>
+                            <else>
+                              <text grow="1" wrap="false">{tab.name}</text>
+                            </else>
+                            <if test="{tab.dirty}">
+                              <text foreground="accent">●</text>
+                            </if>
+                            <if test="{tab.show_close}">
+                              <button width="22" height="22" size="icon" variant="ghost" icon="x" label="Close tab" on-press="close_tab:{tab.index}"></button>
+                            </if>
+                            <else>
+                              <spacer width="22" />
+                            </else>
+                            <separator width="1" height="36" />
+                          </row>
+                          <column grow="1">
+                            <spacer height="36" />
+                            <separator />
+                          </column>
+                          <context-menu>
+                            <menu-item on-press="close_tab:{tab.index}">Close</menu-item>
+                            <menu-item disabled="{tab.only_tab}" on-press="close_other_tabs:{tab.index}">Close Others</menu-item>
+                          </context-menu>
+                        </stack>
+                      </else>
+                    </for>
+                  </row>
+                </scroll>
+              </stack>
+
+              <if test="{previewState == 'text'}">
+                <column grow="1">
+                    <!-- `code` requires a literal lexer name. Select one
+                         declaratively from the Zig-derived file language. -->
+                    <if test="{previewLanguage == 'zig'}">
+                      <code source="{preview}" language="zig" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'javascript'}">
+                      <code source="{preview}" language="javascript" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'typescript'}">
+                      <code source="{preview}" language="typescript" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'jsx'}">
+                      <code source="{preview}" language="jsx" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'tsx'}">
+                      <code source="{preview}" language="tsx" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'json'}">
+                      <code source="{preview}" language="json" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'yaml'}">
+                      <code source="{preview}" language="yaml" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'shell'}">
+                      <code source="{preview}" language="shell" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'python'}">
+                      <code source="{preview}" language="python" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'rust'}">
+                      <code source="{preview}" language="rust" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'c_like'}">
+                      <code source="{preview}" language="c" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'go'}">
+                      <code source="{preview}" language="go" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'html'}">
+                      <code source="{preview}" language="html" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'css'}">
+                      <code source="{preview}" language="css" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'sql'}">
+                      <code source="{preview}" language="sql" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'markdown'}">
+                      <code source="{preview}" language="markdown" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                    <if test="{previewLanguage == 'plain'}">
+                      <code source="{preview}" language="plain" editable="{codeEditable}" on-input="edit_code" line-numbers="true" wrap="false" grow="1" label="{selectedPath}" />
+                    </if>
+                </column>
+              </if>
+              <else>
+                <column grow="1" main="center" cross="center" padding="24">
+                  <if test="{previewState == 'loading'}">
+                    <text foreground="text_muted">Loading…</text>
+                  </if>
+                  <if test="{previewState == 'binary'}">
+                    <text foreground="text_muted">Binary file preview is not available.</text>
+                  </if>
+                  <if test="{previewState == 'failed'}">
+                    <text foreground="text_muted">This file could not be opened.</text>
+                  </if>
+                  <if test="{previewState == 'idle'}">
+                    <text foreground="text_muted">Select a file to preview it.</text>
+                  </if>
+                </column>
+              </else>
+            </column>
+          </if>
+          <else>
+            <column grow="1" gap="8" main="center" cross="center" padding="24">
+              <icon name="file-text" width="36" height="36" foreground="text_muted" />
+              <text size="heading">{emptyEditorTitle}</text>
+              <text foreground="text_muted">{emptyEditorDetail}</text>
+            </column>
+          </else>
+        </stack>
+      </split>
+
+      <status-bar>{status}</status-bar>
+      </column>
+    </if>
+    <else>
+      <column grow="1" gap="14" main="center" cross="center" padding="32">
+        <icon name="folder-open" width="48" height="48" foreground="text_muted" />
+        <text size="heading">Browse a code folder</text>
+        <text foreground="text_muted">Choose a folder to inspect its files and source.</text>
+        <button variant="primary" size="lg" icon="folder-open" on-press="open_folder">Open Folder…</button>
+      </column>
+    </else>
+  </stack>
+</column>

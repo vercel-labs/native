@@ -187,7 +187,11 @@ pub fn timestampToU64(value: i128) u64 {
 }
 
 pub fn automationInputTimestampNs() u64 {
-    return timestampToU64(nowNanoseconds());
+    // Automation input participates in the same duration math as native
+    // host input and presented-frame timestamps. Keep it in the monotonic
+    // domain: wall time can jump, and on Windows/Linux the hosts already
+    // stamp GPU events from QPC/CLOCK_MONOTONIC.
+    return monotonicNanoseconds();
 }
 
 test "the real clocks read plausible, ordered values" {
@@ -203,6 +207,14 @@ test "the real clocks read plausible, ordered values" {
     const second = monotonicNanoseconds();
     try std.testing.expect(first > 0);
     try std.testing.expect(second >= first);
+}
+
+test "automation input timestamps share the monotonic clock domain" {
+    const before = monotonicNanoseconds();
+    const timestamp = automationInputTimestampNs();
+    const after = monotonicNanoseconds();
+    try std.testing.expect(timestamp >= before);
+    try std.testing.expect(timestamp <= after);
 }
 
 test "Clock.system reads the real clocks and Clock{} is the same seam" {

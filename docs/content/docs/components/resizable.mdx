@@ -1,0 +1,46 @@
+---
+title: "Resizable"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `resizable` for a panel with a drag handle. `width` sets its initial width; the engine retains the width after dragging. Resizing affects the panel’s frame, while children and neighboring widgets keep their frames. Children stack, so use an inner row or column for flow. Use [split](/docs/components/split) when the model should own the divider position or two panes should resize together.
+
+<ComponentPreview name="resizable" alt="A resizable sidebar panel rendered by the engine" caption="a resizable panel — drag its right edge to resize it" />
+
+## Markup
+
+```html
+<row grow="1">
+  <resizable width="260">
+    <column padding="12">
+      <text foreground="text_muted">Sidebar</text>
+    </column>
+  </resizable>
+</row>
+```
+
+## Width and retained state
+
+`width` and `min-width` size a newly mounted panel. An enabled panel keeps its user-adjusted width across model updates, including changes to those attributes. A removed panel or a fresh key starts from the authored size again. Disabled panels use their authored size and ignore dragging.
+
+During a drag, the minimum width is the greater of 48 pixels and the panel’s height. Resizing changes the panel’s frame; its children and neighboring widgets keep their own frames.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.row(.{ .grow = 1 }, .{
+    ui.el(.resizable, .{ .width = 260 }, .{
+        ui.column(.{ .padding = 12 }, .{
+            ui.text(.{ .style_tokens = .{ .foreground = .text_muted } }, "Sidebar"),
+        }),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "min-width"]} />

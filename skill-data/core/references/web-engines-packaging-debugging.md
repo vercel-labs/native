@@ -71,7 +71,7 @@ zig build package
 CLI path:
 
 ```bash
-native package --target macos --manifest app.zon --binary zig-out/bin/MyApp
+native package --target macos --manifest app.zon --binary zig-out/bin/MyApp --archive
 ```
 
 Important package manifest fields:
@@ -98,15 +98,18 @@ For frontend apps, package the built frontend assets. The build step usually wir
 
 macOS minimum system version is 11.0.
 
+With `--archive`, the CLI wraps that bundle in a styled DMG. Defaults include a generated 1×/2× Retina background and arrow, an Applications alias, positioned 128px icons, hidden Finder chrome, and a 660×400 usable canvas. Override `.dmg.volume_name`, `.background`, `.window_width`, `.window_height`, `.icon_size`, `.app_position`, `.applications_position`, or `.applications_link` in `app.zon`. Custom backgrounds are project-relative PNG/JPEG/TIFF files; a neighboring `name@2x.png`/`.jpg` is combined automatically, and a prebuilt multi-resolution TIFF also works. For arbitrary visible contents, `.dmg.items` replaces the fixed pair with positioned `app`, `applications`, project-relative `file`, and absolute `link` entries.
+
 Signing modes:
 
 ```bash
 native package --target macos --signing none
 native package --target macos --signing adhoc
 native package --target macos --signing identity --identity "Developer ID Application: Your Name"
+native package --target macos --signing identity --identity "Developer ID Application: Your Name" --archive --notarize --notary-profile "my-app-release"
 ```
 
-For Chromium apps, verify the CEF framework and resources are included and signed before notarization.
+Identity signing enables the hardened runtime and requires a secure timestamp. `--notarize` uses a `notarytool` Keychain profile, submits the final DMG when `--archive` is present, and staples and validates the accepted tickets. For Chromium apps, verify the CEF framework and resources are included and signed before notarization.
 
 ## Linux and Windows packages
 

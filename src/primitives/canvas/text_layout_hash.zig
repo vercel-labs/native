@@ -21,7 +21,10 @@ const resourceHashF32 = hash_model.resourceHashF32;
 const resourceHashPoint = hash_model.resourceHashPoint;
 
 pub fn textLayoutOptionsForDrawText(frame_options: TextLayoutOptions, text: DrawText) TextLayoutOptions {
-    return text.text_layout orelse frame_options;
+    var options = text.text_layout orelse frame_options;
+    if (options.measure == null) options.measure = text.measure;
+    if (options.text_run_policy == null) options.text_run_policy = text.text_run_policy;
+    return options;
 }
 
 pub fn textLayoutKey(text: DrawText, options: TextLayoutOptions) TextLayoutKey {

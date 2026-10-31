@@ -44,9 +44,37 @@ const render_fingerprints = @import("render_fingerprints.zig");
 const vector = @import("vector.zig");
 const font_ttf = @import("font_ttf.zig");
 
-/// Element budget for one glyph outline: the bundled face's densest
-/// glyphs stay well under this (maxp: 96 points per simple glyph).
-const reference_glyph_path_capacity: usize = 256;
+/// Element budget for one glyph outline, derived from the parser's
+/// glyph budgets so every glyph a parsed face maps fits: a contour
+/// emits at most one element per point plus a move, a closing quad, and
+/// a close (points + 3*contours), taken over BOTH glyph forms the gate
+/// admits — a simple glyph's maxima and a composite's flattened maxima
+/// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
+/// this builder actually receives when a composite renders). The
+/// budgets are currently equal, so the max is 1408 either way; the
+/// derivation keeps capacity honest if they ever diverge. Stack shape:
+/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`; the edge
+/// accumulator below it is the per-thread heap-resident
+/// `vector.GlyphRasterizer` (see `reference_glyph_raster_scratch`), so
+/// the builder is the only glyph raster state on the stack.
+const reference_glyph_path_capacity: usize = @max(
+    font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
+    font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
+);
+
+/// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
+/// derived budgets guarantee every outline the font registration gate
+/// admits rasterizes (never a block fallback), which sizes it at
+/// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
+/// lazy_tls pattern), not a stack temporary and not static TLS. Only
+/// threads that ink a glyph through the reference renderer allocate it.
+/// The array carries no default and stays uninitialized, exactly like
+/// the stack `Rasterizer` it replaces; `vector.fillGlyphPath` resets it
+/// per glyph.
+const ReferenceGlyphRasterScratch = struct {
+    raster: vector.GlyphRasterizer,
+};
+const reference_glyph_raster_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphRasterScratch);
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
@@ -62,6 +90,19 @@ pub const ReferenceImage = struct {
     width: usize,
     height: usize,
     pixels: []const u8,
+    /// Precomputed content fingerprint for the GPU cache planner
+    /// (`renderImageFingerprintForResource` uses it when nonzero instead
+    /// of hashing `pixels` at plan time). Media-surface textures set it
+    /// at adoption so a 60 fps producer never pays a full-buffer hash
+    /// per planned frame; 0 — every registered canvas image — keeps the
+    /// classic hash-the-bytes keying byte-identically.
+    content_fingerprint: u64 = 0,
+    /// PRESENTATION-ONLY resource: composited by live GPU/packet hosts,
+    /// invisible to the deterministic reference renderer (see the
+    /// policy comment in `findReferenceImage`). Media-surface textures
+    /// ride the image pipeline with this set, so producer output can
+    /// never leak into goldens, screenshots, or replay pixel marks.
+    presentation_only: bool = false,
 };
 
 /// One runtime-registered font face the reference renderer resolves text
@@ -74,6 +115,7 @@ pub const ReferenceFont = struct {
 };
 
 pub const ReferenceRenderSurface = struct {
+    vector_policy: ?@import("vector_raster_policy.zig").Policy = null,
     width: usize,
     height: usize,
     pixels: []u8,
@@ -239,7 +281,9 @@ pub const ReferenceRenderSurface = struct {
             .clear => self.clear(clear_color),
             .load => if (scissor) |bounds| self.clearRect(bounds, clear_color),
         }
-        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        var owned = self;
+        owned.vector_policy = pass.gpu_plan_policy;
+        for (pass.commands) |command| try owned.renderCommand(referenceScaleCommand(command, scale), scissor);
     }
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {
@@ -393,13 +437,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.fillPath(
+        vector.fillPathWithPolicy(
             value.elements,
             command.transform,
             .even_odd,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -421,13 +466,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.strokePath(
+        vector.strokePathWithPolicy(
             value.elements,
             command.transform,
             .{ .width = stroke_width, .cap = value.cap, .join = .round },
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -445,6 +491,7 @@ pub const ReferenceRenderSurface = struct {
         } else return error.ReferenceRenderUnsupportedCommand;
 
         const src_rect = referenceImageSourceRect(image, value.src) orelse return;
+        const sample_bounds = referenceImageSampleBounds(image, src_rect);
         const local_dst = referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
         const dst_rect = command.transform.transformRect(local_dst).normalized();
         // The rounded mask applies over the REQUESTED destination (the
@@ -469,7 +516,7 @@ pub const ReferenceRenderSurface = struct {
         // once per (image content, size, phase) and every later repaint
         // — the cover-loading cascade, a re-opened view, a whole-pixel
         // move — blends from the panel.
-        if (self.imageScalePanel(image, value, src_rect, dst_rect, pixel_rect)) |panel| {
+        if (self.imageScalePanel(image, value, src_rect, sample_bounds, dst_rect, pixel_rect)) |panel| {
             const dst_x0: i64 = @intFromFloat(@floor(dst_rect.x));
             const dst_y0: i64 = @intFromFloat(@floor(dst_rect.y));
             var y = pixel_rect.y;
@@ -508,7 +555,7 @@ pub const ReferenceRenderSurface = struct {
                 if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
                 const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
                 const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
                     self.pixels[index + 0],
@@ -534,7 +581,7 @@ pub const ReferenceRenderSurface = struct {
         width: usize,
     };
 
-    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
+    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, sample_bounds: ReferenceImageSampleBounds, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
         const memo = self.render_memo orelse return null;
         // Exact-arithmetic bounds: pixel offsets and phases must stay in
         // f32's exact-integer range for the phase-relative identity
@@ -589,7 +636,7 @@ pub const ReferenceRenderSurface = struct {
             var column: usize = 0;
             while (column < panel_width) : (column += 1) {
                 const u = std.math.clamp(((@as(f32, @floatFromInt(column)) + 0.5) - phase_x) / dst_rect.width, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const offset = (row * panel_width + column) * 4;
                 buffer[offset] = sample[0];
                 buffer[offset + 1] = sample[1];
@@ -740,7 +787,10 @@ pub const ReferenceRenderSurface = struct {
         // one tail glyph per multibyte codepoint: the flat 0.65em
         // multibyte estimate overshot the provider's real advances and
         // pushed the tail past the measured clip bounds.
-        const measure = if (value.text_layout) |options| options.measure else null;
+        const measure = if (value.text_layout) |options|
+            options.measure orelse value.measure
+        else
+            value.measure;
         const end = @min(value.text.len, line.text_start + line.paintedTextLen());
         var text_offset: usize = line.text_start;
         var x = line.bounds.x;
@@ -772,9 +822,12 @@ pub const ReferenceRenderSurface = struct {
 
     /// Paint one glyph: the real Geist outline through the vector core
     /// when the codepoint resolves, the historical block rect otherwise
-    /// (unmapped codepoints, glyphs beyond the outline budgets, or draws
-    /// carrying no text bytes). Layout is untouched — the pen position
-    /// and advance still come from the deterministic estimator.
+    /// (unmapped codepoints, glyphs of hostile faces whose `maxp`
+    /// under-declares — the per-glyph parse backstops — or draws
+    /// carrying no text bytes; never a gate-admitted glyph, whose raster
+    /// budgets are derived from the registration gate). Layout is
+    /// untouched — the pen position and advance still come from the
+    /// deterministic estimator.
     fn drawGlyphBox(
         self: ReferenceRenderSurface,
         command: RenderCommand,
@@ -839,14 +892,22 @@ pub const ReferenceRenderSurface = struct {
             .coverage_blend = .srgb,
         };
         // The outline is already in device space; TrueType interiorness
-        // is the nonzero rule.
-        vector.fillPath(
+        // is the nonzero rule. The glyph raster budgets are derived from
+        // the registration gate's outline budgets, so a gate-admitted
+        // face never trips `VectorPathTooComplex` here — the remaining
+        // fallback triggers are a clip band wider than
+        // `max_raster_width` (surface-shaped, not font-shaped) and
+        // nothing else.
+        const raster = &reference_glyph_raster_scratch.get().raster;
+        vector.fillGlyphPathWithPolicy(
+            raster,
             builder.slice(),
             Affine.identity(),
             .nonzero,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return false;
         return true;
     }
@@ -1074,7 +1135,6 @@ fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
 
-
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
 }
@@ -1093,9 +1153,8 @@ fn isReferenceTextSpace(byte: u8) bool {
 /// The face a run's font id inks with: a runtime-registered face when
 /// the id matches one (validated at registration, so a registered id
 /// always resolves — no render-time fallback decision), otherwise the
-/// bundled mapping — the mono face for the reserved mono id, the sans
-/// face for everything else (the weight and italic span variants keep
-/// the regular outlines at their estimator advances, exactly as before).
+/// bundled mapping — Geist Mono for mono text, and the corresponding
+/// regular, medium or bold Geist face for reserved sans ids.
 /// Glyphs missing from whichever face wins keep the per-glyph notdef
 /// block fallback in `drawGlyphBox`; a registered face never cascades
 /// into the bundled faces mid-run.
@@ -1103,8 +1162,7 @@ fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) 
     for (fonts) |font| {
         if (font.id == font_id) return font.face;
     }
-    if (font_id == canvas.default_mono_font_id) return &font_ttf.geist_mono;
-    return &font_ttf.geist_regular;
+    return font_ttf.bundledFaceForFontId(font_id);
 }
 
 /// Decode the first codepoint of the cluster `text[start..start+len]`;
@@ -1255,6 +1313,15 @@ fn referenceImagePixelLen(width: usize, height: usize) ?usize {
 
 fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceImage {
     for (images) |image| {
+        // THE REFERENCE-RENDERER MEDIA POLICY: presentation-only
+        // resources (media-surface textures pushed by external
+        // producers) do not exist for the deterministic CPU path. The
+        // draw referencing one skips — exactly like an unregistered id —
+        // so the surface's id-derived placeholder beneath it is what
+        // reference renders, screenshots, replay pixel marks, and
+        // GOLDENS show. Goldens can therefore never depend on producer
+        // output; only live GPU/packet hosts composite the real texture.
+        if (image.presentation_only) continue;
         if (image.id == id) return image;
     }
     return null;
@@ -1313,22 +1380,43 @@ const ReferencePremultipliedLinearColor = struct {
     a: f32 = 0,
 };
 
-fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
+fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
     return switch (sampling) {
-        .nearest => referenceSampleImageNearest(image, src, u, v),
-        .linear => referenceSampleImageLinear(image, src, u, v),
+        .nearest => referenceSampleImageNearest(image, src, bounds, u, v),
+        .linear => referenceSampleImageLinear(image, src, bounds, u, v),
     };
 }
 
-fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+const ReferenceImageSampleBounds = struct {
+    min_x: i32,
+    min_y: i32,
+    max_x: i32,
+    max_y: i32,
+};
+
+/// Inclusive texel bounds touched by a clipped source rectangle. Native
+/// image APIs constrain filtering to their source portion; mirror that
+/// here so scaling a texture-atlas tile never samples an adjacent tile.
+fn referenceImageSampleBounds(image: ReferenceImage, src: geometry.RectF) ReferenceImageSampleBounds {
+    const image_max_x: i32 = @intCast(image.width - 1);
+    const image_max_y: i32 = @intCast(image.height - 1);
+    return .{
+        .min_x = clampI32(referenceFloor(src.minX()), 0, image_max_x),
+        .min_y = clampI32(referenceFloor(src.minY()), 0, image_max_y),
+        .max_x = clampI32(referenceCeil(src.maxX()) - 1, 0, image_max_x),
+        .max_y = clampI32(referenceCeil(src.maxY()) - 1, 0, image_max_y),
+    };
+}
+
+fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
-    const x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
-    const y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
+    const x = clampI32(referenceFloor(sample_x_f), bounds.min_x, bounds.max_x);
+    const y = clampI32(referenceFloor(sample_y_f), bounds.min_y, bounds.max_y);
     return referenceImagePixel(image, x, y);
 }
 
-fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     // Belt over the renderPass-level fill: direct sampler callers (unit
     // tests, future paths) stay correct. One predictable branch per
     // output pixel — noise next to the twelve pows the table replaces.
@@ -1337,10 +1425,10 @@ fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
     const x_floor = referenceFloor(sample_x_f);
     const y_floor = referenceFloor(sample_y_f);
-    const x0 = clampI32(x_floor, 0, @intCast(image.width - 1));
-    const y0 = clampI32(y_floor, 0, @intCast(image.height - 1));
-    const x1 = clampI32(x_floor + 1, 0, @intCast(image.width - 1));
-    const y1 = clampI32(y_floor + 1, 0, @intCast(image.height - 1));
+    const x0 = clampI32(x_floor, bounds.min_x, bounds.max_x);
+    const y0 = clampI32(y_floor, bounds.min_y, bounds.max_y);
+    const x1 = clampI32(x_floor + 1, bounds.min_x, bounds.max_x);
+    const y1 = clampI32(y_floor + 1, bounds.min_y, bounds.max_y);
     const tx = std.math.clamp(sample_x_f - @as(f32, @floatFromInt(x_floor)), 0, 1);
     const ty = std.math.clamp(sample_y_f - @as(f32, @floatFromInt(y_floor)), 0, 1);
 

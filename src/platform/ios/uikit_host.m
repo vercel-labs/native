@@ -99,12 +99,97 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <AVFoundation/AVFoundation.h>
 #import <ImageIO/ImageIO.h>
+#import <Security/Security.h>
 
 #include <dlfcn.h>
+#include <math.h>
 #include <mach-o/dyld.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "native_sdk_app.h"
+#include "apple_image_fit.h"
+
+// ----------------------------------------------------------- credentials
+// Generic-password Keychain entries shared by the WebView bridge and core
+// effects through the runtime's one service/account namespace.
+static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
+    if (status == errSecSuccess) return 1;
+    if (status == errSecItemNotFound) return missingCode;
+    if (status == errSecInteractionNotAllowed || status == errSecNotAvailable) return -2;
+    if (status == errSecAuthFailed || status == errSecUserCanceled || status == errSecMissingEntitlement) return -3;
+    return -5;
+}
+
+static NSMutableDictionary *NativeSdkCredentialQuery(const char *service, uintptr_t service_len,
+                                                       const char *account, uintptr_t account_len) {
+    NSString *serviceString = [[NSString alloc] initWithBytes:service length:service_len encoding:NSUTF8StringEncoding];
+    NSString *accountString = [[NSString alloc] initWithBytes:account length:account_len encoding:NSUTF8StringEncoding];
+    if (!serviceString || !accountString) return nil;
+    return [@{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: serviceString,
+        (__bridge id)kSecAttrAccount: accountString,
+    } mutableCopy];
+}
+
+static int NativeSdkCredentialSet(void *context,
+                                  const char *service, uintptr_t service_len,
+                                  const char *account, uintptr_t account_len,
+                                  const uint8_t *secret, uintptr_t secret_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        NSData *data = [NSData dataWithBytes:secret length:secret_len];
+        NSDictionary *update = @{ (__bridge id)kSecValueData: data };
+        OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query,
+                                        (__bridge CFDictionaryRef)update);
+        if (status == errSecItemNotFound) {
+            query[(__bridge id)kSecValueData] = data;
+            query[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+            status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
+        }
+        return status == errSecSuccess ? 1 : NativeSdkCredentialStatus(status, -5);
+    }
+}
+
+static int64_t NativeSdkCredentialGet(void *context,
+                                      const char *service, uintptr_t service_len,
+                                      const char *account, uintptr_t account_len,
+                                      uint8_t *output, uintptr_t output_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        query[(__bridge id)kSecReturnData] = @YES;
+        query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+        CFTypeRef raw = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &raw);
+        if (status != errSecSuccess) return NativeSdkCredentialStatus(status, -1);
+        NSData *data = (__bridge NSData *)raw;
+        if (data.length > output_len) {
+            CFRelease(raw);
+            return -4;
+        }
+        if (data.length > 0) memcpy(output, data.bytes, data.length);
+        int64_t result = (int64_t)data.length;
+        CFRelease(raw);
+        return result;
+    }
+}
+
+static int NativeSdkCredentialDelete(void *context,
+                                     const char *service, uintptr_t service_len,
+                                     const char *account, uintptr_t account_len) {
+    (void)context;
+    @autoreleasepool {
+        NSMutableDictionary *query = NativeSdkCredentialQuery(service, service_len, account, account_len);
+        if (!query) return -5;
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+        return status == errSecSuccess ? 1 : NativeSdkCredentialStatus(status, 0);
+    }
+}
 
 // Zig's std.debug stack-trace symbolication (pulled in by the embed lib's
 // panic path) references `_dyld_get_image_header_containing_address`, which
@@ -873,29 +958,50 @@ static int NativeSdkAudioServiceSetVolume(void *context, double volume) {
 // because the canvas image pipeline expects straight alpha. Returns 1
 // decoded, -1 when the decoded pixels do not fit `pixels_len`, 0 for
 // undecodable bytes.
-static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t *out_width, uintptr_t *out_height) {
+static int NativeSdkImageServiceDecode(void *context, const uint8_t *bytes, uintptr_t bytes_len, uint8_t *pixels, uintptr_t pixels_len, uintptr_t max_pixels, uintptr_t *out_width, uintptr_t *out_height) {
     (void)context;
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (!source) return 0;
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+        int64_t source_width_value = 0;
+        int64_t source_height_value = 0;
+        if (properties) {
+            CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+            CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+            if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+            if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+            CFRelease(properties);
+        }
+        size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+        size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+        CGImageRef image = NULL;
+        if (source_width > 0 && source_height > 0) {
+            const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
+            NSDictionary *thumbnail_options = @{
+                (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            };
+            image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+        }
         CFRelease(source);
         if (!image) return 0;
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }
@@ -1665,6 +1771,16 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     native_sdk_app_set_audio_service(self.nativeApp, &audioService, (__bridge void *)self.audioEngine);
     [self logNativeErrorIfAny:@"audio_service"];
 
+    // Secure credentials use generic-password Keychain entries. Register
+    // before start so boot effects see the same namespace as the bridge.
+    native_sdk_credential_service_t credentialService = {
+        .set = NativeSdkCredentialSet,
+        .get = NativeSdkCredentialGet,
+        .delete = NativeSdkCredentialDelete,
+    };
+    native_sdk_app_set_credential_service(self.nativeApp, &credentialService, NULL);
+    [self logNativeErrorIfAny:@"credential_service"];
+
     // The platform image decoder (registered before start, like the audio
     // service, so a boot-effect fx.registerImageBytes already decodes):
     // CGImageSource behind the embed image seam, the same ImageIO family
@@ -1674,6 +1790,28 @@ static const CGFloat NativeSdkTouchSlop = 8.0;
     };
     native_sdk_app_set_image_service(self.nativeApp, &imageService, NULL);
     [self logNativeErrorIfAny:@"image_service"];
+
+    // Engine-owned durable storage lives in the platform app-data
+    // directory. The ABI accepts this for every app; capability-shed builds
+    // treat it as a no-op, while `store` builds open store.db before start.
+    NSString *dataRoot = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                               NSUserDomainMask,
+                                                               YES).firstObject;
+    if (dataRoot) {
+        NSError *dataRootError = nil;
+        [NSFileManager.defaultManager createDirectoryAtPath:dataRoot
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:&dataRootError];
+        if (dataRootError) {
+            NSLog(@"native-sdk: app data directory unavailable: %@", dataRootError);
+        } else {
+            native_sdk_app_set_data_root(self.nativeApp,
+                                         dataRoot.UTF8String,
+                                         [dataRoot lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+            [self logNativeErrorIfAny:@"data_root"];
+        }
+    }
 
     // Verification harness: with NATIVE_SDK_AUTOMATION set (simctl launch
     // exports SIMCTL_CHILD_* into the app) the embedded runtime publishes

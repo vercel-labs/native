@@ -3,8 +3,10 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
+const code_model = @import("code.zig");
 const token_model = @import("tokens.zig");
 const chart_model = @import("chart.zig");
+const terminal_grid_model = @import("terminal_grid.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -20,6 +22,7 @@ const TextRange = text_model.TextRange;
 const TextSelection = text_model.TextSelection;
 const CanvasRenderAnimation = canvas.CanvasRenderAnimation;
 const BlurTokenRef = token_model.BlurTokenRef;
+const ScrollAxes = token_model.ScrollAxes;
 const Easing = token_model.Easing;
 const MotionDuration = token_model.MotionDuration;
 const MotionTokens = token_model.MotionTokens;
@@ -133,6 +136,33 @@ pub const WidgetKind = enum {
     /// never double-draw. Not a hit target itself: the textarea fills the
     /// group's body, so a click "in the field" IS a click in the textarea.
     input_group,
+    /// The media surface leaf: composites a texture PRODUCED OUTSIDE the
+    /// widget tree (a video decoder, a camera pipeline, an external
+    /// renderer) into the layout like any widget — clipped, z-ordered,
+    /// transformed. `image_id` carries the SURFACE id the producer
+    /// targets (`Runtime.acquireMediaSurfaceProducer`), a model-owned
+    /// u64 in the ImageId value space; 0 is the unbound sentinel, and
+    /// usable ids are nonzero values below the reserved namespace bit
+    /// (`media_surface_image_id_bit`, refused at acquire).
+    /// Display-only like `image` and `chart`: not a hit target, presses
+    /// fall through to the nearest pressable ancestor. Texture CONTENTS
+    /// are presentation chrome — the deterministic reference renderer
+    /// draws the surface's id-derived placeholder instead (see
+    /// `ReferenceImage.presentation_only`), so goldens and session
+    /// fingerprints never depend on producer output.
+    media_surface,
+    /// The terminal leaf: paints a RESOLVED emulator viewport (a
+    /// `terminal_grid.TerminalGrid` snapshot the widget's `terminal`
+    /// binding references) as real text runs and geometric box drawing,
+    /// clipped to its frame. A stateful focus target like the text
+    /// inputs — focused, it routes keys and committed text to the
+    /// framework-owned session behind its bound pty id and consumes
+    /// wheel scrollback — but never a text-input kind: the emulator,
+    /// not a TextBuffer, owns the editing model. Its semantics label
+    /// carries the viewport's plain text (a terminal's semantic content
+    /// IS its text), so assistive tech reads the real screen and the
+    /// session fingerprint covers cell state.
+    terminal,
 };
 
 /// STABLE code for a widget kind: assigned at birth, never reused or
@@ -210,6 +240,8 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
         .split_divider => 58,
         .tree => 59,
         .input_group => 60,
+        .media_surface => 61,
+        .terminal => 62,
     };
 }
 
@@ -232,11 +264,75 @@ pub const WidgetState = struct {
     invalid: bool = false,
 };
 
+/// Engine-owned widget markers share one byte so adding runtime policy does
+/// not expand every retained `Widget`. Builder-facing behavior remains on
+/// ordinary named fields; these bits are stamped only by engine code.
+pub const WidgetRuntimeFlags = packed struct(u8) {
+    /// `Ui.code` stamped this textarea as the editor surface.
+    code_editor: bool = false,
+    /// The runtime installed an OS-native scroll driver; engine-drawn
+    /// scrollbar and kinetic physics stand down for this scroll view.
+    native_scroll: bool = false,
+    /// The callback accepts tagged scroll requests, independently of an
+    /// optional tree role sharing this scroll container's callback slot.
+    compiled_scroll_policy: bool = false,
+    _reserved: u5 = 0,
+};
+
+/// Two 128-line masks for code-only diff presentation. `Widget` packs them
+/// into fields dormant on decorated code so ordinary widgets do not grow.
+pub const CodeDiffLines = struct {
+    added: u128,
+    removed: u128,
+};
+
+/// Presentation-only FLIP motion for one draggable keyed widget. Layout and
+/// semantics already describe the final pose; render temporarily translates
+/// the widget from the pose the user was looking at and eases that offset to
+/// zero on the recorded frame clock.
+pub const WidgetLayoutMotion = struct {
+    id: ObjectId,
+    from_offset: geometry.OffsetF = .{},
+    offset: geometry.OffsetF = .{},
+    /// A drag landing begins at the pointer after the live preview has
+    /// disappeared. Hoist that one moving subtree above ancestor clips until
+    /// it settles; ordinary neighbor reflow stays clipped to its scroll lane.
+    escape_ancestor_clips: bool = false,
+    start_ns: u64 = 0,
+    duration_ms: u32 = 180,
+    easing: Easing = .emphasized,
+    spring: canvas.SpringToken = .{},
+};
+
 pub const WidgetRenderState = struct {
+    /// Whether the app is active and this widget tree's window is key.
+    /// Runtime focus ids stay retained while false so focus-visible
+    /// chrome and per-window restoration keep their existing semantics;
+    /// controls whose pixels represent CURRENT keyboard ownership (the
+    /// terminal cursor) consult this gate too.
+    keyboard_active: bool = true,
     focused_id: ?ObjectId = null,
     focus_visible_id: ?ObjectId = null,
     hovered_id: ?ObjectId = null,
     pressed_id: ?ObjectId = null,
+    /// The live widget drag. Normal emission reserves but does not paint the
+    /// source subtree's current layout slot; a final overlay pass paints its
+    /// fully opaque appearance under the pointer. `drag_preview_offset` is
+    /// the total pointer displacement from the gesture's down point.
+    drag_preview_id: ?ObjectId = null,
+    /// The source frame's origin when the gesture first resolved. Keeping
+    /// this stable lets an app move the standing source to a candidate
+    /// insertion slot while the floating preview stays under the pointer.
+    drag_preview_origin: ?geometry.PointF = null,
+    drag_preview_offset: geometry.OffsetF = .{},
+    /// Renderer-private namespace switch used only while emitting the
+    /// floating appearance, so its display-list ids cannot duplicate the source
+    /// subtree's ids.
+    rendering_drag_preview: bool = false,
+    /// Presentation offsets for draggable keyed widgets displaced by a live
+    /// insertion preview (and for the source settling after pointer-up).
+    /// These never alter hit testing, semantics, or final layout geometry.
+    layout_motions: []const WidgetLayoutMotion = &.{},
     /// The pointer position while `hovered_id` is a widget that draws
     /// hover-detail chrome (today: `.chart` with `hover_details`), in
     /// the same coordinate space as widget frames. Null everywhere
@@ -256,6 +352,22 @@ pub const WidgetRenderState = struct {
         if (id == 0) return false;
         for (self.revealing_disclosure_ids) |revealing_id| {
             if (revealing_id == id) return true;
+        }
+        return false;
+    }
+
+    pub fn layoutMotionOffset(self: WidgetRenderState, id: ObjectId) geometry.OffsetF {
+        if (id == 0 or self.rendering_drag_preview) return .{};
+        for (self.layout_motions) |motion| {
+            if (motion.id == id) return motion.offset;
+        }
+        return .{};
+    }
+
+    pub fn layoutMotionEscapesAncestorClips(self: WidgetRenderState, id: ObjectId) bool {
+        if (id == 0 or self.rendering_drag_preview) return false;
+        for (self.layout_motions) |motion| {
+            if (motion.id == id) return motion.escape_ancestor_clips;
         }
         return false;
     }
@@ -307,10 +419,25 @@ pub const WidgetAnchor = struct {
     alignment: WidgetAnchorAlignment = .start,
     /// Gap in points between the anchor edge and the surface.
     offset: f32 = 4,
+    /// Point-anchor mode: when set, the surface anchors at this explicit
+    /// point in the window's coordinate space instead of the parent
+    /// widget's frame (the context-menu-at-the-pointer shape). The point
+    /// acts as a zero-size anchor rect, so the standard popup edge rules
+    /// apply unchanged: `placement` prefers a side of the point, the
+    /// surface flips to the other side when it would cross the window
+    /// edge and the other side has more room, and both axes clamp into
+    /// the window. `stretch` alignment has no width to inherit from a
+    /// point and behaves like `start`.
+    point: ?geometry.PointF = null,
 };
 
 pub const WidgetLayoutStyle = struct {
     padding: geometry.InsetsF = .{},
+    /// True when the widget-kind defaults supplied `padding`. Layout
+    /// resolution uses this provenance to translate a house default onto
+    /// another theme register without mistaking an equal author value for
+    /// the default. Author-created styles leave this false.
+    padding_is_kind_default: bool = false,
     gap: f32 = 0,
     grow: f32 = 0,
     main_alignment: WidgetMainAlignment = .start,
@@ -365,6 +492,17 @@ pub const WidgetLayoutStyle = struct {
     /// into both `min_size` and `max_size`, so intrinsic content can
     /// neither shrink nor silently grow the box past it.
     max_size: geometry.SizeF = .{},
+    /// The media sizing contract for a COMPOSED container: report no
+    /// intrinsic size, exactly like the media-surface leaf it wraps
+    /// (definite width/height or flex grow size it; a hug container
+    /// gives it nothing). Chrome composed beside a zero-intrinsic
+    /// surface — a transport bar — must not leak its own intrinsic
+    /// size into the element, or an unsized element would render as a
+    /// chrome-only strip. Declared sizes stay definite (they ride the
+    /// frame and the min/max bounds, never the intrinsic measure);
+    /// pair with `clip_content` so chrome cannot paint past a box the
+    /// layout granted nothing.
+    zero_intrinsic: bool = false,
 };
 
 pub const WidgetStyle = struct {
@@ -442,6 +580,8 @@ pub const WidgetRole = enum {
     tab,
     checkbox,
     radio,
+    /// A single-choice group containing descendant radio controls.
+    radiogroup,
     switch_control,
     slider,
     progressbar,
@@ -608,7 +748,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .input => builtinComponent(.input, .input, .textbox, false),
         .pagination => builtinComponent(.pagination, .pagination, .group, true),
         .progress => builtinComponent(.progress, .progress, .progressbar, false),
-        .radio_group => builtinComponent(.radio_group, .radio_group, .group, true),
+        .radio_group => builtinComponent(.radio_group, .radio_group, .radiogroup, true),
         .resizable => builtinComponent(.resizable, .resizable, .group, true),
         .select => builtinComponent(.select, .select, .button, true),
         .separator => builtinComponent(.separator, .separator, .none, false),
@@ -702,6 +842,49 @@ pub const WidgetOverscroll = enum {
     rubber_band,
 };
 
+/// The `.terminal` widget's binding: `pty` is the MODEL-OWNED pty
+/// effect key the element binds (the id `fx.ptySpawn` named — ids are
+/// model data, never markup literals; 0 is the unbound sentinel and the
+/// surface paints its background only). `scrollback` is the declared
+/// scrollback offset in rows, following the scroll `value` source-wins
+/// reconcile rule: echo the `on-terminal` state's `scrollback` back
+/// here and the runtime-owned position survives rebuilds; change it
+/// model-side to scroll programmatically. `grid` is the RESOLVED
+/// viewport snapshot the producer published for the key.
+///
+/// LIFETIME: `grid` is a BORROWED pointer, not copied into a retained
+/// tree the way `text`/`spans` are — so the producer must own it for at
+/// least as long as any retained tree built from this widget, since a
+/// focus/hover repaint re-emits from the retained tree without a
+/// rebuild. The sanctioned producer is the framework's terminal-session
+/// store (installed via `Ui.TerminalGridLookup`), whose grids live in
+/// stable per-session storage across frames and are freed only when the
+/// session ends and the widget unmounts — so the runtime flow satisfies
+/// the contract by construction. It is `null` whenever no lookup is
+/// installed (every app- or test-built tree today), which paints the
+/// honest empty surface; a direct builder caller that sets it must honor
+/// the same outlive-the-retained-tree contract, exactly as it must for a
+/// borrowed `text` slice.
+pub const TerminalBinding = struct {
+    pty: u64 = 0,
+    scrollback: u32 = 0,
+    grid: ?*const terminal_grid_model.TerminalGrid = null,
+};
+
+/// A house video-transport chrome role for a control the RUNTIME
+/// consumes: `Ui.video` stamps it on the chrome it composes (`.toggle`
+/// on the play/pause button, `.scrub` on the seek slider), and the app
+/// loop drives the single video playback channel from presses/changes
+/// on these widgets instead of resolving an app Msg — declarative
+/// playback needs no model plumbing to keep its transport honest.
+/// `.none` everywhere else, including every app-authored widget:
+/// builder-internal, never an `ElementOptions` channel.
+pub const VideoControlVerb = enum(u8) {
+    none,
+    toggle,
+    scrub,
+};
+
 /// Where a control sits inside a FLUSH button group (`button_group`
 /// with gap 0), stamped onto the render-time widget copy by BOTH render
 /// walks — never authored, never serialized, never retained. The stamp
@@ -721,6 +904,10 @@ pub const WidgetGroupSegment = enum {
 };
 
 pub const Widget = struct {
+    /// Portable appearance resolver installed by compiled views.
+    appearance_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Optional portable retained component policy, installed by compiled views.
+    interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
     id: ObjectId = 0,
     kind: WidgetKind,
     frame: geometry.RectF = .{},
@@ -762,6 +949,53 @@ pub const Widget = struct {
     /// tooling and write-back can round-trip it. Span paragraphs
     /// (`spans`) wrap by design and ignore it.
     text_no_wrap: bool = false,
+    /// Renderer-owned logical-line gutter for a syntax-code paragraph.
+    /// Zero keeps an ordinary paragraph; a positive value is the decimal
+    /// digit width of the largest marker. The gutter is decoration, not
+    /// retained text, so selection/copy remains the exact source bytes.
+    /// Stamped only by `Ui.code`; there is no generic builder/markup
+    /// channel for turning arbitrary paragraphs into numbered code.
+    /// Bit 7 is an internal diff-metadata tag; `codeLineNumberDigits`
+    /// exposes only the authored digit count.
+    code_line_number_digits: u8 = 0,
+    /// Optional one-based logical depth for a flat sequence of tree rows.
+    /// Zero keeps the structural nesting contract. A nonzero value lets a
+    /// `<for>` render visible rows as siblings while Left/Right still find
+    /// the logical parent and first child from their declared levels.
+    tree_level: u16 = 0,
+    /// Internal marker for an editable `Ui.code` surface. The widget keeps
+    /// the `.textarea` kind so the existing editor, IME, clipboard, undo,
+    /// selection, and accessibility paths all apply; this bit only swaps
+    /// the textarea's visual/geometry policy to bare monospace highlighted
+    /// code (no control fill, border, radius, focus ring, or inset).
+    runtime_flags: WidgetRuntimeFlags = .{},
+    /// Textarea Enter policy (`ElementOptions.submit_on_enter` / markup
+    /// `submit-on-enter`): plain Enter submits instead of editing, while
+    /// Shift+Enter remains a newline. False keeps the ordinary multiline
+    /// contract. Ignored by non-textarea kinds. The engine-only booleans in
+    /// `runtime_flags` share a byte so adding this policy does not grow every
+    /// retained widget.
+    submit_on_enter: bool = false,
+    /// Syntax grammar for an editable `Ui.code` surface. Editable code
+    /// retains one plain source span and tokenizes only visible logical
+    /// lines during paint, so large documents do not consume the view's
+    /// bounded span pool on offscreen syntax runs.
+    code_language: code_model.Language = .plain,
+    /// Runtime-owned longest-line measurement for an editable no-wrap code
+    /// surface. The signature keeps the value honest across font/appearance
+    /// changes; source edits invalidate it before caret and scroll geometry
+    /// read it. These fields are renderer state, not builder options.
+    code_content_width: f32 = 0,
+    code_content_width_generation: u64 = 0,
+    code_content_width_font_id: u64 = 0,
+    code_content_width_size_bits: u32 = 0,
+    /// Nonzero on bounded paragraph chunks that together present one
+    /// selectable source-code document. The group id is the structural id
+    /// of their internal parent; offsets order each chunk's exact source
+    /// bytes without duplicating the full source in retained storage. Fixed
+    /// width keeps the code-diff metadata union intact on 32-bit targets.
+    static_text_group_id: ObjectId = 0,
+    static_text_group_offset: u64 = 0,
     /// What a single-line text run does with content that does not fit
     /// its frame (`ElementOptions.overflow` / markup `overflow=` on
     /// text leaves): `.ellipsis` (default) elides the tail behind a
@@ -785,15 +1019,38 @@ pub const Widget = struct {
     image_fit: ImageFit = .stretch,
     image_sampling: ImageSampling = .linear,
     image_opacity: f32 = 1,
+    /// The video stream's REPORTED dimensions for a contain-fitted
+    /// media surface (`Ui.stampVideoSurfaceFit` writes it from the
+    /// LOADED event's journaled report; null until then): the emit
+    /// computes the letterboxed frame quad from this, never from
+    /// `image_src` — which keeps its ordinary source-crop meaning on
+    /// every widget. Engine-internal: no builder option, no markup
+    /// attribute.
+    stream_size: ?geometry.SizeF = null,
     text_selection: ?TextSelection = null,
     text_composition: ?TextRange = null,
     value: f32 = 0,
+    /// The HORIZONTAL scroll offset of a horizontal-capable
+    /// `.scroll_view` (`value_x:` in the builder, `value-x=` in markup)
+    /// — the horizontal counterpart of the retained offset that rides
+    /// `value`. Follows the same source-wins reconcile rule: the
+    /// runtime-owned offset (user scrolling) survives rebuilds while
+    /// the source offset is unchanged; a source-side change
+    /// (programmatic scroll) wins. Meaningless on every other kind.
+    value_x: f32 = 0,
+    /// Which axes a `.scroll_view` scrolls (`axis:` in the builder,
+    /// `axis=` in markup). Vertical — the pre-axis behavior — is the
+    /// default; `horizontal` and `both` opt the region into wheel
+    /// `delta_x`, the horizontal scrollbar, and the horizontal keymap.
+    /// Virtualized regions ignore the horizontal grant (windowed
+    /// virtualization prices rows, not columns). Meaningless on every
+    /// other kind.
+    scroll_axes: ScrollAxes = .vertical,
     layer: ?i32 = null,
     /// Modal surfaces (dialog/drawer/sheet) paint a token-driven scrim
     /// (dim + backdrop blur) across the whole tree behind them. False
-    /// opts a surface out — for embedding one as an inline PREVIEW
-    /// (a component catalog card, a docs specimen) where it is not
-    /// actually modal. Ignored on every other kind.
+    /// opts out of the scrim for a non-modal specimen; placement remains
+    /// root-relative. Ignored on every other kind.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
@@ -803,10 +1060,6 @@ pub const Widget = struct {
     semantics: WidgetSemantics = .{},
     /// App-declared native context menu for this widget (empty = none).
     context_menu: []const WidgetContextMenuItem = &.{},
-    /// True when the runtime installed a native scroll driver for this
-    /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
-    /// stand down — the OS scroller owns feel and the overlay scroller.
-    native_scroll: bool = false,
     /// Per-region edge behavior for scroll containers (`overscroll:` in
     /// the builder, `overscroll=` in markup): `.default` follows the
     /// `ScrollPhysics.overscroll` token (off unless a theme flips it),
@@ -841,6 +1094,18 @@ pub const Widget = struct {
     /// origin: mounts land at their value, exactly as before. Ignored
     /// on splits that already have a retained fraction.
     resize_origin: f32 = -1,
+    /// Hover-intent show delay for an ANCHORED `.tooltip` widget
+    /// (`tooltip_delay:` in the builder, `tooltip-delay=` in markup),
+    /// in milliseconds. An anchored tooltip is runtime-owned hover
+    /// chrome: it stays hidden until its trigger (the anchor parent's
+    /// subtree) has been hovered this long on the recorded frame
+    /// clock, shows while the hover holds, and hides when the pointer
+    /// leaves — the model never hears hover. 0 shows the instant the
+    /// trigger is hovered. Negative (the default) follows the token
+    /// default (`ControlMetricTokens.tooltip_show_delay_ms`). Ignored
+    /// on every other kind, and on tooltips without an anchor (those
+    /// stay static leaves that paint whenever the view renders them).
+    tooltip_delay_ms: i32 = -1,
     /// Window-drag surface (`window-drag="true"` / `.window_drag`): a
     /// pointer press that lands here — or falls through plain text /
     /// icons / decorations onto it — moves the WINDOW instead of
@@ -851,12 +1116,35 @@ pub const Widget = struct {
     /// widget a hit target; platforms without a window-drag channel
     /// treat the press as dead space.
     window_drag: bool = false,
+    /// The widget listens for hover-enter/hover-leave Msgs
+    /// (`ElementOptions.on_hover_enter` / `on_hover_leave`; markup
+    /// `on-hover-enter` / `on-hover-leave`): the builder stamps this
+    /// from the bound handlers, and the runtime tracks the pointer's
+    /// containment against it — enter when the pointer enters the
+    /// widget's hit region, leave when it exits. Like the chart's
+    /// `hover_details`, the flag makes the widget hit-testable WITHOUT
+    /// claiming presses (clicks keep falling through to the nearest
+    /// claiming ancestor) and without any hover wash of its own — the
+    /// wash stays a per-kind visual channel, so binding hover on a
+    /// quiet content tile never lights it up.
+    hover_msgs: bool = false,
     /// Plot data for `.chart` widgets: model-derived series (values,
     /// token colors, kind) plus domain/grid options. The retained tree
     /// copies series and points into per-view storage like text/spans,
     /// bounded by `canvas_limits.max_canvas_widget_chart_*` budgets.
     /// `Ui.chart` downsamples long series before they land here.
     chart: chart_model.ChartData = .{},
+    /// The `.terminal` widget's binding (see `TerminalBinding`): the
+    /// model-owned pty effect key the element binds, the declared
+    /// scrollback echo, and the resolved grid snapshot published for
+    /// that key. Default (unbound) on every other kind.
+    terminal: TerminalBinding = .{},
+    /// House video-transport role (see `VideoControlVerb`): `Ui.video`
+    /// stamps `.toggle`/`.scrub` on the chrome controls it composes, and
+    /// the app loop consumes presses/changes on them by driving the
+    /// video playback channel — never by resolving an app Msg. `.none`
+    /// on every app-authored widget.
+    video_control: VideoControlVerb = .none,
     /// Render-walk stamp for flush button-group segments (see
     /// `WidgetGroupSegment`). Derived at emit time from the widget's
     /// position among its group's visible children; `.none` everywhere
@@ -864,9 +1152,47 @@ pub const Widget = struct {
     /// serialization, or equality decisions.
     group_segment: WidgetGroupSegment = .none,
     children: []const Widget = &.{},
+
+    pub fn codeLineNumberDigits(self: Widget) u8 {
+        return self.code_line_number_digits & 0x7f;
+    }
+
+    pub fn hasCodeDiff(self: Widget) bool {
+        return self.code_line_number_digits & 0x80 != 0;
+    }
+
+    /// Code-only metadata occupies the otherwise unused no-wrap width-cache
+    /// words plus the ungrouped static-text offset. The high bit above tags
+    /// the union. This keeps Widget's common footprint unchanged; a diff
+    /// editor simply measures its longest line on demand instead of caching.
+    pub fn codeDiffLines(self: Widget) ?CodeDiffLines {
+        if (!self.hasCodeDiff()) return null;
+        const removed_low = @as(u64, @as(u32, @bitCast(self.code_content_width))) |
+            (@as(u64, self.code_content_width_size_bits) << 32);
+        return .{
+            .added = @as(u128, self.code_content_width_generation) |
+                (@as(u128, self.code_content_width_font_id) << 64),
+            .removed = @as(u128, removed_low) |
+                (@as(u128, self.static_text_group_offset) << 64),
+        };
+    }
+
+    pub fn setCodeDiffLines(self: *Widget, lines: CodeDiffLines) void {
+        std.debug.assert(self.static_text_group_id == 0);
+        self.code_line_number_digits |= 0x80;
+        self.code_content_width_generation = @truncate(lines.added);
+        self.code_content_width_font_id = @truncate(lines.added >> 64);
+        const removed_low: u64 = @truncate(lines.removed);
+        self.code_content_width = @bitCast(@as(u32, @truncate(removed_low)));
+        self.code_content_width_size_bits = @truncate(removed_low >> 32);
+        self.static_text_group_offset = @truncate(lines.removed >> 64);
+    }
 };
 
 pub const BuiltinComponentOptions = struct {
+    /// Explicit compiled construction for native toolkit extensions. Ordinary
+    /// TypeScript views receive the same owner through their Ui builder.
+    construction_policy: ?@import("component_construction_policy.zig").Policy = null,
     id: ObjectId = 0,
     frame: geometry.RectF = .{},
     opacity: f32 = 1,
@@ -895,8 +1221,8 @@ pub const BuiltinComponentOptions = struct {
     text_composition: ?TextRange = null,
     value: f32 = 0,
     layer: ?i32 = null,
-    /// See `Widget.scrim`: false embeds a modal surface as an inline
-    /// preview without the behind-it dim + blur.
+    /// See `Widget.scrim`: false keeps root-relative placement but omits
+    /// the behind-it dim + blur.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
@@ -916,6 +1242,7 @@ pub const BuiltinSurfacePlacementOptions = struct {
     bounds: geometry.RectF,
     preferred_size: geometry.SizeF = .{},
     margin: f32 = 24,
+    surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
 };
 
 /// The input-catcher behind a modal surface: a full-bounds panel whose
@@ -956,10 +1283,9 @@ pub const BuiltinSurfaceEnterAnimationOptions = struct {
 };
 
 pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinComponentOptions) Widget {
-    const descriptor = builtinComponentDescriptor(kind);
-    return .{
+    var widget: Widget = .{
         .id = options.id,
-        .kind = descriptor.root_widget_kind,
+        .kind = .stack,
         .frame = options.frame,
         .opacity = options.opacity,
         .transform = options.transform,
@@ -980,13 +1306,24 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .layer = options.layer,
         .scrim = options.scrim,
         .state = options.state,
-        .layout = builtinComponentLayout(kind, options.size orelse builtinComponentDefaultSize(kind), options.layout),
-        .variant = options.variant orelse builtinComponentDefaultVariant(kind),
-        .size = options.size orelse builtinComponentDefaultSize(kind),
+        .layout = options.layout,
+        .variant = .default,
+        .size = .default,
         .style = options.style,
-        .semantics = builtinComponentSemantics(descriptor, options.semantics),
+        .semantics = options.semantics,
         .children = options.children,
     };
+    if (options.construction_policy) |policy| {
+        @import("component_construction_policy.zig").builtin(policy, kind, &widget, options);
+    } else {
+        const descriptor = builtinComponentDescriptor(kind);
+        widget.kind = descriptor.root_widget_kind;
+        widget.variant = options.variant orelse builtinComponentDefaultVariant(kind);
+        widget.size = options.size orelse builtinComponentDefaultSize(kind);
+        widget.layout = builtinComponentLayout(kind, widget.size, options.layout);
+        widget.semantics = builtinComponentSemantics(descriptor, options.semantics);
+    }
+    return widget;
 }
 
 pub fn widgetCommandPartId(part: WidgetCommandPart) ObjectId {
@@ -1035,6 +1372,14 @@ pub fn builtinStatusBarWidget(options: BuiltinStatusBarOptions) Widget {
 }
 
 pub fn builtinSurfaceFrame(kind: BuiltinComponentKind, options: BuiltinSurfacePlacementOptions) ?geometry.RectF {
+    if (options.surface_layout_policy) |policy| {
+        return @import("surface_layout_policy.zig").frame(policy, 0, switch (kind) {
+            .dialog => 0,
+            .drawer => 1,
+            .sheet => 2,
+            else => 255,
+        }, 0, &.{ options.bounds.x, options.bounds.y, options.bounds.width, options.bounds.height, options.preferred_size.width, options.preferred_size.height, 0, 0, 0, 0, 0, 0, options.margin });
+    }
     const bounds = options.bounds.normalized();
     if (bounds.isEmpty()) return null;
 
@@ -1194,6 +1539,18 @@ fn builtinComponentSemantics(descriptor: BuiltinComponentDescriptor, semantics: 
 /// concentric with the container's at every position.
 pub const tabs_list_inset: f32 = 3;
 
+/// Additive control-size step shared by token-backed chrome metrics and
+/// token-independent kind defaults. The default alert inset uses the
+/// house 16px base / 2px step here; runtime token packs feed their own
+/// base and step through `widget_metrics.widgetSizedTokenValue`.
+pub fn widgetSizeSteppedValue(size: WidgetSize, value: f32, step: f32) f32 {
+    return switch (size) {
+        .sm => @max(0, value - step),
+        .default, .icon, .heading, .display => value,
+        .lg => value + step,
+    };
+}
+
 /// Ergonomic per-kind layout defaults for the composite surfaces whose
 /// house reference carries built-in content spacing, shared by EVERY
 /// authoring path — `builtinComponentWidget` and (via the ui builder,
@@ -1210,7 +1567,7 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
             .clip_content = true,
         },
         .alert => .{
-            .padding = geometry.InsetsF.all(16),
+            .padding = geometry.InsetsF.all(widgetSizeSteppedValue(size, 16, 2)),
             .gap = 12,
             .clip_content = true,
         },
@@ -1310,10 +1667,21 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
         explicit.padding.bottom == 0 and explicit.padding.left == 0)
     {
         merged.padding = defaults.padding;
+        merged.padding_is_kind_default = true;
     }
     if (explicit.gap == 0) merged.gap = defaults.gap;
     if (explicit.cross_alignment == .stretch) merged.cross_alignment = defaults.cross_alignment;
     if (!explicit.clip_content) merged.clip_content = defaults.clip_content;
     if (explicit.min_size.width == 0 and explicit.min_size.height == 0) merged.min_size = defaults.min_size;
     return merged;
+}
+
+test "Widget keeps the reviewed retained footprint with portable component and appearance policies" {
+    // One layout tree holds thousands of Widgets by value. On the 64-bit
+    // targets that run the renderer, 792 bytes is the reviewed footprint:
+    // the 776-byte native widget plus two optional 8-byte policy callbacks.
+    // The callbacks borrow compiled code, with no per-widget allocation.
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 792), @sizeOf(Widget));
+    }
 }

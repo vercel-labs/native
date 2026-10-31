@@ -7,6 +7,8 @@ const text_layout_cache = @import("text_layout_cache.zig");
 const text_layout_hash = @import("text_layout_hash.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
 const text_metrics = @import("text_metrics.zig");
+const compiled_run = @import("text_run_policy.zig");
+const compiled_query = @import("text_query_policy.zig");
 
 const Error = canvas.Error;
 const FontId = canvas.FontId;
@@ -36,14 +38,18 @@ pub const estimateTextWidthForFace = text_metrics.estimateTextWidthForFace;
 pub const estimateTextAdvanceForBytes = text_metrics.estimateTextAdvanceForBytes;
 pub const estimatedGlyphAdvance = text_metrics.estimatedGlyphAdvance;
 pub const TextMeasureProvider = text_metrics.TextMeasureProvider;
+pub const TextInkMetrics = text_metrics.TextInkMetrics;
 pub const measureTextWidthForFont = text_metrics.measureTextWidthForFont;
+pub const measureTextWidthForFontWithPolicy = text_metrics.measureTextWidthForFontWithPolicy;
 pub const measureTextAdvance = text_metrics.measureTextAdvance;
 
 /// The measurement provider a DrawText carries via its layout options, if
 /// any. Runs without layout options always measure with the estimator.
 fn drawTextMeasure(text: DrawText) ?*const text_metrics.TextMeasureProvider {
-    const options = text.text_layout orelse return null;
-    return options.measure;
+    if (text.text_layout) |options| {
+        if (options.measure) |measure| return measure;
+    }
+    return text.measure;
 }
 
 const textLayoutOptionsForDrawText = text_layout_hash.textLayoutOptionsForDrawText;
@@ -284,7 +290,7 @@ pub const TextLayoutPlanner = struct {
 
     fn consumeText(self: *TextLayoutPlanner, text: DrawText, options: TextLayoutOptions) Error!void {
         if (self.plan_len >= self.plans.len) return error.TextLayoutPlanListFull;
-        const plan = try layoutTextRunPlan(text, textLayoutOptionsForDrawText(options, text), self.lines[self.line_len..]);
+        const plan = try layoutTextRunPlan(text, options, self.lines[self.line_len..]);
         self.plans[self.plan_len] = plan;
         self.plan_len += 1;
         self.line_len += plan.lineCount();
@@ -318,9 +324,15 @@ pub fn layoutTextRun(text: DrawText, options: TextLayoutOptions, output: []TextL
 }
 
 pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []TextLine) Error!TextLayoutPlan {
+    const effective_options = textLayoutOptionsForDrawText(options, text);
+    if (effective_options.text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, effective_options, .{ .mode = 0, .lines = output });
+        if (result.line_capacity_failed) return error.TextLayoutLineListFull;
+        return .{ .key = textLayoutKey(text, effective_options), .layout = .{ .lines = output[0..result.len], .bounds = result.bounds } };
+    }
     var len: usize = 0;
     var bounds: ?geometry.RectF = null;
-    var lines = TextLineIterator.init(text, options);
+    var lines = TextLineIterator.init(text, effective_options);
     while (lines.next()) |line| {
         if (len >= output.len) return error.TextLayoutLineListFull;
         output[len] = line;
@@ -328,7 +340,7 @@ pub fn layoutTextRunPlan(text: DrawText, options: TextLayoutOptions, output: []T
         bounds = unionOptionalBounds(bounds, line.bounds);
     }
     return .{
-        .key = textLayoutKey(text, options),
+        .key = textLayoutKey(text, effective_options),
         .layout = .{ .lines = output[0..len], .bounds = bounds },
     };
 }
@@ -355,6 +367,13 @@ pub const TextLineIterator = struct {
 
     pub fn next(self: *TextLineIterator) ?TextLine {
         if (self.finished) return null;
+        if (self.options.text_run_policy orelse self.text.text_run_policy) |policy| {
+            const result = compiled_run.execute(policy, 0, self.text, self.options, self.cursor, self.index, self.finished, .{}, 0, 0);
+            self.cursor = result.cursor;
+            self.index = result.index;
+            self.finished = result.finished;
+            return result.line;
+        }
         if (self.text.glyphs.len > 0) return self.nextGlyphLine();
         return self.nextPlainLine();
     }
@@ -371,8 +390,15 @@ pub const TextLineIterator = struct {
             self.finished = true;
         } else {
             var next_start = end;
-            if (next_start < bytes.len and bytes[next_start] == '\n') next_start += 1;
-            while (self.options.wrap == .word and next_start < bytes.len and isTextBreakByte(bytes[next_start])) next_start += 1;
+            if (next_start < bytes.len and bytes[next_start] == '\n') {
+                // A hard break starts the next line immediately after
+                // the newline. Its leading whitespace is editable
+                // content, so it must contribute paint and caret width.
+                next_start += 1;
+            } else {
+                // Only soft word wraps elide their break separators.
+                while (self.options.wrap == .word and next_start < bytes.len and isTextBreakByte(bytes[next_start])) next_start += 1;
+            }
             self.cursor = next_start;
         }
         const elision = plainLineElision(bytes, start, end, self.text.font_id, self.text.size, self.options);
@@ -406,30 +432,106 @@ pub const TextLineIterator = struct {
 /// Conservative ink allowance around a text run's metric box. Command
 /// bounds must cover everything a command may ink (stroke bounds inflate
 /// by stroke width, blur bounds by the radius); text metrics only cover
-/// advances, and real glyph outlines overhang them: a wide glyph behind
+/// advances, and real glyph outlines overhang them: fallback glyphs can
+/// extend above the bundled face's cap-height anchor, a wide glyph behind
 /// the flat 0.65em multibyte estimate (arrows, dingbats) pokes up to
 /// ~0.3em past the last advance, descenders plus anti-aliasing spill a
 /// hair below the 0.25em descent box, and italic or negative-LSB glyphs
 /// lean slightly left of the pen. Renderers clip to command bounds, so a
-/// metric-tight box visibly shaved tail glyphs off reference screenshots.
+/// metric-tight box visibly shaved fallback and tail glyphs off screenshots.
 fn textInkInsets(size: f32) geometry.InsetsF {
     const em = @max(0, size);
-    return geometry.InsetsF.init(0, em * 0.35, em * 0.1, em * 0.1);
+    return geometry.InsetsF.init(em * 0.35, em * 0.35, em * 0.1, em * 0.1);
 }
 
 pub fn textBounds(value: DrawText) ?geometry.RectF {
-    const metric = metricTextBounds(value) orelse return null;
-    return metric.inflate(textInkInsets(value.size));
-}
-
-fn metricTextBounds(value: DrawText) ?geometry.RectF {
-    if (value.glyphs.len == 0 and value.text.len == 0) return null;
+    const run_options = textLayoutOptionsForDrawText(.{}, value);
+    if (run_options.text_run_policy) |policy| return compiled_query.execute(policy, value, run_options, .{ .mode = 1 }).bounds;
     if (value.text_layout) |options| {
         var lines: [max_text_bounds_layout_lines]TextLine = undefined;
         if (layoutTextRun(value, options, &lines)) |layout| {
-            if (layout.bounds) |bounds| return bounds;
+            return textBoundsForLines(value, layout.lines);
         } else |_| {}
+
+        // Bounds must remain truthful even when the fixed layout scratch
+        // cannot materialize every line. Stream the same iterator used by
+        // caret and selection queries; this keeps long wrapped paragraphs
+        // from falling back to a metric box that can clip host-shaped ink.
+        const effective_options = textLayoutOptionsForDrawText(options, value);
+        var iterator = TextLineIterator.init(value, effective_options);
+        var bounds: ?geometry.RectF = null;
+        while (iterator.next()) |line| {
+            bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
+        }
+        if (bounds) |value_bounds| return inflateTextBounds(value, value_bounds);
     }
+
+    const metric = metricTextBounds(value) orelse return null;
+    var bounds = metric.inflate(textInkInsets(value.size));
+    if (value.text_layout == null and value.glyphs.len == 0) {
+        if (drawTextMeasure(value)) |provider| {
+            if (provider.measureInk(value.font_id, value.size, value.text)) |metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    value.origin.x + metrics.min_x,
+                    value.origin.y - metrics.max_y,
+                    metrics.max_x - metrics.min_x,
+                    metrics.max_y - metrics.min_y,
+                ));
+            }
+        }
+    }
+    return bounds;
+}
+
+fn textBoundsForLines(value: DrawText, lines: []const TextLine) ?geometry.RectF {
+    var bounds: ?geometry.RectF = null;
+    for (lines) |line| {
+        bounds = unionOptionalBounds(bounds, textLineInkBounds(value, line));
+    }
+    return if (bounds) |value_bounds| inflateTextBounds(value, value_bounds) else null;
+}
+fn inflateTextBounds(text: DrawText, bounds: geometry.RectF) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 7, text, options, 0, 0, false, .{ .bounds = bounds }, 0, 0).line.?.bounds;
+    return bounds.inflate(textInkInsets(text.size));
+}
+
+fn textLineInkBounds(value: DrawText, line: TextLine) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, value);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 6, value, options, 0, 0, false, line, 0, 0).line.?.bounds;
+    var bounds = line.bounds;
+    if (value.glyphs.len > 0) return bounds;
+    if (drawTextMeasure(value)) |provider| {
+        const start = @min(line.text_start, value.text.len);
+        const end = @min(value.text.len, start + line.paintedTextLen());
+        if (end > start) {
+            if (provider.measureInk(value.font_id, value.size, value.text[start..end])) |line_metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    line.bounds.x + line_metrics.min_x,
+                    line.baseline - line_metrics.max_y,
+                    line_metrics.max_x - line_metrics.min_x,
+                    line_metrics.max_y - line_metrics.min_y,
+                ));
+            }
+        }
+        if (line.hasEllipsis()) {
+            if (provider.measureInk(value.font_id, value.size, text_ellipsis)) |ellipsis_metrics| {
+                bounds = bounds.unionWith(geometry.RectF.init(
+                    line.bounds.maxX() - line.ellipsis_advance + ellipsis_metrics.min_x,
+                    line.baseline - ellipsis_metrics.max_y,
+                    ellipsis_metrics.max_x - ellipsis_metrics.min_x,
+                    ellipsis_metrics.max_y - ellipsis_metrics.min_y,
+                ));
+            }
+        }
+    }
+    return bounds;
+}
+
+fn metricTextBounds(value: DrawText) ?geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, value);
+    if (options.text_run_policy) |policy| return if (compiled_run.execute(policy, 5, value, options, 0, 0, false, .{}, 0, 0).line) |line| line.bounds else null;
+    if (value.glyphs.len == 0 and value.text.len == 0) return null;
 
     var min_x = value.origin.x;
     var min_y = value.origin.y - value.size;
@@ -464,12 +566,32 @@ fn metricTextBounds(value: DrawText) ?geometry.RectF {
 /// buffer and no line-count failure mode: the caret of an arbitrarily
 /// long document always resolves.
 pub fn layoutTextCaretRect(text: DrawText, options: TextLayoutOptions, offset: usize) ?geometry.RectF {
-    const line = streamTextLineForOffset(text, options, snapTextOffset(text.text, offset)) orelse return null;
+    return layoutTextCaretRectWithAffinity(text, options, offset, .upstream);
+}
+
+pub fn layoutTextCaretRectWithAffinity(
+    text: DrawText,
+    options: TextLayoutOptions,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?geometry.RectF {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| return compiled_query.execute(policy, text, options, .{ .mode = 2, .offset = offset, .affinity = affinity }).bounds;
+    const line = streamTextLineForOffset(text, options, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
 
 pub fn textCaretRectForLayout(text: DrawText, layout: TextLayout, offset: usize) ?geometry.RectF {
-    const line = textLineForOffset(layout, text.text.len, snapTextOffset(text.text, offset)) orelse return null;
+    return textCaretRectForLayoutWithAffinity(text, layout, offset, .upstream);
+}
+
+pub fn textCaretRectForLayoutWithAffinity(
+    text: DrawText,
+    layout: TextLayout,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?geometry.RectF {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| return compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 5, .offset = offset, .affinity = affinity, .prepared = layout.lines }).bounds;
+    const line = textLineForOffset(layout, text.text.len, snapTextOffset(text.text, offset), affinity) orelse return null;
     return textCaretRectForLine(text, line, offset);
 }
 
@@ -489,6 +611,11 @@ pub fn layoutTextSelectionRects(
     range: TextRange,
     output: []TextSelectionRect,
 ) []const TextSelectionRect {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, options, .{ .mode = 3, .range = range, .selections = output });
+        return output[0..result.len];
+    }
+
     const normalized = snapTextRange(text.text, range);
     if (normalized.isCollapsed(text.text.len)) return output[0..0];
 
@@ -501,6 +628,11 @@ pub fn layoutTextSelectionRects(
 }
 
 pub fn textSelectionRectsForLayout(text: DrawText, layout: TextLayout, range: TextRange, output: []TextSelectionRect) []const TextSelectionRect {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| {
+        const result = compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 6, .range = range, .prepared = layout.lines, .selections = output });
+        return output[0..result.len];
+    }
+
     const normalized = snapTextRange(text.text, range);
     if (normalized.isCollapsed(text.text.len)) return output[0..0];
 
@@ -554,37 +686,101 @@ fn accumulateTextSelectionRect(accumulator: *TextSelectionRectAccumulator, text:
 /// Byte offset for a point, streaming the run's lines — hit testing a
 /// click in a long document has no line-count failure mode.
 pub fn layoutTextOffsetForPoint(text: DrawText, options: TextLayoutOptions, point: geometry.PointF) ?usize {
+    const position = layoutTextCaretPositionForPoint(text, options, point) orelse return null;
+    return position.offset;
+}
+
+pub fn layoutTextCaretPositionForPoint(
+    text: DrawText,
+    options: TextLayoutOptions,
+    point: geometry.PointF,
+) ?canvas.TextCaretPosition {
+    if (options.text_run_policy orelse text.text_run_policy) |policy| return compiled_query.execute(policy, text, options, .{ .mode = 4, .point = point }).position;
+
     var lines = TextLineIterator.init(text, options);
     var candidate: ?TextLine = null;
+    var previous: ?TextLine = null;
+    var candidate_previous: ?TextLine = null;
     while (lines.next()) |line| {
         candidate = line;
+        candidate_previous = previous;
         if (point.y < line.bounds.y + line.bounds.height) break;
+        previous = line;
     }
     const line = candidate orelse return null;
-    return textLineOffsetForX(text, line, point.x);
+    return textCaretPositionForLine(text, line, candidate_previous, point.x);
 }
 
 pub fn textOffsetForLayoutPoint(text: DrawText, layout: TextLayout, point: geometry.PointF) ?usize {
-    const line = textLineForPoint(layout, point) orelse return null;
-    return textLineOffsetForX(text, line, point.x);
+    const position = textCaretPositionForLayoutPoint(text, layout, point) orelse return null;
+    return position.offset;
+}
+
+pub fn textCaretPositionForLayoutPoint(
+    text: DrawText,
+    layout: TextLayout,
+    point: geometry.PointF,
+) ?canvas.TextCaretPosition {
+    if (textLayoutOptionsForDrawText(.{}, text).text_run_policy) |policy| return compiled_query.execute(policy, text, textLayoutOptionsForDrawText(.{}, text), .{ .mode = 7, .point = point, .prepared = layout.lines }).position;
+
+    var previous: ?TextLine = null;
+    for (layout.lines) |line| {
+        if (point.y < line.bounds.y + line.bounds.height) {
+            return textCaretPositionForLine(text, line, previous, point.x);
+        }
+        previous = line;
+    }
+    const line = previous orelse return null;
+    const before = if (layout.lines.len > 1) layout.lines[layout.lines.len - 2] else null;
+    return textCaretPositionForLine(text, line, before, point.x);
+}
+
+fn textCaretPositionForLine(
+    text: DrawText,
+    line: TextLine,
+    previous: ?TextLine,
+    x: f32,
+) canvas.TextCaretPosition {
+    const offset = textLineOffsetForX(text, line, x);
+    const range = textLineRange(text, line);
+    const affinity: canvas.TextCaretAffinity = if (previous) |previous_line|
+        if (offset == range.start and textLineRange(text, previous_line).end == offset)
+            .downstream
+        else
+            .upstream
+    else
+        .upstream;
+    return .{ .offset = offset, .affinity = affinity };
 }
 
 /// Streaming twin of `textLineForOffset`: the line containing
 /// `offset` (already snapped), with the same neighbor semantics.
-fn streamTextLineForOffset(text: DrawText, options: TextLayoutOptions, offset: usize) ?TextLine {
+fn streamTextLineForOffset(
+    text: DrawText,
+    options: TextLayoutOptions,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?TextLine {
     const normalized = @min(offset, text.text.len);
     var lines = TextLineIterator.init(text, options);
     var previous: ?TextLine = null;
     while (lines.next()) |line| {
         const range = textLineRangeForLength(text.text.len, line);
         if (normalized < range.start) return previous orelse line;
-        if (normalized <= range.end) return line;
+        if (normalized < range.end) return line;
+        if (normalized == range.end) {
+            if (affinity == .upstream) return line;
+            const next_line = lines.next() orelse return line;
+            const next_range = textLineRangeForLength(text.text.len, next_line);
+            return if (next_range.start == normalized) next_line else line;
+        }
         previous = line;
     }
     return previous;
 }
 
 pub fn nextTextLineEnd(text: []const u8, start: usize, font_id: FontId, size: f32, options: TextLayoutOptions) usize {
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 1, .{ .font_id = font_id, .size = size, .origin = .{}, .color = .{}, .text = text, .measure = options.measure }, options, start, 0, false, .{}, 0, 0).offset;
     const max_width = if (options.max_width > 0) options.max_width else std.math.inf(f32);
     if (options.wrap == .none or max_width == std.math.inf(f32)) {
         return nextExplicitLineEnd(text, start);
@@ -748,23 +944,25 @@ fn alignTextLineBounds(bounds: geometry.RectF, options: TextLayoutOptions) geome
     return bounds.translate(geometry.OffsetF.init(dx, 0));
 }
 
-fn textLineForOffset(layout: TextLayout, text_len: usize, offset: usize) ?TextLine {
+fn textLineForOffset(
+    layout: TextLayout,
+    text_len: usize,
+    offset: usize,
+    affinity: canvas.TextCaretAffinity,
+) ?TextLine {
     if (layout.lines.len == 0) return null;
     const normalized = @min(offset, text_len);
     var previous: ?TextLine = null;
-    for (layout.lines) |line| {
+    for (layout.lines, 0..) |line, index| {
         const range = textLineRangeForLength(text_len, line);
         if (normalized < range.start) return previous orelse line;
-        if (normalized <= range.end) return line;
-        previous = line;
-    }
-    return previous;
-}
-
-fn textLineForPoint(layout: TextLayout, point: geometry.PointF) ?TextLine {
-    var previous: ?TextLine = null;
-    for (layout.lines) |line| {
-        if (point.y < line.bounds.y + line.bounds.height) return line;
+        if (normalized < range.end) return line;
+        if (normalized == range.end) {
+            if (affinity == .upstream or index + 1 >= layout.lines.len) return line;
+            const next_line = layout.lines[index + 1];
+            const next_range = textLineRangeForLength(text_len, next_line);
+            return if (next_range.start == normalized) next_line else line;
+        }
         previous = line;
     }
     return previous;
@@ -781,6 +979,8 @@ fn textLineRangeForLength(text_len: usize, line: TextLine) TextRange {
 }
 
 pub fn textLineCaretX(text: DrawText, line: TextLine, offset: usize) f32 {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 2, text, options, 0, 0, false, line, offset, 0).scalar;
     const range = textLineRange(text, line);
     const snapped = clampTextOffsetToRange(text.text, range, offset);
     const x = if (line.glyph_len > 0 and line.glyph_start < text.glyphs.len)
@@ -817,6 +1017,8 @@ fn textLineGlyphCaretX(text: DrawText, line: TextLine, range: TextRange, offset:
 }
 
 fn textLineOffsetForX(text: DrawText, line: TextLine, x: f32) usize {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 3, text, options, 0, 0, false, line, 0, x).offset;
     const range = textLineRange(text, line);
     if (x <= line.bounds.x) return range.start;
     // Elided lines: the hidden tail has no painted geometry, so a point
@@ -887,6 +1089,8 @@ fn lineHeight(text: DrawText, options: TextLayoutOptions) f32 {
 }
 
 pub fn textLineBounds(text: DrawText, text_start: usize, text_len: usize, glyph_start: usize, glyph_len: usize, baseline: f32, line_height_value: f32) geometry.RectF {
+    const options = textLayoutOptionsForDrawText(.{}, text);
+    if (options.text_run_policy) |policy| return compiled_run.execute(policy, 4, text, options, 0, 0, false, .{ .text_start = text_start, .text_len = text_len, .glyph_start = glyph_start, .glyph_len = glyph_len, .baseline = baseline, .bounds = .{ .height = line_height_value } }, 0, 0).line.?.bounds;
     if (glyph_len > 0 and glyph_start < text.glyphs.len) {
         const glyphs = text.glyphs[glyph_start..@min(text.glyphs.len, glyph_start + glyph_len)];
         const origin_x = glyphs[0].x;
