@@ -138,6 +138,8 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "size", .doc = "Control size: default|sm|lg|icon. On text, also the typography rungs heading|display (themable token steps above title - a section heading, a hero stat); numeric sizes are not accepted - retheme the typography tokens instead." },
     .{ .name = "width", .doc = "Definite width (plain number): the element is exactly this wide; content neither shrinks nor overflows it. On resizable it is the initial width." },
     .{ .name = "height", .doc = "Definite height (plain number): the element is exactly this tall; content neither shrinks nor overflows it." },
+    .{ .name = "auto-height-min", .doc = "Textarea content-height floor in points (number or numeric binding); used with auto-height-max, without a definite height." },
+    .{ .name = "auto-height-max", .doc = "Textarea content-height cap in points (number or numeric binding). Positive values enable sizing from wrapped text; 0 disables it. The cap is never below auto-height-min. Overflow scrolls with the caret visible." },
     .{ .name = "grow", .doc = "Flex grow factor; give spacer one." },
     .{ .name = "gap", .doc = "Spacing between children (plain number). Rejected on stacking containers (stack, panel, card, the modal surfaces) — they layer children; put a column (or row) inside for flow." },
     .{ .name = "padding", .doc = "Uniform padding (plain number)." },

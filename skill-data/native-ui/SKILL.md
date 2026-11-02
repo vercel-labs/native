@@ -270,6 +270,14 @@ Render channel (Zig-only, no markup attributes): `ElementOptions.opacity` and `E
 
 Numbers are plain (`gap="12"`), booleans are `true`/`false` or a binding.
 
+For a content-sized `textarea`, set `auto-height-min="44"` and
+`auto-height-max="240"` (points, or numeric model bindings). The renderer measures
+wrapped text at the actual editor width, grows and shrinks within these bounds,
+then scrolls the caret into view at the cap. Bounds must be finite and nonnegative;
+the effective cap is never below the minimum. A zero or omitted maximum preserves
+fixed-size behavior. These attributes are textarea-only and cannot accompany a
+definite `height`. An `input-group` includes the measured editor and its actions.
+
 When children's minimum sizes exceed their container, debug builds log a `zero_canvas_layout` diagnostic naming the container, axis, and overflow in pixels — flex overflow is never silent. In Zig views, `.gap` on a stacking kind (`ui.panel(.{ .gap = 8 }, ...)`) logs a `zero_canvas_ui` warning in debug builds with the same lesson — it never fails the build.
 
 ### Chips: exclusive selection with `selected=`

@@ -19,6 +19,28 @@ Editing shortcuts follow [input](/docs/components/input#editing-keys). On macOS,
 <textarea width="320" height="96" placeholder="Write a release note" text="{draft}" on-input="draft_edited" />
 ```
 
+## Content-sized height
+
+Set `auto-height-max` to a positive number of points to grow a textarea with its
+content. `auto-height-min` sets its minimum height. The renderer measures explicit
+newlines and soft-wrapped lines using the same font metrics and available width
+as painting. Deleting text shrinks the editor again. At the maximum height,
+existing caret scrolling keeps the insertion point visible.
+
+```html
+<textarea label="Message" auto-height-min="44" auto-height-max="240" text="{draft}" on-input="draft_edited" />
+```
+
+Both bounds accept numeric model bindings. They must be finite and nonnegative;
+the effective maximum is at least the minimum. A zero or omitted maximum keeps
+the existing fixed-size behavior. Do not combine either bound with `height`, or
+put the bounds on another element. In a growing chat layout, reserve room for
+the composer and its actions; these bounds do not limit the surrounding window.
+
+To reproduce the growth behavior, enter three lines, paste enough text to wrap
+past the maximum, then delete back to one line. Repeat at a narrower width: the
+same text should occupy more lines, without changing its contents or selection.
+
 ## Programmatic construction (Zig)
 
 In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
@@ -44,5 +66,7 @@ ui.el(.textarea, .{
     "submit-on-enter",
     "on-input",
     "on-submit",
+    "auto-height-min",
+    "auto-height-max",
   ]}
 />

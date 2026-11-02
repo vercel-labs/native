@@ -11,6 +11,7 @@ const widget_tree = @import("widget_tree.zig");
 const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const widget_render = @import("widget_render.zig");
+const text_input = @import("widget_text_input.zig");
 
 const Error = canvas.Error;
 const Widget = widget_model.Widget;
@@ -754,7 +755,7 @@ fn layoutAxisChildrenMode(
         if (!(plan.overflow() <= axis_layout_overflow_epsilon)) logAxisChildrenOverflow(output, parent_index, axis, if (axis == .horizontal) content.width else content.height, plan.used(), plan.overflow());
         for (children, 0..) |child, index| {
             if (!widgetTakesFlowSlot(child)) continue;
-            const frame = plan.frame(index);
+            const frame = autoHeightAxisChildFrame(child, plan.frame(index), content, axis, style.cross_alignment, tokens);
             _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
         }
         return;
@@ -785,7 +786,7 @@ fn layoutAxisChildrenMode(
         if (!(plan.overflow() <= axis_layout_overflow_epsilon)) logAxisChildrenOverflow(output, parent_index, axis, if (axis == .horizontal) content.width else content.height, plan.used(), plan.overflow());
         for (children, 0..) |child, index| {
             if (!widgetTakesFlowSlot(child)) continue;
-            const frame = plan.frame(index);
+            const frame = autoHeightAxisChildFrame(child, plan.frame(index), content, axis, style.cross_alignment, tokens);
             _ = try layoutWidgetDepth(child, frame, parent_index, depth + 1, output, len, tokens);
         }
         return;
@@ -872,13 +873,25 @@ fn layoutAxisChildrenMode(
         else
             preferredCrossExtent(child, axis, cross_extent, style.cross_alignment, tokens);
         const cross_origin = alignedCrossAxisOrigin(content, axis, cross_extent, cross, child, style.cross_alignment);
-        const child_frame = switch (axis) {
+        const proposed_frame = switch (axis) {
             .horizontal => geometry.RectF.init(cursor, cross_origin, main_extent, cross),
             .vertical => geometry.RectF.init(cross_origin, cursor, cross, main_extent),
         };
+        const child_frame = autoHeightAxisChildFrame(child, proposed_frame, content, axis, style.cross_alignment, tokens);
         _ = try layoutWidgetDepth(child, child_frame, parent_index, depth + 1, output, len, tokens);
         cursor += main_extent + child_gap;
     }
+}
+
+/// A row assigns width before its content-sized editor can know its height.
+/// Reuse that final width for every allocator, including compiled plans.
+/// Stretch keeps the container's cross-axis allocation as usual.
+fn autoHeightAxisChildFrame(child: Widget, proposed: geometry.RectF, content: geometry.RectF, axis: LayoutAxis, alignment: WidgetCrossAlignment, tokens: DesignTokens) geometry.RectF {
+    if (axis != .horizontal or alignment == .stretch or !text_input.textInputAutoHeightEnabled(child)) return proposed;
+    var frame = proposed;
+    frame.height = clampMainExtent(child, .vertical, text_input.textInputAutoHeightForWidth(child, frame.width, tokens));
+    frame.y = alignedCrossAxisOrigin(content, .horizontal, content.height, frame.height, child, alignment);
+    return frame;
 }
 
 /// Tolerance separating real layout overflow from float noise.
@@ -1053,6 +1066,7 @@ fn widgetIsSpanParagraph(widget: Widget) bool {
 }
 
 fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize, tokens: DesignTokens) bool {
+    if (text_input.textInputAutoHeightEnabled(widget)) return true;
     if (tokens.measurement_coordination_policy) |policy| {
         var scratch = std.heap.stackFallback(256, std.heap.page_allocator);
         const plan = @import("measurement_coordination_policy.zig").SpanPlan.init(scratch.get(), policy, widget, depth, max_widget_depth) catch @panic("span subtree allocation failed");
@@ -1077,6 +1091,7 @@ fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize, tokens: DesignTokens)
 /// content composes from and falls back to the classic intrinsic extent
 /// everywhere else.
 fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+    if (text_input.textInputAutoHeightEnabled(widget)) return text_input.textInputAutoHeightForWidth(widget, width, tokens);
     if (tokens.measurement_coordination_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, false);
     if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtentReference(widget, width, tokens, depth, false, false);
     if (depth >= max_widget_depth) return preferredMainExtent(widget, .vertical, tokens);
@@ -1103,7 +1118,7 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
             }
             break :blk max_height;
         } else return preferredMainExtent(widget, .vertical, tokens),
-        .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
+        .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu, .input_group => blk: {
             if (widget.layout.virtualized) return preferredMainExtent(widget, .vertical, tokens);
             var sum: f32 = 0;
             var flow_count: usize = 0;
@@ -2429,6 +2444,10 @@ pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF 
 }
 
 fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) geometry.SizeF {
+    if (text_input.textInputAutoHeightEnabled(widget)) {
+        const width = if (widget.frame.width > 0) widget.frame.width else widgetSizedDensityValue(widget, tokens, 200);
+        return geometry.SizeF.init(width, text_input.textInputAutoHeightForWidth(widget, width, tokens));
+    }
     if (tokens.intrinsic_layout_policy) |policy| {
         var owned = tokens;
         owned.control_geometry_policy = owned.control_geometry_policy orelse policy;
