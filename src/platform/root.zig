@@ -147,7 +147,6 @@ pub const NotificationCommandEvent = types.NotificationCommandEvent;
 pub const CredentialKey = types.CredentialKey;
 pub const Credential = types.Credential;
 pub const LocalTimeStyle = types.LocalTimeStyle;
-pub const keyboard_input = types.keyboard_input;
 pub const KeyChord = types.KeyChord;
 pub const KeyboardInputAccess = types.KeyboardInputAccess;
 pub const StatusItemId = types.StatusItemId;

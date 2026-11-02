@@ -151,7 +151,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return self.options.platform.services.keyboardInputAccess(prompt);
         }
 
-        fn requireKeyboardInput(self: *Runtime) error{PermissionDenied}!void {
+        fn requireKeyboardInput(self: *Runtime) error{ UnsupportedService, PermissionDenied }!void {
+            if (self.options.platform.services.send_key_chord_fn == null) return error.UnsupportedService;
             if (!authorization.hasPermission(self.authorization_policy, self.options.security.permissions, security.permission_keyboard_input)) {
                 return error.PermissionDenied;
             }

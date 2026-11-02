@@ -11,6 +11,7 @@ const std = @import("std");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const security = @import("../security/root.zig");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
@@ -70,6 +71,8 @@ const HostMsg = union(enum) {
     credential_prefixed_request,
     open_external_url,
     reveal_path,
+    send_chord,
+    keyboard_access,
     replace,
     drop,
     send,
@@ -143,6 +146,12 @@ fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
         }),
         .open_external_url => fx.hostSend("native-sdk.os.openUrl", "https://example.com/docs"),
         .reveal_path => fx.hostSend("native-sdk.os.revealPath", "/tmp/native-sdk.log"),
+        .send_chord => fx.sendKeyChord(.{
+            .key = ask_key,
+            .chord = platform.KeyChord.init("enter", .{ .command = true, .control = true, .option = true, .shift = true }).?,
+            .on_result = HostEffects.hostMsg(.host_result),
+        }),
+        .keyboard_access => fx.keyboardAccessStatus(.{ .key = ask_key, .prompt = true, .on_result = HostEffects.hostMsg(.host_result) }),
         .replace => fx.hostRequest(.{
             .key = ask_key,
             .name = "svc.echo",
@@ -283,6 +292,22 @@ test "native launch-at-login requests use the platform service without a generic
     try std.testing.expectEqual(@as(u32, 2), h.app_state.model.ok_count);
     try std.testing.expectEqualStrings("enabled", h.app_state.model.bytesPrefix());
     try std.testing.expectEqual(@as(u32, 1), h.harness.null_platform.launch_at_login_set_count);
+}
+
+test "Zig keyboard effects reach the platform once keyboard_input is declared" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    h.harness.runtime.options.security.permissions = &.{security.permission_keyboard_input};
+    try h.app_state.dispatch(&h.harness.runtime, 1, .send_chord);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqual(platform.KeyChord.init("enter", .{ .command = true, .control = true, .option = true, .shift = true }).?, h.harness.null_platform.keyboardChords()[0]);
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .keyboard_access);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 2), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("granted", h.app_state.model.bytesPrefix());
 }
 
 test "native launch-at-login set preserves an unsupported platform result" {

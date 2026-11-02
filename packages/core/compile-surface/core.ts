@@ -307,12 +307,7 @@ export interface NotificationSpec {
 
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
-export type KeyboardModifier = "primary" | "command" | "control" | "option" | "alt" | "shift";
-
-export interface KeyChord {
-  readonly key: string;
-  readonly modifiers?: readonly KeyboardModifier[];
-}
+export type KeyChord = GlobalShortcutBinding;
 
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
@@ -578,22 +573,9 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
   return out;
 }
 
-function keyboardModifierBits(modifiers: readonly KeyboardModifier[] | undefined): number {
-  let primary = false;
-  let command = false;
-  let control = false;
-  let option = false;
-  let shift = false;
-  if (modifiers !== undefined) {
-    for (const modifier of modifiers) {
-      if (modifier === "primary") primary = true;
-      else if (modifier === "command") command = true;
-      else if (modifier === "control") control = true;
-      else if (modifier === "option" || modifier === "alt") option = true;
-      else if (modifier === "shift") shift = true;
-    }
-  }
-  return (primary ? 1 : 0) + (command ? 2 : 0) + (control ? 4 : 0) + (option ? 8 : 0) + (shift ? 16 : 0);
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -915,7 +897,7 @@ export const Cmd = {
 
   keyboard: {
     sendChord(chord: KeyChord, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
-      return Cmd.request("native-sdk.keyboard.sendChord", hostRecordBytes({ key: utf8Bytes(chord.key), modifiers: keyboardModifierBits(chord.modifiers) }), route);
+      return Cmd.request("native-sdk.keyboard.sendChord", hostRecordBytes({ key: chord.key, modifiers: shortcutModifierBits(chord) }), route);
     },
     accessStatus(options: { readonly prompt?: boolean }, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
       return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
@@ -1187,9 +1169,7 @@ export const Sub = {
   },
 
   globalShortcut(id: string, binding: GlobalShortcutBinding, msgKind: string): SubData {
-    return { op: "global_shortcut", id, key: binding.key, modifiers:
-      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
-      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs
