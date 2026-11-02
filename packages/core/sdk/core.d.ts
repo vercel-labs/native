@@ -13,7 +13,7 @@ export { asciiBytes, utf8Bytes } from "./bytes.js";
 export type Msgish = {
     readonly kind: string;
 };
-import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.js";
+import { type GlobalShortcutEvent, type GlobalShortcutState, type WindowDescriptor, type WindowDescriptorSpec } from "./events.js";
 export declare function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor;
 /** Cooperative cancellation capability supplied by generated service hosts. */
 export interface ServiceCancellation {
@@ -113,6 +113,15 @@ export type ChannelSourceArm = {
     readonly bytes: Uint8Array;
 };
 export type ChannelSourceKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm] ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ChannelSourceArm ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export type GlobalShortcutKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof GlobalShortcutEvent] ? [keyof GlobalShortcutEvent] extends [Exclude<keyof M, "kind">] ? M extends Msgish & GlobalShortcutEvent ? [GlobalShortcutState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export interface GlobalShortcutBinding {
+    readonly key: Uint8Array;
+    readonly primary?: boolean;
+    readonly command?: boolean;
+    readonly control?: boolean;
+    readonly option?: boolean;
+    readonly shift?: boolean;
+}
 export type AudioCaptureSource = "microphone" | "system";
 export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
 export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
@@ -407,6 +416,7 @@ export interface NotificationSpec {
     readonly actionCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
+export type KeyChord = GlobalShortcutBinding;
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -868,6 +878,12 @@ export declare const Cmd: {
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
     revealPath(path: Uint8Array): Cmd<never>;
+    keyboard: {
+        sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M>;
+        accessStatus<M extends Msgish>(options: {
+            readonly prompt?: boolean;
+        }, route: RequestRoute<M>): Cmd<M>;
+    };
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
@@ -946,6 +962,12 @@ export type Sub<M extends Msgish> = {
     readonly everyMs: number;
     readonly msgKind: string;
 } | {
+    readonly op: "global_shortcut";
+    readonly id: string;
+    readonly key: Uint8Array;
+    readonly modifiers: number;
+    readonly msgKind: string;
+} | {
     readonly op: "db_live";
     readonly key: string;
     readonly pageKind: string;
@@ -961,5 +983,6 @@ export type Sub<M extends Msgish> = {
 export declare const Sub: {
     none: Sub<never>;
     timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M>;
+    globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M>;
     batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M>;
 };

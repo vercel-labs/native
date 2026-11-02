@@ -3337,6 +3337,26 @@ export class SubsetChecker {
         }
       }
 
+      if (
+        !this.permissions.has("keyboard_input") &&
+        ((ts.isPropertyAccessExpression(node) &&
+          node.name.text === "keyboard" &&
+          ts.isIdentifier(node.expression) &&
+          this.cmdNames.has(node.expression.text) &&
+          this.isSdkReference(node.expression)) ||
+          (ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === "request" &&
+            ts.isIdentifier(node.expression.expression) &&
+            this.cmdNames.has(node.expression.expression.text) &&
+            this.isSdkReference(node.expression.expression) &&
+            node.arguments[0] !== undefined &&
+            ts.isStringLiteralLike(node.arguments[0]) &&
+            node.arguments[0].text.startsWith("native-sdk.keyboard.")))
+      ) {
+        this.report("NS1075", "`Cmd.keyboard.*` and `native-sdk.keyboard.*` requests require the `keyboard_input` permission in app.zon.", node);
+      }
+
       // NS1073 — the core credential wire names belong to the typed factory.
       // Raw Cmd.request payloads are app-controlled bytes and cannot state
       // the credential record contract safely at the authoring boundary.

@@ -67,6 +67,7 @@ pub const max_menu_item_label_bytes = types.max_menu_item_label_bytes;
 pub const max_menu_command_bytes = types.max_menu_command_bytes;
 pub const max_menu_key_bytes = types.max_menu_key_bytes;
 pub const max_shortcuts = types.max_shortcuts;
+pub const max_global_shortcuts = types.max_global_shortcuts;
 pub const max_shortcut_id_bytes = types.max_shortcut_id_bytes;
 pub const max_shortcut_key_bytes = types.max_shortcut_key_bytes;
 pub const max_widget_accessibility_nodes = types.max_widget_accessibility_nodes;
@@ -80,6 +81,11 @@ pub const max_gpu_surface_font_bytes = types.max_gpu_surface_font_bytes;
 pub const ShortcutModifiers = types.ShortcutModifiers;
 pub const Shortcut = types.Shortcut;
 pub const ShortcutEvent = types.ShortcutEvent;
+pub const OwnedShortcut = types.OwnedShortcut;
+pub const sameShortcutCombination = types.sameShortcutCombination;
+pub const GlobalShortcutStatus = types.GlobalShortcutStatus;
+pub const GlobalShortcutEvent = types.GlobalShortcutEvent;
+pub const GlobalShortcutSink = types.GlobalShortcutSink;
 pub const Menu = types.Menu;
 pub const MenuItem = types.MenuItem;
 pub const validateShortcut = types.validateShortcut;
@@ -141,6 +147,8 @@ pub const NotificationCommandEvent = types.NotificationCommandEvent;
 pub const CredentialKey = types.CredentialKey;
 pub const Credential = types.Credential;
 pub const LocalTimeStyle = types.LocalTimeStyle;
+pub const KeyChord = types.KeyChord;
+pub const KeyboardInputAccess = types.KeyboardInputAccess;
 pub const StatusItemId = types.StatusItemId;
 pub const primary_status_item_id = types.primary_status_item_id;
 pub const TrayItemId = types.TrayItemId;
@@ -265,4 +273,9 @@ pub fn installHeadlessImageCodec(
 test {
     std.testing.refAllDecls(@This());
     _ = @import("null_platform_tests.zig");
+    _ = @import("macos/key_codes.zig");
+    _ = @import("windows/key_codes.zig");
+    _ = @import("keyboard_input.zig");
+    _ = @import("macos/keyboard_input.zig");
+    _ = @import("windows/keyboard_input.zig");
 }

@@ -302,7 +302,7 @@ export { asciiBytes, utf8Bytes } from "./bytes.ts";
 /// Every app Msg is a discriminated union on a string `kind` tag.
 export type Msgish = { readonly kind: string };
 
-import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
+import { type GlobalShortcutEvent, type GlobalShortcutState, type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
 
 /// Fill the canonical defaults for a model-declared secondary window.
 export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
@@ -699,6 +699,27 @@ export type ChannelSourceKind<M extends Msgish> = M extends Msgish
       : never
     : never
   : never;
+
+export type GlobalShortcutKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof GlobalShortcutEvent]
+    ? [keyof GlobalShortcutEvent] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & GlobalShortcutEvent
+        ? [GlobalShortcutState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+/// A key from the app shortcut vocabulary plus modifiers. `primary` is
+/// Command on macOS and Control elsewhere.
+export interface GlobalShortcutBinding {
+  readonly key: Uint8Array;
+  readonly primary?: boolean;
+  readonly command?: boolean;
+  readonly control?: boolean;
+  readonly option?: boolean;
+  readonly shift?: boolean;
+}
 
 /// The native capture source. "microphone" captures the selected/default
 /// input device; "system" captures the process-independent desktop output
@@ -1221,6 +1242,9 @@ export interface NotificationSpec {
 /// effect because the user's locale and time zone are ambient host state.
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
+/// A chord to send, shaped like a global shortcut binding; it may have no modifier.
+export type KeyChord = GlobalShortcutBinding;
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -1539,6 +1563,11 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -1980,6 +2009,19 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Keyboard input for whichever app has focus; requires the `keyboard_input` permission.
+  keyboard: {
+    /// Press one chord, such as `{ key: asciiBytes("v"), primary: true }` to paste; ok carries empty bytes.
+    sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.sendChord", { key: chord.key, modifiers: shortcutModifierBits(chord) }, route);
+    },
+
+    /// Ok carries `granted`, `denied`, or `not_required`; `prompt` lets the OS show its grant prompt.
+    accessStatus<M extends Msgish>(options: { readonly prompt?: boolean }, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
@@ -2457,6 +2499,7 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "global_shortcut"; readonly id: string; readonly key: Uint8Array; readonly modifiers: number; readonly msgKind: string }
   | {
       readonly op: "db_live";
       readonly key: string;
@@ -2478,6 +2521,13 @@ export const Sub = {
   /// its single number payload field.
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
+  },
+
+  /// A system-wide shortcut that fires while other apps have focus. It is
+  /// registered while declared and re-registered when the binding changes;
+  /// every report dispatches the named arm with `id` and a GlobalShortcutState.
+  globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M> {
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs
