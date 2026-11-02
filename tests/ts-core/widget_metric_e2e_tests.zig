@@ -1097,3 +1097,64 @@ test "compiled widget metric subtree continuations preserve depth first-match st
     try std.testing.expect(!final.pending());
     try std.testing.expect(final.found());
 }
+
+test "compiled widget metric autoheight reserves nested container width bounds and padding" {
+    _ = core.initialModel();
+    const editor: c.Widget = .{
+        .id = 5,
+        .kind = .textarea,
+        .text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the container grows.",
+        .auto_height_min = 44,
+        .auto_height_max = 400,
+    };
+    const group: c.Widget = .{
+        .id = 4,
+        .kind = .input_group,
+        .children = &.{editor},
+        .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 2, .bottom = 4 } },
+    };
+    const cases = [_]struct { min: f32, max: f32, width: f32 }{
+        .{ .min = 0, .max = 180, .width = 180 },
+        .{ .min = 220, .max = 180, .width = 220 },
+        .{ .min = 800, .max = 0, .width = 800 },
+    };
+    var older = coordinated(.{});
+    older.measurement_coordination_policy = null;
+    // Cover native, compiled reference, production measurement, and fully
+    // owned layout coordinators rather than comparing two wrong heights.
+    for ([_]c.DesignTokens{ .{}, older, coordinated(.{}), flowOwned(.{}), layoutOwned(.{}) }) |tokens| {
+        for (cases) |bounds| {
+            const capped: c.Widget = .{
+                .id = 3,
+                .kind = .column,
+                .children = &.{group},
+                .layout = .{
+                    .min_size = .init(bounds.min, 0),
+                    .max_size = .init(bounds.max, 0),
+                    .padding = .{ .left = 11, .right = 13, .top = 7, .bottom = 9 },
+                },
+            };
+            const wrapper: c.Widget = .{ .id = 2, .kind = .column, .children = &.{capped} };
+            const root: c.Widget = .{
+                .id = 1,
+                .kind = .column,
+                .children = &.{ wrapper, .{ .id = 6, .kind = .button, .text = "Following" } },
+                .layout = .{ .gap = 12 },
+            };
+            var nodes: [6]c.WidgetLayoutNode = undefined;
+            const tree = try c.layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 1000), tokens, &nodes);
+            const actual = tree.findById(5).?.frame;
+            try std.testing.expectEqual(bounds.width, tree.findById(3).?.frame.width);
+            try std.testing.expectEqual(bounds.width - 32, actual.width);
+            var probe = editor;
+            probe.frame = .init(0, 0, actual.width, 400);
+            const viewport = c.textInputViewportForWidget(probe, tokens).?;
+            const expected = @min(@as(f32, 400), @max(@as(f32, 44), @ceil(c.textInputContentExtentForWidget(probe, tokens) + probe.frame.height - viewport.height)));
+            try std.testing.expectEqual(expected, actual.height);
+            // Both container paddings must be reserved before the next control.
+            try std.testing.expectEqual(expected + 22, tree.findById(2).?.frame.height);
+            try std.testing.expectEqual(actual.maxY() + 13 + 12, tree.findById(6).?.frame.y);
+            core.rt.frameReset();
+        }
+    }
+}

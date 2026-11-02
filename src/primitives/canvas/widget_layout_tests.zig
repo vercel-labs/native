@@ -3168,3 +3168,56 @@ test "autoheight textarea reserves constrained nested width and centered row all
         if (width == 180) narrow_height = expected else try std.testing.expect(expected < narrow_height);
     }
 }
+
+test "autoheight textarea reserves nested container width bounds and padding" {
+    const input = @import("widget_text_input.zig");
+    const editor: Widget = .{
+        .id = 5,
+        .kind = .textarea,
+        .text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the container grows.",
+        .auto_height_min = 44,
+        .auto_height_max = 400,
+    };
+    const group: Widget = .{
+        .id = 4,
+        .kind = .input_group,
+        .children = &.{editor},
+        .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 2, .bottom = 4 } },
+    };
+    const cases = [_]struct { min: f32, max: f32, width: f32 }{
+        .{ .min = 0, .max = 180, .width = 180 },
+        .{ .min = 220, .max = 180, .width = 220 },
+        .{ .min = 800, .max = 0, .width = 800 },
+    };
+    // Match allocation's min-over-max precedence, including a min-only
+    // container wider than the offered space. The editor has no width cap.
+    for (cases) |bounds| {
+        const capped: Widget = .{
+            .id = 3,
+            .kind = .column,
+            .children = &.{group},
+            .layout = .{
+                .min_size = .init(bounds.min, 0),
+                .max_size = .init(bounds.max, 0),
+                .padding = .{ .left = 11, .right = 13, .top = 7, .bottom = 9 },
+            },
+        };
+        const wrapper: Widget = .{ .id = 2, .kind = .column, .children = &.{capped} };
+        const root: Widget = .{
+            .id = 1,
+            .kind = .column,
+            .children = &.{ wrapper, .{ .id = 6, .kind = .button, .text = "Following" } },
+            .layout = .{ .gap = 12 },
+        };
+        var nodes: [6]WidgetLayoutNode = undefined;
+        const tree = try layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 1000), .{}, &nodes);
+        const actual = tree.findById(5).?.frame;
+        try std.testing.expectEqual(bounds.width, tree.findById(3).?.frame.width);
+        try std.testing.expectEqual(bounds.width - 32, actual.width);
+        const expected = input.textInputAutoHeightForWidth(editor, actual.width, .{});
+        try std.testing.expectEqual(expected, actual.height);
+        // Both container paddings must be reserved before the next control.
+        try std.testing.expectEqual(expected + 22, tree.findById(2).?.frame.height);
+        try std.testing.expectEqual(actual.maxY() + 13 + 12, tree.findById(6).?.frame.y);
+    }
+}

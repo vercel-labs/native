@@ -1090,7 +1090,11 @@ fn widgetSubtreeHasTextSpans(widget: Widget, depth: usize, tokens: DesignTokens)
 /// paragraphs need; it recurses through the container kinds markdown
 /// content composes from and falls back to the classic intrinsic extent
 /// everywhere else.
-fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignTokens, depth: usize) f32 {
+fn wrappedVerticalExtentForWidth(widget: Widget, offered_width: f32, tokens: DesignTokens, depth: usize) f32 {
+    // Recursive containers receive their parent's offered width. Resolve the
+    // same bounds as allocation before subtracting padding or measuring text;
+    // an authored minimum wins over a smaller maximum here too.
+    const width = clampIntrinsicAxis(offered_width, widget.layout.min_size.width, widget.layout.max_size.width);
     if (text_input.textInputAutoHeightEnabled(widget)) return text_input.textInputAutoHeightForWidth(widget, width, tokens);
     if (tokens.measurement_coordination_policy != null) return compiledWrappedExtent(widget, width, tokens, depth, false, false);
     if (tokens.intrinsic_layout_policy != null) return compiledWrappedExtentReference(widget, width, tokens, depth, false, false);
