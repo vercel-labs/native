@@ -66,7 +66,7 @@ fn enumType(comptime family: Family) type {
 }
 comptime {
     // Keep ordinal transport tied to the independently tested native vocabulary.
-    for (.{ .view, .titlebar, .backend, .pixel_format, .present_mode, .alpha_mode, .color_space, .feature }, .{ 19, 4, 4, 2, 2, 3, 3, 28 }) |family, count| {
+    for (.{ .view, .titlebar, .backend, .pixel_format, .present_mode, .alpha_mode, .color_space, .feature }, .{ 19, 4, 4, 2, 2, 3, 3, 29 }) |family, count| {
         if (@typeInfo(enumType(family)).@"enum".fields.len != count) @compileError("update bridge descriptor vocabulary");
     }
 }

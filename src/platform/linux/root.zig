@@ -484,6 +484,7 @@ pub const LinuxPlatform = struct {
             // app that skips the capability check still learns exactly
             // what is missing.
             .video_playback => false,
+            .global_shortcuts => false,
         };
     }
 

@@ -2,7 +2,7 @@
 title: "Keyboard Shortcuts"
 ---
 
-The Native SDK can register app-level keyboard shortcuts and deliver them to both Zig and JavaScript. Shortcuts are matched by key plus modifiers and are scoped to the native window that receives the key event.
+The Native SDK can register app-level keyboard shortcuts and deliver them to both Zig and JavaScript. Shortcuts are matched by key plus modifiers and are scoped to the native window that receives the key event. To react while another app has focus, use [global shortcuts](#global-shortcuts).
 
 ## Manifest
 
@@ -74,3 +74,25 @@ The event detail includes `id`, `command`, `key`, `windowId`, and `modifiers`. `
 Portable single-character keys are letters, digits, and the unshifted punctuation keys `=`, `-`, `,`, `.`, `/`, `;`, `'`, `[`, `]`, `\`, and `` ` ``. Named keys are `escape`, `enter`, `tab`, `space`, `backspace`, `arrowleft`, `arrowright`, `arrowup`, `arrowdown`, `delete`, `home`, `end`, `pageup`, `pagedown`, `insert`, and `f1` through `f12`.
 
 Single-character keys and text-entry keys (`enter`, `tab`, `space`, and `backspace`) require at least one modifier so shortcuts do not intercept normal typing by default.
+
+## Global shortcuts
+
+A global shortcut fires while any app has focus and reports both press and release, for launchers or hold-to-talk. Bindings use the same keys and modifiers as app shortcuts, up to 16 per app. Declare them from a TypeScript core with `Sub.globalShortcut(id, binding, arm)`; the shortcut is registered while the model declares it and re-registered when its binding changes.
+
+```ts
+export function subscriptions(model: Model): Sub<Msg> {
+  return Sub.globalShortcut("talk", { key: asciiBytes("space"), option: true }, "talk");
+}
+
+type Msg = { kind: "talk"; id: Uint8Array; state: GlobalShortcutState };
+```
+
+The arm receives the shortcut `id` and a `state`:
+
+- `registered`: the OS accepted the binding.
+- `pressed` / `released`: the keys went down or up. Every press gets a release, even if the binding is removed while held.
+- `conflict`: the OS or another app owns the combination.
+- `unsupported`: the platform has no global shortcuts.
+- `rejected`: the binding is invalid (unknown key, no modifier on a letter or text-entry key, or a bad id).
+
+Supported on macOS and Windows. Linux reports `unsupported`. Zig cores use `fx.setGlobalShortcuts` and `fx.clearGlobalShortcuts`.
