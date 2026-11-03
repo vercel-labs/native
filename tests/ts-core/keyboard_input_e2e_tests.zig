@@ -75,7 +75,9 @@ test "denied access and an unsupported host route an error Msg" {
     try fixture.expectReply(.paste, "denied", 0, 1);
     try fixture.expectReply(.access, "denied", 1, 1);
     try testing.expectEqual(@as(u32, 1), fixture.harness.null_platform.keyboard_input_prompt_count);
+    try fixture.expectReply(.quiet, "denied", 2, 1);
+    try testing.expectEqual(@as(u32, 1), fixture.harness.null_platform.keyboard_input_prompt_count);
     fixture.harness.runtime.options.platform.services.send_key_chord_fn = null;
-    try fixture.expectReply(.paste, "unsupported", 1, 2);
+    try fixture.expectReply(.paste, "unsupported", 2, 2);
     try testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.keyboardChords().len);
 }

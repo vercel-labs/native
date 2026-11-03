@@ -23,6 +23,9 @@ test "reports reach the declaring arm in order, a removed held shortcut still re
     Host.init(&fx);
     Host.drain(&fx);
     try expectEntry(0, "a", "registered", "a");
+    const registered = host.configuredGlobalShortcuts()[0].binding.shortcut();
+    try testing.expectEqualStrings("space", registered.key);
+    try testing.expectEqual(sdk.platform.ShortcutModifiers{ .option = true }, registered.modifiers);
 
     try testing.expect(host.pushGlobalShortcut("a", .pressed));
     Host.drain(&fx);
@@ -43,9 +46,30 @@ test "reports reach the declaring arm in order, a removed held shortcut still re
     Host.dispatch(&fx, .invalidate);
     Host.drain(&fx);
     try expectEntry(6, "", "rejected", "bad");
-    try testing.expectEqual(@as(usize, 7), Host.model().log.len);
+    try expectEntry(7, "b", "rejected", "bad");
+    try expectEntry(8, "shift", "rejected", "bad");
+    try expectEntry(9, "escape", "rejected", "bad");
+    try expectEntry(10, "twin", "conflict", "bad");
+    try testing.expectEqual(@as(usize, 11), Host.model().log.len);
 
     Host.dispatch(&fx, .noop);
     Host.drain(&fx);
-    try testing.expectEqual(@as(usize, 7), Host.model().log.len);
+    try testing.expectEqual(@as(usize, 11), Host.model().log.len);
+
+    Host.dispatch(&fx, .clear);
+    Host.drain(&fx);
+    try testing.expectEqual(@as(usize, 0), host.configuredGlobalShortcuts().len);
+}
+
+test "a host without global shortcuts reports unsupported" {
+    var host = sdk.platform.NullPlatform.init(.{});
+    defer host.deinit();
+    host.global_shortcuts = false;
+    var platform = host.platform();
+    var fx: Host.Fx = .init(testing.allocator);
+    defer fx.deinit();
+    fx.bindServices(&platform.services);
+    Host.init(&fx);
+    Host.drain(&fx);
+    try expectEntry(0, "a", "unsupported", "a");
 }

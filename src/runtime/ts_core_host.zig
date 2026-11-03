@@ -847,6 +847,7 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             dbs = @splat(.{});
             global_shortcuts = @splat(.{});
             global_shortcut_count = 0;
+            rejected_shortcut_count = 0;
             clip_write_counter = 0;
             clipboard_writes = @splat(.{});
             audio_cache_dir_len = 0;
@@ -4847,16 +4848,18 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
                         const key = takeLongBytes(subs, &at);
                         const modifiers = @import("global_shortcuts.zig").modifiersFromMask(takeByte(subs, &at));
                         const tag = takeByte(subs, &at);
-                        if (id.len == 0 or id.len > platform.max_shortcut_id_bytes) {
+                        const duplicate = for (declared_shortcuts[0..declared_shortcut_count]) |declared| {
+                            if (std.mem.eql(u8, declared.shortcut.id, id)) break true;
+                        } else false;
+                        if (id.len == 0 or id.len > platform.max_shortcut_id_bytes or duplicate or declared_shortcut_count == declared_shortcuts.len) {
                             const signature = std.hash.Wyhash.hash(tag, id);
-                            if (rejected_now_count == rejected_now.len) @panic("ts core host: more than 16 global shortcuts - the set mirrors platform.max_global_shortcuts");
+                            if (rejected_now_count == rejected_now.len) continue;
                             rejected_now[rejected_now_count] = signature;
                             rejected_now_count += 1;
                             const reported = std.mem.indexOfScalar(u64, rejected_shortcuts[0..rejected_shortcut_count], signature) != null;
                             if (!reported) fx.stageLoopMsg(msgFromTagGlobalShortcut(tag, .rejected, fx.stageLoopKey(id)));
                             continue;
                         }
-                        if (declared_shortcut_count == declared_shortcuts.len) @panic("ts core host: more than 16 global shortcuts - the set mirrors platform.max_global_shortcuts");
                         declared_shortcuts[declared_shortcut_count] = .{ .shortcut = .{ .id = id, .key = key[0..@min(key.len, platform.max_shortcut_key_bytes)], .modifiers = modifiers }, .tag = tag };
                         declared_shortcut_count += 1;
                     },
@@ -4887,7 +4890,6 @@ pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: 
             for (declared, 0..) |item, position| {
                 const index = findGlobalShortcut(item.shortcut.id) orelse freeGlobalShortcutIndex();
                 const entry = &global_shortcuts[index];
-                if (entry.declared) @panic("ts core host: duplicate Sub.globalShortcut id");
                 if (!was_declared[index] or !entry.binding.matches(item.shortcut)) changed = true;
                 entry.* = .{ .used = true, .declared = true, .binding = .init(item.shortcut), .tag = item.tag, .pressed = entry.pressed };
                 shortcuts[position] = entry.binding.shortcut();
