@@ -77,7 +77,14 @@ pub const Error = error{
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
     InvalidGpuSurfaceFont,
+    KeyboardInputAccessDenied,
+    KeyboardInputBlocked,
+    KeyboardInputFailed,
 };
+
+pub const keyboard_input = @import("keyboard_input.zig");
+pub const KeyChord = keyboard_input.KeyChord;
+pub const KeyboardInputAccess = keyboard_input.Access;
 
 pub const WebEngine = enum {
     system,
@@ -191,6 +198,8 @@ pub const PlatformFeature = enum {
     video_playback,
     /// System-wide shortcuts with press and release.
     global_shortcuts,
+    /// Posting key chords to whichever app has keyboard focus.
+    keyboard_input,
 };
 
 pub const WebViewSourceKind = enum {
@@ -2858,6 +2867,9 @@ pub const PlatformServices = struct {
     format_local_time_fn: ?*const fn (context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 = null,
     open_external_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8) anyerror!void = null,
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
+    /// Keyboard input for the focused app; `prompt` asks the OS to show its grant prompt.
+    send_key_chord_fn: ?*const fn (context: ?*anyopaque, chord: KeyChord) anyerror!void = null,
+    keyboard_input_access_fn: ?*const fn (context: ?*anyopaque, prompt: bool) anyerror!KeyboardInputAccess = null,
     add_recent_document_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     clear_recent_documents_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     check_for_updates_fn: ?*const fn (context: ?*anyopaque, user_initiated: bool) anyerror!void = null,
@@ -3429,6 +3441,16 @@ pub const PlatformServices = struct {
         return open_fn(self.context, url);
     }
 
+    pub fn sendKeyChord(self: PlatformServices, chord: KeyChord) anyerror!void {
+        const send_fn = self.send_key_chord_fn orelse return error.UnsupportedService;
+        return send_fn(self.context, chord);
+    }
+
+    pub fn keyboardInputAccess(self: PlatformServices, prompt: bool) anyerror!KeyboardInputAccess {
+        const access_fn = self.keyboard_input_access_fn orelse return error.UnsupportedService;
+        return access_fn(self.context, prompt);
+    }
+
     pub fn revealPath(self: PlatformServices, path: []const u8) anyerror!void {
         const reveal_fn = self.reveal_path_fn orelse return error.UnsupportedService;
         return reveal_fn(self.context, path);
@@ -3885,6 +3907,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // real one.
         .video_playback => services.video_load_fn != null,
         .global_shortcuts => services.configure_global_shortcuts_fn != null,
+        .keyboard_input => services.send_key_chord_fn != null and services.keyboard_input_access_fn != null,
     };
 }
 

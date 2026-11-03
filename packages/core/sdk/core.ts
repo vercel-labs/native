@@ -1242,6 +1242,9 @@ export interface NotificationSpec {
 /// effect because the user's locale and time zone are ambient host state.
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
+/// A chord to send, shaped like a global shortcut binding; it may have no modifier.
+export type KeyChord = GlobalShortcutBinding;
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -1560,6 +1563,11 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -2001,6 +2009,19 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Keyboard input for whichever app has focus; requires the `keyboard_input` permission.
+  keyboard: {
+    /// Press one chord, such as `{ key: asciiBytes("v"), primary: true }` to paste; ok carries empty bytes.
+    sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.sendChord", { key: chord.key, modifiers: shortcutModifierBits(chord) }, route);
+    },
+
+    /// Ok carries `granted`, `denied`, or `not_required`; `prompt` lets the OS show its grant prompt.
+    accessStatus<M extends Msgish>(options: { readonly prompt?: boolean }, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
@@ -2506,9 +2527,7 @@ export const Sub = {
   /// registered while declared and re-registered when the binding changes;
   /// every report dispatches the named arm with `id` and a GlobalShortcutState.
   globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M> {
-    return { op: "global_shortcut", id, key: binding.key, modifiers:
-      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
-      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs

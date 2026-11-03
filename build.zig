@@ -1438,6 +1438,10 @@ pub fn build(b: *std.Build) void {
         b.step("test-ts-spawn-exact", "Compare exact compiled subprocess routing, ownership and effect replay").dependOn(&spawn_exact_run.step);
         ts_core_e2e_step.dependOn(&spawn_exact_run.step);
         test_step.dependOn(&spawn_exact_run.step);
+        const keyboard_input_run = b.addRunArtifact(ts_core_artifacts.keyboard_input);
+        b.step("test-ts-keyboard-input-e2e", "Run compiled keyboard input commands through the runtime and null platform").dependOn(&keyboard_input_run.step);
+        ts_core_e2e_step.dependOn(&keyboard_input_run.step);
+        test_step.dependOn(&keyboard_input_run.step);
         const boot_images_run = b.addRunArtifact(ts_core_artifacts.boot_images);
         b.step("test-ts-boot-images", "Compare synchronous compiled image startup, complete results and native pixel ownership").dependOn(&boot_images_run.step);
         ts_core_e2e_step.dependOn(&boot_images_run.step);
@@ -4466,6 +4470,7 @@ const TsCoreE2eArtifacts = struct {
     audio_exact: *std.Build.Step.Compile,
     global_shortcut: *std.Build.Step.Compile,
     spawn_exact: *std.Build.Step.Compile,
+    keyboard_input: *std.Build.Step.Compile,
     boot_images: *std.Build.Step.Compile,
     deck: *std.Build.Step.Compile,
     markdown_viewer: *std.Build.Step.Compile,
@@ -4889,6 +4894,16 @@ fn tsCoreE2eArtifact(
     const spawn_exact_mod = module(b, target, optimize, "tests/ts-core/spawn_exact_effect_tests.zig");
     spawn_exact_mod.addImport("native_sdk", desktop_mod);
     spawn_exact_mod.addImport("spawn_exact_core", spawn_exact_fixture.module);
+
+    const keyboard_input_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
+        .entry = "tests/ts-core/keyboard-input/core.ts",
+        .src_dir = b.path("tests/ts-core/keyboard-input"),
+        .name = "keyboard_input_core",
+        .keyboard_input_permission = true,
+    });
+    const keyboard_input_mod = module(b, target, optimize, "tests/ts-core/keyboard_input_e2e_tests.zig");
+    keyboard_input_mod.addImport("native_sdk", desktop_mod);
+    keyboard_input_mod.addImport("keyboard_input_core", keyboard_input_fixture.module);
 
     const boot_images_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, build_trace, .{
         .entry = "tests/ts-core/boot-images/core.ts",
@@ -5531,6 +5546,7 @@ fn tsCoreE2eArtifact(
         .audio_exact = filteredTestArtifact(b, audio_exact_mod, "ts-audio-exact-effect-tests", &.{}),
         .global_shortcut = filteredTestArtifact(b, global_shortcut_mod, "ts-global-shortcut-e2e-tests", &.{}),
         .spawn_exact = filteredTestArtifact(b, spawn_exact_mod, "ts-spawn-exact-effect-tests", &.{}),
+        .keyboard_input = filteredTestArtifact(b, keyboard_input_mod, "ts-keyboard-input-e2e-tests", &.{}),
         .boot_images = filteredTestArtifact(b, boot_images_mod, "ts-boot-images-tests", &.{}),
         .deck = filteredTestArtifact(b, deck_mod, "ts-deck-e2e-tests", &.{}),
         .gpu_dashboard = filteredTestArtifact(b, gpu_dashboard_mod, "ts-gpu-dashboard-e2e-tests", &.{}),
@@ -5804,6 +5820,7 @@ const ExternalCoreFixtureSpec = struct {
     /// The fixture stands in for an app whose manifest declares the Tier-4
     /// build capability and its matching core-effect permission.
     credentials_capability: bool = false,
+    keyboard_input_permission: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
@@ -5869,6 +5886,7 @@ fn externalCoreFixtureModule(
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
     if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
+    if (spec.keyboard_input_permission) check.addArgs(&.{ "--permission", "keyboard_input" });
     if (std.mem.eql(u8, spec.entry, "tests/ts-core/fixture.ts")) check.addArgs(&.{ "--permission", "filesystem" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");

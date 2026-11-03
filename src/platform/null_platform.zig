@@ -476,6 +476,13 @@ pub const NullPlatform = struct {
     dock_presence_count: u32 = 0,
     launch_at_login_status: types.LaunchAtLoginStatus = .disabled,
     launch_at_login_set_count: u32 = 0,
+    /// Set false before `platform()` to model a host without keyboard input.
+    keyboard_input: bool = true,
+    /// `.denied` makes posts fail like a macOS app without the Accessibility grant.
+    keyboard_input_access: types.KeyboardInputAccess = .granted,
+    keyboard_input_prompt_count: u32 = 0,
+    keyboard_chords: [32]types.KeyChord = undefined,
+    keyboard_chord_count: usize = 0,
     /// Captured `WindowOptions.min_width`/`min_height` per created
     /// window — the content min-size floor that must survive to the
     /// create seam (macOS applies it as `contentMinSize`); same
@@ -973,6 +980,8 @@ pub const NullPlatform = struct {
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = if (self.keyboard_input) sendKeyChord else null,
+                .keyboard_input_access_fn = if (self.keyboard_input) keyboardInputAccess else null,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .configure_security_policy_fn = configureSecurityPolicy,
@@ -1059,6 +1068,7 @@ pub const NullPlatform = struct {
             .system_audio_capture => self.system_audio_capture,
             .video_playback => self.video_playback,
             .global_shortcuts => self.global_shortcuts,
+            .keyboard_input => self.keyboard_input,
         };
     }
 
@@ -1918,6 +1928,24 @@ pub const NullPlatform = struct {
         self.revealed_path = undefined;
         self.revealed_path_len = 0;
         self.revealed_path_len = (try copyInto(&self.revealed_path, path)).len;
+    }
+
+    fn sendKeyChord(context: ?*anyopaque, chord: types.KeyChord) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.keyboard_input_access == .denied) return error.KeyboardInputAccessDenied;
+        if (self.keyboard_chord_count == self.keyboard_chords.len) return error.KeyboardInputFailed;
+        self.keyboard_chords[self.keyboard_chord_count] = chord;
+        self.keyboard_chord_count += 1;
+    }
+
+    fn keyboardInputAccess(context: ?*anyopaque, prompt: bool) anyerror!types.KeyboardInputAccess {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (prompt and self.keyboard_input_access == .denied) self.keyboard_input_prompt_count += 1;
+        return self.keyboard_input_access;
+    }
+
+    pub fn keyboardChords(self: *const NullPlatform) []const types.KeyChord {
+        return self.keyboard_chords[0..self.keyboard_chord_count];
     }
 
     fn addRecentDocument(context: ?*anyopaque, path: []const u8) anyerror!void {

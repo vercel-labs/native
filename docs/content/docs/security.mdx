@@ -52,6 +52,10 @@ Declare `permissions` and `capabilities` in `app.json` (or a supported `app.zon`
       <td>Credential store read/write/delete operations</td>
     </tr>
     <tr>
+      <td><code>keyboard_input</code></td>
+      <td>Sending key chords to whichever app has keyboard focus (<a href="/docs/keyboard-shortcuts#keyboard-input">Keyboard input</a>). This can drive any app, such as opening a launcher or terminal and typing into it, so it reaches past every other permission; Windows adds no OS consent prompt</td>
+    </tr>
+    <tr>
       <td><code>network</code></td>
       <td>Network requests from native code</td>
     </tr>
@@ -80,7 +84,7 @@ Declare `permissions` and `capabilities` in `app.json` (or a supported `app.zon`
 
 Custom permissions use reverse-DNS names (e.g. `com.example.my-permission`). Use the smallest set that covers your app.
 
-[Global shortcuts](/docs/keyboard-shortcuts#global-shortcuts) need no permission; an app receives only the combinations it registers.
+[Global shortcuts](/docs/keyboard-shortcuts#global-shortcuts) need no permission; an app receives only the combinations it registers, and every key except `f1` through `f12` needs a modifier other than Shift so a global shortcut cannot take plain typing or navigation keys.
 
 ### Available capabilities
 

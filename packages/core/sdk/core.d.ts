@@ -416,6 +416,7 @@ export interface NotificationSpec {
     readonly actionCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
+export type KeyChord = GlobalShortcutBinding;
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -877,6 +878,12 @@ export declare const Cmd: {
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
     revealPath(path: Uint8Array): Cmd<never>;
+    keyboard: {
+        sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M>;
+        accessStatus<M extends Msgish>(options: {
+            readonly prompt?: boolean;
+        }, route: RequestRoute<M>): Cmd<M>;
+    };
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;

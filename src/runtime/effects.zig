@@ -77,6 +77,7 @@ const persist_store = @import("persist_store.zig");
 const record_store = @import("record_store.zig");
 const relational_store = @import("relational_store.zig");
 const credentials_store = @import("credentials_store.zig");
+const keyboard_input = @import("keyboard_input.zig");
 const file_access = @import("file_access.zig");
 const pty_transport = @import("pty.zig");
 const global_shortcuts_mod = @import("global_shortcuts.zig");
@@ -394,6 +395,7 @@ pub const SystemServiceBinding = struct {
     /// Restore only runtime window bookkeeping from a journaled successful
     /// capability, without invoking native window focus or close services.
     replay_window_result_fn: ?*const fn (context: *anyopaque, label: []const u8, closed: bool) void = null,
+    keyboard_input: ?keyboard_input.Binding = null,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -9585,6 +9587,40 @@ pub fn Effects(comptime Msg: type) type {
             self.startHostRequest(options, max_effect_host_payload_bytes, max_effect_host_result_bytes, null, null, null);
         }
 
+        pub const KeyChordOptions = struct {
+            key: u64,
+            chord: platform.KeyChord,
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const KeyboardAccessOptions = struct {
+            key: u64,
+            prompt: bool = false,
+            on_result: ?HostMsgFn = null,
+        };
+
+        /// Post a key chord to the focused app; requires the `keyboard_input` permission.
+        pub fn sendKeyChord(self: *Self, options: KeyChordOptions) void {
+            var payload: [keyboard_input.max_chord_payload_bytes]u8 = undefined;
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.send_chord_name,
+                .payload = keyboard_input.encodeChord(&payload, options.chord),
+                .on_result = options.on_result,
+            });
+        }
+
+        /// Ask for the OS grant; the ok bytes are `granted`, `denied`, or `not_required`.
+        pub fn keyboardAccessStatus(self: *Self, options: KeyboardAccessOptions) void {
+            const payload = [_]u8{@intFromBool(options.prompt)};
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.access_status_name,
+                .payload = &payload,
+                .on_result = options.on_result,
+            });
+        }
+
         fn startHostRequest(
             self: *Self,
             options: HostRequestOptions,
@@ -9767,7 +9803,8 @@ pub fn Effects(comptime Msg: type) type {
             return @import("desktop_files.zig").isName(name) or std.mem.startsWith(u8, name, "core.store.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
-                std.mem.eql(u8, name, "native-sdk.time.formatLocal");
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal") or
+                keyboard_input.isRequestName(name);
         }
 
         fn isNativeHostSendName(name: []const u8) bool {
@@ -9926,6 +9963,13 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
                 self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
+            if (keyboard_input.isRequestName(name)) {
+                const binding = (self.system_services orelse return self.feedUnsupportedNativeRequest(key)).keyboard_input orelse
+                    return self.feedUnsupportedNativeRequest(key);
+                const result = keyboard_input.execute(binding, name, payload);
+                self.feedHostResult(key, result.ok, result.bytes) catch {};
                 return;
             }
             const services = self.services orelse {

@@ -307,6 +307,8 @@ export interface NotificationSpec {
 
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
+export type KeyChord = GlobalShortcutBinding;
+
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
 /// checking, never the data).
@@ -569,6 +571,11 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -888,6 +895,15 @@ export const Cmd = {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
   },
 
+  keyboard: {
+    sendChord(chord: KeyChord, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return Cmd.request("native-sdk.keyboard.sendChord", hostRecordBytes({ key: chord.key, modifiers: shortcutModifierBits(chord) }), route);
+    },
+    accessStatus(options: { readonly prompt?: boolean }, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
+  },
+
   formatLocalTime(
     timestampMs: number,
     style: LocalTimeStyle,
@@ -1153,9 +1169,7 @@ export const Sub = {
   },
 
   globalShortcut(id: string, binding: GlobalShortcutBinding, msgKind: string): SubData {
-    return { op: "global_shortcut", id, key: binding.key, modifiers:
-      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
-      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs

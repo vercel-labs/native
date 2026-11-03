@@ -28,6 +28,7 @@ test {
     _ = @import("effects_image_tests.zig");
     _ = @import("effects_channel_tests.zig");
     _ = @import("effects_host_tests.zig");
+    _ = @import("keyboard_input.zig");
     _ = @import("effects_credentials_tests.zig");
     _ = @import("effects_store_tests.zig");
     _ = @import("effects_relational_tests.zig");

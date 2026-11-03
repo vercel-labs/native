@@ -118,6 +118,13 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>macOS model cores, system WebView, and Chromium through Keychain; Linux model cores and system WebView through Secret Service/libsecret when available; Windows model cores and system WebView through Credential Manager; iOS toolkit apps through generic-password Keychain entries; Android toolkit apps through an AndroidKeyStore AES-GCM key and authenticated ciphertext in app-private preferences. Core dev and test hosts use hermetic memory.</td>
     </tr>
     <tr>
+      <td>Keyboard input to the focused app</td>
+      <td><code>Cmd.keyboard.sendChord/accessStatus</code> / <code>fx.sendKeyChord/keyboardAccessStatus</code> / <code>runtime.sendKeyChord/keyboardInputAccess</code></td>
+      <td>None. Web content cannot post input.</td>
+      <td>None. Gated by the <code>keyboard_input</code> manifest permission.</td>
+      <td>macOS model cores through <code>CGEventPost</code> once the user grants Accessibility; Windows model cores through <code>SendInput</code>; Linux, iOS, and Android report unsupported. See <a href="/docs/keyboard-shortcuts#keyboard-input">Keyboard input</a>.</td>
+    </tr>
+    <tr>
       <td>Local date/time formatting</td>
       <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code> / <code>runtime.formatLocalTime(...)</code></td>
       <td>None. Effects/runtime API.</td>
@@ -171,6 +178,7 @@ const support = {
   audioSpectrum: await window.zero.platform.supports("audio_spectrum"),
   microphoneCapture: await window.zero.platform.supports("microphone_capture"),
   systemAudioCapture: await window.zero.platform.supports("system_audio_capture"),
+  keyboardInput: await window.zero.platform.supports("keyboard_input"),
 };
 ```
 

@@ -464,7 +464,9 @@ export type NativeSdkPlatformFeature =
   | "video_playback"
   | "videoPlayback"
   | "global_shortcuts"
-  | "globalShortcuts";
+  | "globalShortcuts"
+  | "keyboard_input"
+  | "keyboardInput";
 
 export type NativeSdkPlatformFeatureSelector =
   | { feature: NativeSdkPlatformFeature; name?: never }

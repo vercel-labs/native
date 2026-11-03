@@ -5,6 +5,7 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 const canvas = @import("canvas");
+const keyboard_input = @import("keyboard_input.zig");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
 const app_icon = canvas.app_icon;
@@ -818,6 +819,8 @@ pub const MacPlatform = struct {
                 .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = keyboard_input.sendKeyChord,
+                .keyboard_input_access_fn = keyboard_input.access,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .check_for_updates_fn = checkForUpdates,
@@ -925,6 +928,7 @@ pub const MacPlatform = struct {
             // a second player.
             .video_playback => self.web_engine == .system,
             .global_shortcuts => global_shortcuts.available(),
+            .keyboard_input => true,
         };
     }
 

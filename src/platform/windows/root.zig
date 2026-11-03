@@ -4,6 +4,7 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 const global_shortcuts = @import("global_shortcuts.zig");
+const keyboard_input = @import("keyboard_input.zig");
 
 const bundled_geist_regular = @embedFile("../../primitives/canvas/fonts/Geist-Regular.ttf");
 const bundled_geist_mono = @embedFile("../../primitives/canvas/fonts/GeistMono-Regular.ttf");
@@ -475,6 +476,8 @@ pub const WindowsPlatform = struct {
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = keyboard_input.sendKeyChord,
+                .keyboard_input_access_fn = keyboard_input.access,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .set_credential_fn = setCredential,
@@ -569,6 +572,7 @@ pub const WindowsPlatform = struct {
             // what is missing.
             .video_playback => false,
             .global_shortcuts => global_shortcuts.available(),
+            .keyboard_input => true,
         };
     }
 

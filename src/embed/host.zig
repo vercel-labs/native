@@ -837,6 +837,7 @@ pub const MobileHostApp = struct {
         // would be a lie. Apps hear one honest failed event instead.
         self.null_platform.global_shortcuts = false;
         self.null_platform.video_playback = false;
+        self.null_platform.keyboard_input = false;
         self.last_error = null;
         self.activation_count = 0;
         self.deactivation_count = 0;
