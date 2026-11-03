@@ -416,11 +416,7 @@ export interface NotificationSpec {
     readonly actionCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
-export type KeyboardModifier = "primary" | "command" | "control" | "option" | "alt" | "shift";
-export interface KeyChord {
-    readonly key: string;
-    readonly modifiers?: readonly KeyboardModifier[];
-}
+export type KeyChord = GlobalShortcutBinding;
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {

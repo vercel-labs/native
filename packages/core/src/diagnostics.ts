@@ -551,8 +551,8 @@ export const rules = {
   NS1075: {
     id: "NS1075",
     title: "keyboard input requires explicit permission",
-    fix: "Add `\"keyboard_input\"` to app.zon's `permissions`, or remove the `Cmd.keyboard.*` call.",
-    why: "Typing into other apps is default-deny: the runtime answers every undeclared keyboard request with `rejected`, so a missing grant is caught at check time instead of shipping a command that can never succeed.",
+    fix: "Add `\"keyboard_input\"` to app.zon's `permissions`, or remove the `Cmd.keyboard.*` call or `native-sdk.keyboard.*` request.",
+    why: "Typing into other apps is default-deny: on hosts that can post input, the runtime answers every undeclared keyboard request with `rejected`, so a missing grant is caught at check time instead of shipping a command that can never succeed.",
     class: "guarantee",
   },
   NS1420: {

@@ -50,15 +50,22 @@ test "a chord and the access query reach the platform once keyboard_input is dec
     const fixture = try Fixture.create(true);
     defer fixture.destroy();
     try fixture.expectReply(.paste, "", 1, 0);
-    try fixture.expectReply(.access, "granted", 2, 0);
+    try fixture.expectReply(.chord, "", 2, 0);
+    try fixture.expectReply(.access, "granted", 3, 0);
     try testing.expectEqual(sdk.KeyChord.init("v", .{ .primary = true }).?, fixture.harness.null_platform.keyboardChords()[0]);
+    try testing.expectEqual(sdk.KeyChord.init("enter", .{ .command = true, .control = true, .option = true, .shift = true }).?, fixture.harness.null_platform.keyboardChords()[1]);
 }
 
 test "an undeclared permission is refused before reaching the platform" {
     const fixture = try Fixture.create(false);
     defer fixture.destroy();
+    fixture.harness.null_platform.keyboard_input_access = .denied;
     try fixture.expectReply(.paste, "rejected", 0, 1);
+    try fixture.expectReply(.access, "rejected", 0, 2);
     try testing.expectEqual(@as(usize, 0), fixture.harness.null_platform.keyboardChords().len);
+    try testing.expectEqual(@as(u32, 0), fixture.harness.null_platform.keyboard_input_prompt_count);
+    fixture.harness.runtime.options.platform.services.send_key_chord_fn = null;
+    try fixture.expectReply(.paste, "unsupported", 0, 3);
 }
 
 test "denied access and an unsupported host route an error Msg" {

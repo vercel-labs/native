@@ -1242,14 +1242,8 @@ export interface NotificationSpec {
 /// effect because the user's locale and time zone are ambient host state.
 export type LocalTimeStyle = "date" | "time" | "datetime";
 
-/// Manifest modifier names: `primary` is Command on macOS and Control elsewhere; `alt` aliases `option`.
-export type KeyboardModifier = "primary" | "command" | "control" | "option" | "alt" | "shift";
-
-/// `key` is from the shortcut key vocabulary, such as "v", "enter", "arrowleft", or "f5".
-export interface KeyChord {
-  readonly key: string;
-  readonly modifiers?: readonly KeyboardModifier[];
-}
+/// A chord to send, shaped like a global shortcut binding; it may have no modifier.
+export type KeyChord = GlobalShortcutBinding;
 
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
@@ -1571,22 +1565,9 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
   return out;
 }
 
-function keyboardModifierBits(modifiers: readonly KeyboardModifier[] | undefined): number {
-  let primary = false;
-  let command = false;
-  let control = false;
-  let option = false;
-  let shift = false;
-  if (modifiers !== undefined) {
-    for (const modifier of modifiers) {
-      if (modifier === "primary") primary = true;
-      else if (modifier === "command") command = true;
-      else if (modifier === "control") control = true;
-      else if (modifier === "option" || modifier === "alt") option = true;
-      else if (modifier === "shift") shift = true;
-    }
-  }
-  return (primary ? 1 : 0) + (command ? 2 : 0) + (control ? 4 : 0) + (option ? 8 : 0) + (shift ? 16 : 0);
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -2032,9 +2013,9 @@ export const Cmd = {
 
   /// Keyboard input for whichever app has focus; requires the `keyboard_input` permission.
   keyboard: {
-    /// Press one chord, such as `{ key: "v", modifiers: ["primary"] }` to paste; ok carries empty bytes.
+    /// Press one chord, such as `{ key: asciiBytes("v"), primary: true }` to paste; ok carries empty bytes.
     sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M> {
-      return Cmd.request("native-sdk.keyboard.sendChord", { key: utf8Bytes(chord.key), modifiers: keyboardModifierBits(chord.modifiers) }, route);
+      return Cmd.request("native-sdk.keyboard.sendChord", { key: chord.key, modifiers: shortcutModifierBits(chord) }, route);
     },
 
     /// Ok carries `granted`, `denied`, or `not_required`; `prompt` lets the OS show its grant prompt.
@@ -2546,9 +2527,7 @@ export const Sub = {
   /// registered while declared and re-registered when the binding changes;
   /// every report dispatches the named arm with `id` and a GlobalShortcutState.
   globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M> {
-    return { op: "global_shortcut", id, key: binding.key, modifiers:
-      ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
-      ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0), msgKind };
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs
