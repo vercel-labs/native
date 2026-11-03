@@ -77,7 +77,7 @@ Single-character keys and text-entry keys (`enter`, `tab`, `space`, and `backspa
 
 ## Global shortcuts
 
-A global shortcut fires while any app has focus and reports both press and release, for launchers or hold-to-talk. Bindings use the same keys and modifiers as app shortcuts, up to 16 per app. Declare them from a TypeScript core with `Sub.globalShortcut(id, binding, arm)`; the shortcut is registered while the model declares it and re-registered when its binding changes.
+A global shortcut fires while any app has focus and reports both press and release, for launchers or hold-to-talk. Bindings use the same keys as app shortcuts, up to 16 per app, and every key except `f1` through `f12` needs a modifier other than Shift. Declare them from a TypeScript core with `Sub.globalShortcut(id, binding, arm)`; the shortcut is registered while the model declares it and re-registered when its binding changes.
 
 ```ts
 export function subscriptions(model: Model): Sub<Msg> {
@@ -93,7 +93,7 @@ The arm receives the shortcut `id` and a `state`:
 - `pressed` / `released`: the keys went down or up. Every press gets a release, even if the binding is removed while held.
 - `conflict`: the OS or another app owns the combination.
 - `unsupported`: the platform has no global shortcuts.
-- `rejected`: the binding is invalid (unknown key, no modifier on a letter or text-entry key, or a bad id).
+- `rejected`: the binding is invalid (unknown key, no modifier other than Shift on a key other than `f1` through `f12`, a bad or duplicate id, or more than 16 shortcuts).
 
 Supported on macOS and Windows. Linux reports `unsupported`. Zig cores use `fx.setGlobalShortcuts` and `fx.clearGlobalShortcuts`.
 

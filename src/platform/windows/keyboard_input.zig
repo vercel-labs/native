@@ -109,7 +109,7 @@ test "input records match the Win32 INPUT layout" {
     try std.testing.expectEqual(@as(usize, @sizeOf(usize)), @offsetOf(Input, "keyboard"));
 }
 
-test "chord inputs lift stray held modifiers, keep held chord modifiers, and mask a lifted Alt on both ends" {
+test "chord inputs lift stray held modifiers, keep held chord modifiers, and mask a lifted Alt or Win on both ends" {
     const v: u16 = 0x56;
     const cases = [_]struct { types.ShortcutModifiers, [modifier_groups.len][2]bool, []const struct { u16, bool } }{
         .{ .{ .primary = true }, @splat(.{ false, false }), &.{ .{ 0x11, false }, .{ v, false }, .{ v, true }, .{ 0x11, true } } },
@@ -117,6 +117,8 @@ test "chord inputs lift stray held modifiers, keep held chord modifiers, and mas
         .{ .{ .primary = true }, .{ .{ false, false }, .{ false, false }, .{ false, true }, .{ false, false } }, &.{ .{ 0xA1, true }, .{ 0x11, false }, .{ v, false }, .{ v, true }, .{ 0x11, true }, .{ 0xA1, false } } },
         .{ .{ .primary = true }, .{ .{ false, false }, .{ true, false }, .{ false, false }, .{ false, false } }, &.{ .{ vk_mask, false }, .{ vk_mask, true }, .{ 0xA4, true }, .{ 0x11, false }, .{ v, false }, .{ v, true }, .{ 0x11, true }, .{ 0xA4, false }, .{ vk_mask, false }, .{ vk_mask, true } } },
         .{ .{ .command = true }, .{ .{ false, false }, .{ false, false }, .{ false, false }, .{ false, true } }, &.{ .{ v, false }, .{ v, true } } },
+        .{ .{ .primary = true }, .{ .{ false, false }, .{ false, false }, .{ false, false }, .{ true, false } }, &.{ .{ vk_mask, false }, .{ vk_mask, true }, .{ vk_lwin, true }, .{ 0x11, false }, .{ v, false }, .{ v, true }, .{ 0x11, true }, .{ vk_lwin, false }, .{ vk_mask, false }, .{ vk_mask, true } } },
+        .{ .{ .control = true, .option = true, .shift = true }, @splat(.{ false, false }), &.{ .{ 0x11, false }, .{ 0x12, false }, .{ 0x10, false }, .{ v, false }, .{ v, true }, .{ 0x10, true }, .{ 0x12, true }, .{ 0x11, true } } },
     };
     for (cases) |case| {
         var inputs: [max_inputs]Input = undefined;
@@ -129,4 +131,6 @@ test "chord inputs lift stray held modifiers, keep held chord modifiers, and mas
     }
     var inputs: [max_inputs]Input = undefined;
     try std.testing.expectEqual(@as(usize, max_inputs), chordInputs(.{}, v, @splat(.{ true, true }), &inputs));
+    try std.testing.expect(virtualKeyInput(0x25, false).keyboard.flags & keyeventf_extendedkey != 0);
+    try std.testing.expect(virtualKeyInput(v, false).keyboard.flags & keyeventf_extendedkey == 0);
 }

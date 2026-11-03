@@ -19,17 +19,12 @@ const header_bytes: usize = 8;
 pub const max_packet_bytes: usize = header_bytes + platform.max_shortcut_id_bytes + platform.max_shortcut_key_bytes;
 
 pub fn modifierMask(modifiers: platform.ShortcutModifiers) u8 {
-    var mask: u8 = 0;
-    inline for (std.meta.fields(platform.ShortcutModifiers), 0..) |field, bit| {
-        if (@field(modifiers, field.name)) mask |= 1 << bit;
-    }
-    return mask;
+    return @as(u8, @intFromBool(modifiers.primary)) | @as(u8, @intFromBool(modifiers.command)) << 1 | @as(u8, @intFromBool(modifiers.control)) << 2 |
+        @as(u8, @intFromBool(modifiers.option)) << 3 | @as(u8, @intFromBool(modifiers.shift)) << 4;
 }
 
 pub fn modifiersFromMask(mask: u8) platform.ShortcutModifiers {
-    var modifiers: platform.ShortcutModifiers = .{};
-    inline for (std.meta.fields(platform.ShortcutModifiers), 0..) |field, bit| @field(modifiers, field.name) = mask & (1 << bit) != 0;
-    return modifiers;
+    return .{ .primary = mask & 1 != 0, .command = mask & 2 != 0, .control = mask & 4 != 0, .option = mask & 8 != 0, .shift = mask & 16 != 0 };
 }
 
 pub fn encodePacket(buffer: *[max_packet_bytes]u8, kind: EffectGlobalShortcutEventKind, shortcut: platform.Shortcut) []const u8 {
@@ -70,6 +65,9 @@ pub const Session = struct {
 
 pub fn admissible(shortcut: platform.Shortcut, earlier: []const platform.Shortcut) bool {
     platform.validateShortcut(shortcut) catch return false;
+    const modifiers = shortcut.modifiers;
+    const function_key = shortcut.key.len > 1 and std.ascii.toLower(shortcut.key[0]) == 'f' and std.ascii.isDigit(shortcut.key[1]);
+    if (!function_key and !(modifiers.primary or modifiers.command or modifiers.control or modifiers.option)) return false;
     for (earlier) |previous| {
         if (std.mem.eql(u8, previous.id, shortcut.id)) return false;
     }
