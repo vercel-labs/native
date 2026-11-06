@@ -976,6 +976,9 @@ pub const Widget = struct {
     /// `runtime_flags` share a byte so adding this policy does not grow every
     /// retained widget.
     submit_on_enter: bool = false,
+    /// Opt-in measured textarea height. A zero maximum preserves fixed sizing.
+    auto_height_min: f32 = 0,
+    auto_height_max: f32 = 0,
     /// Syntax grammar for an editable `Ui.code` surface. Editable code
     /// retains one plain source span and tokenizes only visible logical
     /// lines during paint, so large documents do not consume the view's
@@ -1678,10 +1681,11 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
 
 test "Widget keeps the reviewed retained footprint with portable component and appearance policies" {
     // One layout tree holds thousands of Widgets by value. On the 64-bit
-    // targets that run the renderer, 792 bytes is the reviewed footprint:
-    // the 776-byte native widget plus two optional 8-byte policy callbacks.
+    // targets that run the renderer, 800 bytes is the reviewed footprint:
+    // the 776-byte native widget, two optional 8-byte policy callbacks,
+    // and two 4-byte opt-in textarea height bounds.
     // The callbacks borrow compiled code, with no per-widget allocation.
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 792), @sizeOf(Widget));
+        try std.testing.expectEqual(@as(usize, 800), @sizeOf(Widget));
     }
 }

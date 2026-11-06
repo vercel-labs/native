@@ -612,6 +612,8 @@ pub const attrs = [_]AttrInfo{
     .{ .code = 103, .name = "command", .class = .text, .group = .option, .field = "command" },
     .{ .code = 104, .name = "focusable", .class = .flag, .group = .option },
     .{ .code = 105, .name = "backdrop-blur", .class = .option, .group = .option, .field = "backdrop_blur_token" },
+    .{ .code = 106, .name = "auto-height-min", .class = .number, .group = .option, .field = "auto_height_min" },
+    .{ .code = 107, .name = "auto-height-max", .class = .number, .group = .option, .field = "auto_height_max" },
 };
 
 // ----------------------------------------------------------------- events

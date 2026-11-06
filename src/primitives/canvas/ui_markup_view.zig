@@ -4804,8 +4804,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
         }
 
         fn setOptionField(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {
-            if (scope.expression_policy) |owner| return self.setOptionFieldOwned(owner, scope, node, options, field, attribute);
-            return self.setOptionFieldReference(scope, node, options, field, attribute);
+            if (scope.expression_policy) |owner| {
+                try self.setOptionFieldOwned(owner, scope, node, options, field, attribute);
+            } else {
+                try self.setOptionFieldReference(scope, node, options, field, attribute);
+            }
+            if (comptime std.mem.eql(u8, field, "auto_height_min") or std.mem.eql(u8, field, "auto_height_max")) {
+                const value = @field(options, field);
+                if (!std.math.isFinite(value) or value < 0) return self.failVoid(node, markup.auto_height_value_message);
+            }
         }
 
         fn setOptionFieldReference(self: *Self, scope: *Scope, node: markup.MarkupNode, options: *Ui.ElementOptions, comptime field: []const u8, attribute: markup.MarkupAttr) BuildError!void {

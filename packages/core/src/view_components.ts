@@ -13,7 +13,7 @@ type NscContextMenuItem = { label: string; labelBytes?: readonly number[]; press
 type NscChartSeries = { kind: string; values: readonly number[]; color: string; fill: boolean; label: readonly number[] };
 
 type NscViewNode = {
-  end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean;
+  end: number; kind: string; text: string; textBytes?: readonly number[]; labelBytes?: readonly number[]; placeholderBytes?: readonly number[]; placeholder?: string; command?: string; wrap?: boolean; submitOnEnter?: boolean; autoHeightMin?: number; autoHeightMax?: number;
   key?: string; keyBytes?: readonly number[]; keyInt?: number; keySlot?: number; globalKey?: string; globalKeyBytes?: readonly number[]; globalKeyInt?: number;
   columns?: number; virtualized?: boolean; virtualItemExtent?: number; virtualWindow?: number;
   gap?: number; padding?: number; grow?: number; width?: number; height?: number; minWidth?: number; maxWidth?: number;

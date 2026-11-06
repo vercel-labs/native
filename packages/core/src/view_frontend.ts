@@ -958,6 +958,11 @@ function compileViewFunction(source: string, contract: ViewContract, options: Vi
         if (!["start", "center", "end"].includes(value)) fail(node, "unsupported text-alignment");
         props.push(v.prop("textAlignment", v.str(value)));
       }
+      else if (name === "auto-height-min" || name === "auto-height-max") {
+        if (node.name !== "textarea" || node.attrs.has("height")) fail(node, "auto-height bounds require textarea without a definite height");
+        if (!value.startsWith("{") && (!Number.isFinite(Number(value)) || Number(value) < 0)) fail(node, "auto-height bounds must be finite nonnegative points");
+        props.push(v.prop(name === "auto-height-min" ? "autoHeightMin" : "autoHeightMax", bound(value, "number", node, scope)));
+      }
       else if (name === "min-width" || name === "max-width") props.push(v.prop(name === "min-width" ? "minWidth" : "maxWidth", bound(value, "number", node, scope)));
       else if (["resize-duration", "resize-easing", "resize-origin"].includes(name)) {
         if (node.name !== "split") fail(node, `${name} requires split`);

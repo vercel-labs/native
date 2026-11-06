@@ -205,10 +205,31 @@ test "a template file without a view root parses as a component file" {
     try testing.expectEqualStrings(markup.empty_document_message, empty_parser.diagnostic.message);
 }
 
-test "template and use misuse is validated with positions and teaching messages" {
+test "textarea content height validates element placement and numeric bounds" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
+    var auto_height_parser = markup.Parser.init(arena_state.allocator(), "<textarea label=\"Draft\" auto-height-min=\"44\" auto-height-max=\"{ceiling}\" />");
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try auto_height_parser.parse()));
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<text auto-height-max=\"200\">x</text>", .message = markup.auto_height_element_message },
+        .{ .source = "<textarea label=\"Draft\" height=\"80\" auto-height-max=\"200\"/>", .message = markup.auto_height_element_message },
+        .{ .source = "<textarea label=\"Draft\" auto-height-min=\"-1\"/>", .message = markup.auto_height_value_message },
+        .{ .source = "<textarea label=\"Draft\" auto-height-max=\"inf\"/>", .message = markup.auto_height_value_message },
+        .{ .source = "<textarea label=\"Draft\" auto-height-min=\"{1 + }\"/>", .message = markup.expr.expected_operand_message },
+        .{ .source = "<textarea label=\"Draft\" auto-height-max=\"{1 + }\"/>", .message = markup.expr.expected_operand_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena_state.allocator(), case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+    }
+}
+
+test "template and use misuse is validated with positions and teaching messages" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
     const cases = [_]struct { source: []const u8, message: []const u8 }{
         // Templates must be top-level, named, unique, and single-bodied.
         .{ .source = "<column>\n  <template name=\"t\"><text>x</text></template>\n</column>", .message = markup.template_top_level_message },

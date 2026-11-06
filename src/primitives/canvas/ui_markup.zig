@@ -1204,6 +1204,9 @@ pub const autofocus_element_message = "autofocus is only supported on focusable 
 
 pub const submit_on_enter_element_message = "submit-on-enter is only supported on textarea - it makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; single-line fields already submit on Enter, and other elements have no multiline Enter policy";
 
+pub const auto_height_element_message = "auto-height bounds require textarea without a definite height";
+pub const auto_height_value_message = "auto-height bounds must be finite nonnegative points";
+
 pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle/on-hold/on-drag are fine anywhere: they make any element interactive, and presses on plain text or icons inside it fall through to it)";
 
 /// Elements whose widget kind layers its children on top of each other
@@ -3430,6 +3433,22 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     }
                     if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
                         return attrError(node, attribute, message);
+                    }
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "auto-height-min") or std.mem.eql(u8, attribute.name, "auto-height-max")) {
+                    if (!std.mem.eql(u8, node.name, "textarea") or node.attr("height") != null)
+                        return attrError(node, attribute, auto_height_element_message);
+                    if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                        return attrError(node, attribute, message);
+                    }
+                    const expression = parseAttrExpression(attribute.value) orelse
+                        return attrError(node, attribute, invalid_expression_message);
+                    if (expression == .literal) {
+                        const value = std.fmt.parseFloat(f32, expression.literal) catch
+                            return attrError(node, attribute, auto_height_value_message);
+                        if (!std.math.isFinite(value) or value < 0)
+                            return attrError(node, attribute, auto_height_value_message);
                     }
                     continue;
                 }

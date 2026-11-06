@@ -323,6 +323,29 @@ pub fn textInputViewportForWidget(widget: Widget, tokens: DesignTokens) ?geometr
     return widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
 }
 
+pub fn textInputAutoHeightEnabled(widget: Widget) bool {
+    return widget.kind == .textarea and std.math.isFinite(widget.auto_height_max) and widget.auto_height_max > 0;
+}
+
+/// The same presented-byte line breaker, font metrics and content inset used
+/// for painting and caret scrolling. No separate wrap estimator or hidden node.
+pub fn textInputAutoHeightForWidth(widget: Widget, width: f32, tokens: DesignTokens) f32 {
+    var measured = widget;
+    const minimum = if (std.math.isFinite(widget.auto_height_min)) @max(0, widget.auto_height_min) else 0;
+    const maximum = @max(minimum, widget.auto_height_max);
+    // Ancestor wrapping may offer the full container width. Match the width
+    // bounds the eventual child allocation applies before counting lines.
+    const bounded_width = if (widget.layout.max_size.width > 0) @min(width, widget.layout.max_size.width) else width;
+    measured.frame.width = @max(1, @max(widget.layout.min_size.width, bounded_width));
+    measured.frame.height = maximum;
+    const text_size = widgetTextInputSize(measured, tokens);
+    const inset = widgetTextInputInset(measured, tokens);
+    const options = widgetTextInputLayoutOptions(measured, tokens, text_size, inset);
+    const vertical_inset = widgetTextInputVerticalInset(measured, tokens, text_size, options);
+    const height = textInputContentExtentForWidget(measured, tokens) + vertical_inset * 2;
+    return std.math.clamp(@ceil(height), minimum, maximum);
+}
+
 pub fn textInputContentExtentForWidget(widget: Widget, tokens: DesignTokens) f32 {
     if (!widget_access.widgetTextInputKind(widget.kind)) return 0;
     const text_size = widgetTextInputSize(widget, tokens);

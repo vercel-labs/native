@@ -1641,7 +1641,7 @@ function nscvWrappedLayout(request: Uint8Array): Uint8Array {
   const v = (at: number): number => wire.getFloat32(at, true);
   let mode = 0;
   if ((kind === 26 || kind === 44) && (flags & 1) !== 0) mode = 1;
-  else if (kind === 2 || kind === 7 || kind === 4 || kind === 5 || kind === 24 || kind === 25) mode = (flags & 2) !== 0 ? 0 : 2;
+  else if (kind === 2 || kind === 7 || kind === 4 || kind === 5 || kind === 24 || kind === 25 || kind === 60) mode = (flags & 2) !== 0 ? 0 : 2;
   else if (kind === 0 || kind === 22 || kind === 18 || kind === 15 || kind === 16 || kind === 23) mode = 3;
   else if (kind === 17) mode = 4;
   else if (kind === 14) mode = 5;
