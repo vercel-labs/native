@@ -448,3 +448,39 @@ test "the wide-cell spacer extends its primary's background in the published sna
     try testing.expect(row.cells[1].bg != null);
     try testing.expectEqual(row.cells[0].bg.?.r, row.cells[1].bg.?.r);
 }
+
+test "an external transport feeds a session and receives input and resize" {
+    if (comptime !terminal_session.enabled) return error.SkipZigTest;
+    var store = TerminalSessions.init(testing.allocator);
+    defer store.deinit();
+    store.beginBuild(.{});
+
+    var pty_gateway = TestGateway{ .gpa = testing.allocator };
+    defer pty_gateway.deinit();
+    var external = TestGateway{ .gpa = testing.allocator };
+    defer external.deinit();
+    store.setGateway(pty_gateway.gateway());
+    store.setExternalTransport(.{
+        .context = @ptrCast(&external),
+        .write = TestGateway.writeFn,
+        .resize = TestGateway.resizeFn,
+    });
+
+    store.feedExternal(9, "hello\r\n");
+    const grid = resolveGrid(&store, 9) orelse return error.TestExpectedGrid;
+    try testing.expect(std.mem.indexOf(u8, gridText(grid), "hello") != null);
+
+    try testing.expect(store.textInput(9, "ls\r"));
+    try testing.expect(std.mem.indexOf(u8, external.written.items, "ls\r") != null);
+    try testing.expectEqual(@as(usize, 0), pty_gateway.written.items.len);
+
+    _ = store.reconcile(9, 0, 100, 40);
+    const resized = external.resized orelse return error.TestExpectedResize;
+    try testing.expectEqual(@as(u16, 100), resized.cols);
+    try testing.expectEqual(@as(u16, 40), resized.rows);
+    try testing.expectEqual(@as(usize, 0), pty_gateway.resize_count);
+
+    store.feedExternalExit(9);
+    const ended = resolveGrid(&store, 9) orelse return error.TestExpectedGrid;
+    try testing.expect(!ended.running);
+}
