@@ -24,7 +24,7 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # TypeScript cores compile through the external core compiler at
       # build/test time; the compiler and the frontend's toolchain both
       # arrive with this one install (without it the ts-core suites skip
@@ -32,6 +32,8 @@ jobs:
       # cache action on purpose: hosted runners are ephemeral, so any
       # per-run compiler cache dies with the VM and runs stay hermetic
       # across commits by machine lifecycle.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - name: Service surface tooling and claims
         if: matrix.shard == 1
@@ -61,10 +63,12 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # The exact-pinned external core compiler and the frontend's
       # toolchain, one install (packages/core/package.json is the one
       # place the pin lives).
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       # Per-fixture contract artifacts the fixture driver consumes: the effective sidecar plus its generated entry module and compiler profile, under zig-out/core-contracts.
       - run: zig build stage-core-contracts
@@ -83,9 +87,11 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # gpu-components is a TypeScript-core app, so its smoke build needs
       # the frontend compiler and exact-pinned TypeScript toolchain.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       # The mobile aggregate runs on Linux for Android. Exercise the other
       # store-capable cross-target here against the real iPhone simulator SDK.
@@ -122,7 +128,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
@@ -155,7 +163,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
@@ -213,10 +223,12 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # The TypeScript core suites compile through the external core
       # compiler at build/test time; without the install they skip
       # silently, so CI must provide it.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - run: zig build test-tooling
 
@@ -227,7 +239,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm --prefix packages/native-sdk run version:check
       - run: npm --prefix packages/native-sdk run scripts:check
 
@@ -253,10 +267,12 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # The TypeScript examples compile through the external core
       # compiler at build time; the compiler and the frontend toolchain
       # arrive with this install.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       # Every example test uses the null backend, so this lane needs no
       # GTK/WebKitGTK packages. The root build owns the round-robin shard
@@ -270,7 +286,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
@@ -306,7 +324,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
@@ -395,9 +415,11 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # The scaffold default is the TypeScript core; its frontend and
       # compiler run at build time from this checkout's packages/core.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       # No WebKitGTK dev package, same as linux-canvas-smoke: the scaffold
       # declares no web use, so its host compiles with the stub seam.
@@ -422,7 +444,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
@@ -465,7 +489,9 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - name: Install core compiler
         run: npm ci --prefix packages/core --include=dev
       - name: Install Wine and Xvfb
@@ -509,10 +535,12 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.22.1
       # The default scaffold is a TypeScript core: its build runs the
       # @native-sdk/core frontend and the external core compiler from
       # this checkout's own install.
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - run: npm ci --prefix packages/core
       - run: zig build
       - name: Scaffold and test the zero-config native app
@@ -557,7 +585,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - uses: pnpm/action-setup@v4
         with:
           version: 10.23.0
@@ -574,7 +604,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.23.4
+      - name: Update npm
+        run: npm install --global --ignore-scripts --no-audit --no-fund npm@12.2.1
       - uses: pnpm/action-setup@v4
         with:
           version: 10.23.0
