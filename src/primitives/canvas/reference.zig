@@ -129,6 +129,11 @@ pub const ReferenceRenderSurface = struct {
     /// instead of re-running its pixel loop. Same bytes either way —
     /// this only moves time.
     render_memo: ?*ReferenceRenderMemo = null,
+    /// Live pixel hosts may composite presentation-only resources (the
+    /// media-surface texture channel). Deterministic renders (goldens,
+    /// screenshots, replay marks) leave this false and keep the
+    /// id-derived placeholder policy.
+    composite_presentation_images: bool = false,
 
     pub fn init(width: usize, height: usize, pixels: []u8) Error!ReferenceRenderSurface {
         const len = std.math.mul(usize, std.math.mul(usize, width, height) catch return error.ReferenceRenderSurfaceTooSmall, 4) catch return error.ReferenceRenderSurfaceTooSmall;
@@ -155,6 +160,15 @@ pub const ReferenceRenderSurface = struct {
 
     /// Runtime-registered faces text runs resolve against before the
     /// bundled fallback mapping (see `referenceFaceForFontId`).
+    /// Let a live software host composite presentation-only resources.
+    /// The deterministic render paths never call this, so their output
+    /// remains producer-independent.
+    pub fn withPresentationImages(self: ReferenceRenderSurface, enabled: bool) ReferenceRenderSurface {
+        var next = self;
+        next.composite_presentation_images = enabled;
+        return next;
+    }
+
     pub fn withFonts(self: ReferenceRenderSurface, fonts: []const ReferenceFont) ReferenceRenderSurface {
         var next = self;
         next.fonts = fonts;
@@ -582,6 +596,10 @@ pub const ReferenceRenderSurface = struct {
     };
 
     fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, sample_bounds: ReferenceImageSampleBounds, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
+        // Media-surface frames change every frame; a retained scale panel
+        // would be recomputed (and its cache invalidated) on each one.
+        // Sample those draws directly instead.
+        if (image.presentation_only) return null;
         const memo = self.render_memo orelse return null;
         // Exact-arithmetic bounds: pixel offsets and phases must stay in
         // f32's exact-integer range for the phase-relative identity
@@ -959,7 +977,7 @@ pub const ReferenceRenderSurface = struct {
     }
 
     fn findImage(self: ReferenceRenderSurface, id: ImageId) ?ReferenceImage {
-        return findReferenceImage(self.images, id);
+        return findReferenceImage(self.images, id, self.composite_presentation_images);
     }
 };
 
@@ -1311,7 +1329,7 @@ fn referenceImagePixelLen(width: usize, height: usize) ?usize {
     return std.math.mul(usize, pixel_count, 4) catch return null;
 }
 
-fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceImage {
+fn findReferenceImage(images: []const ReferenceImage, id: ImageId, composite_presentation_images: bool) ?ReferenceImage {
     for (images) |image| {
         // THE REFERENCE-RENDERER MEDIA POLICY: presentation-only
         // resources (media-surface textures pushed by external
@@ -1321,7 +1339,7 @@ fn findReferenceImage(images: []const ReferenceImage, id: ImageId) ?ReferenceIma
         // reference renders, screenshots, replay pixel marks, and
         // GOLDENS show. Goldens can therefore never depend on producer
         // output; only live GPU/packet hosts composite the real texture.
-        if (image.presentation_only) continue;
+        if (image.presentation_only and !composite_presentation_images) continue;
         if (image.id == id) return image;
     }
     return null;
