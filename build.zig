@@ -4389,6 +4389,71 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     });
 }
 
+/// A copy of `source` with `suffix` appended, read when the step runs.
+/// Test fixtures use this instead of `@embedFile`, which runs whenever
+/// build.zig compiles and so needs the file in every checkout of this
+/// package, including the published one that leaves `tests/` out.
+fn sourceWithSuffix(b: *std.Build, source: std.Build.LazyPath, suffix: []const u8, basename: []const u8) std.Build.LazyPath {
+    const file = b.allocator.create(SourceWithSuffix) catch @panic("OOM");
+    file.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = b.fmt("append to {s}", .{basename}),
+            .owner = b,
+            .makeFn = SourceWithSuffix.make,
+        }),
+        .source = source.dupe(b),
+        .suffix = b.dupe(suffix),
+        .basename = b.dupePath(basename),
+        .generated = undefined,
+    };
+    file.generated = .{ .step = &file.step };
+    source.addStepDependencies(&file.step);
+    return .{ .generated = .{ .file = &file.generated } };
+}
+
+const SourceWithSuffix = struct {
+    step: std.Build.Step,
+    source: std.Build.LazyPath,
+    suffix: []const u8,
+    basename: []const u8,
+    generated: std.Build.GeneratedFile,
+
+    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
+        _ = options;
+        const self: *SourceWithSuffix = @fieldParentPtr("step", step);
+        const b = step.owner;
+        const io = b.graph.io;
+        const arena = b.allocator;
+        try step.singleUnchangingWatchInput(self.source);
+        const source_path = self.source.getPath3(b, step);
+        const source = source_path.root_dir.handle.readFileAlloc(io, source_path.sub_path, arena, .limited(16 * 1024 * 1024)) catch |err|
+            return step.fail("cannot read {f}: {t}", .{ source_path, err });
+        const bytes = try std.mem.concat(arena, u8, &.{ source, self.suffix });
+
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        const output_dir = b.pathJoin(&.{ "o", "native-suffixed", &hex });
+        const output_path = b.pathJoin(&.{ output_dir, self.basename });
+        self.generated.path = try b.cache_root.join(arena, &.{output_path});
+
+        if (b.cache_root.handle.access(io, output_path, .{})) |_| {
+            step.result_cached = true;
+            return;
+        } else |_| {}
+        b.cache_root.handle.createDirPath(io, output_dir) catch |err|
+            return step.fail("cannot create the output directory for {s}: {t}", .{ self.basename, err });
+        var atomic = b.cache_root.handle.createFileAtomic(io, output_path, .{ .replace = true }) catch |err|
+            return step.fail("cannot stage {s}: {t}", .{ self.basename, err });
+        defer atomic.deinit(io);
+        atomic.file.writeStreamingAll(io, bytes) catch |err|
+            return step.fail("cannot write {s}: {t}", .{ self.basename, err });
+        atomic.replace(io) catch |err|
+            return step.fail("cannot publish {s}: {t}", .{ self.basename, err });
+    }
+};
+
 /// The framework module's `terminal_vt` import for THIS repository's own
 /// builds: always the stub. The emulator (libghostty-vt) is pinned by
 /// the APPS that want live `<terminal>` sessions, never by this package
@@ -4949,8 +5014,12 @@ fn tsCoreE2eArtifact(
     const gpu_dashboard_stage = b.addWriteFiles();
     const gpu_dashboard_root = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/gpu_dashboard_e2e_tests.zig"), "gpu_dashboard_e2e_tests.zig");
     // Test-only access to the unchanged reference's private capability hooks.
-    _ = gpu_dashboard_stage.add("gpu_dashboard_reference_access.zig", @embedFile("tests/ts-core/gpu-dashboard-reference/main.zig") ++
-        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n");
+    _ = gpu_dashboard_stage.addCopyFile(sourceWithSuffix(
+        b,
+        b.path("tests/ts-core/gpu-dashboard-reference/main.zig"),
+        "\npub const migrationScene = shell_scene;\npub const migrationOptions = dashboardOptions;\n",
+        "gpu_dashboard_reference_access.zig",
+    ), "gpu_dashboard_reference_access.zig");
     _ = gpu_dashboard_stage.addCopyFile(b.path("tests/ts-core/effects_media_parity.zig"), "effects_media_parity.zig");
     _ = gpu_dashboard_stage.addCopyFile(b.path("examples/gpu-dashboard/src/app.native"), "app.native");
     const gpu_dashboard_mod = b.createModule(.{ .root_source_file = gpu_dashboard_root, .target = target, .optimize = optimize });
