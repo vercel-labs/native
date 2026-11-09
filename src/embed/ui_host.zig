@@ -200,6 +200,7 @@ pub fn UiAppHostWithStorageCredentialsAndImages(
                 .bundle_id = credentials_service,
             });
             self.null_platform.gpu_surfaces = true;
+            self.null_platform.keyboard_input = false;
             // Audio is declined until the shim registers a real service
             // (`native_sdk_app_set_audio_service`): without one,
             // `fx.playAudio` degrades to one explicit `.failed` Msg
@@ -210,6 +211,7 @@ pub fn UiAppHostWithStorageCredentialsAndImages(
             self.null_platform.audio_streaming = false;
             self.null_platform.microphone_capture = false;
             self.null_platform.system_audio_capture = false;
+            self.null_platform.global_shortcuts = false;
             // The null packet presenter records only counts; disabling it
             // routes presentation through the CPU pixel path so frames
             // produce real pixels (the buffer M2's surface blit consumes).

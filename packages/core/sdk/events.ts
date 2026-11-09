@@ -624,6 +624,16 @@ export interface AudioCaptureEvent {
   readonly droppedTotal: number;
 }
 
+/// The `Sub.globalShortcut` arm record. "registered" means the OS accepted the
+/// binding; "conflict", "unsupported", and "rejected" mean another app or the OS
+/// owns it, the platform has no global shortcuts, or the binding is invalid.
+export type GlobalShortcutState = "registered" | "pressed" | "released" | "conflict" | "unsupported" | "rejected";
+
+export interface GlobalShortcutEvent {
+  readonly id: Uint8Array;
+  readonly state: GlobalShortcutState;
+}
+
 /** Retained viewport facts supplied to a windowed-list row query. */
 export interface VirtualListRange {
   readonly start_index: number;

@@ -367,6 +367,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>App-scoped access to the OS credential store; get returns secret bytes, missing items route <code>miss</code>, and the manifest must declare the <code>credentials</code> capability and permission</td>
     </tr>
     <tr>
+      <td><code>Cmd.keyboard.sendChord(chord, route)</code> / <code>Cmd.keyboard.accessStatus(&#123; prompt? &#125;, route)</code></td>
+      <td>Send a key chord to whichever app has keyboard focus, or check the OS grant; requires the <code>keyboard_input</code> permission (<a href="/docs/keyboard-shortcuts#keyboard-input">Keyboard input</a>)</td>
+    </tr>
+    <tr>
       <td><code>Cmd.formatLocalTime(timestampMs, style, route)</code></td>
       <td>Format an epoch timestamp as localized <code>date</code>, <code>time</code>, or <code>datetime</code> text in the host's current time zone</td>
     </tr>
@@ -585,6 +589,8 @@ export function subscriptions(model: Model): Sub<Msg> {
   ]);
 }
 ```
+
+`Sub.globalShortcut(id, binding, arm)` declares a system-wide shortcut; see [Global shortcuts](/docs/keyboard-shortcuts#global-shortcuts).
 
 Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.fetch`'s response lines, `Cmd.spawn`'s stdout lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
 

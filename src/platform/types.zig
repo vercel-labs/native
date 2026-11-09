@@ -77,7 +77,14 @@ pub const Error = error{
     InvalidGpuSurfacePacket,
     InvalidGpuSurfaceImage,
     InvalidGpuSurfaceFont,
+    KeyboardInputAccessDenied,
+    KeyboardInputBlocked,
+    KeyboardInputFailed,
 };
+
+pub const keyboard_input = @import("keyboard_input.zig");
+pub const KeyChord = keyboard_input.KeyChord;
+pub const KeyboardInputAccess = keyboard_input.Access;
 
 pub const WebEngine = enum {
     system,
@@ -189,6 +196,10 @@ pub const PlatformFeature = enum {
     /// verbs with a teaching and `error.UnsupportedService` — named
     /// unsupported, not half-implemented — and report false here.
     video_playback,
+    /// System-wide shortcuts with press and release.
+    global_shortcuts,
+    /// Posting key chords to whichever app has keyboard focus.
+    keyboard_input,
 };
 
 pub const WebViewSourceKind = enum {
@@ -292,6 +303,7 @@ pub const max_menu_key_bytes: usize = 32;
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
 pub const max_shortcut_key_bytes: usize = 32;
+pub const max_global_shortcuts: usize = 16;
 pub const max_widget_accessibility_nodes: usize = 64;
 pub const max_gpu_surface_packet_json_bytes: usize = 128 * 1024;
 /// Payload bound for the compact binary gpu-surface packet encoding
@@ -363,6 +375,55 @@ pub const ShortcutEvent = struct {
     key: []const u8,
     modifiers: ShortcutModifiers = .{},
     window_id: WindowId = 1,
+};
+
+pub const OwnedShortcut = struct {
+    id: [max_shortcut_id_bytes]u8 = undefined,
+    id_len: usize = 0,
+    key: [max_shortcut_key_bytes]u8 = undefined,
+    key_len: usize = 0,
+    modifiers: ShortcutModifiers = .{},
+
+    pub fn init(source: Shortcut) OwnedShortcut {
+        var owned: OwnedShortcut = .{ .id_len = source.id.len, .key_len = source.key.len, .modifiers = source.modifiers };
+        @memcpy(owned.id[0..source.id.len], source.id);
+        @memcpy(owned.key[0..source.key.len], source.key);
+        return owned;
+    }
+
+    pub fn shortcut(self: *const OwnedShortcut) Shortcut {
+        return .{ .id = self.id[0..self.id_len], .key = self.key[0..self.key_len], .modifiers = self.modifiers };
+    }
+
+    pub fn matches(self: *const OwnedShortcut, other: Shortcut) bool {
+        return std.mem.eql(u8, self.id[0..self.id_len], other.id) and sameShortcutCombination(self.shortcut(), other);
+    }
+};
+
+pub fn sameShortcutCombination(a: Shortcut, b: Shortcut) bool {
+    return std.ascii.eqlIgnoreCase(a.key, b.key) and std.meta.eql(a.modifiers, b.modifiers);
+}
+
+pub const GlobalShortcutPhase = enum(u8) { pressed, released };
+
+/// A host's answer for one global shortcut binding.
+pub const GlobalShortcutStatus = enum(u8) { registered, conflict, rejected };
+
+pub const GlobalShortcutEvent = struct {
+    shortcut: Shortcut,
+    phase: GlobalShortcutPhase,
+};
+
+/// Where a host delivers presses and releases; safe to push from any thread.
+pub const GlobalShortcutSink = struct {
+    context: ?*anyopaque = null,
+    generation: u64 = 0,
+    push_fn: ?*const fn (context: ?*anyopaque, generation: u64, event: GlobalShortcutEvent) void = null,
+
+    pub fn push(self: GlobalShortcutSink, event: GlobalShortcutEvent) void {
+        const push_fn = self.push_fn orelse return;
+        push_fn(self.context, self.generation, event);
+    }
 };
 
 pub const Menu = struct {
@@ -2806,6 +2867,9 @@ pub const PlatformServices = struct {
     format_local_time_fn: ?*const fn (context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 = null,
     open_external_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8) anyerror!void = null,
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
+    /// Keyboard input for the focused app; `prompt` asks the OS to show its grant prompt.
+    send_key_chord_fn: ?*const fn (context: ?*anyopaque, chord: KeyChord) anyerror!void = null,
+    keyboard_input_access_fn: ?*const fn (context: ?*anyopaque, prompt: bool) anyerror!KeyboardInputAccess = null,
     add_recent_document_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
     clear_recent_documents_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     check_for_updates_fn: ?*const fn (context: ?*anyopaque, user_initiated: bool) anyerror!void = null,
@@ -2818,6 +2882,8 @@ pub const PlatformServices = struct {
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
+    /// Replace the whole system-wide shortcut set.
+    configure_global_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut, sink: GlobalShortcutSink, statuses: []GlobalShortcutStatus) anyerror!void = null,
     emit_window_event_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void = null,
     request_gpu_surface_frame_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, label: []const u8) anyerror!void = null,
     /// Input was dispatched to the surface: hosts that throttle occluded
@@ -3375,6 +3441,16 @@ pub const PlatformServices = struct {
         return open_fn(self.context, url);
     }
 
+    pub fn sendKeyChord(self: PlatformServices, chord: KeyChord) anyerror!void {
+        const send_fn = self.send_key_chord_fn orelse return error.UnsupportedService;
+        return send_fn(self.context, chord);
+    }
+
+    pub fn keyboardInputAccess(self: PlatformServices, prompt: bool) anyerror!KeyboardInputAccess {
+        const access_fn = self.keyboard_input_access_fn orelse return error.UnsupportedService;
+        return access_fn(self.context, prompt);
+    }
+
     pub fn revealPath(self: PlatformServices, path: []const u8) anyerror!void {
         const reveal_fn = self.reveal_path_fn orelse return error.UnsupportedService;
         return reveal_fn(self.context, path);
@@ -3473,6 +3549,11 @@ pub const PlatformServices = struct {
             return error.UnsupportedService;
         };
         return configure_fn(self.context, shortcuts);
+    }
+
+    pub fn configureGlobalShortcuts(self: PlatformServices, shortcuts: []const Shortcut, sink: GlobalShortcutSink, statuses: []GlobalShortcutStatus) anyerror!void {
+        const configure_fn = self.configure_global_shortcuts_fn orelse return error.UnsupportedService;
+        return configure_fn(self.context, shortcuts, sink, statuses);
     }
 
     pub fn emitWindowEvent(self: PlatformServices, window_id: WindowId, name: []const u8, detail_json: []const u8) anyerror!void {
@@ -3825,6 +3906,8 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // generic floor still probes the verb for embedders that wire a
         // real one.
         .video_playback => services.video_load_fn != null,
+        .global_shortcuts => services.configure_global_shortcuts_fn != null,
+        .keyboard_input => services.send_key_chord_fn != null and services.keyboard_input_access_fn != null,
     };
 }
 

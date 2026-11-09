@@ -5,10 +5,12 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 const canvas = @import("canvas");
+const keyboard_input = @import("keyboard_input.zig");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
 const app_icon = canvas.app_icon;
 const updater_c_api = @import("../../updater/c_api.zig");
+const global_shortcuts = @import("global_shortcuts.zig");
 
 comptime {
     _ = updater_c_api.native_sdk_update_verify_feed;
@@ -658,6 +660,7 @@ pub const MacPlatform = struct {
     /// a run-loop timer), so a plain field is race-free.
     video_sink: platform_mod.VideoFrameSink = .{},
     audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
+    global_shortcuts: global_shortcuts.Registry = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!MacPlatform {
         return initWithEngine(title, size, .system);
@@ -755,6 +758,7 @@ pub const MacPlatform = struct {
             std.debug.print("macos platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
+        self.global_shortcuts.deinit();
         native_sdk_appkit_destroy(self.host);
     }
 
@@ -815,6 +819,8 @@ pub const MacPlatform = struct {
                 .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = keyboard_input.sendKeyChord,
+                .keyboard_input_access_fn = keyboard_input.access,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .check_for_updates_fn = checkForUpdates,
@@ -827,6 +833,7 @@ pub const MacPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_global_shortcuts_fn = configureGlobalShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
@@ -920,6 +927,8 @@ pub const MacPlatform = struct {
             // reports honestly unsupported rather than half-implementing
             // a second player.
             .video_playback => self.web_engine == .system,
+            .global_shortcuts => global_shortcuts.available(),
+            .keyboard_input => true,
         };
     }
 
@@ -2470,6 +2479,11 @@ fn configureMenus(context: ?*anyopaque, menus: []const platform_mod.Menu) anyerr
     );
 }
 
+fn configureGlobalShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut, sink: platform_mod.GlobalShortcutSink, statuses: []platform_mod.GlobalShortcutStatus) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return self.global_shortcuts.configure(shortcuts, sink, statuses);
+}
+
 fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (shortcuts.len > platform_mod.max_shortcuts) return error.InvalidShortcut;
@@ -2924,6 +2938,7 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "mac platform module exports type" {
     _ = MacPlatform;
+    _ = global_shortcuts;
 }
 
 test "mac AppKit packet text anchors use the resolved font ascent" {
