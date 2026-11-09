@@ -3494,7 +3494,7 @@ fn nextPackageJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const 
         \\    "@types/node": "^25.6.2",
         \\    "@types/react": "^19.2.14",
         \\    "@types/react-dom": "^19.2.3",
-        \\    "typescript": "^6.0.3"
+        \\    "typescript": "^7.0.2"
         \\  }
         \\}
         \\
