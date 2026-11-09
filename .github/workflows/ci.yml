@@ -573,6 +573,10 @@ jobs:
       - run: pnpm typecheck
         working-directory: evals
 
+      # Also check with the official TypeScript compiler while tsc-ts is new.
+      - run: pnpm typecheck:tsc
+        working-directory: evals
+
   docs:
     name: Docs
     runs-on: ubuntu-latest
@@ -588,4 +592,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: docs
       - run: pnpm check
+        working-directory: docs
+
+      # Also check with the official TypeScript compiler while tsc-ts is new.
+      - run: pnpm typecheck:tsc
         working-directory: docs

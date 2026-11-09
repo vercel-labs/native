@@ -5,13 +5,15 @@
   "type": "module",
   "packageManager": "pnpm@10.23.0",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc-ts --noEmit",
+    "typecheck:tsc": "tsc --noEmit",
     "eval": "node src/main.ts",
     "metrics": "node src/authoring-metrics.ts",
     "check": "pnpm typecheck"
   },
   "devDependencies": {
     "@types/node": "^24",
+    "tsc-ts": "0.1.3",
     "typescript": "^7.0.2"
   },
   "dependencies": {
