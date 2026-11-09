@@ -635,6 +635,10 @@ pub fn Ui(comptime Msg: type) type {
             /// default textarea contract (Enter inserts; primary+Enter
             /// submits). Meaningless on every other element.
             submit_on_enter: bool = false,
+            /// Textareas only: measure wrapped content using the renderer's font
+            /// provider, then clamp to these point bounds. Zero max opts out.
+            auto_height_min: f32 = 0,
+            auto_height_max: f32 = 0,
             variant: canvas.WidgetVariant = .default,
             size: canvas.WidgetSize = .default,
             /// Resolve backdrop blur against the live design-token register.
@@ -3927,6 +3931,8 @@ pub fn Ui(comptime Msg: type) type {
                 .text_overflow = options.overflow,
                 .autofocus = options.autofocus,
                 .submit_on_enter = options.submit_on_enter,
+                .auto_height_min = options.auto_height_min,
+                .auto_height_max = options.auto_height_max,
                 .image_id = options.image,
                 .image_src = options.image_src,
                 .value = options.value,

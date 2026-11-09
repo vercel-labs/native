@@ -3100,3 +3100,124 @@ test "axis layout overflow is reported past the float-noise epsilon" {
     const overflow = widget_layout.axisLayoutOverflow(400, 446) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f32, 46), overflow);
 }
+
+test "opt-in textarea grows from measured wraps and newlines inside an input group" {
+    const input = @import("widget_text_input.zig");
+    var editor = Widget{ .id = 2, .kind = .textarea, .text = "one", .auto_height_min = 44, .auto_height_max = 240 };
+    const tokens = DesignTokens{};
+    try std.testing.expectEqual(@as(f32, 44), input.textInputAutoHeightForWidth(editor, 400, tokens));
+    editor.text = "one\ntwo\n";
+    const three = input.textInputAutoHeightForWidth(editor, 400, tokens);
+    try std.testing.expect(three > 44);
+    editor.text = "one\ntwo";
+    try std.testing.expect(input.textInputAutoHeightForWidth(editor, 400, tokens) < three);
+    editor.text = "A café message with measured words and UTF-8 🌿 that wraps at the actual available input width.";
+    const wide = input.textInputAutoHeightForWidth(editor, 600, tokens);
+    const narrow = input.textInputAutoHeightForWidth(editor, 180, tokens);
+    try std.testing.expect(narrow > wide);
+    try std.testing.expect(input.textInputAutoHeightForWidth(editor, 600, .{ .text_measure = &doubled_text_measure }) > wide);
+    const children = [_]Widget{editor};
+    const group = Widget{ .id = 1, .kind = .input_group, .children = &children };
+    var nodes: [2]WidgetLayoutNode = undefined;
+    _ = try layoutWidgetTreeWithTokens(group, geometry.RectF.init(0, 0, 180, 500), tokens, &nodes);
+    try std.testing.expect(nodes[1].frame.height >= narrow);
+    editor.text = "line\n" ** 60;
+    try std.testing.expectEqual(@as(f32, 240), input.textInputAutoHeightForWidth(editor, 180, tokens));
+    editor.frame = geometry.RectF.init(0, 0, 180, 240);
+    const maximum_scroll = input.textInputMaxScrollOffsetForWidget(editor, tokens);
+    try std.testing.expect(maximum_scroll > 0);
+    editor.value = maximum_scroll;
+    editor.text_selection = .collapsed(editor.text.len);
+    const caret = input.textGeometryForWidget(editor, tokens).caret_bounds.?;
+    const viewport = input.textInputViewportForWidget(editor, tokens).?;
+    try std.testing.expect(caret.y >= viewport.y - 0.01);
+    try std.testing.expect(caret.maxY() <= viewport.maxY() + 0.01);
+    editor.text = "short";
+    editor.frame.height = input.textInputAutoHeightForWidth(editor, 180, tokens);
+    try std.testing.expectEqual(@as(f32, 44), editor.frame.height);
+    try std.testing.expectEqual(@as(f32, 0), input.clampedTextInputScrollOffsetForWidget(editor, tokens, 900));
+    editor.auto_height_max = 20;
+    try std.testing.expectEqual(@as(f32, 44), input.textInputAutoHeightForWidth(editor, 180, tokens));
+    editor.auto_height_max = 0;
+    try std.testing.expect(!input.textInputAutoHeightEnabled(editor));
+}
+
+test "autoheight textarea reserves constrained nested width and centered row allocation" {
+    const input = @import("widget_text_input.zig");
+    const text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the row grows.";
+    const editor: Widget = .{ .id = 3, .kind = .textarea, .text = text, .auto_height_min = 44, .auto_height_max = 240, .layout = .{ .max_size = .init(180, 0) } };
+    const group: Widget = .{ .id = 2, .kind = .input_group, .children = &.{editor} };
+    const root: Widget = .{ .id = 1, .kind = .column, .children = &.{ group, .{ .id = 4, .kind = .button, .text = "Following" } } };
+    var nodes: [4]WidgetLayoutNode = undefined;
+    _ = try layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 500), .{}, &nodes);
+    try std.testing.expectEqual(@as(f32, 180), nodes[2].frame.width);
+    try std.testing.expectEqual(input.textInputAutoHeightForWidth(editor, 180, .{}), nodes[1].frame.height);
+    try std.testing.expect(nodes[3].frame.y >= nodes[2].frame.maxY());
+
+    var growing = editor;
+    growing.layout = .{ .grow = 1 };
+    const row: Widget = .{ .id = 2, .kind = .row, .children = &.{growing}, .layout = .{ .cross_alignment = .center } };
+    const row_root: Widget = .{ .id = 1, .kind = .column, .children = &.{ row, .{ .id = 4, .kind = .button, .text = "Following" } } };
+    var narrow_height: f32 = 0;
+    for ([_]f32{ 180, 600 }) |width| {
+        _ = try layoutWidgetTreeWithTokens(row_root, .init(0, 0, width, 500), .{}, &nodes);
+        const expected = input.textInputAutoHeightForWidth(growing, width, .{});
+        try std.testing.expectEqual(expected, nodes[2].frame.height);
+        try std.testing.expectEqual(nodes[1].frame.y, nodes[2].frame.y);
+        try std.testing.expect(nodes[3].frame.y >= nodes[2].frame.maxY());
+        if (width == 180) narrow_height = expected else try std.testing.expect(expected < narrow_height);
+    }
+}
+
+test "autoheight textarea reserves nested container width bounds and padding" {
+    const input = @import("widget_text_input.zig");
+    const editor: Widget = .{
+        .id = 5,
+        .kind = .textarea,
+        .text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the container grows.",
+        .auto_height_min = 44,
+        .auto_height_max = 400,
+    };
+    const group: Widget = .{
+        .id = 4,
+        .kind = .input_group,
+        .children = &.{editor},
+        .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 2, .bottom = 4 } },
+    };
+    const cases = [_]struct { min: f32, max: f32, width: f32 }{
+        .{ .min = 0, .max = 180, .width = 180 },
+        .{ .min = 220, .max = 180, .width = 220 },
+        .{ .min = 800, .max = 0, .width = 800 },
+    };
+    // Match allocation's min-over-max precedence, including a min-only
+    // container wider than the offered space. The editor has no width cap.
+    for (cases) |bounds| {
+        const capped: Widget = .{
+            .id = 3,
+            .kind = .column,
+            .children = &.{group},
+            .layout = .{
+                .min_size = .init(bounds.min, 0),
+                .max_size = .init(bounds.max, 0),
+                .padding = .{ .left = 11, .right = 13, .top = 7, .bottom = 9 },
+            },
+        };
+        const wrapper: Widget = .{ .id = 2, .kind = .column, .children = &.{capped} };
+        const root: Widget = .{
+            .id = 1,
+            .kind = .column,
+            .children = &.{ wrapper, .{ .id = 6, .kind = .button, .text = "Following" } },
+            .layout = .{ .gap = 12 },
+        };
+        var nodes: [6]WidgetLayoutNode = undefined;
+        const tree = try layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 1000), .{}, &nodes);
+        const actual = tree.findById(5).?.frame;
+        try std.testing.expectEqual(bounds.width, tree.findById(3).?.frame.width);
+        try std.testing.expectEqual(bounds.width - 32, actual.width);
+        const expected = input.textInputAutoHeightForWidth(editor, actual.width, .{});
+        try std.testing.expectEqual(expected, actual.height);
+        // Both container paddings must be reserved before the next control.
+        try std.testing.expectEqual(expected + 22, tree.findById(2).?.frame.height);
+        try std.testing.expectEqual(actual.maxY() + 13 + 12, tree.findById(6).?.frame.y);
+    }
+}

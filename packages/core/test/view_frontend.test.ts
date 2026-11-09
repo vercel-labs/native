@@ -2411,3 +2411,15 @@ test("compiled charts reject incorrect channels child placement and untyped arra
   ]) assert.throws(() => compileView(markup, chartContract));
   for (const grid of ["-1", "256", "0.5"]) assert.throws(() => evaluateChart(`<chart grid-lines="${grid}"><series values="{samples}"/></chart>`, { samples: [], labels: [], caption: new Uint8Array(0) }));
 });
+
+test("textarea autoheight emits numeric bounds and rejects invalid opt-in declarations", () => {
+  const compiled = compileView('<textarea auto-height-min="44" auto-height-max="{count}"/>', contract);
+  assert.match(compiled, /autoHeightMin: 44/);
+  assert.match(compiled, /autoHeightMax:/);
+  for (const markup of [
+    '<textarea auto-height-min="-1" auto-height-max="200"/>',
+    '<textarea auto-height-max="Infinity"/>',
+    '<textarea height="44" auto-height-max="200"/>',
+    '<text auto-height-max="200">wrong kind</text>',
+  ]) assert.throws(() => compileView(markup, contract));
+});

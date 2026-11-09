@@ -83,6 +83,8 @@ const Record = struct {
     command: []const u8 = "",
     wrap: ?bool = null,
     submitOnEnter: bool = false,
+    autoHeightMin: f32 = 0,
+    autoHeightMax: f32 = 0,
     key: ?[]const u8 = null,
     keyBytes: ?ByteText = null,
     keyInt: ?i64 = null,
@@ -405,6 +407,8 @@ fn nodeRecord(ui: *Ui, records: []const Record, index: usize, parent_end: usize,
     if ((value.kind == .code or value.kind == .input_group or value.kind == .input_group_actions) and
         (value.paddingTop != null or value.paddingBottom != null or value.paddingLeft != null or value.paddingRight != null)) return error.InvalidView;
     for ([_]f32{ value.width, value.height, value.minWidth, value.maxWidth }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+    for ([_]f32{ value.autoHeightMin, value.autoHeightMax }) |extent| if (!std.math.isFinite(extent) or extent < 0) return error.InvalidView;
+    if ((value.autoHeightMin != 0 or value.autoHeightMax != 0) and (value.kind != .textarea or value.height != 0)) return error.InvalidView;
     if (value.kind == .resizable and value.gap != 0) return error.InvalidView;
     if (value.resize != null and value.kind != .split) return error.InvalidView;
     if (!std.math.isFinite(value.resizeOrigin) or (value.resizeOrigin != -1 and (value.resizeOrigin < 0 or value.resizeOrigin > 1))) return error.InvalidView;
@@ -593,6 +597,8 @@ fn nodeRecord(ui: *Ui, records: []const Record, index: usize, parent_end: usize,
         .overflow = value.overflow,
         .text_alignment = value.textAlignment,
         .submit_on_enter = value.submitOnEnter,
+        .auto_height_min = value.autoHeightMin,
+        .auto_height_max = value.autoHeightMax,
         .autofocus = value.autofocus,
         .columns = value.columns,
         .virtualized = value.virtualized,
@@ -1699,4 +1705,18 @@ test "compiled app chart rejects misplaced metadata unbounded samples and invali
     var ui = Ui.init(arena.allocator());
     const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"chart\",\"text\":\"\",\"chartSeries\":[{{\"kind\":\"line\",\"values\":[{s}],\"color\":\"accent\",\"fill\":false,\"label\":[]}}],\"chartXLabels\":[]}}]}}", .{values});
     try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+}
+
+test "compiled grouped input autoheight validates opt-in bounds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const retained = try decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"textarea\",\"text\":\"one\",\"autoHeightMin\":44,\"autoHeightMax\":240}]}");
+    try std.testing.expectEqual(@as(f32, 44), retained.widget.auto_height_min);
+    try std.testing.expectEqual(@as(f32, 240), retained.widget.auto_height_max);
+    for ([_][]const u8{ "\"autoHeightMin\":-1", "\"autoHeightMax\":-1", "\"autoHeightMax\":200,\"height\":44" }) |fields| {
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"format\":2,\"nodes\":[{{\"end\":1,\"kind\":\"textarea\",\"text\":\"\",{s}}}]}}", .{fields});
+        try std.testing.expectError(error.InvalidView, decode(&ui, bytes));
+    }
+    try std.testing.expectError(error.InvalidView, decode(&ui, "{\"format\":2,\"nodes\":[{\"end\":1,\"kind\":\"text\",\"text\":\"\",\"autoHeightMax\":200}]}"));
 }

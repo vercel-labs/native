@@ -33,6 +33,37 @@ fn ownedIntrinsic(tokens: c.DesignTokens) c.DesignTokens {
     return t;
 }
 
+test "compiled widget metric textarea bounds validate evaluated owned expressions" {
+    _ = core.initialModel();
+    const Model = struct { bound: f32 };
+    const Msg = union(enum) { noop };
+    inline for (.{ "<textarea label=\"Draft\" auto-height-min=\"{bound}\" />", "<textarea label=\"Draft\" auto-height-max=\"{bound}\" />" }, .{ "auto_height_min", "auto_height_max" }) |source, field| {
+        for ([_]f32{ 0, 44, 240, -1, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) }) |bound| {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var interpreted = try c.MarkupView(Model, Msg).init(arena.allocator(), source);
+            var native_ui = c.Ui(Msg).init(arena.allocator());
+            var compiled_ui = c.Ui(Msg).init(arena.allocator());
+            native_ui.expression_policy = core.nativeWindowPolicy;
+            compiled_ui.expression_policy = core.nativeWindowPolicy;
+            const model = Model{ .bound = bound };
+            const node = c.CompiledMarkupView(Model, Msg, source).build(&compiled_ui, &model);
+            if (std.math.isFinite(bound) and bound >= 0) {
+                const expected = try native_ui.finalize(try interpreted.build(&native_ui, &model));
+                const actual = try compiled_ui.finalize(node);
+                try std.testing.expectEqual(bound, @field(expected.root, field));
+                try std.testing.expectEqual(bound, @field(actual.root, field));
+            } else {
+                try std.testing.expectError(error.MarkupBuild, interpreted.build(&native_ui, &model));
+                try std.testing.expectEqualStrings(c.ui_markup.auto_height_value_message, interpreted.diagnostic.message);
+                try std.testing.expect(compiled_ui.failed);
+                try std.testing.expectError(error.OutOfMemory, compiled_ui.finalize(node));
+            }
+            core.rt.frameReset();
+        }
+    }
+}
+
 test "compiled widget metric container coordination preserves complete sizes and measurement order" {
     _ = core.initialModel();
     var trace: Measures = .{};
@@ -650,6 +681,48 @@ fn coordinated(tokens: c.DesignTokens) c.DesignTokens {
     return t;
 }
 
+test "compiled widget metric autoheight uses constrained and allocated editor widths" {
+    _ = core.initialModel();
+    const editor: c.Widget = .{
+        .id = 3,
+        .kind = .textarea,
+        .text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the row grows.",
+        .auto_height_min = 44,
+        .auto_height_max = 240,
+        .layout = .{ .max_size = .init(180, 0) },
+    };
+    const group: c.Widget = .{ .id = 2, .kind = .input_group, .children = &.{editor} };
+    const grouped: c.Widget = .{ .id = 1, .kind = .column, .children = &.{ group, .{ .id = 4, .kind = .button, .text = "Following" } } };
+    var growing = editor;
+    growing.layout = .{ .grow = 1 };
+    const row: c.Widget = .{ .id = 2, .kind = .row, .children = &.{growing}, .layout = .{ .cross_alignment = .center } };
+    const centered: c.Widget = .{ .id = 1, .kind = .column, .children = &.{ row, .{ .id = 4, .kind = .button, .text = "Following" } } };
+    // Exercise the reference, the older compiled allocation path, and the
+    // production measurement coordinator with the real compiled policy.
+    var older = coordinated(.{});
+    older.measurement_coordination_policy = null;
+    for ([_]c.DesignTokens{ .{}, older, coordinated(.{}) }) |tokens| {
+        var nodes: [4]c.WidgetLayoutNode = undefined;
+        _ = try c.layoutWidgetTreeWithTokens(grouped, .init(0, 0, 600, 500), tokens, &nodes);
+        try std.testing.expectEqual(@as(f32, 180), nodes[2].frame.width);
+        try std.testing.expectEqual(nodes[1].frame.height, nodes[2].frame.height);
+        try std.testing.expect(nodes[3].frame.y >= nodes[2].frame.maxY());
+        var narrow_height: f32 = 0;
+        for ([_]f32{ 180, 600 }) |width| {
+            _ = try c.layoutWidgetTreeWithTokens(centered, .init(0, 0, width, 500), tokens, &nodes);
+            var probe = growing;
+            probe.frame = .init(0, 0, width, 240);
+            const viewport = c.textInputViewportForWidget(probe, tokens).?;
+            const expected = @max(@as(f32, 44), @ceil(c.textInputContentExtentForWidget(probe, tokens) + probe.frame.height - viewport.height));
+            try std.testing.expectEqual(expected, nodes[2].frame.height);
+            try std.testing.expectEqual(nodes[1].frame.y, nodes[2].frame.y);
+            try std.testing.expect(nodes[3].frame.y >= nodes[2].frame.maxY());
+            if (width == 180) narrow_height = expected else try std.testing.expect(expected < narrow_height);
+        }
+        core.rt.frameReset();
+    }
+}
+
 fn flowOwned(tokens: c.DesignTokens) c.DesignTokens {
     var t = coordinated(tokens);
     t.flow_measurement_policy = core.nativeWindowPolicy;
@@ -1023,4 +1096,65 @@ test "compiled widget metric subtree continuations preserve depth first-match st
     const final = plan.run();
     try std.testing.expect(!final.pending());
     try std.testing.expect(final.found());
+}
+
+test "compiled widget metric autoheight reserves nested container width bounds and padding" {
+    _ = core.initialModel();
+    const editor: c.Widget = .{
+        .id = 5,
+        .kind = .textarea,
+        .text = "A measured message with enough words to wrap at a narrow editor width but fewer lines when the container grows.",
+        .auto_height_min = 44,
+        .auto_height_max = 400,
+    };
+    const group: c.Widget = .{
+        .id = 4,
+        .kind = .input_group,
+        .children = &.{editor},
+        .layout = .{ .padding = .{ .left = 3, .right = 5, .top = 2, .bottom = 4 } },
+    };
+    const cases = [_]struct { min: f32, max: f32, width: f32 }{
+        .{ .min = 0, .max = 180, .width = 180 },
+        .{ .min = 220, .max = 180, .width = 220 },
+        .{ .min = 800, .max = 0, .width = 800 },
+    };
+    var older = coordinated(.{});
+    older.measurement_coordination_policy = null;
+    // Cover native, compiled reference, production measurement, and fully
+    // owned layout coordinators rather than comparing two wrong heights.
+    for ([_]c.DesignTokens{ .{}, older, coordinated(.{}), flowOwned(.{}), layoutOwned(.{}) }) |tokens| {
+        for (cases) |bounds| {
+            const capped: c.Widget = .{
+                .id = 3,
+                .kind = .column,
+                .children = &.{group},
+                .layout = .{
+                    .min_size = .init(bounds.min, 0),
+                    .max_size = .init(bounds.max, 0),
+                    .padding = .{ .left = 11, .right = 13, .top = 7, .bottom = 9 },
+                },
+            };
+            const wrapper: c.Widget = .{ .id = 2, .kind = .column, .children = &.{capped} };
+            const root: c.Widget = .{
+                .id = 1,
+                .kind = .column,
+                .children = &.{ wrapper, .{ .id = 6, .kind = .button, .text = "Following" } },
+                .layout = .{ .gap = 12 },
+            };
+            var nodes: [6]c.WidgetLayoutNode = undefined;
+            const tree = try c.layoutWidgetTreeWithTokens(root, .init(0, 0, 600, 1000), tokens, &nodes);
+            const actual = tree.findById(5).?.frame;
+            try std.testing.expectEqual(bounds.width, tree.findById(3).?.frame.width);
+            try std.testing.expectEqual(bounds.width - 32, actual.width);
+            var probe = editor;
+            probe.frame = .init(0, 0, actual.width, 400);
+            const viewport = c.textInputViewportForWidget(probe, tokens).?;
+            const expected = @min(@as(f32, 400), @max(@as(f32, 44), @ceil(c.textInputContentExtentForWidget(probe, tokens) + probe.frame.height - viewport.height)));
+            try std.testing.expectEqual(expected, actual.height);
+            // Both container paddings must be reserved before the next control.
+            try std.testing.expectEqual(expected + 22, tree.findById(2).?.frame.height);
+            try std.testing.expectEqual(actual.maxY() + 13 + 12, tree.findById(6).?.frame.y);
+            core.rt.frameReset();
+        }
+    }
 }

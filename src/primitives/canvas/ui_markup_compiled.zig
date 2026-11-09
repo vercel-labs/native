@@ -456,6 +456,16 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         }
                     }
                 }
+                for (node.attrs) |attribute| {
+                    if (!std.mem.eql(u8, attribute.name, "auto-height-min") and !std.mem.eql(u8, attribute.name, "auto-height-max")) continue;
+                    if (kind != .textarea or node.attr("height") != null) fail(node, markup.auto_height_element_message);
+                    const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                    if (expression == .literal) {
+                        const value = std.fmt.parseFloat(f32, expression.literal) catch
+                            fail(node, markup.auto_height_value_message);
+                        if (!std.math.isFinite(value) or value < 0) fail(node, markup.auto_height_value_message);
+                    }
+                }
                 // Interpreter parity: the overflow policy's closed
                 // literal vocabulary. A compile error here; bindings
                 // resolve at runtime like any enum option.
@@ -3433,9 +3443,13 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     const value = attrExprValue(node, entries, attribute_name, raw, ui, model, scope);
                     @field(options, zig_field) = runtime_values.convert(Target, owner, value, false) orelse runtimeFail(Target, ui);
                 }
-                return;
+            } else {
+                setOptionReference(node, zig_field, attribute_name, raw, entries, ui, model, scope, options);
             }
-            setOptionReference(node, zig_field, attribute_name, raw, entries, ui, model, scope, options);
+            if (comptime std.mem.eql(u8, zig_field, "auto_height_min") or std.mem.eql(u8, zig_field, "auto_height_max")) {
+                const value = @field(options, zig_field);
+                if (!std.math.isFinite(value) or value < 0) @field(options, zig_field) = runtimeFail(f32, ui);
+            }
         }
 
         fn setOptionReference(comptime node: markup.MarkupNode, comptime zig_field: []const u8, comptime attribute_name: []const u8, comptime raw: []const u8, comptime entries: []const ScopeEntry, ui: *Ui, model: *const ModelT, scope: anytype, options: *Ui.ElementOptions) void {

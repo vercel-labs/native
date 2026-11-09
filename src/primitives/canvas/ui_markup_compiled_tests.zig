@@ -18,6 +18,46 @@ const fixture = @import("ui_markup_view_tests.zig");
 
 const testing = std.testing;
 
+test "textarea content height rejects negative and nonfinite evaluated bounds" {
+    const Model = struct { bound: f32 };
+    const Msg = union(enum) { noop };
+    inline for (.{ "<textarea label=\"Draft\" auto-height-min=\"{bound}\" />", "<textarea label=\"Draft\" auto-height-max=\"{bound}\" />" }) |source| {
+        for ([_]f32{ -1, std.math.inf(f32), -std.math.inf(f32), std.math.nan(f32) }) |bound| {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var interpreted = try canvas.MarkupView(Model, Msg).init(arena.allocator(), source);
+            var native_ui = canvas.Ui(Msg).init(arena.allocator());
+            var compiled_ui = canvas.Ui(Msg).init(arena.allocator());
+            const model = Model{ .bound = bound };
+            try testing.expectError(error.MarkupBuild, interpreted.build(&native_ui, &model));
+            try testing.expectEqualStrings(@import("ui_markup.zig").auto_height_value_message, interpreted.diagnostic.message);
+            const node = canvas.CompiledMarkupView(Model, Msg, source).build(&compiled_ui, &model);
+            try testing.expect(compiled_ui.failed);
+            try testing.expectError(error.OutOfMemory, compiled_ui.finalize(node));
+        }
+    }
+}
+
+test "compiled textarea content height matches interpreted numeric bindings" {
+    const Model = struct { ceiling: f32 = 240 };
+    const Msg = union(enum) { noop };
+    const Ui = canvas.Ui(Msg);
+    const source = "<textarea label=\"Draft\" auto-height-min=\"44\" auto-height-max=\"{ceiling}\" text=\"First line\" />";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var model = Model{};
+    var interpreted = try canvas.MarkupView(Model, Msg).init(arena.allocator(), source);
+    const Compiled = canvas.CompiledMarkupView(Model, Msg, source);
+    var native_ui = Ui.init(arena.allocator());
+    var compiled_ui = Ui.init(arena.allocator());
+    const expected = try native_ui.finalize(try interpreted.build(&native_ui, &model));
+    const actual = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+    try testing.expectEqual(@as(f32, 44), actual.root.auto_height_min);
+    try testing.expectEqual(@as(f32, 240), actual.root.auto_height_max);
+    try testing.expectEqual(expected.root.auto_height_min, actual.root.auto_height_min);
+    try testing.expectEqual(expected.root.auto_height_max, actual.root.auto_height_max);
+}
+
 test "windowed markup preserves complete ranges keyed rows and retained declarations in both engines" {
     const Row = struct { id: usize, label: []const u8 };
     const Model = struct {
